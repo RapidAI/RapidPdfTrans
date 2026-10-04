@@ -16,6 +16,10 @@
 //! belong to later milestones. The glyph source location (stream, operator
 //! index, byte range) is the hook those steps will use to delete the original
 //! text-showing operator instead of dropping text.
+//!
+//! [`translate`] sends extracted text to a pluggable translator. The default
+//! model name is `auto`. Translation marks glyphs
+//! `translated_pending_rewrite` and does not rewrite PDF operators.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -23,6 +27,7 @@ pub mod coverage;
 pub mod error;
 pub mod extract;
 pub mod glyph;
+pub mod translate;
 
 mod color;
 mod content;
@@ -38,6 +43,10 @@ pub use extract::{ExtractOptions, Extraction, OpenOptions, PdfDocument, COORDINA
 pub use font::minimal_ttf;
 pub use geom::{Matrix, Rect};
 pub use glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKind};
+pub use translate::{
+    translate_extraction, LlmTranslator, TranslateOptions, TranslateReport, TranslatedSegment,
+    Translator, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
+};
 
 #[cfg(test)]
 mod coverage_api {
