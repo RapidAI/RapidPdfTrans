@@ -9,8 +9,11 @@ repository.workspace = true
 
 [lib]
 name = "rapidpdftrans"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 rpt-core = { path = "../rpt-core" }
 serde_json.workspace = true
+
+[build-dependencies]
+cbindgen.workspace = true

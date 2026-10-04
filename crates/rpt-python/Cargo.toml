@@ -14,3 +14,4 @@ crate-type = ["cdylib"]
 [dependencies]
 rpt-core = { path = "../rpt-core" }
 pyo3.workspace = true
+serde_json.workspace = true

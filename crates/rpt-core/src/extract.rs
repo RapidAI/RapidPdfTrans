@@ -251,7 +251,7 @@ impl Extraction {
             .join("\n")
     }
 
-    pub fn to_json_pretty(&self) -> Result<String> {
+    pub fn to_json_value(&self) -> Result<serde_json::Value> {
         let mut value = serde_json::to_value(self).map_err(|e| Error::Message(e.to_string()))?;
         if let Some(obj) = value.as_object_mut() {
             obj.insert(
@@ -264,6 +264,11 @@ impl Extraction {
                 serde_json::Value::String(self.plain_text()),
             );
         }
-        serde_json::to_string_pretty(&value).map_err(|e| Error::Message(e.to_string()))
+        Ok(value)
+    }
+
+    pub fn to_json_pretty(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self.to_json_value()?)
+            .map_err(|e| Error::Message(e.to_string()))
     }
 }
