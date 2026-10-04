@@ -62,6 +62,8 @@ impl OpenOptions {
 pub struct ExtractOptions {
     pub max_depth: u32,
     pub max_stream_bytes: usize,
+    /// Stop after this many pages. `None` reads the whole document.
+    pub max_pages: Option<u32>,
 }
 
 impl Default for ExtractOptions {
@@ -69,6 +71,7 @@ impl Default for ExtractOptions {
         Self {
             max_depth: 32,
             max_stream_bytes: 32 * 1024 * 1024,
+            max_pages: None,
         }
     }
 }
@@ -86,6 +89,9 @@ impl ExtractOptions {
         }
         if let Some(limit) = value.get("max_stream_bytes").and_then(|v| v.as_u64()) {
             opts.max_stream_bytes = limit as usize;
+        }
+        if let Some(pages) = value.get("max_pages").and_then(|v| v.as_u64()) {
+            opts.max_pages = Some(pages as u32);
         }
         Ok(opts)
     }
@@ -130,6 +136,7 @@ impl PdfDocument {
             &InterpretOptions {
                 max_depth: opts.max_depth,
                 max_stream_bytes: opts.max_stream_bytes,
+                max_pages: opts.max_pages,
             },
         );
         Extraction {

@@ -25,6 +25,8 @@ const DIAGNOSTIC_CAP: usize = 200;
 pub struct InterpretOptions {
     pub max_depth: u32,
     pub max_stream_bytes: usize,
+    /// Stop after this many pages. `None` reads the whole document.
+    pub max_pages: Option<u32>,
 }
 
 impl Default for InterpretOptions {
@@ -32,6 +34,7 @@ impl Default for InterpretOptions {
         Self {
             max_depth: 32,
             max_stream_bytes: DEFAULT_STREAM_LIMIT,
+            max_pages: None,
         }
     }
 }
@@ -56,6 +59,9 @@ pub fn interpret_document(doc: &Document, opts: &InterpretOptions) -> Interprete
     }
     for (number, page_id) in page_map {
         let index = number.saturating_sub(1);
+        if opts.max_pages.is_some_and(|limit| index >= limit) {
+            break;
+        }
         let media_box =
             inherited_rect(doc, page_id, b"MediaBox").unwrap_or(Rect::new(0.0, 0.0, 612.0, 792.0));
         let rotate = inherited_int(doc, page_id, b"Rotate").unwrap_or(0);
