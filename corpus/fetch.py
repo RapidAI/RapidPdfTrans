@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Download the fidelity corpus into corpus/cache.
 
-The manifest is the source of truth. PDFs are not committed.
+The manifest is the source of truth for the full corpus. Those PDFs are not
+committed. A separate openly licensed subset lives in corpus/ci and is what CI runs.
 
     python3 corpus/fetch.py           # download every manifest entry
     python3 corpus/fetch.py --ci      # only entries with "ci": true
@@ -488,21 +489,23 @@ def pdf_pages(path: Path) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+# Same ids as corpus/ci. Only CC BY files, each under 1 MB.
+CI_IDS = {
+    "2024-acl-long-7",
+    "arxiv-2609.36965",
+    "arxiv-2610.01998",
+    "arxiv-2610.02163",
+    "arxiv-2610.02193",
+    "neurips-2017-attention",
+    "neurips-2023-00296c0e",
+    "pmlr-v202-abbas23a",
+    "pmlr-v202-abels23a",
+}
+
+
 def mark_ci(docs: list[dict]) -> None:
     for doc in docs:
-        doc["ci"] = False
-    wanted = ["arxiv", "acl", "pmlr", "neurips", "cvpr", "usenix"]
-    chosen = []
-    for source in wanted:
-        candidates = [doc for doc in docs if doc["source"] == source and doc["bytes"] and doc["bytes"] < 2_500_000]
-        if not candidates:
-            continue
-        chosen.append(min(candidates, key=lambda doc: doc["bytes"]))
-    cjk = [doc for doc in docs if "cjk" in doc["tags"] and doc["bytes"] and doc["bytes"] < 3_000_000]
-    if cjk:
-        chosen.append(min(cjk, key=lambda doc: doc["bytes"]))
-    for doc in chosen:
-        doc["ci"] = True
+        doc["ci"] = doc["id"] in CI_IDS
 
 
 def load_manifest() -> list[dict]:
@@ -514,7 +517,7 @@ def write_manifest(docs: list[dict]) -> None:
     docs = sorted(docs, key=lambda doc: (doc["source"], doc["id"]))
     payload = {
         "version": 1,
-        "notes": "PDFs are downloaded into corpus/cache and are not committed. sha256 is of the cached bytes.",
+        "notes": "Full corpus PDFs are downloaded into corpus/cache and are not committed. sha256 is of the cached bytes. Entries with ci:true are the openly licensed files also stored in corpus/ci for GitHub Actions.",
         "documents": docs,
     }
     MANIFEST.write_text(json.dumps(payload, indent=2) + "\n")

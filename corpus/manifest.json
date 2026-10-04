@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "PDFs are downloaded into corpus/cache and are not committed. sha256 is of the cached bytes.",
+  "notes": "Full corpus PDFs are downloaded into corpus/cache and are not committed. sha256 is of the cached bytes. Entries with ci:true are the openly licensed files also stored in corpus/ci for GitHub Actions.",
   "documents": [
     {
       "id": "2024-acl-long-0",
@@ -237,7 +237,7 @@
         "latex",
         "ml"
       ],
-      "ci": true
+      "ci": false
     },
     {
       "id": "arxiv-1506.02640",
@@ -604,7 +604,7 @@
         "latex",
         "math"
       ],
-      "ci": false
+      "ci": true
     },
     {
       "id": "arxiv-2610.02080",
@@ -684,7 +684,7 @@
         "cs",
         "latex"
       ],
-      "ci": false
+      "ci": true
     },
     {
       "id": "arxiv-2610.02193",
@@ -700,7 +700,7 @@
         "cs",
         "latex"
       ],
-      "ci": false
+      "ci": true
     },
     {
       "id": "arxiv-2610.02209",
@@ -809,7 +809,7 @@
         "latex",
         "two-column"
       ],
-      "ci": true
+      "ci": false
     },
     {
       "id": "cvpr-2024-yin-sce-mae-selective-correspondence-enhancement",
@@ -1141,7 +1141,7 @@
         "neurips",
         "two-column"
       ],
-      "ci": false
+      "ci": true
     },
     {
       "id": "neurips-2023-0001ca33",
@@ -1399,7 +1399,7 @@
         "pmlr",
         "two-column"
       ],
-      "ci": false
+      "ci": true
     },
     {
       "id": "pmlr-v202-acharki23a",
@@ -1589,7 +1589,7 @@
         "two-column",
         "usenix"
       ],
-      "ci": true
+      "ci": false
     },
     {
       "id": "lang-blue-fairy-1889",

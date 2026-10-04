@@ -1,0 +1,203 @@
+{
+  "version": 1,
+  "notes": "Openly licensed PDFs committed for CI. Each file is CC BY 4.0. The rest of the corpus stays in corpus/manifest.json and is downloaded into corpus/cache.",
+  "documents": [
+    {
+      "id": "arxiv-2610.02163",
+      "url": "https://arxiv.org/pdf/2610.02163",
+      "source": "arxiv",
+      "title": "AutoCompact: Learning When to Compact Context in Long-Horizon Coding Agents",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "277901975ba0aefc182d35f5ba081bc9f54c79a9b54ee8fe7ac13086a9f689ad",
+      "bytes": 285600,
+      "pages": 11,
+      "tags": [
+        "arxiv",
+        "single-column",
+        "formulas",
+        "code",
+        "tables",
+        "figures",
+        "xobject-text",
+        "identity-h",
+        "link-annotations",
+        "custom-encoding"
+      ],
+      "ci": true
+    },
+    {
+      "id": "pmlr-v202-abbas23a",
+      "url": "https://proceedings.mlr.press/v202/abbas23a/abbas23a.pdf",
+      "source": "pmlr",
+      "title": "ClusterFuG: Clustering Fully connected Graphs by Multicut",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "d381b783b74f86c11309677578e510000d04f0ac872fb06cb26e354a2f78764b",
+      "bytes": 329081,
+      "pages": 12,
+      "tags": [
+        "pmlr",
+        "icml",
+        "two-column",
+        "formulas",
+        "footnotes",
+        "tables",
+        "figures",
+        "bold",
+        "italic",
+        "color",
+        "link-annotations"
+      ],
+      "ci": true
+    },
+    {
+      "id": "neurips-2023-00296c0e",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/00296c0e10cd24d415c2db63ea2a2c68-Paper-Conference.pdf",
+      "source": "neurips",
+      "title": "Path following algorithms for l2-regularized M-estimation with approximation guarantee",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "03f70e81174e1f1203159d00e1b25b5706d6d4610f687094452a92368fa93897",
+      "bytes": 340260,
+      "pages": 11,
+      "tags": [
+        "neurips",
+        "single-column",
+        "formulas",
+        "figures",
+        "footnotes",
+        "link-annotations"
+      ],
+      "ci": true
+    },
+    {
+      "id": "arxiv-2610.01998",
+      "url": "https://arxiv.org/pdf/2610.01998",
+      "source": "arxiv",
+      "title": "On the prime geodesic theorem",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "d36e28b7db84516d8143aefebe88bba9d5e8fa26a8b562815ef45115eb7ff0b7",
+      "bytes": 370206,
+      "pages": 10,
+      "tags": [
+        "arxiv",
+        "math",
+        "single-column",
+        "formulas",
+        "type3",
+        "xobject-text",
+        "identity-h",
+        "builtin-encoding",
+        "link-annotations"
+      ],
+      "ci": true
+    },
+    {
+      "id": "pmlr-v202-abels23a",
+      "url": "https://proceedings.mlr.press/v202/abels23a/abels23a.pdf",
+      "source": "pmlr",
+      "title": "Expertise Trees Resolve Knowledge Limitations in Collective Decision-Making",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "f7222fdfd201b5c6cf0bddfc249131c888af94cdf7864f92963bba549ecdcc6c",
+      "bytes": 504216,
+      "pages": 12,
+      "tags": [
+        "pmlr",
+        "icml",
+        "two-column",
+        "formulas",
+        "type3",
+        "xobject-text",
+        "identity-h",
+        "link-annotations"
+      ],
+      "ci": true
+    },
+    {
+      "id": "neurips-2017-attention",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf",
+      "source": "neurips",
+      "title": "Attention Is All You Need",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "d87d482d5ae7960e2e43d7dd6d21377e60e73e8fce1bf2a01aff7aca8a08c537",
+      "bytes": 569417,
+      "pages": 11,
+      "tags": [
+        "neurips",
+        "single-column",
+        "formulas",
+        "tables",
+        "figures",
+        "no-tounicode",
+        "custom-encoding",
+        "link-annotations"
+      ],
+      "ci": true
+    },
+    {
+      "id": "2024-acl-long-7",
+      "url": "https://aclanthology.org/2024.acl-long.7.pdf",
+      "source": "acl",
+      "title": "BitDistiller: Unleashing the Potential of Sub-4-Bit LLMs via Self-Distillation",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "7c3442ba994ea73a1501954c9b31a2cf356bc1687a97837c05472fd8bff709c1",
+      "bytes": 614450,
+      "pages": 15,
+      "tags": [
+        "acl",
+        "two-column",
+        "formulas",
+        "code",
+        "tables",
+        "figures",
+        "footnotes",
+        "type3",
+        "xobject-text",
+        "link-annotations"
+      ],
+      "ci": true
+    },
+    {
+      "id": "arxiv-2610.02193",
+      "url": "https://arxiv.org/pdf/2610.02193",
+      "source": "arxiv",
+      "title": "Hierarchical Continuous Diffusion Language Models",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "0817f055286339262945cb84e39e82c4af642554ef6c65a0239e4dca815901a5",
+      "bytes": 617457,
+      "pages": 24,
+      "tags": [
+        "arxiv",
+        "single-column",
+        "formulas",
+        "type3",
+        "xobject-text",
+        "actualtext",
+        "identity-h",
+        "cid-truetype",
+        "link-annotations"
+      ],
+      "ci": true
+    },
+    {
+      "id": "arxiv-2609.36965",
+      "url": "https://arxiv.org/pdf/2609.36965",
+      "source": "arxiv",
+      "title": "Chinese-Jev: Bringing System One Model to Chinese-Language Tasks",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "04bea4e23959d5a29c124bf90a2728048b43bdce01ace838ab5b598b2a59a073",
+      "bytes": 662639,
+      "pages": 20,
+      "tags": [
+        "arxiv",
+        "cjk",
+        "two-column",
+        "formulas",
+        "code",
+        "identity-h",
+        "standard-14",
+        "xobject-text",
+        "link-annotations"
+      ],
+      "ci": true
+    }
+  ]
+}
