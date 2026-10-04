@@ -1,6 +1,6 @@
 # Fidelity corpus
 
-Real PDFs used to check that extraction keeps every glyph and that the QA harness can see layout and style. The files themselves are not committed. `manifest.json` records the URL, source, license, sha256, size, and feature tags. `fetch.py` downloads them into `cache/`, which is gitignored.
+Real PDFs used to check that extraction keeps every glyph and that the QA harness can see layout and style. None of those PDFs are committed, including small excerpts and openly licensed samples. `manifest.json` is the file list: direct download URL, source, license, sha256, size, and feature tags. `fetch.py` downloads them into `cache/`, which is gitignored, so another machine can rebuild the same corpus from the manifest. Programmatic fixtures such as `testdata/hello.pdf` (from `cargo run -p rpt-core --example hello_pdf`) are unit-test files, not corpus documents.
 
 ```bash
 python3 corpus/fetch.py          # full corpus, verifies sha256
