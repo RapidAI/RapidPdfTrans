@@ -1,0 +1,19 @@
+[package]
+name = "rpt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Format-preserving PDF translation core: content-stream interpreter and glyph coverage"
+repository.workspace = true
+
+[dependencies]
+lopdf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+encoding_rs.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

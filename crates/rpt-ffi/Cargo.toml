@@ -1,0 +1,16 @@
+[package]
+name = "rpt-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "C ABI for RapidPdfTrans"
+repository.workspace = true
+
+[lib]
+name = "rapidpdftrans"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+rpt-core = { path = "../rpt-core" }
+serde_json.workspace = true

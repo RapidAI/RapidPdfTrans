@@ -1,0 +1,16 @@
+/target
+**/target
+**/*.rs.bk
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+*.a
+*.so
+*.dylib
+*.dll
+.DS_Store
+/tmp
+*.log
+.env
+.env.*

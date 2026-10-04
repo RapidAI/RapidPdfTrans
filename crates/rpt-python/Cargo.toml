@@ -1,0 +1,16 @@
+[package]
+name = "rpt-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Python bindings for RapidPdfTrans"
+repository.workspace = true
+
+[lib]
+name = "rapidpdftrans"
+crate-type = ["cdylib"]
+
+[dependencies]
+rpt-core = { path = "../rpt-core" }
+pyo3.workspace = true

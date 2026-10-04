@@ -1,0 +1,17 @@
+[package]
+name = "rpt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "RapidPdfTrans command line tool"
+repository.workspace = true
+
+[[bin]]
+name = "rpt"
+path = "src/main.rs"
+
+[dependencies]
+rpt-core = { path = "../rpt-core" }
+clap.workspace = true
+serde_json.workspace = true
