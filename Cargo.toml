@@ -5,6 +5,7 @@ members = [
     "crates/rpt-ffi",
     "crates/rpt-cli",
     "crates/rpt-python",
+    "crates/rpt-qa",
 ]
 default-members = ["crates/rpt-core", "crates/rpt-ffi", "crates/rpt-cli"]
 

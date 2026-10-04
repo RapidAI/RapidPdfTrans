@@ -11,6 +11,7 @@
 | `crates/rpt-core` | 内容流解释器、字体解码、字形守恒、翻译器 |
 | `crates/rpt-ffi` | C ABI（`rpt_open`、`rpt_extract`、`rpt_translate`、`rpt_save`、`rpt_free`） |
 | `crates/rpt-cli` | `rpt extract` 与 `rpt translate` |
+| `crates/rpt-qa` | 语料保真报告（`rpt-qa`） |
 | `crates/rpt-python` | PyO3 原生模块，不经过 C ABI |
 | `include/rapidpdftrans.h` | cbindgen 生成的 C 头文件 |
 | `bindings/cpp` | 只有头文件的 RAII 包装 |
@@ -95,6 +96,10 @@ export RPT_LLM_API_KEY=...
 - 不可见文字（`Tr` 3 或 7）会记录并打标，不会丢掉
 - 矩形裁剪会标出落在外面的字形；其他路径只标 `clip_uncertain`
 - Unicode 回退顺序：ToUnicode CMap，预定义 CJK CMap（用 `encoding_rs` 解码，不是 Adobe 的 CID 表），简单编码和 `/Differences`（Adobe Glyph List），最后才是内嵌字体的 cmap。映射失败的字形会保留并打标。
+
+## 保真语料
+
+`corpus/manifest.json` 记录真实论文和可再分发图书的 URL、许可证、sha256 和特征标签。PDF 由 `python3 corpus/fetch.py` 下载到被 git 忽略的缓存，不提交进仓库。`rpt-qa` 对每份文件做抽取和字形覆盖率检查，用 Poppler 对文字，并对一份逐字节相同的副本做渲染对比（整页 SSIM，以及去掉字形框之后的非文字区域 SSIM）。lopdf 另存是另一次结构往返，会改写文件，报告里单独列出。CI 只跑标记了 `ci: true` 的小子集。全量语料在夜间的 `Corpus fidelity` 工作流。说明见 `corpus/README.md`。
 
 ## 里程碑
 

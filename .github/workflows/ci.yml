@@ -14,8 +14,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Install Python headers
-        run: sudo apt-get update && sudo apt-get install -y python3-dev g++
+      - name: Install Python headers and Poppler
+        run: sudo apt-get update && sudo apt-get install -y python3-dev g++ poppler-utils
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -41,3 +41,7 @@ jobs:
         run: |
           ./target/release/rpt extract testdata/hello.pdf --json > /tmp/hello.json
           python3 -c 'import json; d=json.load(open("/tmp/hello.json")); assert d["plain_text"]=="Hello"'
+      - name: Corpus subset fidelity check
+        run: |
+          python3 corpus/fetch.py --ci
+          cargo run -p rpt-qa -- --ci --render-pages 1

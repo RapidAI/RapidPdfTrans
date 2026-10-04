@@ -1,0 +1,1613 @@
+{
+  "version": 1,
+  "notes": "PDFs are downloaded into corpus/cache and are not committed. sha256 is of the cached bytes.",
+  "documents": [
+    {
+      "id": "2024-acl-long-0",
+      "url": "https://aclanthology.org/2024.acl-long.0.pdf",
+      "source": "acl",
+      "title": "2024.acl-long.0",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "d2a87115e1db484f1198e398bf0f66f74ebfd932cc5594f47b9ee70757538ec6",
+      "bytes": 3283669,
+      "pages": 95,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-acl-long-1",
+      "url": "https://aclanthology.org/2024.acl-long.1.pdf",
+      "source": "acl",
+      "title": "2024.acl-long.1",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "94cd077715e7b13a75841b89d3bc46713fdaa9fd80842822524b7811b034a89d",
+      "bytes": 687679,
+      "pages": 17,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-acl-long-2",
+      "url": "https://aclanthology.org/2024.acl-long.2.pdf",
+      "source": "acl",
+      "title": "2024.acl-long.2",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "423a4e2856c9f3380c93d5259f7935ecf805e3b7593d7d01a71fc4b29a9b3efb",
+      "bytes": 4965965,
+      "pages": 18,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-acl-long-3",
+      "url": "https://aclanthology.org/2024.acl-long.3.pdf",
+      "source": "acl",
+      "title": "2024.acl-long.3",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "88e037fe50932fe7f0881e9ffd2953d0ced5f13f598c0c8c4d99623f95ce9e6a",
+      "bytes": 1135737,
+      "pages": 18,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-acl-long-4",
+      "url": "https://aclanthology.org/2024.acl-long.4.pdf",
+      "source": "acl",
+      "title": "2024.acl-long.4",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "bbe982c3483605b77fc447774934c62323dca1c6161b5b12e7a7570796b13981",
+      "bytes": 1572461,
+      "pages": 20,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-acl-long-5",
+      "url": "https://aclanthology.org/2024.acl-long.5.pdf",
+      "source": "acl",
+      "title": "2024.acl-long.5",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "9e829c1066089842141ed33721caf276bfafaf629ef54237ee9e29c38db37439",
+      "bytes": 891284,
+      "pages": 17,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-acl-long-6",
+      "url": "https://aclanthology.org/2024.acl-long.6.pdf",
+      "source": "acl",
+      "title": "2024.acl-long.6",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "7a1de42b45c8c5cd724705f111c1ef840b4748bfbd41145db853bc1742fa0b3c",
+      "bytes": 1009116,
+      "pages": 11,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-acl-long-7",
+      "url": "https://aclanthology.org/2024.acl-long.7.pdf",
+      "source": "acl",
+      "title": "2024.acl-long.7",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "7c3442ba994ea73a1501954c9b31a2cf356bc1687a97837c05472fd8bff709c1",
+      "bytes": 614450,
+      "pages": 15,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": true
+    },
+    {
+      "id": "arxiv-1312.6114",
+      "url": "https://arxiv.org/pdf/1312.6114",
+      "source": "arxiv",
+      "title": "Auto-Encoding Variational Bayes",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "bdcb63b79ed88f64f8ee2d43a721930d01dde5441a4dba20ecaa2342b34e017c",
+      "bytes": 3926758,
+      "pages": 14,
+      "tags": [
+        "arxiv",
+        "cs",
+        "formulas",
+        "latex",
+        "ml",
+        "single-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1406.2661",
+      "url": "https://arxiv.org/pdf/1406.2661",
+      "source": "arxiv",
+      "title": "Generative Adversarial Nets",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "ff5819e3a7b713c3bd3107b7de3d51fe0a347aa5d8444f0efdcf2345ef0a8b63",
+      "bytes": 530482,
+      "pages": 9,
+      "tags": [
+        "arxiv",
+        "cs",
+        "formulas",
+        "latex",
+        "ml"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1409.1556",
+      "url": "https://arxiv.org/pdf/1409.1556",
+      "source": "arxiv",
+      "title": "Very Deep Convolutional Networks",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "83728f9efc21081792902b4c17a4657022d1e4a92ec81655c2427f4ef0755e50",
+      "bytes": 200010,
+      "pages": 14,
+      "tags": [
+        "arxiv",
+        "cs",
+        "cv",
+        "latex",
+        "tables",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1412.6980",
+      "url": "https://arxiv.org/pdf/1412.6980",
+      "source": "arxiv",
+      "title": "Adam",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "eab9c73ae2ceda884b94830bda99312254bac4806f6c9f045cbab90721ecda31",
+      "bytes": 584641,
+      "pages": 15,
+      "tags": [
+        "algorithms",
+        "arxiv",
+        "cs",
+        "formulas",
+        "latex",
+        "ml"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1502.03167",
+      "url": "https://arxiv.org/pdf/1502.03167",
+      "source": "arxiv",
+      "title": "Batch Normalization",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "bdc69e0b568f41d8d3181cc9077a461f58fcdd1c70c9f49efe60a05ee6109655",
+      "bytes": 173548,
+      "pages": 11,
+      "tags": [
+        "arxiv",
+        "cs",
+        "formulas",
+        "latex",
+        "ml"
+      ],
+      "ci": true
+    },
+    {
+      "id": "arxiv-1506.02640",
+      "url": "https://arxiv.org/pdf/1506.02640",
+      "source": "arxiv",
+      "title": "Faster R-CNN",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "54bcd2dd05dc618849e8a94d8b88fe3eeb37f80e96e200600d38f1f733931678",
+      "bytes": 5296750,
+      "pages": 10,
+      "tags": [
+        "arxiv",
+        "cs",
+        "cv",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1512.03385",
+      "url": "https://arxiv.org/pdf/1512.03385",
+      "source": "arxiv",
+      "title": "Deep Residual Learning",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "1e0651b6810ecba34a3dbc5b5b0209226f889004607c1f203540a48d64e5a93a",
+      "bytes": 819383,
+      "pages": 12,
+      "tags": [
+        "arxiv",
+        "cs",
+        "cv",
+        "figures",
+        "latex",
+        "tables",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1607.06450",
+      "url": "https://arxiv.org/pdf/1607.06450",
+      "source": "arxiv",
+      "title": "Layer Normalization",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "c464f839fb8d59f7fde92f9b4caa67c2d1f2f196b88f93fb60502249df0aaef7",
+      "bytes": 612446,
+      "pages": 14,
+      "tags": [
+        "arxiv",
+        "cs",
+        "formulas",
+        "latex",
+        "ml"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1703.06870",
+      "url": "https://arxiv.org/pdf/1703.06870",
+      "source": "arxiv",
+      "title": "Mask R-CNN",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "b595a882b763d55d933543131f32a2c4b6f41d0818d418ef46a2b66f946b67a8",
+      "bytes": 7723886,
+      "pages": 12,
+      "tags": [
+        "arxiv",
+        "cs",
+        "cv",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1706.03762",
+      "url": "https://arxiv.org/pdf/1706.03762",
+      "source": "arxiv",
+      "title": "Attention Is All You Need",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697",
+      "bytes": 2215244,
+      "pages": 15,
+      "tags": [
+        "arxiv",
+        "cs",
+        "figures",
+        "formulas",
+        "latex",
+        "ml",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-1810.04805",
+      "url": "https://arxiv.org/pdf/1810.04805",
+      "source": "arxiv",
+      "title": "BERT",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "5692a5514787a8c6727b4ff3b726a3385798bc68e12138d1d4af83947e2acf6e",
+      "bytes": 775166,
+      "pages": 16,
+      "tags": [
+        "arxiv",
+        "cs",
+        "latex",
+        "nlp",
+        "tables",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2006.11239",
+      "url": "https://arxiv.org/pdf/2006.11239",
+      "source": "arxiv",
+      "title": "Denoising Diffusion Probabilistic Models",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "aee5e07a802e8dfd2a386374c94fd61d1d056cb7e1e0fec4f28e8120ff5d8505",
+      "bytes": 10267274,
+      "pages": 25,
+      "tags": [
+        "arxiv",
+        "cs",
+        "figures",
+        "formulas",
+        "latex",
+        "ml"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2010.11929",
+      "url": "https://arxiv.org/pdf/2010.11929",
+      "source": "arxiv",
+      "title": "An Image is Worth 16x16 Words",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "8ce7b83971a14508ca711a27c875c9b6914c4f6767cf3150fb1ca6c07aa056d6",
+      "bytes": 3743814,
+      "pages": 22,
+      "tags": [
+        "arxiv",
+        "cs",
+        "cv",
+        "figures",
+        "formulas",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2103.14030",
+      "url": "https://arxiv.org/pdf/2103.14030",
+      "source": "arxiv",
+      "title": "Highly accurate protein structure prediction",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "dfdc7631fe2a35bb5892080b9c0eeadc4432d55cf1856f84bc88802efa877a7c",
+      "bytes": 1360315,
+      "pages": 14,
+      "tags": [
+        "arxiv",
+        "biology",
+        "figures",
+        "latex"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2609.32770",
+      "url": "https://arxiv.org/pdf/2609.32770",
+      "source": "arxiv",
+      "title": "C-HAT-Bench",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "d8dda605b7baf449012d059c51cabab18ef8f85296ec3416306ca61d34002b8a",
+      "bytes": 16189884,
+      "pages": 35,
+      "tags": [
+        "arxiv",
+        "cjk",
+        "latex",
+        "nlp"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2609.33014",
+      "url": "https://arxiv.org/pdf/2609.33014",
+      "source": "arxiv",
+      "title": "TCMQA",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "12b2886c7b24ef84adb5eb28359de93e019fd7a75a4ca38c23d93b7a3ef13806",
+      "bytes": 4283397,
+      "pages": 16,
+      "tags": [
+        "arxiv",
+        "cjk",
+        "latex",
+        "nlp"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2609.36804",
+      "url": "https://arxiv.org/pdf/2609.36804",
+      "source": "arxiv",
+      "title": "VAA-CSEC",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "1e3730cd5fee8aec5eff9bbf360ec0850c1e05c475c1adc6b6e723e9d3e263e2",
+      "bytes": 6477272,
+      "pages": 16,
+      "tags": [
+        "arxiv",
+        "cjk",
+        "latex",
+        "nlp"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2609.36965",
+      "url": "https://arxiv.org/pdf/2609.36965",
+      "source": "arxiv",
+      "title": "Chinese-Jev",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "04bea4e23959d5a29c124bf90a2728048b43bdce01ace838ab5b598b2a59a073",
+      "bytes": 662639,
+      "pages": 20,
+      "tags": [
+        "arxiv",
+        "cjk",
+        "latex",
+        "nlp"
+      ],
+      "ci": true
+    },
+    {
+      "id": "arxiv-2609.38908",
+      "url": "https://arxiv.org/pdf/2609.38908",
+      "source": "arxiv",
+      "title": "CellMSA: Context Modeling for Single-Cell Representation Learning",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "7fb17da8903293f830597adac5ce2b0fbb6e2577d81cc33381573eccb6fb5279",
+      "bytes": 8183991,
+      "pages": 31,
+      "tags": [
+        "arxiv",
+        "biology",
+        "latex"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.01358",
+      "url": "https://arxiv.org/pdf/2610.01358",
+      "source": "arxiv",
+      "title": "2610.01358",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "bf6d9e60eb25c469122fbc9a4de459284c137da716443f38636794b7ee52159f",
+      "bytes": 19613529,
+      "pages": 47,
+      "tags": [
+        "arxiv",
+        "biology",
+        "latex"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.01706",
+      "url": "https://arxiv.org/pdf/2610.01706",
+      "source": "arxiv",
+      "title": "Analogue black hole lightring and its resonances in an optical fiber",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "50cb6f39b685229a24646c6433b370c7e3b5b7a88b79d211c5ee3baf1ecf27a3",
+      "bytes": 2078656,
+      "pages": 9,
+      "tags": [
+        "arxiv",
+        "latex",
+        "physics"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.01891",
+      "url": "https://arxiv.org/pdf/2610.01891",
+      "source": "arxiv",
+      "title": "RipplePLM: Structural and Property Decoupling for Protein Mutation Effect Generation",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "4f5ba7c3f9e40d0c613cd8b3f76f9bdafcd57bb9c9c42faa4261cbaf562dbf52",
+      "bytes": 2721537,
+      "pages": 20,
+      "tags": [
+        "arxiv",
+        "biology",
+        "latex"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.01899",
+      "url": "https://arxiv.org/pdf/2610.01899",
+      "source": "arxiv",
+      "title": "Square products of factorials and a conjecture of Erd\u0151s and Graham",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "fa2d536863e9b70034086847d39c13ebb3b09ede989ec10b32841c75bca84297",
+      "bytes": 458676,
+      "pages": 18,
+      "tags": [
+        "arxiv",
+        "latex",
+        "math"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.01980",
+      "url": "https://arxiv.org/pdf/2610.01980",
+      "source": "arxiv",
+      "title": "The Curvature of Regret in Contextual Linear Optimization",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "a6c0c0eb8c5bcd7a701d946a9b9ff4a0d403b7211db073b1f987653921a5e76e",
+      "bytes": 554293,
+      "pages": 14,
+      "tags": [
+        "arxiv",
+        "latex",
+        "stats"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.01995",
+      "url": "https://arxiv.org/pdf/2610.01995",
+      "source": "arxiv",
+      "title": "Can AI Oversight Be Zero Knowledge?",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "615f787d6b84dfe031dbaafc828e75232edc49624357d67619f6bf082fa4ebd2",
+      "bytes": 468128,
+      "pages": 38,
+      "tags": [
+        "arxiv",
+        "latex",
+        "security"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.01998",
+      "url": "https://arxiv.org/pdf/2610.01998",
+      "source": "arxiv",
+      "title": "On the prime geodesic theorem",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "d36e28b7db84516d8143aefebe88bba9d5e8fa26a8b562815ef45115eb7ff0b7",
+      "bytes": 370206,
+      "pages": 10,
+      "tags": [
+        "arxiv",
+        "latex",
+        "math"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.02080",
+      "url": "https://arxiv.org/pdf/2610.02080",
+      "source": "arxiv",
+      "title": "Thin-capping layer epitaxial quantum dots for near-field quantum photonics",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "bcc2d5acf8e3b1fda5928ca8a1977b115e42a788c9cd7dd37725e598d665d5ce",
+      "bytes": 3127219,
+      "pages": 14,
+      "tags": [
+        "arxiv",
+        "latex",
+        "physics"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.02109",
+      "url": "https://arxiv.org/pdf/2610.02109",
+      "source": "arxiv",
+      "title": "Higher-Page Jacobian and Albanese Tori",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "9699f01c1c55b221155a669a1b86e90214392b1ac85aa819718f1473385a2bd2",
+      "bytes": 391046,
+      "pages": 31,
+      "tags": [
+        "arxiv",
+        "latex",
+        "math"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.02113",
+      "url": "https://arxiv.org/pdf/2610.02113",
+      "source": "arxiv",
+      "title": "Quantum Advantage for Two-Party Differential Privacy",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "f023a8483c7ea332b3c8e0990816452d4f30cb2fdda6b77d76a96d3389fcebca",
+      "bytes": 469189,
+      "pages": 22,
+      "tags": [
+        "arxiv",
+        "latex",
+        "security"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.02158",
+      "url": "https://arxiv.org/pdf/2610.02158",
+      "source": "arxiv",
+      "title": "Muon meets Tamed Langevin: Momentum Preconditioning beyond Convex and gradient-Lipschitz Potentials",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "d9d5b899074921719a205d5f741f3e01e570d033b15b5fd09fcaaf20d5b1e990",
+      "bytes": 456042,
+      "pages": 26,
+      "tags": [
+        "arxiv",
+        "latex",
+        "stats"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.02163",
+      "url": "https://arxiv.org/pdf/2610.02163",
+      "source": "arxiv",
+      "title": "AutoCompact: Learning When to Compact Context in Long-Horizon Coding Agents",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "277901975ba0aefc182d35f5ba081bc9f54c79a9b54ee8fe7ac13086a9f689ad",
+      "bytes": 285600,
+      "pages": 11,
+      "tags": [
+        "arxiv",
+        "cs",
+        "latex"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.02193",
+      "url": "https://arxiv.org/pdf/2610.02193",
+      "source": "arxiv",
+      "title": "Hierarchical Continuous Diffusion Language Models",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "0817f055286339262945cb84e39e82c4af642554ef6c65a0239e4dca815901a5",
+      "bytes": 617457,
+      "pages": 24,
+      "tags": [
+        "arxiv",
+        "cs",
+        "latex"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.02209",
+      "url": "https://arxiv.org/pdf/2610.02209",
+      "source": "arxiv",
+      "title": "Leading gravitational dressing of operators and states in de Sitter space",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "971f67c91f0543db668571f320ed72c27a60e6f625ee2cac40b6aaefdfa8fd6f",
+      "bytes": 401957,
+      "pages": 27,
+      "tags": [
+        "arxiv",
+        "latex",
+        "physics"
+      ],
+      "ci": false
+    },
+    {
+      "id": "ctex-manual",
+      "url": "https://mirrors.mit.edu/CTAN/language/chinese/ctex/ctex.pdf",
+      "source": "ctan",
+      "title": "ctex manual",
+      "license": "LPPL-1.3c (CTAN ctex)",
+      "sha256": "b102c4e6801da8ed5696f31698c8788d4eade53c4b8121ff95226c51f49f515a",
+      "bytes": 1426774,
+      "pages": 195,
+      "tags": [
+        "book",
+        "cjk",
+        "latex",
+        "manual"
+      ],
+      "ci": false
+    },
+    {
+      "id": "cvpr-2024-carlsson-heal-swin-a-vision-transformer-on-the-s",
+      "url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Carlsson_HEAL-SWIN_A_Vision_Transformer_On_The_Sphere_CVPR_2024_paper.pdf",
+      "source": "cvpr",
+      "title": "Carlsson HEAL-SWIN A Vision Transformer On The Sphere CVPR 2024",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "328372119a7de92124b163fb1bf9aaebf30555e9288c3ea81989093275a18ea8",
+      "bytes": 7966920,
+      "pages": 11,
+      "tags": [
+        "conference",
+        "cv",
+        "cvpr",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "cvpr-2024-decatur-3d-paintbrush-local-stylization-of-3d-sh",
+      "url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Decatur_3D_Paintbrush_Local_Stylization_of_3D_Shapes_with_Cascaded_Score_CVPR_2024_paper.pdf",
+      "source": "cvpr",
+      "title": "Decatur 3D Paintbrush Local Stylization of 3D Shapes with Cascaded Score CVPR 2024",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "4d1c32fa90f4d724e670044ba8350df0fcce3d14dc90a9ebdcee9408b55ca9db",
+      "bytes": 9631160,
+      "pages": 11,
+      "tags": [
+        "conference",
+        "cv",
+        "cvpr",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "cvpr-2024-lee-guided-slot-attention-for-unsupervised-video",
+      "url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Lee_Guided_Slot_Attention_for_Unsupervised_Video_Object_Segmentation_CVPR_2024_paper.pdf",
+      "source": "cvpr",
+      "title": "Lee Guided Slot Attention for Unsupervised Video Object Segmentation CVPR 2024",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "a7a822519f43888c9725d192846da40ffe7170f51585c8dcccf4f74727379d77",
+      "bytes": 4709073,
+      "pages": 10,
+      "tags": [
+        "conference",
+        "cv",
+        "cvpr",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "cvpr-2024-liu-programmable-motion-generation-for-open-set-",
+      "url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Liu_Programmable_Motion_Generation_for_Open-Set_Motion_Control_Tasks_CVPR_2024_paper.pdf",
+      "source": "cvpr",
+      "title": "Liu Programmable Motion Generation for Open-Set Motion Control Tasks CVPR 2024",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "ddd933545b57902f73963f125a3615a121a44586c1ad0c97f60206a6361f6ebf",
+      "bytes": 2094464,
+      "pages": 10,
+      "tags": [
+        "conference",
+        "cv",
+        "cvpr",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": true
+    },
+    {
+      "id": "cvpr-2024-yin-sce-mae-selective-correspondence-enhancement",
+      "url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Yin_SCE-MAE_Selective_Correspondence_Enhancement_with_Masked_Autoencoder_for_Self-Supervised_Landmark_CVPR_2024_paper.pdf",
+      "source": "cvpr",
+      "title": "Yin SCE-MAE Selective Correspondence Enhancement with Masked Autoencoder for Self-Supervised Landmark CVPR 2024",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "577ef1303757548c324063355242c8bcb7ce328acca78956e4db6a24c19d3c82",
+      "bytes": 4670062,
+      "pages": 10,
+      "tags": [
+        "conference",
+        "cv",
+        "cvpr",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "cvpr-2024-zhu-dpmesh-exploiting-diffusion-prior-for-occlud",
+      "url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Zhu_DPMesh_Exploiting_Diffusion_Prior_for_Occluded_Human_Mesh_Recovery_CVPR_2024_paper.pdf",
+      "source": "cvpr",
+      "title": "Zhu DPMesh Exploiting Diffusion Prior for Occluded Human Mesh Recovery CVPR 2024",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "b13af9984b1b1bfb879ae724035629c3f7a1e21fe414dcbedae9ae307cf3dd08",
+      "bytes": 2336744,
+      "pages": 10,
+      "tags": [
+        "conference",
+        "cv",
+        "cvpr",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "eccv-2022-001",
+      "url": "https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136630001.pdf",
+      "source": "eccv",
+      "title": "ECCV 2022 paper 1",
+      "license": "ECVA open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "81aff0454549769be88a3bc74813f56669391c6aeb2908013206422f98912918",
+      "bytes": 10092360,
+      "pages": 20,
+      "tags": [
+        "conference",
+        "cv",
+        "eccv",
+        "figures",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2023-emnlp-main-0",
+      "url": "https://aclanthology.org/2023.emnlp-main.0.pdf",
+      "source": "emnlp",
+      "title": "2023.emnlp-main.0",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "e73a202fb352155f6862e1f28639ba188245a226cad751ec73b43ed6b1d083f5",
+      "bytes": 8494929,
+      "pages": 101,
+      "tags": [
+        "conference",
+        "emnlp",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2023-emnlp-main-1",
+      "url": "https://aclanthology.org/2023.emnlp-main.1.pdf",
+      "source": "emnlp",
+      "title": "2023.emnlp-main.1",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "332e6b5164695cf15e036714f4f64d38764e30499a8b285e199a79b32e8d7e0c",
+      "bytes": 791368,
+      "pages": 14,
+      "tags": [
+        "conference",
+        "emnlp",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2023-emnlp-main-2",
+      "url": "https://aclanthology.org/2023.emnlp-main.2.pdf",
+      "source": "emnlp",
+      "title": "2023.emnlp-main.2",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "587ebc2cb92ced939560ae7e71a5a78bdc16bcfc37fe64a02c50393a588706d2",
+      "bytes": 1340342,
+      "pages": 14,
+      "tags": [
+        "conference",
+        "emnlp",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2023-emnlp-main-3",
+      "url": "https://aclanthology.org/2023.emnlp-main.3.pdf",
+      "source": "emnlp",
+      "title": "2023.emnlp-main.3",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "a3399d724f330eda775e7b9336598e5a4ea4da45b3741f4a7da5c5350c06a5bb",
+      "bytes": 1765807,
+      "pages": 14,
+      "tags": [
+        "conference",
+        "emnlp",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2023-emnlp-main-4",
+      "url": "https://aclanthology.org/2023.emnlp-main.4.pdf",
+      "source": "emnlp",
+      "title": "2023.emnlp-main.4",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "0ada7997200ad18531038aa1fa00da5a1cd6559d9e3a393c9e6a6fbae0fa8c3f",
+      "bytes": 4393792,
+      "pages": 15,
+      "tags": [
+        "conference",
+        "emnlp",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2023-emnlp-main-5",
+      "url": "https://aclanthology.org/2023.emnlp-main.5.pdf",
+      "source": "emnlp",
+      "title": "2023.emnlp-main.5",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "d95f97dd1a942ea0932287e538d0a50d57322ef9daed7bd0db28802d1d7e34fe",
+      "bytes": 1284598,
+      "pages": 13,
+      "tags": [
+        "conference",
+        "emnlp",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "iccv-2023-han-towards-attack-tolerant-federated-learning-v",
+      "url": "https://openaccess.thecvf.com/content/ICCV2023/papers/Han_Towards_Attack-tolerant_Federated_Learning_via_Critical_Parameter_Analysis_ICCV_2023_paper.pdf",
+      "source": "iccv",
+      "title": "Han Towards Attack-tolerant Federated Learning via Critical Parameter Analysis ICCV 2023",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "8aa150b5fd8c0b12b8e69c2ef39b32ebf4731f80bfe718ee3ec87604d4b63071",
+      "bytes": 858888,
+      "pages": 10,
+      "tags": [
+        "conference",
+        "cv",
+        "figures",
+        "iccv",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "iccv-2023-liu-birds-eye-view-scene-graph-for-vision-langua",
+      "url": "https://openaccess.thecvf.com/content/ICCV2023/papers/Liu_Birds-Eye-View_Scene_Graph_for_Vision-Language_Navigation_ICCV_2023_paper.pdf",
+      "source": "iccv",
+      "title": "Liu Birds-Eye-View Scene Graph for Vision-Language Navigation ICCV 2023",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "336a28fe599d8289067038f71a628c6159e88b305a0c224ae97d0530ffc07311",
+      "bytes": 4285994,
+      "pages": 13,
+      "tags": [
+        "conference",
+        "cv",
+        "figures",
+        "iccv",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "iccv-2023-yi-diff-retinex-rethinking-low-light-image-enhan",
+      "url": "https://openaccess.thecvf.com/content/ICCV2023/papers/Yi_Diff-Retinex_Rethinking_Low-light_Image_Enhancement_with_A_Generative_Diffusion_Model_ICCV_2023_paper.pdf",
+      "source": "iccv",
+      "title": "Yi Diff-Retinex Rethinking Low-light Image Enhancement with A Generative Diffusion Model ICCV 2023",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "8a36996eed3ca30f038da063d779c9c30799abf0dc378cc200ce6625ab5c4a6b",
+      "bytes": 9469229,
+      "pages": 10,
+      "tags": [
+        "conference",
+        "cv",
+        "figures",
+        "iccv",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "iccv-2023-zbinden-stochastic-segmentation-with-conditional",
+      "url": "https://openaccess.thecvf.com/content/ICCV2023/papers/Zbinden_Stochastic_Segmentation_with_Conditional_Categorical_Diffusion_Models_ICCV_2023_paper.pdf",
+      "source": "iccv",
+      "title": "Zbinden Stochastic Segmentation with Conditional Categorical Diffusion Models ICCV 2023",
+      "license": "CVF open access; copyright retained by the authors (PDF not committed)",
+      "sha256": "fb19d5086b71020901d63d288d65db9a99ceebed2d1637bb4ee4f36301cb5ba2",
+      "bytes": 2506778,
+      "pages": 11,
+      "tags": [
+        "conference",
+        "cv",
+        "figures",
+        "iccv",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-naacl-long-0",
+      "url": "https://aclanthology.org/2024.naacl-long.0.pdf",
+      "source": "naacl",
+      "title": "2024.naacl-long.0",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "8cdd08891749ac58e2a5c392ce37c789671c3ff43410b8496cbf8cea87963b6f",
+      "bytes": 912862,
+      "pages": 62,
+      "tags": [
+        "conference",
+        "latex",
+        "naacl",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-naacl-long-1",
+      "url": "https://aclanthology.org/2024.naacl-long.1.pdf",
+      "source": "naacl",
+      "title": "2024.naacl-long.1",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "093a3a545ae03ac5198bfc45215b1af06b5d6f51a2f2fdcbbd03b79b4913cb0f",
+      "bytes": 1127913,
+      "pages": 21,
+      "tags": [
+        "conference",
+        "latex",
+        "naacl",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-naacl-long-2",
+      "url": "https://aclanthology.org/2024.naacl-long.2.pdf",
+      "source": "naacl",
+      "title": "2024.naacl-long.2",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "11eeb967b04273009b488cfd182ad90118571e0b9dfb014e130ae75c0043ca8a",
+      "bytes": 3282464,
+      "pages": 18,
+      "tags": [
+        "conference",
+        "latex",
+        "naacl",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "2024-naacl-long-3",
+      "url": "https://aclanthology.org/2024.naacl-long.3.pdf",
+      "source": "naacl",
+      "title": "2024.naacl-long.3",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "b720042e677bcdd660a1c0ac09effc84eeaa60cad518d8fbbef62a3c37c5b2f1",
+      "bytes": 619964,
+      "pages": 19,
+      "tags": [
+        "conference",
+        "latex",
+        "naacl",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "neurips-2017-attention",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf",
+      "source": "neurips",
+      "title": "Attention Is All You Need (NeurIPS 2017)",
+      "license": "CC BY 4.0 (NeurIPS proceedings)",
+      "sha256": "d87d482d5ae7960e2e43d7dd6d21377e60e73e8fce1bf2a01aff7aca8a08c537",
+      "bytes": 569417,
+      "pages": 11,
+      "tags": [
+        "conference",
+        "formulas",
+        "latex",
+        "ml",
+        "neurips",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "neurips-2023-0001ca33",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/0001ca33ba34ce0351e4612b744b3936-Paper-Conference.pdf",
+      "source": "neurips",
+      "title": "NeurIPS 2023 0001ca33",
+      "license": "CC BY 4.0 (NeurIPS proceedings)",
+      "sha256": "2582f9fdc5154b1ea516b94b45f9de07a43977190e8d31241bc7c2c88e2ac214",
+      "bytes": 4516021,
+      "pages": 12,
+      "tags": [
+        "conference",
+        "latex",
+        "ml",
+        "neurips",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "neurips-2023-00160816",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/001608167bb652337af5df0129aeaabd-Paper-Conference.pdf",
+      "source": "neurips",
+      "title": "NeurIPS 2023 00160816",
+      "license": "CC BY 4.0 (NeurIPS proceedings)",
+      "sha256": "3d997967ca115de081fa2f0b9fc443b5fbdcbf003726e8c0f16bee038ebd6316",
+      "bytes": 1528653,
+      "pages": 22,
+      "tags": [
+        "conference",
+        "latex",
+        "ml",
+        "neurips",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "neurips-2023-0021c2cb",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/0021c2cb1b9b6a71ac478ea52a93b25a-Paper-Conference.pdf",
+      "source": "neurips",
+      "title": "NeurIPS 2023 0021c2cb",
+      "license": "CC BY 4.0 (NeurIPS proceedings)",
+      "sha256": "8d5f16b5977ce61e8ccdfa80300c7af152f92aa8ce4feb17d54ac2b673fbf0d9",
+      "bytes": 7648406,
+      "pages": 22,
+      "tags": [
+        "conference",
+        "latex",
+        "ml",
+        "neurips",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "neurips-2023-00226294",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/002262941c9edfd472a79298b2ac5e17-Paper-Conference.pdf",
+      "source": "neurips",
+      "title": "NeurIPS 2023 00226294",
+      "license": "CC BY 4.0 (NeurIPS proceedings)",
+      "sha256": "02fc84aa7ffcdee0535dfd35940512a4392b6f07c3fd6b221309893f9abafaec",
+      "bytes": 1707985,
+      "pages": 16,
+      "tags": [
+        "conference",
+        "latex",
+        "ml",
+        "neurips",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "neurips-2023-00296c0e",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/00296c0e10cd24d415c2db63ea2a2c68-Paper-Conference.pdf",
+      "source": "neurips",
+      "title": "NeurIPS 2023 00296c0e",
+      "license": "CC BY 4.0 (NeurIPS proceedings)",
+      "sha256": "03f70e81174e1f1203159d00e1b25b5706d6d4610f687094452a92368fa93897",
+      "bytes": 340260,
+      "pages": 11,
+      "tags": [
+        "conference",
+        "latex",
+        "ml",
+        "neurips",
+        "two-column"
+      ],
+      "ci": true
+    },
+    {
+      "id": "neurips-2023-0073cc73",
+      "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/0073cc73e1873b35345209b50a3dab66-Paper-Conference.pdf",
+      "source": "neurips",
+      "title": "NeurIPS 2023 0073cc73",
+      "license": "CC BY 4.0 (NeurIPS proceedings)",
+      "sha256": "4784eba166ae6ef9f14ebe661e33f8dfc3ac059c83aa63140db7542cfc310338",
+      "bytes": 20871239,
+      "pages": 13,
+      "tags": [
+        "conference",
+        "latex",
+        "ml",
+        "neurips",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "nist-sp-800-63-3",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-63-3.pdf",
+      "source": "nist",
+      "title": "NIST SP 800-63-3 Digital Identity Guidelines",
+      "license": "Public domain (US government work)",
+      "sha256": "915bb812cb705918461e642e84141c6ca2adc2ca0106e1d88f3884c61f07110a",
+      "bytes": 1599268,
+      "pages": 76,
+      "tags": [
+        "government",
+        "public-domain",
+        "security",
+        "word"
+      ],
+      "ci": false
+    },
+    {
+      "id": "open-logic",
+      "url": "https://builds.openlogicproject.org/open-logic-complete.pdf",
+      "source": "open-logic",
+      "title": "The Open Logic Project",
+      "license": "CC BY 4.0 (Open Logic Project)",
+      "sha256": "e17ac6f54723999b727b56b60f864a969f2b7c883be5ce7149f13472a0ee14ae",
+      "bytes": 4063129,
+      "pages": 1016,
+      "tags": [
+        "book",
+        "formulas",
+        "latex",
+        "math",
+        "textbook"
+      ],
+      "ci": false
+    },
+    {
+      "id": "openstax-university-physics-v2",
+      "url": "https://assets.openstax.org/oscms-prodcms/media/documents/university-physics-volume-2_-_WEB.pdf",
+      "source": "openstax",
+      "title": "University Physics Volume 2",
+      "license": "CC BY-NC-SA 4.0 (OpenStax)",
+      "sha256": "3f5d8d0e38ba663c84a036b54cf6087bc2836adca553cb7849f2c0e85e97a445",
+      "bytes": 63815745,
+      "pages": 781,
+      "tags": [
+        "book",
+        "figures",
+        "formulas",
+        "physics",
+        "prince",
+        "single-column",
+        "textbook"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-aamand23a",
+      "url": "https://proceedings.mlr.press/v202/aamand23a/aamand23a.pdf",
+      "source": "pmlr",
+      "title": "aamand23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "87ef36d3f3713ca062fea066d01d4408a449a1eafe4d97c0d247e859f5894068",
+      "bytes": 3853836,
+      "pages": 18,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-abbas23a",
+      "url": "https://proceedings.mlr.press/v202/abbas23a/abbas23a.pdf",
+      "source": "pmlr",
+      "title": "abbas23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "d381b783b74f86c11309677578e510000d04f0ac872fb06cb26e354a2f78764b",
+      "bytes": 329081,
+      "pages": 12,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": true
+    },
+    {
+      "id": "pmlr-v202-abbe23a",
+      "url": "https://proceedings.mlr.press/v202/abbe23a/abbe23a.pdf",
+      "source": "pmlr",
+      "title": "abbe23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "3a9857286d446c0ab8c1a554ae0f2441812de6a02e6b5f4020ee4e5d6a7e3fe6",
+      "bytes": 912323,
+      "pages": 30,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-abedsoltan23a",
+      "url": "https://proceedings.mlr.press/v202/abedsoltan23a/abedsoltan23a.pdf",
+      "source": "pmlr",
+      "title": "abedsoltan23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "c795455905006f93fc4859dcb6db1727748f63c1ade02505821e68fc9a81ca9a",
+      "bytes": 597412,
+      "pages": 18,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-abels23a",
+      "url": "https://proceedings.mlr.press/v202/abels23a/abels23a.pdf",
+      "source": "pmlr",
+      "title": "abels23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "f7222fdfd201b5c6cf0bddfc249131c888af94cdf7864f92963bba549ecdcc6c",
+      "bytes": 504216,
+      "pages": 12,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-acharki23a",
+      "url": "https://proceedings.mlr.press/v202/acharki23a/acharki23a.pdf",
+      "source": "pmlr",
+      "title": "acharki23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "1e438c17b55d4dd4b89c28d8acf516c92a62e6670a7ff05b72684e9b8e53dc56",
+      "bytes": 616945,
+      "pages": 42,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-adams23a",
+      "url": "https://proceedings.mlr.press/v202/adams23a/adams23a.pdf",
+      "source": "pmlr",
+      "title": "adams23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "f43e39eeb32fea231247a07b12347a11ac6598b5fce75800bd802a5e1e56532d",
+      "bytes": 1879736,
+      "pages": 19,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-agarwala23a",
+      "url": "https://proceedings.mlr.press/v202/agarwala23a/agarwala23a.pdf",
+      "source": "pmlr",
+      "title": "agarwala23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "961841d85edc8d049e78965610b4de12d5b6290753fdff565d6d315d77b560ab",
+      "bytes": 785162,
+      "pages": 17,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-agarwala23b",
+      "url": "https://proceedings.mlr.press/v202/agarwala23b/agarwala23b.pdf",
+      "source": "pmlr",
+      "title": "agarwala23b",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "3b9d1826ed3367dbd37c2d08219f0c366cf3411d8ef7ba92809c209de0b5c5ad",
+      "bytes": 9703258,
+      "pages": 27,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "pmlr-v202-agazzi23a",
+      "url": "https://proceedings.mlr.press/v202/agazzi23a/agazzi23a.pdf",
+      "source": "pmlr",
+      "title": "agazzi23a",
+      "license": "CC BY 4.0 (PMLR)",
+      "sha256": "3026a6dacdd9c2d21fcfc7134cd1857af6b273c49675b7b890c5a2715f5b363a",
+      "bytes": 605667,
+      "pages": 32,
+      "tags": [
+        "conference",
+        "icml",
+        "latex",
+        "ml",
+        "pmlr",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "usenix-sec24-gohil",
+      "url": "https://www.usenix.org/system/files/usenixsecurity24-gohil.pdf",
+      "source": "usenix",
+      "title": "gohil",
+      "license": "USENIX open-access proceedings; copyright retained by the authors (PDF not committed)",
+      "sha256": "53b11e62c1c3017bd28d3dd31de0d5245c23b0c038867cc0169c8682940a344e",
+      "bytes": 1129069,
+      "pages": 19,
+      "tags": [
+        "code",
+        "conference",
+        "latex",
+        "security",
+        "two-column",
+        "usenix"
+      ],
+      "ci": false
+    },
+    {
+      "id": "usenix-sec24-mankali",
+      "url": "https://www.usenix.org/system/files/usenixsecurity24-mankali.pdf",
+      "source": "usenix",
+      "title": "mankali",
+      "license": "USENIX open-access proceedings; copyright retained by the authors (PDF not committed)",
+      "sha256": "1bc15a466a2f5ce827241573cebaf718a3d98b79b5b5ff277e61a7ac1521bc29",
+      "bytes": 4761560,
+      "pages": 19,
+      "tags": [
+        "code",
+        "conference",
+        "latex",
+        "security",
+        "two-column",
+        "usenix"
+      ],
+      "ci": false
+    },
+    {
+      "id": "usenix-sec24-qin",
+      "url": "https://www.usenix.org/system/files/usenixsecurity24-qin.pdf",
+      "source": "usenix",
+      "title": "qin",
+      "license": "USENIX open-access proceedings; copyright retained by the authors (PDF not committed)",
+      "sha256": "9d9aba50c2d93cc36e50343dcc5ed9464beced999670d5e4c82f83e32fb6356e",
+      "bytes": 974145,
+      "pages": 19,
+      "tags": [
+        "code",
+        "conference",
+        "latex",
+        "security",
+        "two-column",
+        "usenix"
+      ],
+      "ci": false
+    },
+    {
+      "id": "usenix-sec24-soneji",
+      "url": "https://www.usenix.org/system/files/usenixsecurity24-soneji.pdf",
+      "source": "usenix",
+      "title": "soneji",
+      "license": "USENIX open-access proceedings; copyright retained by the authors (PDF not committed)",
+      "sha256": "736e86a77cda276bcd2b36b9132c76ee4a3bc204c676fd45d8c9da935771c361",
+      "bytes": 492779,
+      "pages": 19,
+      "tags": [
+        "code",
+        "conference",
+        "latex",
+        "security",
+        "two-column",
+        "usenix"
+      ],
+      "ci": false
+    },
+    {
+      "id": "usenix-sec24-tabassum",
+      "url": "https://www.usenix.org/system/files/usenixsecurity24-tabassum.pdf",
+      "source": "usenix",
+      "title": "tabassum",
+      "license": "USENIX open-access proceedings; copyright retained by the authors (PDF not committed)",
+      "sha256": "f82d03e15a5e6559f248ba813c24d97ae29a45953cd66b02809cddb69bcdc0fa",
+      "bytes": 424510,
+      "pages": 19,
+      "tags": [
+        "code",
+        "conference",
+        "latex",
+        "security",
+        "two-column",
+        "usenix"
+      ],
+      "ci": true
+    },
+    {
+      "id": "lang-blue-fairy-1889",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/b/bb/The_Blue_Fairy_Book_-_Lang_-_1889.pdf",
+      "source": "wikimedia",
+      "title": "The Blue Fairy Book (Andrew Lang, 1889 scan)",
+      "license": "Public domain (Andrew Lang 1889; Wikimedia Commons)",
+      "sha256": "cb4d6e4d8299f92c4ebf26997790fdc03593718a7f1f289c0f9cee6ad789445b",
+      "bytes": 39272649,
+      "pages": 438,
+      "tags": [
+        "book",
+        "historical",
+        "literature",
+        "public-domain",
+        "scanned"
+      ],
+      "ci": false
+    }
+  ]
+}

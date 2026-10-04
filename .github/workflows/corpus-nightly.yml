@@ -1,0 +1,28 @@
+name: Corpus fidelity
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  corpus:
+    name: full corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Poppler
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Download corpus
+        run: python3 corpus/fetch.py
+      - name: Fidelity report
+        run: cargo run -p rpt-qa --release -- --render-pages 2
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidelity-report
+          path: |
+            corpus/reports/summary.json
+            corpus/reports/summary.md
