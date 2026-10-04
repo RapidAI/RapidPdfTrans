@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Python headers
+        run: sudo apt-get update && sudo apt-get install -y python3-dev g++
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Release artifacts
+        run: cargo build -p rpt-ffi -p rpt-cli -p rpt-python --release
+      - name: C++ smoke
+        run: |
+          g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
+            target/release/librapidpdftrans.a -ldl -lm -lpthread -lgcc_s \
+            -o /tmp/rpt-cpp-smoke
+          /tmp/rpt-cpp-smoke testdata/hello.pdf
+      - name: Python smoke
+        run: |
+          cp target/release/librapidpdftrans.so /tmp/rapidpdftrans.so
+          PYTHONPATH=/tmp python3 bindings/python/smoke.py testdata/hello.pdf
+      - name: Go smoke
+        working-directory: bindings/go
+        run: go test -count=1 .
+      - name: CLI smoke
+        run: |
+          ./target/release/rpt extract testdata/hello.pdf --json > /tmp/hello.json
+          python3 -c 'import json; d=json.load(open("/tmp/hello.json")); assert d["plain_text"]=="Hello"'
