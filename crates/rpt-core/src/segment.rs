@@ -1617,9 +1617,13 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
             column_anchor(column, line.page).is_some_and(|anchor| {
                 let distance = (anchor - line.left).abs();
                 // A wrapped word can start a list-indented line and finish
-                // back on the column margin. The margin and the indent are
-                // still one column; the other column is much farther away.
-                distance <= 28.0 || (distance <= 64.0 && soft_hyphen_stem(&line.text).is_some())
+                // back on the column margin. That line sits to the right of
+                // the margin. A body line to the left of a centered title is
+                // a different column, even when a hyphen makes the gap look
+                // like an indent.
+                let indented = line.left + 1.0 >= anchor;
+                distance <= 28.0
+                    || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some())
             }) || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
         });
         if let Some(slot) = slot {
@@ -3449,6 +3453,75 @@ mod tests {
             .collect();
         assert!(
             texts.iter().any(|text| text.contains("Soundararajan")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_centered_title_does_not_steal_a_hyphenated_body_line() {
+        // Several centered lines keep that column's median well to the right
+        // of the body. A hyphen within 64pt of the title used to join it, and
+        // the next plain line then landed in the author column instead.
+        let mut title_a = block(0, 190.0, 700.0, 210.0, 14.0, "Sturmian beta-shifts");
+        title_a.font_name = "CMBX12".into();
+        let mut title_b = block(
+            1,
+            188.0,
+            682.0,
+            214.0,
+            14.0,
+            "and typical periodic optimization",
+        );
+        title_b.font_name = "CMBX12".into();
+        let mut title_c = block(2, 192.0, 664.0, 200.0, 14.0, "of continuous maps");
+        title_c.font_name = "CMBX12".into();
+        let mut author_a = block(3, 152.0, 630.0, 180.0, 10.0, "Ada Lovelace");
+        author_a.font_name = "CMR10".into();
+        let mut author_b = block(4, 155.0, 618.0, 170.0, 10.0, "Grace Hopper");
+        author_b.font_name = "CMR10".into();
+        let mut hyphen = block(
+            5,
+            128.0,
+            570.0,
+            230.0,
+            10.0,
+            "of Lipschitz maps and typical periodic or-",
+        );
+        hyphen.font_name = "CMR10".into();
+        let mut cont = block(
+            6,
+            128.0,
+            559.0,
+            230.0,
+            10.0,
+            "bit contains an example of the shift space.",
+        );
+        cont.font_name = "CMR10".into();
+        let mut plain = block(
+            7,
+            128.0,
+            548.0,
+            230.0,
+            10.0,
+            "beta-shifts whose expansion stays in one paragraph.",
+        );
+        plain.font_name = "CMR10".into();
+        let texts: Vec<_> = segment_glyphs(&[
+            title_a, title_b, title_c, author_a, author_b, hyphen, cont, plain,
+        ])
+        .iter()
+        .map(|seg| seg.text.clone())
+        .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("periodic orbit") && text.contains("beta-shifts whose")
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Sturmian") && !text.contains("orbit")),
             "{texts:?}"
         );
     }

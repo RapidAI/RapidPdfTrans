@@ -496,6 +496,7 @@ CI_IDS = {
     "arxiv-2610.01998",
     "arxiv-2610.02163",
     "arxiv-2610.02193",
+    "arxiv-2610.03665",
     "neurips-2017-attention",
     "neurips-2023-00296c0e",
     "pmlr-v202-abbas23a",

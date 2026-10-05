@@ -311,19 +311,27 @@ pub(crate) fn fit_cjk_block(
     metrics: CjkMeasure,
 ) -> Option<(Vec<String>, f32, f32, f32)> {
     let start = (source_size * scale).max(1.0);
-    // A one-line source has no second baseline to wrap onto. Shrink further
-    // so a slightly wider translation still paints, instead of leaving English.
-    let single_line = available <= 0.5;
-    let floor = if single_line {
-        (source_size * 0.62).min(start)
-    } else {
-        (start * 0.78).max(source_size * 0.62).min(start)
-    };
+    // A paragraph that already fits stays at `start`. A narrow column, or a
+    // one-line source, may shrink to 0.62 of the English size before the
+    // English is left in place.
+    let floor = (source_size * 0.62).min(start);
     let mut size = start;
     loop {
         let indent = size * indent_ems;
         let first_width = (width - indent).max(size * 0.5);
-        let lines = wrap_text(text, size, first_width, width, font)?;
+        // A narrow column can need more lines than `wrap_text` will count at
+        // the starting size. That is a reason to shrink, not to keep the English.
+        let Some(lines) = wrap_text(text, size, first_width, width, font) else {
+            if size <= floor + 0.01 {
+                return None;
+            }
+            let next = (size * 0.94).max(floor);
+            if (next - size).abs() < 0.01 {
+                return None;
+            }
+            size = next;
+            continue;
+        };
         let gaps = lines.len().saturating_sub(1);
         let within = lines.iter().enumerate().all(|(index, line)| {
             let limit = if index == 0 { first_width } else { width };
@@ -506,7 +514,9 @@ pub(crate) fn wrap_text(
         while start < chars.len() && chars[start].is_whitespace() {
             start += 1;
         }
-        if lines.len() > 48 {
+        // A full page is well under this. The cap only stops a degenerate
+        // string; the fit loop shrinks when a real paragraph still exceeds it.
+        if lines.len() > 96 {
             return None;
         }
     }
@@ -851,6 +861,40 @@ mod tests {
             body.size
         );
         assert_eq!(lifted.indent, 0.0);
+
+        let dense = "中文回归".repeat(185);
+        let narrow = fit_paragraph(
+            &dense,
+            10.91,
+            220.0,
+            189.7,
+            15,
+            false,
+            &uniform_font(&dense),
+            metrics,
+        )
+        .expect("a narrow column of paint-density Chinese still fits");
+        assert!(
+            narrow.size + 0.05 >= 10.91 * 0.62,
+            "shrunk below the floor: {}",
+            narrow.size
+        );
+        assert!(narrow.lines.len() > 15, "{:?}", narrow.lines.len());
+        let abstract_body = "中文回归".repeat(300);
+        let column = fit_paragraph(
+            &abstract_body,
+            9.96,
+            186.0,
+            310.8,
+            27,
+            false,
+            &uniform_font(&abstract_body),
+            metrics,
+        );
+        assert!(
+            column.is_some(),
+            "27-line narrow abstract should fit at the 0.62 floor"
+        );
 
         let affil = "1新加坡管理大学2南洋理工大学3哈佛大学";
         assert_eq!(

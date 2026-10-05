@@ -719,6 +719,22 @@
       "ci": false
     },
     {
+      "id": "arxiv-2610.03665",
+      "url": "https://arxiv.org/pdf/2610.03665",
+      "source": "arxiv",
+      "title": "Pivot-SD: Efficient Self-Distillation for Masked Diffusion Language Models",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "c2da3d9d59be97175539f9eb97356ae8341339d8956c964def0843ed2ca3f21b",
+      "bytes": 607541,
+      "pages": 16,
+      "tags": [
+        "arxiv",
+        "cs",
+        "latex"
+      ],
+      "ci": true
+    },
+    {
       "id": "ctex-manual",
       "url": "https://mirrors.mit.edu/CTAN/language/chinese/ctex/ctex.pdf",
       "source": "ctan",

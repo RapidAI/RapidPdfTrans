@@ -1,6 +1,6 @@
 # CI PDFs
 
-Nine real papers committed so GitHub Actions can run the fidelity harness without downloading the rest of the corpus. Every file is CC BY 4.0 (`https://creativecommons.org/licenses/by/4.0/`). Each is under 700 KB. The nine files together are about 4.1 MB.
+Ten real papers committed so GitHub Actions can run the fidelity harness without downloading the rest of the corpus. Every file is CC BY 4.0 (`https://creativecommons.org/licenses/by/4.0/`). Each is under 700 KB. The ten files together are about 4.9 MB.
 
 `manifest.json` records the direct download URL, source, license, sha256, size, page count, and feature tags. The PDFs sit next to that manifest (`{id}.pdf`). CI runs:
 
@@ -20,6 +20,7 @@ Everything else stays in `../manifest.json` and is fetched into the gitignored `
 | `neurips-2017-attention.pdf` | 569417 | NeurIPS 2017 “Attention Is All You Need” (CC BY). Formulas, tables, figures. Type 1 faces with no ToUnicode CMap (custom and builtin encodings). |
 | `2024-acl-long-7.pdf` | 614450 | ACL 2024 paper (CC BY). Two-column. Almost all text is inside Form XObjects. Type 3 DejaVu fonts, code, tables, figures, footnotes. |
 | `arxiv-2610.02193.pdf` | 617457 | CC BY arXiv paper. Type 3 fonts, Form XObject text, ActualText, Identity-H CID TrueType (Helvetica and Times). |
+| `arxiv-2610.03665.pdf` | 607541 | Two-column CC BY arXiv paper. Computer Modern math (CMMI, CMSY, CMEX, MSBM), Inconsolata code, Nimbus italic, Identity-H, unembedded Standard 14, a Type 3 face, affiliation superscripts. |
 | `arxiv-2609.36965.pdf` | 662639 | CC BY arXiv paper with Chinese text (ChillRoundF, Identity-H). Two-column, formulas, code, unembedded Standard 14 fonts, Form XObject text. |
 
 Link annotations are hyperlink dictionaries. Their appearances did not yield extra text glyphs on the pages the harness extracts. Type 3 coverage is the font and its char proc being present; many of those procs draw marks rather than nested text.

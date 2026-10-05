@@ -1496,6 +1496,42 @@ fn substitute_covered(text: &str, font: &SubsetFont) -> String {
     out
 }
 
+/// A centered title is only as wide as the English ink. Chinese can use the
+/// page measure on both sides. A column heading sits off the page center and
+/// keeps its own column.
+fn centered_heading_span(
+    level: HeadingLevel,
+    source_size: f32,
+    media: [f32; 4],
+    block_left: f32,
+    block_right: f32,
+) -> Option<(f32, f32)> {
+    if level != HeadingLevel::Title {
+        return None;
+    }
+    let page_left = media[0];
+    let page_right = media[2];
+    let page_width = page_right - page_left;
+    if page_width < 200.0 {
+        return None;
+    }
+    let mid = (block_left + block_right) * 0.5;
+    let page_mid = (page_left + page_right) * 0.5;
+    if (mid - page_mid).abs() > 28.0 {
+        return None;
+    }
+    if block_left - page_left < 36.0 || page_right - block_right < 36.0 {
+        return None;
+    }
+    let margin = (page_width * 0.11).clamp(54.0, 78.0);
+    let left = page_left + margin;
+    let right = page_right - margin;
+    if right - left < (block_right - block_left) + source_size * 4.0 {
+        return None;
+    }
+    Some((left, right))
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -1579,22 +1615,36 @@ fn layout_segment(
     }
     block_right = block_right.min(media[2] - 1.0);
     block_left = block_left.max(media[0]);
-    let width = (block_right - block_left).max(source_size);
     let available = (top_y - bottom_y).max(0.0);
     let bold = paragraph_is_bold(&ink);
     let level = heading_level(ink.len(), source_size, bold, text);
     let indent_ems = cjk_indent_ems(ink.len(), source_size, bold, text);
     let scale = scale_for_heading(level, source_size, metrics);
-    let (lines, size, leading, indent) = fit_cjk_block(
-        text,
-        source_size,
-        scale,
-        width,
-        indent_ems,
-        available,
-        font,
-        metrics,
-    )?;
+    let fit_box = |left: f32, right: f32| {
+        let width = (right - left).max(source_size);
+        fit_cjk_block(
+            text,
+            source_size,
+            scale,
+            width,
+            indent_ems,
+            available,
+            font,
+            metrics,
+        )
+    };
+    let (block_left, block_right, lines, size, leading, indent) =
+        if let Some((lines, size, leading, indent)) = fit_box(block_left, block_right) {
+            (block_left, block_right, lines, size, leading, indent)
+        } else if let Some((left, right)) =
+            centered_heading_span(level, source_size, media, block_left, block_right)
+        {
+            let (lines, size, leading, indent) = fit_box(left, right)?;
+            (left, right, lines, size, leading, indent)
+        } else {
+            return None;
+        };
+    let width = (block_right - block_left).max(source_size);
     let first_width = (width - indent).max(size * 0.5);
     let sup = superscript_metrics(glyphs);
     let mask = if sup.is_some() {
@@ -3998,6 +4048,22 @@ mod tests {
             units_per_em: 1000,
             glyphs,
         }
+    }
+
+    #[test]
+    fn a_centered_title_may_use_the_page_measure() {
+        let media = [0.0, 0.0, 595.0, 842.0];
+        let (left, right) = centered_heading_span(HeadingLevel::Title, 14.35, media, 180.0, 416.0)
+            .expect("centered title");
+        assert!(right - left > 400.0, "{left}..{right}");
+        assert!(
+            centered_heading_span(HeadingLevel::Title, 14.35, media, 88.0, 274.0).is_none(),
+            "a left column is not a page-centered title"
+        );
+        assert!(
+            centered_heading_span(HeadingLevel::Body, 14.35, media, 180.0, 416.0).is_none(),
+            "body text keeps the ink box"
+        );
     }
 
     #[test]

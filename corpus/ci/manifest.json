@@ -178,6 +178,29 @@
       "ci": true
     },
     {
+      "id": "arxiv-2610.03665",
+      "url": "https://arxiv.org/pdf/2610.03665",
+      "source": "arxiv",
+      "title": "Pivot-SD: Efficient Self-Distillation for Masked Diffusion Language Models",
+      "license": "CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+      "sha256": "c2da3d9d59be97175539f9eb97356ae8341339d8956c964def0843ed2ca3f21b",
+      "bytes": 607541,
+      "pages": 16,
+      "tags": [
+        "arxiv",
+        "two-column",
+        "formulas",
+        "code",
+        "bold",
+        "italic",
+        "identity-h",
+        "standard-14",
+        "type3",
+        "superscripts"
+      ],
+      "ci": true
+    },
+    {
       "id": "arxiv-2609.36965",
       "url": "https://arxiv.org/pdf/2609.36965",
       "source": "arxiv",
