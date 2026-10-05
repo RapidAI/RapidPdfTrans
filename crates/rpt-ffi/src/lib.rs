@@ -238,7 +238,15 @@ pub unsafe extern "C" fn rpt_save(
                 &report,
                 &RewriteOptions {
                     mode: translate_opts.output_mode,
-                    font_bytes: None,
+                    cjk_serif: translate_opts
+                        .cjk_font
+                        .as_ref()
+                        .map(std::path::PathBuf::from),
+                    cjk_sans: translate_opts
+                        .cjk_sans
+                        .as_ref()
+                        .map(std::path::PathBuf::from),
+                    ..RewriteOptions::default()
                 },
             )
             .map_err(|e| e.to_string())?;

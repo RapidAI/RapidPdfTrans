@@ -18,7 +18,7 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use crate::color::Color;
 use crate::error::{Error, Result};
 use crate::extract::Extraction;
-use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, SubsetFont};
+use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSources, SubsetFont};
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
@@ -29,6 +29,10 @@ pub struct RewriteOptions {
     pub mode: OutputMode,
     /// Font bytes to subset. `None` searches `RPT_CJK_FONT` and common CJK fonts.
     pub font_bytes: Option<Vec<u8>>,
+    /// Song/serif CJK file used for regular body text.
+    pub cjk_serif: Option<std::path::PathBuf>,
+    /// Sans CJK file used for regular sans text. Bold text stays Noto Sans CJK.
+    pub cjk_sans: Option<std::path::PathBuf>,
 }
 
 struct Span {
@@ -46,6 +50,8 @@ struct Drawn {
     cids: Vec<u16>,
     resource: String,
     skew: f32,
+    /// Extra advance after each glyph, in unscaled text space (`Tc`).
+    tracking: f32,
 }
 
 /// Rewrite `extraction` using `report` and remember the dispositions on the glyphs.
@@ -178,7 +184,14 @@ pub fn rewrite_translation(
                 .iter()
                 .flat_map(|(_, text)| text.chars().map(|ch| ch as u32))
                 .collect::<Vec<_>>();
-            let Some(font) = subset_for_style(style, &chars) else {
+            let Some(font) = subset_for_style(
+                style,
+                &chars,
+                &FontSources {
+                    serif: opts.cjk_serif.clone(),
+                    sans: opts.cjk_sans.clone(),
+                },
+            ) else {
                 for (index, _) in &group {
                     for id in &report.segments[*index].glyph_ids {
                         keep.insert(*id, "no-font".into());
@@ -598,7 +611,7 @@ fn inherent_keep(glyph: &Glyph) -> Option<&'static str> {
     if glyph.unmapped || glyph.unicode.is_empty() {
         return Some("unmapped");
     }
-    if is_math_font(&glyph.font_name) {
+    if is_math_font(&glyph.font_name) && !is_footnote_symbol(&glyph.unicode) {
         return Some("formula");
     }
     if glyph.vertical {
@@ -612,6 +625,10 @@ fn inherent_keep(glyph: &Glyph) -> Option<&'static str> {
         SourceKind::AnnotationAppearance => Some("annotation"),
         SourceKind::PageContent | SourceKind::FormXObject => None,
     }
+}
+
+fn is_footnote_symbol(text: &str) -> bool {
+    matches!(text.trim(), "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#")
 }
 
 fn is_math_font(name: &str) -> bool {
@@ -770,6 +787,13 @@ fn segment_crosses_column(glyphs: &[&Glyph], size: f32) -> bool {
     gaps.iter().any(|gap| *gap > trigger)
 }
 
+struct InkLine<'a> {
+    glyphs: Vec<&'a Glyph>,
+    y: f32,
+    left: f32,
+    right: f32,
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -795,86 +819,215 @@ fn layout_segment(
         .find(|info| info.index == page)
         .map(|info| info.media_box)
         .unwrap_or([0.0, 0.0, 612.0, 792.0]);
-    let x = glyphs
-        .iter()
-        .map(|glyph| glyph.matrix[4])
-        .fold(f32::MAX, f32::min);
-    let y = glyphs[0].matrix[5];
-    let right = glyphs
-        .iter()
-        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
-        .fold(x, f32::max);
-    let from_advance: f32 = glyphs.iter().map(|glyph| glyph.advance[0].abs()).sum();
-    // The line box is the visual span of the source glyphs. Summing advances
-    // is wrong once a segment holds more than one source line (a joined
-    // hyphen): that sum is two columns wide, so the translation is drawn as
-    // one line that runs through the margin. Advances are only a fallback for
-    // fonts that omit /Widths and therefore have an empty bbox.
-    let size0 = glyphs[0].font_size.max(1.0);
-    let visual = (right - x).max(0.0);
-    if segment_crosses_column(glyphs, size0) {
+    let ink = ink_lines(glyphs);
+    if ink.is_empty() {
         return None;
     }
-    let line_width = if visual >= size0 * 0.25 {
-        visual
-    } else if from_advance >= size0 * 0.25 {
-        from_advance
-    } else {
-        (glyphs.len() as f32 * size0 * 0.5).max(size0)
-    };
-    let line_width = line_width.min((media[2] - x - 1.0).max(size0));
-    let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
-    sizes.sort_by(|a, b| a.total_cmp(b));
-    let mut size = sizes[sizes.len() / 2].max(1.0);
-    let floor = size * 0.55;
-    while measure(text, size, font) > line_width && size > floor {
-        size *= 0.92;
-    }
-    let lines = if measure(text, size, font) <= line_width {
-        vec![text.to_string()]
-    } else {
-        wrap_text(text, size, line_width, font)?
-    };
-    if lines.len() > 6 {
-        return None;
-    }
-    if lines
+    let size0 = ink
         .iter()
-        .any(|line| measure(line, size, font) > line_width + 1.0)
+        .map(|line| {
+            line.glyphs
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max)
+        })
+        .fold(1.0f32, f32::max);
+    if ink
+        .iter()
+        .any(|line| segment_crosses_column(&line.glyphs, size0))
     {
         return None;
     }
-    let leading = size * 1.15;
-    let mut origin_y = y;
+    let mut sizes: Vec<f32> = ink
+        .iter()
+        .flat_map(|line| line.glyphs.iter().map(|glyph| glyph.font_size))
+        .collect();
+    sizes.sort_by(|a, b| a.total_cmp(b));
+    let source_size = sizes[sizes.len() / 2].max(1.0);
+    let top_y = ink[0].y;
+    let bottom_y = ink[ink.len() - 1].y;
+    let spans: Vec<(f32, f32)> = ink
+        .iter()
+        .map(|line| line_span(line, source_size))
+        .collect();
+    let mut block_left = spans.iter().map(|(left, _)| *left).fold(f32::MAX, f32::min);
+    let mut block_right = spans
+        .iter()
+        .map(|(_, right)| *right)
+        .fold(block_left, f32::max);
+    let mut indent = 0.0f32;
+    if spans.len() >= 2 {
+        let body_left = spans[1..]
+            .iter()
+            .map(|(left, _)| *left)
+            .fold(f32::MAX, f32::min);
+        if spans[0].0 > body_left + source_size * 0.6 {
+            indent = spans[0].0 - body_left;
+            block_left = body_left;
+        }
+    }
+    block_right = block_right.min(media[2] - 1.0);
+    block_left = block_left.max(media[0]);
+    let width = (block_right - block_left).max(source_size);
+    let first_width = (width - indent).max(source_size * 0.5);
+    let deltas: Vec<f32> = ink
+        .windows(2)
+        .map(|pair| pair[0].y - pair[1].y)
+        .filter(|dy| *dy > 0.0)
+        .collect();
+    let source_leading = if deltas.is_empty() {
+        source_size * 1.15
+    } else {
+        let mut ordered = deltas;
+        ordered.sort_by(|a, b| a.total_cmp(b));
+        ordered[ordered.len() / 2]
+    };
+    let floor = source_size * 0.55;
+    let mut size = source_size;
+    let fitted = loop {
+        let leading = (source_leading * size / source_size).clamp(size * 1.0, size * 1.35);
+        let lines = wrap_text(text, size, first_width, width, font)?;
+        let available = (top_y - bottom_y).max(0.0);
+        let need = (lines.len().saturating_sub(1) as f32) * leading;
+        let within = lines.iter().enumerate().all(|(index, line)| {
+            let limit = if index == 0 { first_width } else { width };
+            measure(line, size, font) <= limit + 1.0
+        });
+        if within && need <= available + 0.8 {
+            break Some((lines, leading));
+        }
+        if size <= floor + 0.01 {
+            break None;
+        }
+        size = (size * 0.92).max(floor);
+    };
+    let (lines, leading) = fitted?;
+    let mut origin_y = top_y;
     if bilingual {
-        let above = y + size * 1.2;
+        let above = top_y + size * 1.2;
         if above + size <= media[3] {
             origin_y = above;
         } else {
-            origin_y = y - size * 1.2;
+            origin_y = top_y - size * 1.2;
         }
     }
     let last_y = origin_y - (lines.len().saturating_sub(1) as f32) * leading;
-    if last_y < media[1] || origin_y > media[3] {
+    if last_y < media[1] - 0.5 || origin_y > media[3] {
         return None;
     }
-    let color = glyphs[0].fill_color.clone();
+    let color = ink[0].glyphs[0].fill_color.clone();
+    let count = lines.len();
     Some(
         lines
             .into_iter()
             .enumerate()
-            .map(|(index, line)| Drawn {
-                page,
-                x,
-                y: origin_y - index as f32 * leading,
-                size,
-                color: color.clone(),
-                cids: cids_of(&line, font),
-                resource: resource.to_string(),
-                skew,
+            .map(|(index, line)| {
+                let limit = if index == 0 { first_width } else { width };
+                Drawn {
+                    page,
+                    x: block_left + if index == 0 { indent } else { 0.0 },
+                    y: origin_y - index as f32 * leading,
+                    size,
+                    color: color.clone(),
+                    cids: cids_of(&line, font),
+                    resource: resource.to_string(),
+                    skew,
+                    tracking: line_tracking(&line, size, limit, font, index + 1 != count),
+                }
             })
             .collect(),
     )
+}
+
+fn ink_lines<'a>(glyphs: &[&'a Glyph]) -> Vec<InkLine<'a>> {
+    let mut ordered: Vec<&Glyph> = glyphs.to_vec();
+    ordered.sort_by(|a, b| {
+        b.matrix[5]
+            .total_cmp(&a.matrix[5])
+            .then(a.matrix[4].total_cmp(&b.matrix[4]))
+    });
+    let mut groups: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in ordered {
+        let size = glyph.font_size.max(1.0);
+        let same = groups.last().is_some_and(|group| {
+            let anchor = group[0];
+            (anchor.matrix[5] - glyph.matrix[5]).abs() <= anchor.font_size.max(size) * 0.35
+        });
+        if same {
+            groups.last_mut().unwrap().push(glyph);
+        } else {
+            groups.push(vec![glyph]);
+        }
+    }
+    groups.retain(|group| {
+        !group
+            .iter()
+            .all(|glyph| is_attached_mark(&glyph.unicode, glyph.font_size))
+    });
+    groups
+        .into_iter()
+        .map(|group| {
+            let left = group
+                .iter()
+                .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
+                .fold(f32::MAX, f32::min);
+            let right = group
+                .iter()
+                .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]))
+                .fold(left, f32::max);
+            let mut ys: Vec<f32> = group.iter().map(|glyph| glyph.matrix[5]).collect();
+            ys.sort_by(|a, b| a.total_cmp(b));
+            let y = ys[ys.len() / 2];
+            InkLine {
+                glyphs: group,
+                y,
+                left,
+                right,
+            }
+        })
+        .collect()
+}
+
+fn line_span(line: &InkLine<'_>, size: f32) -> (f32, f32) {
+    let visual = line.right - line.left;
+    if visual >= size * 0.25 {
+        return (line.left, line.right);
+    }
+    // Some Type 1 fonts omit widths, so every glyph sits on the same point.
+    // Estimate from advances, then from a half-em per glyph, for this line only.
+    let advance: f32 = line.glyphs.iter().map(|glyph| glyph.advance[0].abs()).sum();
+    let width = if advance >= size * 0.25 {
+        advance
+    } else {
+        (line.glyphs.len() as f32 * size * 0.5).max(size)
+    };
+    (line.left, line.left + width)
+}
+
+fn is_attached_mark(text: &str, size: f32) -> bool {
+    if is_footnote_symbol(text) {
+        return true;
+    }
+    let text = text.trim();
+    size <= 8.0
+        && !text.is_empty()
+        && text.chars().count() <= 2
+        && text.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn line_tracking(text: &str, size: f32, width: f32, font: &SubsetFont, justify: bool) -> f32 {
+    if !justify {
+        return 0.0;
+    }
+    let count = text.chars().count();
+    if count < 2 || size <= 0.0 {
+        return 0.0;
+    }
+    let slack = width - measure(text, size, font);
+    if !(0.4..width * 0.22).contains(&slack) {
+        return 0.0;
+    }
+    slack / ((count - 1) as f32 * size)
 }
 
 fn measure(text: &str, size: f32, font: &SubsetFont) -> f32 {
@@ -894,17 +1047,28 @@ fn cids_of(text: &str, font: &SubsetFont) -> Vec<u16> {
         .collect()
 }
 
-fn wrap_text(text: &str, size: f32, max_width: f32, font: &SubsetFont) -> Option<Vec<String>> {
+fn wrap_text(
+    text: &str,
+    size: f32,
+    first_width: f32,
+    max_width: f32,
+    font: &SubsetFont,
+) -> Option<Vec<String>> {
     let chars: Vec<char> = text.chars().collect();
     let mut lines = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
+        let limit = if lines.is_empty() {
+            first_width
+        } else {
+            max_width
+        };
         let mut end = start;
         let mut width = 0.0f32;
         let mut last_space = None;
         while end < chars.len() {
             let advance = measure(&chars[end].to_string(), size, font);
-            if end > start && width + advance > max_width {
+            if end > start && width + advance > limit {
                 break;
             }
             width += advance;
@@ -934,7 +1098,7 @@ fn wrap_text(text: &str, size: f32, max_width: f32, font: &SubsetFont) -> Option
         if chars.get(start) == Some(&' ') {
             start += 1;
         }
-        if lines.len() > 6 {
+        if lines.len() > 48 {
             return None;
         }
     }
@@ -1004,7 +1168,8 @@ fn embed_and_draw(
         let mut stream = String::from("BT\n0 Tc 0 Tw 100 Tz 0 TL 0 Ts\n");
         for line in lines {
             stream.push_str(&format!(
-                "/{} {} Tf {} 1 0 {} 1 {} {} Tm <{}> Tj\n",
+                "{} Tc /{} {} Tf {} 1 0 {} 1 {} {} Tm <{}> Tj\n",
+                pdf_num(line.tracking),
                 line.resource,
                 pdf_num(line.size),
                 color_ops(&line.color),
@@ -1633,6 +1798,7 @@ mod tests {
             &RewriteOptions {
                 mode,
                 font_bytes: Some(font.to_vec()),
+                ..RewriteOptions::default()
             },
         )
         .unwrap();

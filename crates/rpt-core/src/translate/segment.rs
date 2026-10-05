@@ -1,13 +1,14 @@
 //! Group extracted glyphs into translation segments.
 //!
-//! A segment is one visual line (same page, similar baseline), split further
-//! only when the line is long. Unmapped glyphs are not folded into a segment:
-//! they stay pending so a failed Unicode mapping cannot vanish inside a
-//! translation.
+//! A segment is one paragraph: visual lines in the same column, joined so the
+//! translator sees the whole block and the rewrite can reflow it inside that
+//! block. Superscripts and footnote marks are attached to the line they sit
+//! on. Figure interiors and table cells are not segments; only their captions
+//! are. Unmapped glyphs stay out of every segment.
 
 use crate::glyph::Glyph;
 
-const LONG_LINE: usize = 400;
+const LONG_LINE: usize = 1600;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Segment {
@@ -17,7 +18,39 @@ pub struct Segment {
     pub text: String,
 }
 
+/// Figure interiors and table cells stay original unless the caller opts in.
+#[derive(Clone, Debug)]
+pub struct SegmentFlags {
+    pub skip_figures: bool,
+    pub skip_tables: bool,
+}
+
+impl Default for SegmentFlags {
+    fn default() -> Self {
+        Self {
+            skip_figures: true,
+            skip_tables: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Segmentation {
+    pub segments: Vec<Segment>,
+    /// Glyphs that belong to a figure interior or a table body, with a reason.
+    pub kept: Vec<(u32, String)>,
+}
+
 pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
+    segment_with(glyphs, &SegmentFlags::default()).segments
+}
+
+pub fn segment_with(glyphs: &[Glyph], flags: &SegmentFlags) -> Segmentation {
+    let lines = raw_lines(glyphs);
+    assemble(lines, flags)
+}
+
+fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
     let mut ordered: Vec<&Glyph> = glyphs.iter().collect();
     ordered.sort_by(|a, b| {
         a.page_index
@@ -76,42 +109,7 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
     if !current.is_empty() {
         lines.extend(split_columns(current));
     }
-
-    let mut segments = Vec::new();
-    for line in lines {
-        let page = line[0].page_index;
-        let mut buf_ids: Vec<u32> = Vec::new();
-        let mut buf = String::new();
-        let mut previous: Option<&Glyph> = None;
-        let flush = |segments: &mut Vec<Segment>, buf_ids: &mut Vec<u32>, buf: &mut String| {
-            if buf_ids.is_empty() {
-                return;
-            }
-            segments.push(Segment {
-                id: segments.len() as u32,
-                page_index: page,
-                glyph_ids: std::mem::take(buf_ids),
-                text: std::mem::take(buf),
-            });
-        };
-        for glyph in line {
-            if let Some(prev) = previous {
-                if word_space(prev, glyph) {
-                    buf.push(' ');
-                }
-            }
-            previous = Some(glyph);
-            let next_len = buf.len() + glyph.unicode.len();
-            let boundary = next_len > LONG_LINE && sentence_end(&buf);
-            if boundary {
-                flush(&mut segments, &mut buf_ids, &mut buf);
-            }
-            buf.push_str(&glyph.unicode);
-            buf_ids.push(glyph.id);
-        }
-        flush(&mut segments, &mut buf_ids, &mut buf);
-    }
-    join_line_break_hyphens(glyphs, segments)
+    lines
 }
 
 /// Split one baseline where a gap is a column gutter rather than a word space.
@@ -155,42 +153,579 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
     parts
 }
 
-/// LaTeX line-break hyphens (`tra-` / `jectories`) are separate lines. Join them
-/// so the translator sees the whole word. A following capital, or a line in the
-/// other column, stays separate.
-fn join_line_break_hyphens(glyphs: &[Glyph], segments: Vec<Segment>) -> Vec<Segment> {
-    if segments.len() < 2 {
-        return segments;
-    }
-    let by_id: std::collections::HashMap<u32, &Glyph> =
-        glyphs.iter().map(|glyph| (glyph.id, glyph)).collect();
-    let mut consumed = vec![false; segments.len()];
-    let mut out = Vec::new();
-    for i in 0..segments.len() {
-        if consumed[i] {
-            continue;
-        }
-        consumed[i] = true;
-        let mut seg = segments[i].clone();
-        while let Some(next_index) = hyphen_continuation(&seg, &segments, &consumed, &by_id) {
-            let next = &segments[next_index];
-            let rest = next.text.trim_start();
-            let Some(stem) = soft_hyphen_stem(&seg.text) else {
-                break;
-            };
-            if !rest.starts_with(|ch: char| ch.is_ascii_lowercase()) {
-                break;
+struct VisualLine<'a> {
+    glyphs: Vec<&'a Glyph>,
+    text: String,
+    page: u32,
+    y: f32,
+    left: f32,
+    right: f32,
+    size: f32,
+    font: String,
+}
+
+fn assemble(raw: Vec<Vec<&Glyph>>, flags: &SegmentFlags) -> Segmentation {
+    let mut lines: Vec<VisualLine> = raw.into_iter().map(visual_line).collect();
+    attach_markers(&mut lines);
+    let kept = interior_glyphs(&lines, flags);
+    let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    if !kept_ids.is_empty() {
+        lines.retain(|line| {
+            line.glyphs
+                .iter()
+                .any(|glyph| !kept_ids.contains(&glyph.id))
+        });
+        for line in &mut lines {
+            line.glyphs.retain(|glyph| !kept_ids.contains(&glyph.id));
+            line.text = line_text(&line.glyphs);
+            if let Some(bounds) = line_bounds(&line.glyphs) {
+                line.left = bounds.0;
+                line.right = bounds.1;
+                line.y = bounds.2;
+                line.size = bounds.3;
             }
-            consumed[next_index] = true;
-            seg.text = format!("{stem}{rest}");
-            seg.glyph_ids.extend(next.glyph_ids.iter().copied());
         }
-        out.push(seg);
+        lines.retain(|line| !line.glyphs.is_empty());
     }
-    for (id, seg) in out.iter_mut().enumerate() {
+    let paragraphs = join_paragraphs(lines);
+    let mut segments = Vec::new();
+    for para in paragraphs {
+        let page = para[0].page;
+        let mut buf_ids: Vec<u32> = Vec::new();
+        let mut buf = String::new();
+        let flush = |segments: &mut Vec<Segment>, buf_ids: &mut Vec<u32>, buf: &mut String| {
+            if buf_ids.is_empty() || buf.trim().is_empty() {
+                buf_ids.clear();
+                buf.clear();
+                return;
+            }
+            segments.push(Segment {
+                id: segments.len() as u32,
+                page_index: page,
+                glyph_ids: std::mem::take(buf_ids),
+                text: std::mem::take(buf),
+            });
+        };
+        for (index, line) in para.iter().enumerate() {
+            let piece = if index == 0 {
+                line.text.clone()
+            } else if let Some(stem) = soft_hyphen_stem(&buf) {
+                let rest = line.text.trim_start();
+                if rest.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+                    format!("{stem}{rest}")
+                } else {
+                    format!("{} {}", buf.trim_end(), line.text.trim_start())
+                }
+            } else {
+                format!("{} {}", buf.trim_end(), line.text.trim_start())
+            };
+            if index > 0 && piece.chars().count() > LONG_LINE && sentence_end(&buf) {
+                flush(&mut segments, &mut buf_ids, &mut buf);
+                buf = line.text.clone();
+            } else {
+                buf = piece;
+            }
+            buf_ids.extend(line.glyphs.iter().map(|glyph| glyph.id));
+        }
+        flush(&mut segments, &mut buf_ids, &mut buf);
+    }
+    for (id, seg) in segments.iter_mut().enumerate() {
         seg.id = id as u32;
     }
-    out
+    Segmentation { segments, kept }
+}
+
+fn visual_line(glyphs: Vec<&Glyph>) -> VisualLine<'_> {
+    let (left, right, y, size) = line_bounds(&glyphs).unwrap_or((0.0, 0.0, 0.0, 12.0));
+    let font = font_key(&glyphs[0].font_name);
+    VisualLine {
+        text: line_text(&glyphs),
+        page: glyphs[0].page_index,
+        y,
+        left,
+        right,
+        size,
+        font,
+        glyphs,
+    }
+}
+
+fn line_bounds(glyphs: &[&Glyph]) -> Option<(f32, f32, f32, f32)> {
+    let first = *glyphs.first()?;
+    let left = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min);
+    let right = glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]))
+        .fold(left, f32::max);
+    let mut ys: Vec<f32> = glyphs.iter().map(|glyph| glyph.matrix[5]).collect();
+    ys.sort_by(|a, b| a.total_cmp(b));
+    let y = ys[ys.len() / 2];
+    let size = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(first.font_size, f32::max)
+        .max(1.0);
+    Some((left, right, y, size))
+}
+
+fn line_text(glyphs: &[&Glyph]) -> String {
+    let mut buf = String::new();
+    let mut previous: Option<&Glyph> = None;
+    for glyph in glyphs {
+        if let Some(prev) = previous {
+            if word_space(prev, glyph) && !is_marker_text(&glyph.unicode) {
+                buf.push(' ');
+            }
+        }
+        buf.push_str(&glyph.unicode);
+        previous = Some(glyph);
+    }
+    buf
+}
+
+fn font_key(name: &str) -> String {
+    name.rsplit('+').next().unwrap_or(name).to_string()
+}
+
+fn attach_markers(lines: &mut Vec<VisualLine<'_>>) {
+    let mut drop = vec![false; lines.len()];
+    let hosts: Vec<Option<usize>> = (0..lines.len())
+        .map(|index| marker_host(index, lines))
+        .collect();
+    for (index, host) in hosts.into_iter().enumerate() {
+        let Some(host) = host else {
+            continue;
+        };
+        let markers = std::mem::take(&mut lines[index].glyphs);
+        lines[host].glyphs.extend(markers);
+        lines[host]
+            .glyphs
+            .sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+        lines[host].text = line_text(&lines[host].glyphs);
+        if let Some((left, right, y, size)) = line_bounds(&lines[host].glyphs) {
+            lines[host].left = left;
+            lines[host].right = right;
+            lines[host].y = y;
+            lines[host].size = size;
+        }
+        drop[index] = true;
+    }
+    let mut index = 0;
+    lines.retain(|_| {
+        let keep = !drop[index];
+        index += 1;
+        keep
+    });
+}
+
+fn marker_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
+    let line = &lines[index];
+    if !is_marker_line(line) {
+        return None;
+    }
+    let mut best: Option<(usize, f32)> = None;
+    for (other_index, other) in lines.iter().enumerate() {
+        if other_index == index || other.page != line.page || is_marker_line(other) {
+            continue;
+        }
+        let dy = line.y - other.y;
+        let size = other.size.max(1.0);
+        if dy < size * 0.12 || dy > size * 0.9 {
+            continue;
+        }
+        if line.size > size * 0.85 {
+            continue;
+        }
+        let span = other.right - other.left;
+        if line.left < other.left - size || line.right > other.right + size {
+            continue;
+        }
+        if span < size {
+            continue;
+        }
+        let near = line.glyphs.iter().all(|mark| {
+            other.glyphs.iter().any(|glyph| {
+                (mark.matrix[4] - glyph.bbox[0].max(glyph.bbox[2])).abs() <= size * 1.6
+                    || (mark.matrix[4] >= glyph.matrix[4] - size
+                        && mark.matrix[4] <= glyph.bbox[0].max(glyph.bbox[2]) + size)
+            })
+        });
+        if !near {
+            continue;
+        }
+        if best.is_none_or(|(_, best_dy)| dy < best_dy) {
+            best = Some((other_index, dy));
+        }
+    }
+    best.map(|(host, _)| host)
+}
+
+fn is_marker_line(line: &VisualLine<'_>) -> bool {
+    !line.glyphs.is_empty()
+        && line.glyphs.len() <= 16
+        && line
+            .glyphs
+            .iter()
+            .all(|glyph| is_marker_text(&glyph.unicode))
+}
+
+fn is_marker_text(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().count() <= 2
+        && text.chars().all(|ch| {
+            ch.is_ascii_digit() || matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆' | '#')
+        })
+}
+
+/// Glyphs drawn inside a figure or a table, excluding the caption paragraph.
+fn interior_glyphs(lines: &[VisualLine<'_>], flags: &SegmentFlags) -> Vec<(u32, String)> {
+    if !flags.skip_figures && !flags.skip_tables {
+        return Vec::new();
+    }
+    let order = reading_order(lines);
+    let mut body_fonts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut caption_line = vec![false; lines.len()];
+    let mut kept = Vec::new();
+    let mut claimed = vec![false; lines.len()];
+    let mut seen = vec![false; lines.len()];
+    for &start in &order {
+        if seen[start] {
+            continue;
+        }
+        let Some(kind) = caption_kind(&lines[start].text) else {
+            continue;
+        };
+        if (kind == "figure" && !flags.skip_figures) || (kind == "table" && !flags.skip_tables) {
+            continue;
+        }
+        let block = caption_block(start, lines, &order);
+        for index in &block {
+            seen[*index] = true;
+            caption_line[*index] = true;
+        }
+        let page = lines[start].page;
+        let body_font = body_fonts
+            .entry(page)
+            .or_insert_with(|| dominant_body_font(lines, page));
+        for index in figure_side(&block, lines, body_font, &caption_line) {
+            if claimed[index] || caption_line[index] {
+                continue;
+            }
+            claimed[index] = true;
+            for glyph in &lines[index].glyphs {
+                kept.push((glyph.id, kind.to_string()));
+            }
+        }
+    }
+    kept
+}
+
+fn caption_kind(text: &str) -> Option<&'static str> {
+    let lower = text.trim().to_ascii_lowercase();
+    if caption_prefix(&lower, &["figure", "fig.", "fig"]) {
+        Some("figure")
+    } else if caption_prefix(&lower, &["table", "tab.", "tab"]) {
+        Some("table")
+    } else {
+        None
+    }
+}
+
+fn caption_prefix(lower: &str, prefixes: &[&str]) -> bool {
+    for prefix in prefixes {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        if (*prefix == "fig" || *prefix == "tab")
+            && rest.starts_with(|ch: char| ch.is_ascii_alphabetic())
+        {
+            continue;
+        }
+        let rest = rest.trim_start().trim_start_matches('.');
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix(|ch: char| ch.is_ascii_digit()) else {
+            continue;
+        };
+        let rest = rest.trim_start_matches(|ch: char| ch.is_ascii_digit());
+        let rest = rest.trim_start();
+        // "Figure 1:" and "Table 2." are captions. A long "Figure 1 Overview of …"
+        // is too. "Fig 1" and "Table 1 shows" are ordinary sentences.
+        if rest.starts_with([':', '.']) {
+            return true;
+        }
+        if rest.starts_with(|ch: char| ch.is_ascii_uppercase()) && lower.chars().count() >= 24 {
+            return true;
+        }
+    }
+    false
+}
+
+fn caption_block(start: usize, lines: &[VisualLine<'_>], order: &[usize]) -> Vec<usize> {
+    let Some(pos) = order.iter().position(|index| *index == start) else {
+        return vec![start];
+    };
+    let mut block = vec![start];
+    let cap_w = (lines[start].right - lines[start].left).max(1.0);
+    for &index in &order[pos + 1..] {
+        if lines[index].page != lines[start].page || caption_kind(&lines[index].text).is_some() {
+            break;
+        }
+        let prev = *block.last().unwrap_or(&start);
+        if !continues_paragraph(&lines[prev], &lines[index]) {
+            break;
+        }
+        let width = lines[index].right - lines[index].left;
+        if width < cap_w * 0.35 && lines[index].text.chars().count() < 24 {
+            break;
+        }
+        block.push(index);
+        if width + lines[index].size * 2.0 < cap_w {
+            break;
+        }
+    }
+    block
+}
+
+fn figure_side(
+    block: &[usize],
+    lines: &[VisualLine<'_>],
+    body_font: &str,
+    caption_line: &[bool],
+) -> Vec<usize> {
+    let page = lines[block[0]].page;
+    let top = block
+        .iter()
+        .map(|index| lines[*index].y)
+        .fold(f32::MIN, f32::max);
+    let bottom = block
+        .iter()
+        .map(|index| lines[*index].y)
+        .fold(f32::MAX, f32::min);
+    let above = walk_interior(top, 1.0, page, block, lines, body_font, caption_line);
+    let below = walk_interior(bottom, -1.0, page, block, lines, body_font, caption_line);
+    // A figure caption sits under the drawing; a table caption sits above the cells.
+    if above.len() >= below.len() && !above.is_empty() {
+        above
+    } else {
+        below
+    }
+}
+
+fn walk_interior(
+    origin_y: f32,
+    direction: f32,
+    page: u32,
+    block: &[usize],
+    lines: &[VisualLine<'_>],
+    body_font: &str,
+    caption_line: &[bool],
+) -> Vec<usize> {
+    let anchor = &lines[block[0]];
+    let mut cursor = origin_y;
+    let mut picked = Vec::new();
+    loop {
+        let mut band: Vec<(usize, f32)> = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            if line.page != page || block.contains(&index) || picked.contains(&index) {
+                continue;
+            }
+            let dy = (line.y - cursor) * direction;
+            if dy <= 0.4 || !x_overlaps(anchor, line) {
+                continue;
+            }
+            band.push((index, dy));
+        }
+        if band.is_empty() {
+            break;
+        }
+        band.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let nearest = band[0].1;
+        // A blank band this wide is the next region, not more of the drawing.
+        if nearest > 140.0 || (cursor - origin_y).abs() > 420.0 {
+            break;
+        }
+        let size = lines[band[0].0].size.max(1.0);
+        let group: Vec<usize> = band
+            .into_iter()
+            .filter(|(_, dy)| *dy <= nearest + size * 0.5)
+            .map(|(index, _)| index)
+            .collect();
+        if group.iter().any(|&index| {
+            caption_line.get(index).copied().unwrap_or(false)
+                || stops_interior(&lines[index], body_font)
+        }) {
+            break;
+        }
+        for index in &group {
+            picked.push(*index);
+        }
+        cursor = group
+            .iter()
+            .map(|&index| lines[index].y)
+            .fold(cursor, |acc, y| {
+                if direction > 0.0 {
+                    acc.max(y)
+                } else {
+                    acc.min(y)
+                }
+            });
+    }
+    picked
+}
+
+fn stops_interior(line: &VisualLine<'_>, body_font: &str) -> bool {
+    caption_kind(&line.text).is_some()
+        || is_body_barrier(line, body_font)
+        || is_section_heading(line, body_font)
+}
+
+fn x_overlaps(anchor: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
+    let left = anchor.left.max(line.left);
+    let right = anchor.right.min(line.right);
+    let overlap = (right - left).max(0.0);
+    let narrow = (anchor.right - anchor.left)
+        .min(line.right - line.left)
+        .max(1.0);
+    overlap >= narrow * 0.3
+}
+
+fn dominant_body_font(lines: &[VisualLine<'_>], page: u32) -> String {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for line in lines.iter().filter(|line| line.page == page) {
+        if is_body_shape(line) {
+            *counts.entry(line.font.as_str()).or_insert(0) += line.text.len();
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(font, _)| font.to_string())
+        .unwrap_or_default()
+}
+
+fn is_body_shape(line: &VisualLine<'_>) -> bool {
+    let letters = line.text.chars().filter(|ch| ch.is_alphabetic()).count();
+    letters >= 45 && line.right - line.left >= 160.0
+}
+
+fn is_body_barrier(line: &VisualLine<'_>, body_font: &str) -> bool {
+    if !is_body_shape(line) {
+        return false;
+    }
+    body_font.is_empty() || line.font == body_font
+}
+
+/// "1 Introduction" is a section heading, not a label inside a figure.
+fn is_section_heading(line: &VisualLine<'_>, body_font: &str) -> bool {
+    if !body_font.is_empty() && line.font != body_font {
+        return false;
+    }
+    let text = line.text.trim();
+    if text.chars().count() > 48 || line.right - line.left > 260.0 {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    let digits = index;
+    if digits == 0 || digits > 2 {
+        return false;
+    }
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+    }
+    if index >= bytes.len() || bytes[index] != b' ' {
+        return false;
+    }
+    text[index..]
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_alphabetic())
+        .count()
+        >= 4
+}
+
+fn reading_order(lines: &[VisualLine<'_>]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..lines.len()).collect();
+    order.sort_by(|a, b| {
+        lines[*a]
+            .page
+            .cmp(&lines[*b].page)
+            .then(lines[*b].y.total_cmp(&lines[*a].y))
+            .then(lines[*a].left.total_cmp(&lines[*b].left))
+    });
+    order
+}
+
+fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
+    let mut indexed: Vec<VisualLine> = lines;
+    indexed.sort_by(|a, b| {
+        a.page
+            .cmp(&b.page)
+            .then(b.y.total_cmp(&a.y))
+            .then(a.left.total_cmp(&b.left))
+    });
+    let mut paragraphs: Vec<Vec<VisualLine>> = Vec::new();
+    for line in indexed {
+        if paragraphs
+            .last()
+            .and_then(|para| para.last())
+            .is_some_and(|prev| continues_paragraph(prev, &line))
+        {
+            paragraphs.last_mut().unwrap().push(line);
+        } else {
+            paragraphs.push(vec![line]);
+        }
+    }
+    paragraphs
+}
+
+fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if upper.page != lower.page {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    let dy = upper.y - lower.y;
+    if dy < size * 0.7 || dy > size * 1.5 {
+        return false;
+    }
+    if (upper.size - lower.size).abs() > size * 0.2 {
+        return false;
+    }
+    if upper.font != lower.font {
+        return false;
+    }
+    let hyphen = soft_hyphen_stem(&upper.text).is_some()
+        && lower
+            .text
+            .trim_start()
+            .starts_with(|ch: char| ch.is_ascii_lowercase());
+    if (upper.left - lower.left).abs() > 36.0 && !hyphen {
+        return false;
+    }
+    if hyphen {
+        return true;
+    }
+    let upper_w = upper.right - upper.left;
+    let lower_w = lower.right - lower.left;
+    if upper.right + size * 2.2 < lower.right {
+        return false;
+    }
+    if lower_w < upper_w * 0.5
+        && lower.text.chars().count() < 32
+        && !lower.text.trim_end().ends_with('.')
+    {
+        return false;
+    }
+    let overlap = (upper.right.min(lower.right) - upper.left.max(lower.left)).max(0.0);
+    let narrow = upper_w.min(lower_w).max(1.0);
+    overlap >= narrow * 0.35 || (upper.left - lower.left).abs() <= 8.0
 }
 
 fn soft_hyphen_stem(text: &str) -> Option<&str> {
@@ -203,38 +738,6 @@ fn soft_hyphen_stem(text: &str) -> Option<&str> {
     } else {
         None
     }
-}
-
-fn hyphen_continuation(
-    segment: &Segment,
-    segments: &[Segment],
-    consumed: &[bool],
-    by_id: &std::collections::HashMap<u32, &Glyph>,
-) -> Option<usize> {
-    let head_id = *segment.glyph_ids.first()?;
-    let tail_id = *segment.glyph_ids.last()?;
-    let head = by_id.get(&head_id)?;
-    let tail = by_id.get(&tail_id)?;
-    let mut best: Option<(usize, f32)> = None;
-    for (index, other) in segments.iter().enumerate() {
-        if consumed[index] || other.page_index != segment.page_index {
-            continue;
-        }
-        let first_id = *other.glyph_ids.first()?;
-        let first = by_id.get(&first_id)?;
-        let size = tail.font_size.max(1.0);
-        let dy = tail.matrix[5] - first.matrix[5];
-        if dy < size * 0.45 || dy > size * 2.4 {
-            continue;
-        }
-        if (first.matrix[4] - head.matrix[4]).abs() > 36.0 {
-            continue;
-        }
-        if best.is_none_or(|(_, best_dy)| dy < best_dy) {
-            best = Some((index, dy));
-        }
-    }
-    best.map(|(index, _)| index)
 }
 
 /// A gap that is a word space in the original drawing, not a character in the stream.
@@ -418,6 +921,266 @@ mod tests {
         assert!(segs
             .iter()
             .any(|seg| seg.text.chars().all(|ch| ch == 'b' || ch == ' ')));
+    }
+
+    fn wide(id: u32, x: f32, y: f32, text: &str, width: f32, size: f32) -> Glyph {
+        let mut item = glyph(id, x, y, text, false);
+        item.font_size = size;
+        item.bbox = [x, y, x + width, y + size];
+        item
+    }
+
+    #[test]
+    fn a_superscript_joins_the_name_and_is_not_its_own_segment() {
+        let mut name = wide(0, 72.0, 100.0, "Zhang", 38.0, 10.0);
+        name.font_name = "NimbusRomNo9L-Medi".into();
+        let mut mark = wide(1, 112.0, 103.6, "1", 4.0, 7.0);
+        mark.font_name = "CMR7".into();
+        let mut star = wide(2, 108.0, 103.6, "∗", 4.0, 7.0);
+        star.font_name = "CMSY7".into();
+        let segs = segment_glyphs(&[name, star, mark]);
+        assert_eq!(
+            segs.len(),
+            1,
+            "{:?}",
+            segs.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+        assert!(segs[0].text.contains('1'), "{}", segs[0].text);
+        assert!(segs[0].text.contains('∗'), "{}", segs[0].text);
+        assert!(segs[0].glyph_ids.contains(&1));
+        assert!(segs[0].glyph_ids.contains(&2));
+    }
+
+    #[test]
+    fn a_paragraph_is_one_segment_and_a_short_heading_stays_apart() {
+        let body =
+            "Coding agents solve repository level tasks through long trajectories of inspection.";
+        let lines = vec![
+            wide(0, 72.0, 500.0, body, 320.0, 10.0),
+            wide(
+                1,
+                72.0,
+                489.0,
+                "The next line continues the same paragraph without a break.",
+                320.0,
+                10.0,
+            ),
+            wide(2, 72.0, 470.0, "1 Introduction", 90.0, 12.0),
+        ];
+        let segs = segment_glyphs(&lines);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("next line continues")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.contains(&"1 Introduction"),
+            "{texts:?}"
+        );
+        assert_eq!(
+            segs.iter()
+                .filter(|seg| seg.text.contains("Coding"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn figure_labels_are_kept_and_the_caption_is_translated() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(1, 90.0, 640.0, "USER PROMPT", 55.0, 9.0),
+            wide(2, 230.0, 640.0, "REASONING", 50.0, 9.0),
+            wide(
+                3,
+                72.0,
+                560.0,
+                "Figure 1: A diagram of the system and its parts.",
+                360.0,
+                10.0,
+            ),
+            wide(4, 72.0, 480.0, body, 360.0, 10.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.starts_with("Figure 1:")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("USER PROMPT")),
+            "{texts:?}"
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
+        assert!(seg.kept.iter().all(|(_, reason)| reason == "figure"));
+    }
+
+    #[test]
+    fn table_cells_are_kept_and_the_caption_is_translated() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let mut header = wide(1, 72.0, 600.0, "Method", 50.0, 10.0);
+        header.font_name = "NimbusRomNo9L-Regu".into();
+        let mut score = wide(2, 220.0, 600.0, "Score", 40.0, 10.0);
+        score.font_name = "NimbusRomNo9L-Regu".into();
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(
+                3,
+                72.0,
+                640.0,
+                "Table 1: Pass rates for each method on the benchmark.",
+                360.0,
+                10.0,
+            ),
+            header,
+            score,
+            wide(4, 72.0, 500.0, body, 360.0, 10.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.starts_with("Table 1:")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("Method")),
+            "{texts:?}"
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
+        assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
+    }
+
+    #[test]
+    fn a_sentence_that_mentions_a_table_is_not_a_caption() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(
+                1,
+                72.0,
+                680.0,
+                "Table 1 shows that both methods improve the pass rate.",
+                360.0,
+                10.0,
+            ),
+            wide(
+                2,
+                72.0,
+                669.0,
+                "The next sentence stays in the same paragraph.",
+                360.0,
+                10.0,
+            ),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        assert!(seg.kept.is_empty(), "{:?}", seg.kept);
+        assert!(seg
+            .segments
+            .iter()
+            .any(|item| item.text.contains("Table 1 shows")));
+    }
+
+    #[test]
+    fn translating_figures_is_opt_in() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(1, 90.0, 640.0, "USER PROMPT", 55.0, 9.0),
+            wide(
+                2,
+                72.0,
+                560.0,
+                "Figure 1: A diagram of the system and its parts.",
+                360.0,
+                10.0,
+            ),
+        ];
+        let seg = segment_with(
+            &glyphs,
+            &SegmentFlags {
+                skip_figures: false,
+                skip_tables: true,
+            },
+        );
+        assert!(seg.kept.is_empty(), "{:?}", seg.kept);
+        assert!(seg
+            .segments
+            .iter()
+            .any(|item| item.text.contains("USER PROMPT")));
+    }
+
+    #[test]
+    fn the_sample_paper_keeps_diagram_labels_and_table_cells() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/arxiv-2610.02163.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract_with(&crate::extract::ExtractOptions {
+            max_pages: Some(6),
+            ..crate::extract::ExtractOptions::default()
+        });
+        let seg = segment_with(&extraction.glyphs, &SegmentFlags::default());
+        let kept: std::collections::HashSet<u32> = seg.kept.iter().map(|(id, _)| *id).collect();
+        let mono: Vec<_> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.page_index == 1 && glyph.font_name.contains("PlexMono"))
+            .collect();
+        assert!(!mono.is_empty(), "page 2 should contain diagram labels");
+        let kept_mono = mono.iter().filter(|glyph| kept.contains(&glyph.id)).count();
+        assert!(
+            kept_mono * 10 >= mono.len() * 9,
+            "kept {} of {} mono labels",
+            kept_mono,
+            mono.len()
+        );
+        assert!(seg.segments.iter().any(|item| {
+            item.page_index == 1 && item.text.replace(' ', "").starts_with("Figure1:")
+        }));
+        assert!(seg.segments.iter().any(|item| {
+            item.page_index == 5 && item.text.replace(' ', "").starts_with("Table1:")
+        }));
+        assert!(seg.segments.iter().any(|item| {
+            item.page_index == 5 && item.text.replace(' ', "").starts_with("Figure3:")
+        }));
+        let cell = extraction.glyphs.iter().find(|glyph| {
+            glyph.page_index == 5
+                && glyph.unicode == "M"
+                && glyph.matrix[5] < 660.0
+                && glyph.matrix[5] > 630.0
+                && glyph.matrix[4] < 140.0
+        });
+        let cell = cell.expect("table header");
+        assert!(kept.contains(&cell.id), "table header should stay original");
+        assert!(seg.kept.iter().any(|(_, reason)| reason == "figure"));
+        assert!(seg.kept.iter().any(|(_, reason)| reason == "table"));
+        let author = seg
+            .segments
+            .iter()
+            .find(|item| item.page_index == 0 && item.text.contains("Zhang"))
+            .expect("author line");
+        assert!(
+            author.text.contains('1') && author.text.contains('∗'),
+            "superscripts should travel with the author line: {}",
+            author.text
+        );
+        let abstract_parts = seg
+            .segments
+            .iter()
+            .filter(|item| item.page_index == 0 && item.text.contains("Coding"))
+            .count();
+        assert_eq!(abstract_parts, 1, "the abstract should be one paragraph");
     }
 
     #[test]

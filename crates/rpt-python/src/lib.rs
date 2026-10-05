@@ -80,7 +80,9 @@ fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
         &report,
         &RewriteOptions {
             mode: opts.output_mode,
-            font_bytes: None,
+            cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
+            cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+            ..RewriteOptions::default()
         },
     )
     .map_err(py_err)?;

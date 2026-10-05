@@ -64,6 +64,14 @@ pub struct TranslateOptions {
     pub translator: Option<String>,
     /// Leave References / Bibliography as original text. Default is on.
     pub skip_references: bool,
+    /// Leave text inside figures original. Only the caption is translated.
+    pub skip_figures: bool,
+    /// Leave table cells and headers original. Only the caption is translated.
+    pub skip_tables: bool,
+    /// Song/serif CJK font file. Empty uses `RPT_CJK_FONT`, then Noto Serif CJK.
+    pub cjk_font: Option<String>,
+    /// Sans CJK font file for regular sans text.
+    pub cjk_sans: Option<String>,
     /// `replace` writes only the translation. `bilingual` keeps an English page.
     pub output_mode: OutputMode,
 }
@@ -146,6 +154,10 @@ impl Default for TranslateOptions {
             max_tokens: None,
             translator: None,
             skip_references: true,
+            skip_figures: true,
+            skip_tables: true,
+            cjk_font: None,
+            cjk_sans: None,
             output_mode: OutputMode::Replace,
         }
     }
@@ -226,6 +238,18 @@ impl TranslateOptions {
         }
         if let Some(skip) = value.get("skip_references").and_then(|v| v.as_bool()) {
             opts.skip_references = skip;
+        }
+        if let Some(skip) = value.get("skip_figures").and_then(|v| v.as_bool()) {
+            opts.skip_figures = skip;
+        }
+        if let Some(skip) = value.get("skip_tables").and_then(|v| v.as_bool()) {
+            opts.skip_tables = skip;
+        }
+        if let Some(v) = string_field(&value, &["cjk_font", "cjk_serif"]) {
+            opts.cjk_font = Some(v);
+        }
+        if let Some(v) = string_field(&value, &["cjk_sans"]) {
+            opts.cjk_sans = Some(v);
         }
         let layout = string_field(&value, &["bilingual_layout", "layout"]);
         if let Some(mode) = string_field(&value, &["output_mode", "mode"]) {
@@ -319,7 +343,14 @@ pub fn translate_extraction(
     if opts.batch_size == 0 {
         return Err(Error::Options("batch_size must be at least 1".into()));
     }
-    let segments = segment::segment_glyphs(&extraction.glyphs);
+    let segmentation = segment::segment_with(
+        &extraction.glyphs,
+        &segment::SegmentFlags {
+            skip_figures: opts.skip_figures,
+            skip_tables: opts.skip_tables,
+        },
+    );
+    let segments = segmentation.segments;
     let reference_ids = if opts.skip_references {
         references::reference_glyph_ids(&extraction.glyphs)
     } else {
@@ -327,6 +358,21 @@ pub fn translate_extraction(
     };
     for id in &reference_ids {
         extraction.mark_kept(*id, "references")?;
+    }
+    let by_id: HashMap<u32, usize> = extraction
+        .glyphs
+        .iter()
+        .enumerate()
+        .map(|(index, glyph)| (glyph.id, index))
+        .collect();
+    for (id, reason) in &segmentation.kept {
+        let Some(index) = by_id.get(id) else {
+            continue;
+        };
+        if extraction.glyphs[*index].disposition.is_final() {
+            continue;
+        }
+        extraction.mark_kept(*id, reason.clone())?;
     }
     let shielded: Vec<protect::Shielded> = segments
         .iter()
@@ -894,9 +940,14 @@ mod tests {
         );
         assert_eq!(warnings.len(), 1);
         assert!(opts.skip_references);
+        assert!(opts.skip_figures);
+        assert!(opts.skip_tables);
         assert!(!format!("{opts:?}").contains("nope"));
         let (opts, _) = TranslateOptions::from_json(r#"{"skip_references":false}"#).unwrap();
         assert!(!opts.skip_references);
+        let (opts, _) =
+            TranslateOptions::from_json(r#"{"skip_figures":false,"skip_tables":false}"#).unwrap();
+        assert!(!opts.skip_figures && !opts.skip_tables);
         assert_eq!(
             TranslateOptions::from_json(r#"{"output_mode":"replace"}"#)
                 .unwrap()

@@ -43,11 +43,11 @@ pub fn face_style(font_name: &str) -> FaceStyle {
     ]
     .iter()
     .any(|needle| upper.contains(needle));
-    let bold = [
-        "BOLD", "BLACK", "HEAVY", "SEMIBOLD", "DEMIBOLD", "CMBX", "MEDI",
-    ]
-    .iter()
-    .any(|needle| upper.contains(needle));
+    // Medium (NimbusRom-Medi) stays a regular Song face. SemiBold and Bold
+    // use the heiti face.
+    let bold = ["BOLD", "BLACK", "HEAVY", "SEMIBOLD", "DEMIBOLD", "CMBX"]
+        .iter()
+        .any(|needle| upper.contains(needle));
     let italic = ["ITAL", "OBLIQUE", "CMTI"]
         .iter()
         .any(|needle| upper.contains(needle));
@@ -58,10 +58,44 @@ pub fn face_style(font_name: &str) -> FaceStyle {
     }
 }
 
-/// Subset a style-matched CJK face. Noto CJK (CFF) is preferred; a glyf font is the fallback.
-pub fn subset_for_style(style: FaceStyle, codepoints: &[u32]) -> Option<SubsetFont> {
-    if let Some(face) = noto_face(style) {
-        if let Some(font) = subset_cff(face.0, face.1, codepoints) {
+/// Optional faces that replace the bundled Noto CJK files.
+#[derive(Clone, Debug, Default)]
+pub struct FontSources {
+    /// Song/serif face for regular body text (`RPT_CJK_FONT` when unset).
+    pub serif: Option<std::path::PathBuf>,
+    /// Sans face for regular sans text (`RPT_CJK_SANS` when unset).
+    pub sans: Option<std::path::PathBuf>,
+}
+
+/// Subset a style-matched CJK face. Bold text uses Noto Sans CJK Bold.
+/// Regular serif text uses the configured Song face, then Noto Serif CJK.
+pub fn subset_for_style(
+    style: FaceStyle,
+    codepoints: &[u32],
+    sources: &FontSources,
+) -> Option<SubsetFont> {
+    if style.bold {
+        if let Some(font) = noto_subset(false, true, codepoints) {
+            return Some(font);
+        }
+    } else if style.serif {
+        let path = sources.serif.clone().or_else(|| env_font("RPT_CJK_FONT"));
+        if let Some(path) = path {
+            if let Some(font) = subset_user_font(&path, codepoints) {
+                return Some(font);
+            }
+        }
+        if let Some(font) = noto_subset(true, false, codepoints) {
+            return Some(font);
+        }
+    } else {
+        let path = sources.sans.clone().or_else(|| env_font("RPT_CJK_SANS"));
+        if let Some(path) = path {
+            if let Some(font) = subset_user_font(&path, codepoints) {
+                return Some(font);
+            }
+        }
+        if let Some(font) = noto_subset(false, false, codepoints) {
             return Some(font);
         }
     }
@@ -69,14 +103,67 @@ pub fn subset_for_style(style: FaceStyle, codepoints: &[u32]) -> Option<SubsetFo
     subset_ttf(&bytes, codepoints)
 }
 
-fn noto_face(style: FaceStyle) -> Option<(&'static str, u32)> {
-    let path = match (style.serif, style.bold) {
-        (true, true) => "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
+fn env_font(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var(name).ok().and_then(|path| {
+        let path = path.trim();
+        if path.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(path))
+        }
+    })
+}
+
+fn noto_subset(serif: bool, bold: bool, codepoints: &[u32]) -> Option<SubsetFont> {
+    let path = match (serif, bold) {
+        (_, true) => "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
         (true, false) => "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-        (false, true) => "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
         (false, false) => "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     };
-    std::path::Path::new(path).is_file().then_some((path, 2))
+    std::path::Path::new(path)
+        .is_file()
+        .then(|| subset_cff(path, 2, codepoints))
+        .flatten()
+}
+
+fn subset_user_font(path: &std::path::Path, codepoints: &[u32]) -> Option<SubsetFont> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    if is_cff_font(&bytes) {
+        let path = path.to_str()?;
+        let mut best: Option<SubsetFont> = None;
+        let mut best_count = 0usize;
+        for face in 0..6 {
+            let Some(font) = subset_cff(path, face, codepoints) else {
+                continue;
+            };
+            let count = font.glyphs.len();
+            if count > best_count {
+                best_count = count;
+                best = Some(font);
+            }
+        }
+        best
+    } else {
+        subset_ttf(&bytes, codepoints)
+    }
+}
+
+fn is_cff_font(bytes: &[u8]) -> bool {
+    if bytes.starts_with(b"OTTO") {
+        return true;
+    }
+    if bytes.starts_with(b"ttcf") && bytes.len() >= 16 {
+        let count = u32::from_be_bytes(bytes[8..12].try_into().ok().unwrap_or([0; 4]));
+        if count == 0 {
+            return false;
+        }
+        let offset = u32::from_be_bytes(bytes[12..16].try_into().ok().unwrap_or([0; 4])) as usize;
+        return bytes.get(offset..offset + 4) == Some(b"OTTO");
+    }
+    false
 }
 
 fn subset_cff(path: &str, face_index: u32, codepoints: &[u32]) -> Option<SubsetFont> {
@@ -730,5 +817,18 @@ mod tests {
         let cmap = FontCmap::parse(&subset.bytes);
         assert!(cmap.unicode_to_gid.contains_key(&0x4E2D));
         assert!(cmap.unicode_to_gid.contains_key(&0x41));
+    }
+
+    #[test]
+    fn medium_body_is_serif_and_real_bold_is_heiti() {
+        let medium = face_style("NimbusRomNo9L-Medi");
+        assert!(medium.serif);
+        assert!(!medium.bold);
+        let regular = face_style("NimbusRomNo9L-Regu");
+        assert!(regular.serif && !regular.bold);
+        let bold = face_style("NimbusRomNo9L-Bold");
+        assert!(bold.serif && bold.bold);
+        let semi = face_style("IBMPlexMono-SemiBold");
+        assert!(semi.bold);
     }
 }

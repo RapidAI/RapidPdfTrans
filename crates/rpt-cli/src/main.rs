@@ -18,6 +18,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Dump per-glyph JSON and the coverage report.
     Extract {
@@ -66,6 +67,18 @@ enum Command {
         /// Translate the References section. By default that section is kept unchanged.
         #[arg(long)]
         translate_references: bool,
+        /// Translate text inside figures. By default only the figure caption is translated.
+        #[arg(long)]
+        translate_figures: bool,
+        /// Translate table cells and headers. By default only the table caption is translated.
+        #[arg(long)]
+        translate_tables: bool,
+        /// Song/serif CJK font (TTF, TTC, or OTF). Overrides Noto Serif CJK for body text.
+        #[arg(long)]
+        cjk_font: Option<PathBuf>,
+        /// Sans CJK font for regular sans text. Bold text still uses Noto Sans CJK Bold.
+        #[arg(long)]
+        cjk_sans: Option<PathBuf>,
         /// Segments per model call.
         #[arg(long, default_value_t = 8)]
         batch_size: usize,
@@ -98,6 +111,10 @@ fn main() -> ExitCode {
             base_url,
             glossary,
             translate_references,
+            translate_figures,
+            translate_tables,
+            cjk_font,
+            cjk_sans,
             batch_size,
             json: _,
             compact,
@@ -116,6 +133,16 @@ fn main() -> ExitCode {
                 Err(err) => return fail(err.to_string()),
             };
             let bilingual_mode = OutputMode::parse("bilingual", Some(&layout)).ok();
+            if let Some(path) = cjk_font.as_ref() {
+                if !path.is_file() {
+                    return fail(format!("CJK font not found: {}", path.display()));
+                }
+            }
+            if let Some(path) = cjk_sans.as_ref() {
+                if !path.is_file() {
+                    return fail(format!("CJK sans font not found: {}", path.display()));
+                }
+            }
             run_translate(
                 &path,
                 TranslateOptions {
@@ -125,6 +152,10 @@ fn main() -> ExitCode {
                     base_url,
                     glossary,
                     skip_references: !translate_references,
+                    skip_figures: !translate_figures,
+                    skip_tables: !translate_tables,
+                    cjk_font: cjk_font.as_ref().map(|path| path.display().to_string()),
+                    cjk_sans: cjk_sans.as_ref().map(|path| path.display().to_string()),
                     batch_size,
                     output_mode,
                     ..TranslateOptions::default()
@@ -191,7 +222,9 @@ fn run_translate(
             &report,
             &RewriteOptions {
                 mode: opts.output_mode,
-                font_bytes: None,
+                cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
+                cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+                ..RewriteOptions::default()
             },
         ) {
             return fail(err);
@@ -220,7 +253,9 @@ fn run_translate(
             &report,
             &RewriteOptions {
                 mode,
-                font_bytes: None,
+                cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
+                cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+                ..RewriteOptions::default()
             },
         ) {
             return fail(err);

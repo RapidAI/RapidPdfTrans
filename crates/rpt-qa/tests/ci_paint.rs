@@ -249,7 +249,7 @@ fn glyph_run(extraction: &rpt_core::Extraction, text: &str) -> Option<(f32, f32,
     });
     for window in glyphs.windows(chars.len()) {
         let matched = window.iter().zip(&chars).all(|(glyph, ch)| {
-            glyph.unicode.chars().next() == Some(*ch)
+            glyph.unicode.starts_with(*ch)
                 && glyph.page_index == window[0].page_index
                 && (glyph.matrix[5] - window[0].matrix[5]).abs() < 0.8
         });
