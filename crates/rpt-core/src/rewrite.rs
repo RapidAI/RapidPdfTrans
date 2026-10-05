@@ -50,8 +50,12 @@ struct Drawn {
     cids: Vec<u16>,
     resource: String,
     skew: f32,
-    /// Extra advance after each glyph, in unscaled text space (`Tc`).
-    tracking: f32,
+    text: String,
+    /// User-space advance of each character.
+    widths: Vec<f32>,
+    /// Extra user-space gap after each character except the last.
+    /// Only CJK–CJK gaps are filled, so a Latin citation stays tight.
+    gaps: Vec<f32>,
 }
 
 /// Rewrite `extraction` using `report` and remember the dispositions on the glyphs.
@@ -254,6 +258,7 @@ pub fn rewrite_translation(
         .collect();
     if !draw_ids.is_empty() && !embedded.is_empty() {
         embed_and_draw(doc, extraction, &drawn, &embedded)?;
+        retarget_link_annotations(doc, extraction, &drawn, &draw_ids);
     }
 
     for (id, reason) in non_text {
@@ -292,6 +297,10 @@ pub fn rewrite_translation(
     if let (Some(layout), Some(original)) = (compose, original) {
         compose_bilingual(doc, &original, layout)?;
     }
+    // Side-by-side imports the original page, including any OpenType font
+    // stored under a CIDFontType0C subtype. Unwrap after compose so both
+    // the translated file and the imported copy lose the mismatch.
+    unwrap_opentype_cid_fonts(doc);
     Ok(())
 }
 
@@ -937,6 +946,7 @@ fn layout_segment(
             .enumerate()
             .map(|(index, line)| {
                 let limit = if index == 0 { first_width } else { width };
+                let justify = index + 1 != count;
                 Drawn {
                     page,
                     x: block_left + if index == 0 { indent } else { 0.0 },
@@ -946,7 +956,9 @@ fn layout_segment(
                     cids: cids_of(&line, font),
                     resource: resource.to_string(),
                     skew,
-                    tracking: line_tracking(&line, size, limit, font, index + 1 != count),
+                    widths: char_widths(&line, size, font),
+                    gaps: justify_gaps(&line, size, limit, font, justify),
+                    text: line,
                 }
             })
             .collect(),
@@ -1029,19 +1041,54 @@ fn is_attached_mark(text: &str, size: f32) -> bool {
         && text.chars().all(|ch| ch.is_ascii_digit())
 }
 
-fn line_tracking(text: &str, size: f32, width: f32, font: &SubsetFont, justify: bool) -> f32 {
-    if !justify {
-        return 0.0;
+/// Extra space goes only between CJK characters. A single `Tc` would letter-space
+/// the Latin citation on the same line.
+fn justify_gaps(text: &str, size: f32, width: f32, font: &SubsetFont, justify: bool) -> Vec<f32> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut gaps = vec![0.0f32; chars.len().saturating_sub(1)];
+    if !justify || chars.len() < 2 || size <= 0.0 {
+        return gaps;
     }
-    let count = text.chars().count();
-    if count < 2 || size <= 0.0 {
-        return 0.0;
+    let slots: Vec<usize> = (0..chars.len() - 1)
+        .filter(|&index| is_cjk_body(chars[index]) && is_cjk_body(chars[index + 1]))
+        .collect();
+    if slots.is_empty() {
+        return gaps;
     }
     let slack = width - measure(text, size, font);
-    if !(0.4..width * 0.22).contains(&slack) {
-        return 0.0;
+    if !(0.4..width * 0.12).contains(&slack) {
+        return gaps;
     }
-    slack / ((count - 1) as f32 * size)
+    let extra = slack / slots.len() as f32;
+    if extra > size * 0.18 {
+        return gaps;
+    }
+    for index in slots {
+        gaps[index] = extra;
+    }
+    gaps
+}
+
+fn is_cjk_body(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3040}'..='\u{30FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{AC00}'..='\u{D7AF}'
+    )
+}
+
+fn char_widths(text: &str, size: f32, font: &SubsetFont) -> Vec<f32> {
+    text.chars()
+        .map(|ch| {
+            font.glyphs
+                .get(&(ch as u32))
+                .map(|(_, advance)| *advance as f32 * size / font.units_per_em as f32)
+                .unwrap_or(size)
+        })
+        .collect()
 }
 
 fn measure(text: &str, size: f32, font: &SubsetFont) -> f32 {
@@ -1079,37 +1126,38 @@ fn wrap_text(
         };
         let mut end = start;
         let mut width = 0.0f32;
-        let mut last_space = None;
         while end < chars.len() {
             let advance = measure(&chars[end].to_string(), size, font);
             if end > start && width + advance > limit {
                 break;
             }
             width += advance;
-            if chars[end] == ' ' {
-                last_space = Some(end);
-            }
             end += 1;
         }
         if end == start {
             end = (start + 1).min(chars.len());
         } else if end < chars.len() {
-            if let Some(space) = last_space {
-                if space > start {
-                    end = space;
-                }
-            }
+            // Break at the rightmost legal point. Jumping back to the previous
+            // ASCII space throws away CJK that already fit after a citation.
             while end > start + 1 && !can_break(chars[end - 1], chars[end]) {
                 end -= 1;
             }
         }
-        let line: String = chars[start..end].iter().collect();
-        if line.trim().is_empty() && end == start {
-            return None;
+        let mut line_end = end;
+        while line_end > start && chars[line_end - 1].is_whitespace() {
+            line_end -= 1;
         }
+        if line_end == start {
+            start = end.max(start + 1);
+            while start < chars.len() && chars[start].is_whitespace() {
+                start += 1;
+            }
+            continue;
+        }
+        let line: String = chars[start..line_end].iter().collect();
         lines.push(line);
         start = end;
-        if chars.get(start) == Some(&' ') {
+        while start < chars.len() && chars[start].is_whitespace() {
             start += 1;
         }
         if lines.len() > 48 {
@@ -1194,15 +1242,14 @@ fn embed_and_draw(
         let mut stream = String::from("BT\n0 Tc 0 Tw 100 Tz 0 TL 0 Ts\n");
         for line in lines {
             stream.push_str(&format!(
-                "{} Tc /{} {} Tf {} 1 0 {} 1 {} {} Tm <{}> Tj\n",
-                pdf_num(line.tracking),
+                "0 Tc /{} {} Tf {} 1 0 {} 1 {} {} Tm {}\n",
                 line.resource,
                 pdf_num(line.size),
                 color_ops(&line.color),
                 pdf_num(line.skew),
                 pdf_num(line.x),
                 pdf_num(line.y),
-                hex_cids(&line.cids)
+                show_text(line)
             ));
         }
         stream.push_str("ET\n");
@@ -1491,6 +1538,445 @@ fn hex_cids(cids: &[u16]) -> String {
     cids.iter().map(|cid| format!("{cid:04X}")).collect()
 }
 
+fn show_text(line: &Drawn) -> String {
+    let count = line.text.chars().count();
+    if line.cids.len() != count || line.gaps.iter().all(|gap| *gap == 0.0) || line.size <= 0.0 {
+        return format!("<{}> Tj", hex_cids(&line.cids));
+    }
+    let mut parts = Vec::with_capacity(line.cids.len() * 2);
+    for (index, cid) in line.cids.iter().enumerate() {
+        if index > 0 {
+            let extra = line.gaps.get(index - 1).copied().unwrap_or(0.0);
+            let adj = -((extra / line.size) * 1000.0).round() as i32;
+            if adj != 0 {
+                parts.push(adj.to_string());
+            }
+        }
+        parts.push(format!("<{cid:04X}>"));
+    }
+    format!("[{}] TJ", parts.join(" "))
+}
+
+#[derive(Clone)]
+struct LinkRef {
+    id: ObjectId,
+    rect: [f32; 4],
+}
+
+/// Move link rectangles onto the rewritten citation, or drop them when the
+/// original words no longer have a single place on the page.
+fn retarget_link_annotations(
+    doc: &mut Document,
+    extraction: &Extraction,
+    drawn: &[Drawn],
+    rewritten: &HashSet<u32>,
+) {
+    for page in &extraction.pages {
+        let Some(page_id) = parse_id(&page.object_id) else {
+            continue;
+        };
+        let Some((holder, items)) = load_annots(doc, page_id) else {
+            continue;
+        };
+        let links: Vec<LinkRef> = items.iter().filter_map(|obj| link_ref(doc, obj)).collect();
+        if links.is_empty() {
+            continue;
+        }
+        let mut updates: HashMap<ObjectId, [f32; 4]> = HashMap::new();
+        let mut drop_ids: HashSet<ObjectId> = HashSet::new();
+        let mut clones: Vec<ObjectId> = Vec::new();
+        for cluster in cluster_links(&links) {
+            match place_cluster(&cluster, page.index, extraction, drawn, rewritten) {
+                ClusterPlace::Keep => {}
+                ClusterPlace::Drop(ids) => drop_ids.extend(ids),
+                ClusterPlace::Move { ids, rects } => {
+                    let count = ids.len().min(rects.len());
+                    for (id, rect) in ids.iter().zip(rects.iter()).take(count) {
+                        updates.insert(*id, *rect);
+                    }
+                    if ids.len() > rects.len() {
+                        drop_ids.extend(ids.iter().skip(rects.len()).copied());
+                    }
+                    let Some(source) = ids.first().copied() else {
+                        continue;
+                    };
+                    for rect in rects.iter().skip(ids.len()) {
+                        if let Some(id) = clone_link(doc, source, *rect) {
+                            clones.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        if updates.is_empty() && drop_ids.is_empty() && clones.is_empty() {
+            continue;
+        }
+        for (id, rect) in &updates {
+            set_annot_rect(doc, *id, *rect);
+        }
+        let mut kept = Vec::new();
+        for item in items {
+            let drop = item
+                .as_reference()
+                .ok()
+                .is_some_and(|id| drop_ids.contains(&id));
+            if !drop {
+                kept.push(item);
+            }
+        }
+        for id in clones {
+            kept.push(Object::Reference(id));
+        }
+        store_annots(doc, page_id, holder, kept);
+    }
+}
+
+enum ClusterPlace {
+    Keep,
+    Drop(Vec<ObjectId>),
+    Move {
+        ids: Vec<ObjectId>,
+        rects: Vec<[f32; 4]>,
+    },
+}
+
+fn place_cluster(
+    cluster: &[LinkRef],
+    page: u32,
+    extraction: &Extraction,
+    drawn: &[Drawn],
+    rewritten: &HashSet<u32>,
+) -> ClusterPlace {
+    let union = union_rect(cluster);
+    let mut glyphs: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| glyph.page_index == page && overlaps_rect(glyph.bbox, union, 1.5))
+        .collect();
+    if glyphs.is_empty() || !glyphs.iter().any(|glyph| rewritten.contains(&glyph.id)) {
+        return ClusterPlace::Keep;
+    }
+    glyphs.sort_by(|a, b| {
+        a.matrix[4]
+            .total_cmp(&b.matrix[4])
+            .then(a.matrix[5].total_cmp(&b.matrix[5]))
+    });
+    let needle = squash_text(&glyphs_text(&glyphs));
+    let ids: Vec<ObjectId> = cluster.iter().map(|link| link.id).collect();
+    if needle.chars().count() < 2 {
+        return ClusterPlace::Drop(ids);
+    }
+    let lines: Vec<&Drawn> = drawn.iter().filter(|line| line.page == page).collect();
+    let Some(hit) = unique_citation_hit(&lines, &needle) else {
+        return ClusterPlace::Drop(ids);
+    };
+    let rects = if hit.len() == 1 && cluster.len() > 1 {
+        split_span(hit[0], cluster)
+    } else {
+        hit
+    };
+    ClusterPlace::Move { ids, rects }
+}
+
+fn unique_citation_hit(lines: &[&Drawn], needle: &str) -> Option<Vec<[f32; 4]>> {
+    let mut ordered = lines.to_vec();
+    ordered.sort_by(|a, b| b.y.total_cmp(&a.y).then(a.x.total_cmp(&b.x)));
+    let mut hits: Vec<Vec<[f32; 4]>> = Vec::new();
+    for line in &ordered {
+        if let Some(rect) = line_hit(line, needle) {
+            hits.push(vec![rect]);
+        }
+    }
+    for pair in ordered.windows(2) {
+        if !lines_are_adjacent(pair[0], pair[1]) {
+            continue;
+        }
+        if let Some(rects) = pair_hit(pair[0], pair[1], needle) {
+            hits.push(rects);
+        }
+    }
+    if hits.len() == 1 {
+        hits.pop()
+    } else {
+        None
+    }
+}
+
+fn line_hit(line: &Drawn, needle: &str) -> Option<[f32; 4]> {
+    let (flat, map) = squash_map(&line.text);
+    let start = unique_index(&flat, needle)?;
+    let end = start + needle.chars().count();
+    let first = *map.get(start)?;
+    let last = *map.get(end - 1)?;
+    Some(span_rect(line, first, last + 1))
+}
+
+fn pair_hit(top: &Drawn, bottom: &Drawn, needle: &str) -> Option<Vec<[f32; 4]>> {
+    let (top_flat, top_map) = squash_map(&top.text);
+    let (bottom_flat, bottom_map) = squash_map(&bottom.text);
+    if top_flat.is_empty() || bottom_flat.is_empty() {
+        return None;
+    }
+    let flat = format!("{top_flat}{bottom_flat}");
+    let start = unique_index(&flat, needle)?;
+    let end = start + needle.chars().count();
+    if start >= top_flat.chars().count() || end <= top_flat.chars().count() {
+        return None;
+    }
+    let split = top_flat.chars().count();
+    let top_first = *top_map.get(start)?;
+    let top_last = *top_map.last()?;
+    let bottom_first = *bottom_map.first()?;
+    let bottom_last = *bottom_map.get(end - split - 1)?;
+    Some(vec![
+        span_rect(top, top_first, top_last + 1),
+        span_rect(bottom, bottom_first, bottom_last + 1),
+    ])
+}
+
+fn lines_are_adjacent(top: &Drawn, bottom: &Drawn) -> bool {
+    let dy = top.y - bottom.y;
+    let size = top.size.max(bottom.size).max(1.0);
+    dy > size * 0.4 && dy < size * 2.2 && (top.x - bottom.x).abs() < 40.0
+}
+
+fn unique_index(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let first = haystack.find(needle)?;
+    if haystack[first + needle.len()..].contains(needle) {
+        return None;
+    }
+    Some(haystack[..first].chars().count())
+}
+
+fn span_rect(line: &Drawn, start: usize, end: usize) -> [f32; 4] {
+    let x0 = char_x(line, start);
+    let x1 = char_x(line, end).max(x0 + line.size * 0.3);
+    [x0, line.y - line.size * 0.22, x1, line.y + line.size * 0.85]
+}
+
+fn char_x(line: &Drawn, index: usize) -> f32 {
+    let mut x = line.x;
+    let limit = index.min(line.widths.len());
+    for i in 0..limit {
+        x += line.widths[i];
+        if i < line.gaps.len() {
+            x += line.gaps[i];
+        }
+    }
+    x
+}
+
+fn split_span(span: [f32; 4], links: &[LinkRef]) -> Vec<[f32; 4]> {
+    let union = union_rect(links);
+    let width = (union[2] - union[0]).max(0.1);
+    let span_w = span[2] - span[0];
+    links
+        .iter()
+        .map(|link| {
+            let t0 = ((link.rect[0] - union[0]) / width).clamp(0.0, 1.0);
+            let t1 = ((link.rect[2] - union[0]) / width).clamp(t0, 1.0);
+            [
+                span[0] + t0 * span_w,
+                span[1],
+                (span[0] + t1 * span_w).max(span[0] + t0 * span_w + 1.0),
+                span[3],
+            ]
+        })
+        .collect()
+}
+
+fn glyphs_text(glyphs: &[&Glyph]) -> String {
+    let mut out = String::new();
+    let mut prev: Option<&Glyph> = None;
+    for glyph in glyphs {
+        if let Some(prev) = prev {
+            let gap = glyph.bbox[0].min(glyph.matrix[4]) - prev.bbox[2].max(prev.matrix[4]);
+            let size = prev.font_size.max(glyph.font_size).max(1.0);
+            let blank = glyph.unicode.chars().all(|ch| ch.is_whitespace());
+            if gap > size * 0.18 && !blank {
+                out.push(' ');
+            }
+        }
+        out.push_str(&glyph.unicode);
+        prev = Some(glyph);
+    }
+    out
+}
+
+fn squash_text(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn squash_map(text: &str) -> (String, Vec<usize>) {
+    let mut flat = String::new();
+    let mut map = Vec::new();
+    for (index, ch) in text.chars().enumerate() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        flat.push(ch);
+        map.push(index);
+    }
+    (flat, map)
+}
+
+fn cluster_links(links: &[LinkRef]) -> Vec<Vec<LinkRef>> {
+    let mut ordered = links.to_vec();
+    ordered.sort_by(|a, b| {
+        b.rect[1]
+            .total_cmp(&a.rect[1])
+            .then(a.rect[0].total_cmp(&b.rect[0]))
+    });
+    let mut clusters: Vec<Vec<LinkRef>> = Vec::new();
+    for link in ordered {
+        let join = clusters.last().is_some_and(|cluster| {
+            let anchor = cluster.last().unwrap();
+            let cy = (link.rect[1] + link.rect[3]) * 0.5;
+            let ay = (anchor.rect[1] + anchor.rect[3]) * 0.5;
+            (cy - ay).abs() < 3.0 && link.rect[0] <= anchor.rect[2] + 18.0
+        });
+        if join {
+            clusters.last_mut().unwrap().push(link);
+        } else {
+            clusters.push(vec![link]);
+        }
+    }
+    clusters
+}
+
+fn union_rect(links: &[LinkRef]) -> [f32; 4] {
+    let mut rect = links[0].rect;
+    for link in &links[1..] {
+        rect[0] = rect[0].min(link.rect[0]);
+        rect[1] = rect[1].min(link.rect[1]);
+        rect[2] = rect[2].max(link.rect[2]);
+        rect[3] = rect[3].max(link.rect[3]);
+    }
+    rect
+}
+
+fn overlaps_rect(bbox: [f32; 4], rect: [f32; 4], pad: f32) -> bool {
+    bbox[0] < rect[2] + pad
+        && bbox[2] > rect[0] - pad
+        && bbox[1] < rect[3] + pad
+        && bbox[3] > rect[1] - pad
+}
+
+fn link_ref(doc: &Document, obj: &Object) -> Option<LinkRef> {
+    let id = obj.as_reference().ok()?;
+    let dict = doc.get_dictionary(id).ok()?;
+    let subtype = dict
+        .get(b"Subtype")
+        .ok()
+        .and_then(|obj| obj.as_name().ok())?;
+    if subtype != b"Link" {
+        return None;
+    }
+    let rect = rect_from_object(doc, dict.get(b"Rect").ok()?)?;
+    Some(LinkRef { id, rect })
+}
+
+fn load_annots(doc: &Document, page_id: ObjectId) -> Option<(Option<ObjectId>, Vec<Object>)> {
+    let obj = doc.get_dictionary(page_id).ok()?.get(b"Annots").ok()?;
+    match obj {
+        Object::Reference(id) => {
+            let arr = doc.get_object(*id).ok()?.as_array().ok()?.clone();
+            Some((Some(*id), arr))
+        }
+        Object::Array(arr) => Some((None, arr.clone())),
+        _ => None,
+    }
+}
+
+fn store_annots(doc: &mut Document, page_id: ObjectId, holder: Option<ObjectId>, arr: Vec<Object>) {
+    if let Some(id) = holder {
+        if let Ok(object) = doc.get_object_mut(id) {
+            if let Ok(existing) = object.as_array_mut() {
+                *existing = arr;
+                return;
+            }
+        }
+    }
+    let Ok(page) = doc.get_object_mut(page_id) else {
+        return;
+    };
+    let Ok(dict) = page.as_dict_mut() else {
+        return;
+    };
+    if arr.is_empty() {
+        dict.remove(b"Annots");
+    } else {
+        dict.set("Annots", arr);
+    }
+}
+
+fn set_annot_rect(doc: &mut Document, id: ObjectId, rect: [f32; 4]) {
+    let Ok(object) = doc.get_object_mut(id) else {
+        return;
+    };
+    let Ok(dict) = object.as_dict_mut() else {
+        return;
+    };
+    dict.set("Rect", rect_objects(rect));
+    dict.remove(b"QuadPoints");
+}
+
+fn clone_link(doc: &mut Document, source: ObjectId, rect: [f32; 4]) -> Option<ObjectId> {
+    let mut dict = doc.get_object(source).ok()?.as_dict().ok()?.clone();
+    dict.set("Rect", rect_objects(rect));
+    dict.remove(b"QuadPoints");
+    Some(doc.add_object(dict))
+}
+
+/// `CIDFontType0C` must be a bare CFF program. An OpenType (`OTTO`) wrapper
+/// makes Poppler warn "Mismatch between font type and embedded font file".
+/// RPTCJK is already stored as bare CFF; this rewrites source fonts such as
+/// the arXiv margin stamp, including copies imported for a bilingual page.
+fn unwrap_opentype_cid_fonts(doc: &mut Document) {
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    for id in ids {
+        let Some(bytes) = doc.get_object(id).ok().and_then(|object| {
+            let stream = object.as_stream().ok()?;
+            let subtype = stream
+                .dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|obj| obj.as_name().ok());
+            if subtype != Some(b"CIDFontType0C".as_slice()) {
+                return None;
+            }
+            Some(
+                stream
+                    .decompressed_content()
+                    .unwrap_or_else(|_| stream.content.clone()),
+            )
+        }) else {
+            continue;
+        };
+        if bytes.len() < 12 || &bytes[0..4] != b"OTTO" {
+            continue;
+        }
+        let Some(cff) = sfnt_table(&bytes, b"CFF ") else {
+            continue;
+        };
+        if cff.len() < 4 || cff[0] != 1 {
+            continue;
+        }
+        let Some(stream) = doc
+            .get_object_mut(id)
+            .ok()
+            .and_then(|object| object.as_stream_mut().ok())
+        else {
+            continue;
+        };
+        stream.dict.set("Subtype", "CIDFontType0C");
+        stream.set_plain_content(cff);
+    }
+}
+
 fn pdf_num(value: f32) -> String {
     format!("{value:.3}")
 }
@@ -1625,6 +2111,68 @@ mod tests {
         assert!(text.contains("AB"), "{text}");
         assert!(text.contains("References"), "{text}");
         assert!(!text.contains("Hello"), "{text}");
+    }
+
+    #[test]
+    fn a_citation_stays_on_the_line_with_the_following_cjk() {
+        let text = "见(Rashid et al.,2025)上评估AutoCompact分别取得通过率";
+        let mut glyphs = HashMap::new();
+        for (id, ch) in (1u16..).zip(text.chars()) {
+            glyphs.insert(ch as u32, (id, 1000));
+        }
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        };
+        // 22em ends at "上". The old wrapper jumped back to the space in "et al.".
+        let lines = wrap_text(text, 10.0, 220.0, 220.0, &font).unwrap();
+        assert!(
+            lines[0].contains("et al.,2025)") && lines[0].ends_with('上'),
+            "{lines:?}"
+        );
+        let gaps = justify_gaps(lines[0].as_str(), 10.0, 400.0, &font, true);
+        assert!(
+            gaps.iter().all(|gap| *gap == 0.0),
+            "a short citation line must not be letter-spaced: {gaps:?}"
+        );
+        let cjk = "中文正文需要两端对齐";
+        let mut cjk_glyphs = HashMap::new();
+        for (id, ch) in (1u16..).zip(cjk.chars()) {
+            cjk_glyphs.insert(ch as u32, (id, 1000));
+        }
+        let cjk_font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: cjk_glyphs,
+        };
+        let count = cjk.chars().count();
+        let width = count as f32 * 10.0 + 8.0;
+        let cjk_gaps = justify_gaps(cjk, 10.0, width, &cjk_font, true);
+        assert!(
+            cjk_gaps.iter().all(|gap| *gap > 0.0),
+            "pure CJK slack should spread across every ideograph gap: {cjk_gaps:?}"
+        );
+        let mixed = "中文(Rashid)后续";
+        let mut mixed_glyphs = HashMap::new();
+        for (id, ch) in (1u16..).zip(mixed.chars()) {
+            mixed_glyphs.insert(ch as u32, (id, 1000));
+        }
+        let mixed_font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: mixed_glyphs,
+        };
+        let mixed_width = measure(mixed, 10.0, &mixed_font) + 2.0;
+        let mixed_gaps = justify_gaps(mixed, 10.0, mixed_width, &mixed_font, true);
+        let chars: Vec<char> = mixed.chars().collect();
+        for (index, gap) in mixed_gaps.iter().enumerate() {
+            let latin = !is_cjk_body(chars[index]) || !is_cjk_body(chars[index + 1]);
+            if latin {
+                assert_eq!(*gap, 0.0, "gap {index} in {mixed}");
+            }
+        }
+        assert!(mixed_gaps.iter().any(|gap| *gap > 0.0), "{mixed_gaps:?}");
     }
 
     #[test]
@@ -1968,5 +2516,198 @@ mod tests {
         }
         assert!(after.chars().filter(|ch| !ch.is_whitespace()).count() > 100);
         let _ = (before, out);
+    }
+
+    #[test]
+    fn a_citation_link_moves_onto_the_rewritten_glyphs() {
+        let translated = "参见(Smith et al., 2020)的结果说明";
+        let bytes = citation_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let report =
+            translate_extraction(&mut extraction, &TranslateOptions::default(), &MoveCitation)
+                .unwrap();
+        let font = box_ttf(&translated.chars().map(|ch| ch as u32).collect::<Vec<_>>());
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let saved = doc.save_bytes().unwrap();
+        let loaded = Document::load_mem(&saved).unwrap();
+        let page_id = loaded.get_pages().into_values().next().unwrap();
+        let annots = loaded
+            .get_dictionary(page_id)
+            .unwrap()
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            annots.len(),
+            1,
+            "the link over the replaced prose is removed"
+        );
+        let id = annots[0].as_reference().unwrap();
+        let rect = rect_from_object(
+            &loaded,
+            loaded.get_dictionary(id).unwrap().get(b"Rect").unwrap(),
+        )
+        .unwrap();
+        // Source citation sat near x=367. "参见" is two 7.2pt glyphs, so the
+        // citation now starts just after the paragraph origin at 72.
+        assert!(
+            rect[0] > 80.0 && rect[0] < 95.0,
+            "link should sit on the citation, not the old English x: {rect:?}"
+        );
+        assert!(
+            rect[2] > 220.0 && rect[2] < 245.0,
+            "link should cover the citation and not the following Chinese: {rect:?}"
+        );
+        let text = PdfDocument::open_bytes(&saved)
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(text.contains("(Smith et al., 2020)"), "{text}");
+        assert!(text.contains("参见"), "{text}");
+    }
+
+    #[test]
+    fn opentype_cid_fontfile_is_unwrapped_without_a_viewer_warning() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/arxiv-2610.02163.pdf");
+        if !path.exists() {
+            return;
+        }
+        let mut doc = Document::load(&path).unwrap();
+        unwrap_opentype_cid_fonts(&mut doc);
+        let mut saved = Vec::new();
+        doc.save_to(&mut saved).unwrap();
+        let out = std::env::temp_dir().join("rpt-unwrapped-stamp.pdf");
+        std::fs::write(&out, &saved).unwrap();
+        let fonts = std::process::Command::new("pdffonts")
+            .arg(&out)
+            .output()
+            .expect("pdffonts");
+        let listing = String::from_utf8_lossy(&fonts.stdout);
+        let stderr = String::from_utf8_lossy(&fonts.stderr);
+        assert!(!stderr.contains("Mismatch between font type"), "{stderr}");
+        assert!(
+            !listing.contains("(OT)"),
+            "CIDFontType0C must be bare CFF:\n{listing}"
+        );
+        assert!(
+            listing.contains("NimbusRoman") && listing.contains("CID Type 0C"),
+            "{listing}"
+        );
+        let text = std::process::Command::new("pdftotext")
+            .args(["-f", "1", "-l", "1", "-enc", "UTF-8", "-q"])
+            .arg(&out)
+            .arg("-")
+            .output()
+            .expect("pdftotext");
+        let extracted = String::from_utf8_lossy(&text.stdout);
+        let err = String::from_utf8_lossy(&text.stderr);
+        assert!(!err.contains("Mismatch between font type"), "{err}");
+        assert!(
+            extracted.contains("arXiv:2610.02163"),
+            "unwrapping the stamp font dropped its text: {extracted}"
+        );
+    }
+
+    fn citation_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<Object> = (0..256).map(|_| Object::Integer(600)).collect();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let prose = b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX (Smith et al., 2020)) Tj ET".to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, prose));
+        let cite = doc.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Link",
+            "Rect" => vec![366.into(), 688.into(), 520.into(), 716.into()],
+            "Border" => vec![0.into(), 0.into(), 1.into()],
+            "C" => vec![0.into(), 1.into(), 0.into()],
+        });
+        let filler = doc.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Link",
+            "Rect" => vec![72.into(), 688.into(), 300.into(), 716.into()],
+            "Border" => vec![0.into(), 0.into(), 1.into()],
+            "C" => vec![0.into(), 1.into(), 0.into()],
+        });
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+            "Annots" => vec![cite.into(), filler.into()],
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    struct MoveCitation;
+    impl Translator for MoveCitation {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+            let translations: Vec<serde_json::Value> = payload["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap_or("");
+                    let translated = if text.contains('⟦') {
+                        let mut marks = String::new();
+                        let mut rest = text;
+                        while let Some(start) = rest.find('⟦') {
+                            let Some(end) = rest[start..].find('⟧') else {
+                                break;
+                            };
+                            let stop = start + end + '⟧'.len_utf8();
+                            marks.push_str(&rest[start..stop]);
+                            rest = &rest[stop..];
+                        }
+                        format!("参见{marks}的结果说明")
+                    } else {
+                        text.to_string()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": translated})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
     }
 }
