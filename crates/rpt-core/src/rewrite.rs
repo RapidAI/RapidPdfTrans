@@ -1217,9 +1217,14 @@ fn toc_page_number_runs<'a>(
         let start_new = match runs.last().and_then(|run| run.last().copied()) {
             Some(prev) => {
                 let size = prev.font_size.max(glyph.font_size).max(1.0);
+                let gap = glyph_ink_left(glyph) - glyph_ink_right(prev);
+                // A tiny baseline difference sorts `8` before `4` even though
+                // `4` sits further left. A negative gap is that jump backward,
+                // not the next digit of the same number.
                 glyph.page_index != prev.page_index
                     || (glyph.matrix[5] - prev.matrix[5]).abs() > size * 0.45
-                    || glyph_ink_left(glyph) - glyph_ink_right(prev) > size * 0.45
+                    || gap > size * 0.45
+                    || glyph_ink_left(glyph) + 0.4 < glyph_ink_left(prev)
             }
             None => true,
         };
