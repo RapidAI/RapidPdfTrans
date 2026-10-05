@@ -9,6 +9,11 @@ layout rather than model quality.
     python3 corpus/bench/identity_server.py --port 8765
     python3 corpus/bench/compete.py --pages 1
 
+``--live`` uses the shared gateway (``RPT_LLM_BASE_URL``, model ``auto``)
+and writes ``corpus/benchmarks/live-head-to-head.json`` instead of the
+identity record. The API key is read from the environment and scrubbed
+from logs and reports.
+
 BabelDOC and pdf2zh_next must be on PATH. ``rpt`` is taken from
 ``target/release`` or ``target/debug``. The identity server must already
 be listening. RapidPdfTrans still reads ``RPT_LLM_API_KEY`` from the
@@ -89,6 +94,14 @@ def pick_pdf(directory: Path) -> Path | None:
     return ranked[-1][2]
 
 
+def scrub(text: str) -> str:
+    """Drop the gateway key before a log or a report is written."""
+    secret = os.environ.get("RPT_LLM_API_KEY", "")
+    if secret:
+        text = text.replace(secret, "[redacted]")
+    return text
+
+
 def run_cmd(cmd: list[str], cwd: Path, log: Path, timeout: int) -> tuple[int, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -106,16 +119,27 @@ def run_cmd(cmd: list[str], cwd: Path, log: Path, timeout: int) -> tuple[int, st
         output = exc.stdout or ""
         if isinstance(output, bytes):
             output = output.decode("utf-8", "replace")
-        log.write_text(output + f"\nTIMEOUT after {timeout}s\n")
+        log.write_text(scrub(output + f"\nTIMEOUT after {timeout}s\n"))
         return 124, f"timeout after {timeout}s"
-    log.write_text(completed.stdout or "")
+    log.write_text(scrub(completed.stdout or ""))
     if completed.returncode != 0:
-        tail = (completed.stdout or "")[-1500:]
+        tail = scrub((completed.stdout or "")[-1500:])
         return completed.returncode, tail
     return 0, ""
 
 
-def translate_rpt(rpt: Path, source: Path, out_dir: Path, pages: int, timeout: int) -> tuple[Path | None, str]:
+def translate_rpt(
+    rpt: Path,
+    source: Path,
+    out_dir: Path,
+    pages: int,
+    timeout: int,
+    *,
+    base_url: str,
+    model: str,
+    batch_size: int,
+    jobs: int,
+) -> tuple[Path | None, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     output = out_dir / "translated.pdf"
     cmd = [
@@ -131,29 +155,43 @@ def translate_rpt(rpt: Path, source: Path, out_dir: Path, pages: int, timeout: i
         "--to",
         "zh",
         "--base-url",
-        "http://127.0.0.1:8765/v1",
+        base_url,
         "--model",
-        "identity",
+        model,
         "--batch-size",
-        "16",
+        str(batch_size),
+        "--jobs",
+        str(jobs),
     ]
     code, detail = run_cmd(cmd, out_dir, out_dir / "rpt.log", timeout)
-    if code != 0 or not output.exists():
-        return None, detail or f"rpt exit {code}"
-    return output, ""
+    # Coverage can fail after the PDF is saved. Score that file.
+    if output.exists() and output.stat().st_size > 0:
+        return output, ""
+    return None, detail or f"rpt exit {code}"
 
 
-def translate_babeldoc(binary: Path, source: Path, out_dir: Path, pages: int, timeout: int) -> tuple[Path | None, str]:
+def translate_babeldoc(
+    binary: Path,
+    source: Path,
+    out_dir: Path,
+    pages: int,
+    timeout: int,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    qps: int,
+) -> tuple[Path | None, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         str(binary),
         "--openai",
         "--openai-model",
-        "identity",
+        model,
         "--openai-base-url",
-        "http://127.0.0.1:8765/v1",
+        base_url,
         "--openai-api-key",
-        "local",
+        api_key,
         "--lang-in",
         "en",
         "--lang-out",
@@ -167,7 +205,7 @@ def translate_babeldoc(binary: Path, source: Path, out_dir: Path, pages: int, ti
         "--pages",
         f"1-{pages}",
         "--qps",
-        "16",
+        str(qps),
         "--primary-font-family",
         "serif",
         "--output",
@@ -179,23 +217,34 @@ def translate_babeldoc(binary: Path, source: Path, out_dir: Path, pages: int, ti
     ]
     code, detail = run_cmd(cmd, out_dir, out_dir / "babeldoc.log", timeout)
     pdf = pick_pdf(out_dir)
-    if code != 0 or pdf is None:
+    if pdf is None:
         return None, detail or f"babeldoc exit {code}"
     return pdf, ""
 
 
-def translate_pdf2zh(binary: Path, source: Path, out_dir: Path, pages: int, timeout: int) -> tuple[Path | None, str]:
+def translate_pdf2zh(
+    binary: Path,
+    source: Path,
+    out_dir: Path,
+    pages: int,
+    timeout: int,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    qps: int,
+) -> tuple[Path | None, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         str(binary),
         str(source),
         "--openai",
         "--openai-model",
-        "identity",
+        model,
         "--openai-base-url",
-        "http://127.0.0.1:8765/v1",
+        base_url,
         "--openai-api-key",
-        "local",
+        api_key,
         "--lang-in",
         "en",
         "--lang-out",
@@ -208,7 +257,7 @@ def translate_pdf2zh(binary: Path, source: Path, out_dir: Path, pages: int, time
         "--pages",
         f"1-{pages}",
         "--qps",
-        "16",
+        str(qps),
         "--primary-font-family",
         "serif",
         "--output",
@@ -216,7 +265,7 @@ def translate_pdf2zh(binary: Path, source: Path, out_dir: Path, pages: int, time
     ]
     code, detail = run_cmd(cmd, out_dir, out_dir / "pdf2zh.log", timeout)
     pdf = pick_pdf(out_dir)
-    if code != 0 or pdf is None:
+    if pdf is None:
         return None, detail or f"pdf2zh_next exit {code}"
     return pdf, ""
 
@@ -270,11 +319,17 @@ def markdown(payload: dict) -> str:
         "",
         f"Recorded {payload['recorded_at']} on commit `{payload['git']}`.",
         "",
-        "Each engine translated the same CI pages through the identity server "
-        f"(`{payload['translator']}`), limited to the first {payload['pages']} page(s). "
-        "The translator returns the source text, so these numbers measure layout "
-        "damage rather than translation quality. `identity_char_retention` near 1.0 "
-        "means the source characters survived.",
+        "Each engine translated the same CI pages through "
+        f"`{payload['translator']}`, limited to the first {payload['pages']} page(s). "
+        + (
+            "The model is the shared gateway (`auto`). "
+            "`identity_char_retention` near 1.0 means the source characters survived; "
+            "a real translation is expected to score lower there."
+            if payload.get("kind") == "live-head-to-head"
+            else "The translator returns the source text, so these numbers measure layout "
+            "damage rather than translation quality. `identity_char_retention` near 1.0 "
+            "means the source characters survived."
+        ),
         "",
         "BabelDOC is 0.6.x (`babeldoc`). PDFMathTranslate is pdf2zh_next 2.9.0. "
         "Both use `--primary-font-family serif`, `--no-dual`, and no watermark. "
@@ -344,6 +399,16 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=1200)
     parser.add_argument("--work", default="/tmp/rpt-compete")
     parser.add_argument("--engines", default=",".join(ENGINES))
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="translate through the shared gateway (model auto) instead of the identity server",
+    )
+    parser.add_argument(
+        "--ids",
+        default="",
+        help="comma-separated corpus ids; live defaults to three CI papers",
+    )
     args = parser.parse_args()
     engines = [name for name in args.engines.split(",") if name]
     rpt = find_bin("rpt")
@@ -365,8 +430,37 @@ def main() -> int:
         print("RPT_LLM_API_KEY is required for rpt translate", file=sys.stderr)
         return 2
 
+    live = args.live
+    base_url = (
+        os.environ.get("RPT_LLM_BASE_URL", "https://hub.mypapers.top/api/llm/v1")
+        if live
+        else "http://127.0.0.1:8765/v1"
+    )
+    model = "auto" if live else "identity"
+    api_key = os.environ.get("RPT_LLM_API_KEY", "") if live else "local"
+    batch_size = 1 if live else 16
+    jobs = 1 if live else 1
+    qps = 2 if live else 16
+    if live and not api_key:
+        print("RPT_LLM_API_KEY is required for a live run", file=sys.stderr)
+        return 2
+
     manifest = ROOT / args.manifest
     docs = load_docs(manifest)
+    wanted = [item.strip() for item in args.ids.split(",") if item.strip()]
+    if live and not wanted:
+        wanted = [
+            "arxiv-2610.02163",
+            "pmlr-v202-abbas23a",
+            "neurips-2023-00296c0e",
+        ]
+    if wanted:
+        by_id = {doc["id"]: doc for doc in docs}
+        missing = [item for item in wanted if item not in by_id]
+        if missing:
+            print("unknown ids:", ", ".join(missing), file=sys.stderr)
+            return 2
+        docs = [by_id[item] for item in wanted]
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
@@ -388,15 +482,46 @@ def main() -> int:
             print(f"== {engine} {doc['id']}", flush=True)
             try:
                 if engine == "rapidpdftrans":
-                    pdf, detail = translate_rpt(rpt, source, out_dir, args.pages, args.timeout)
+                    pdf, detail = translate_rpt(
+                        rpt,
+                        source,
+                        out_dir,
+                        args.pages,
+                        args.timeout,
+                        base_url=base_url,
+                        model=model,
+                        batch_size=batch_size,
+                        jobs=jobs,
+                    )
                 elif engine == "babeldoc":
-                    pdf, detail = translate_babeldoc(babeldoc, source, out_dir, args.pages, args.timeout)
+                    pdf, detail = translate_babeldoc(
+                        babeldoc,
+                        source,
+                        out_dir,
+                        args.pages,
+                        args.timeout,
+                        base_url=base_url,
+                        model=model,
+                        api_key=api_key,
+                        qps=qps,
+                    )
                 elif engine == "pdf2zh_next":
-                    pdf, detail = translate_pdf2zh(pdf2zh, source, out_dir, args.pages, args.timeout)
+                    pdf, detail = translate_pdf2zh(
+                        pdf2zh,
+                        source,
+                        out_dir,
+                        args.pages,
+                        args.timeout,
+                        base_url=base_url,
+                        model=model,
+                        api_key=api_key,
+                        qps=qps,
+                    )
                 else:
                     pdf, detail = None, f"unknown engine {engine}"
             except Exception as exc:  # noqa: BLE001
                 pdf, detail = None, str(exc)
+            detail = scrub(detail or "")
             if pdf is None:
                 print(f"   failed: {detail[-200:]}", flush=True)
                 rows.append(
@@ -450,8 +575,8 @@ def main() -> int:
     payload = {
         "recorded_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "git": git_head(),
-        "kind": "head-to-head",
-        "translator": "identity http://127.0.0.1:8765/v1",
+        "kind": "live-head-to-head" if live else "head-to-head",
+        "translator": f"gateway {base_url} model {model}" if live else "identity http://127.0.0.1:8765/v1",
         "pages": args.pages,
         "engines": engines,
         "versions": {
@@ -465,13 +590,19 @@ def main() -> int:
     bench_dir = ROOT / "corpus" / "benchmarks"
     bench_dir.mkdir(parents=True, exist_ok=True)
     stamp = payload["recorded_at"].replace(":", "").replace("-", "")
-    run_path = bench_dir / "runs" / f"{stamp}-engines.json"
+    suffix = "live" if live else "engines"
+    run_path = bench_dir / "runs" / f"{stamp}-{suffix}.json"
     run_path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2) + "\n"
+    text = scrub(json.dumps(payload, indent=2) + "\n")
+    report = scrub(markdown(payload))
     run_path.write_text(text)
-    (bench_dir / "head-to-head.json").write_text(text)
-    (bench_dir / "head-to-head.md").write_text(markdown(payload))
-    (bench_dir / "latest.md").write_text(markdown(payload))
+    if live:
+        (bench_dir / "live-head-to-head.json").write_text(text)
+        (bench_dir / "live-head-to-head.md").write_text(report)
+    else:
+        (bench_dir / "head-to-head.json").write_text(text)
+        (bench_dir / "head-to-head.md").write_text(report)
+        (bench_dir / "latest.md").write_text(report)
     history = {
         "recorded_at": payload["recorded_at"],
         "git": payload["git"],
