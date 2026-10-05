@@ -715,7 +715,8 @@ fn import_object(
 }
 
 /// A sentence that contains a symbol (`edge ij with c > 0`) is body text.
-/// A display equation has more math glyphs than words.
+/// A display equation has more math glyphs than words. A one-line equation
+/// that also says "and define" or "for some f" is still that equation.
 fn prose_carries_inline_math(glyphs: &[&Glyph]) -> bool {
     let mut letters = 0usize;
     let mut formula = 0usize;
@@ -732,7 +733,26 @@ fn prose_carries_inline_math(glyphs: &[&Glyph]) -> bool {
                 .count();
         }
     }
-    letters >= 16 && other > formula
+    if letters < 16 || other <= formula {
+        return false;
+    }
+    if formula >= 8 && letters < 40 && one_baseline(glyphs) {
+        return false;
+    }
+    true
+}
+
+fn one_baseline(glyphs: &[&Glyph]) -> bool {
+    let mut ys: Vec<f32> = glyphs.iter().map(|glyph| glyph.matrix[5]).collect();
+    if ys.is_empty() {
+        return false;
+    }
+    ys.sort_by(|left, right| left.total_cmp(right));
+    let size = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    ys[ys.len() - 1] - ys[0] <= size * 0.7
 }
 
 fn keep_contains(glyph: &Glyph) -> bool {
@@ -3347,6 +3367,89 @@ mod tests {
         assert!(text.contains("AB"), "{text}");
         assert!(text.contains("References"), "{text}");
         assert!(!text.contains("Hello"), "{text}");
+    }
+
+    fn math_glyph(id: u32, x: f32, y: f32, text: &str, math: bool) -> Glyph {
+        Glyph {
+            id,
+            page_index: 0,
+            unicode: text.into(),
+            unmapped: false,
+            char_code: vec![b'A'],
+            gid: None,
+            font_resource: "F1".into(),
+            font_name: if math {
+                "CMMI10".into()
+            } else {
+                "NimbusRomNo9L-Regu".into()
+            },
+            font_object: None,
+            font_size: 10.0,
+            matrix: [10.0, 0.0, 0.0, 10.0, x, y],
+            bbox: [x, y, x + 6.0, y + 8.0],
+            advance: [6.0, 0.0],
+            fill_color: Color::black(),
+            stroke_color: Color::black(),
+            render_mode: 0,
+            invisible: false,
+            clipped: false,
+            clip_uncertain: false,
+            vertical: false,
+            disposition: Disposition::Pending,
+            source: GlyphSource {
+                kind: SourceKind::PageContent,
+                object_id: None,
+                stream_index: 0,
+                operator_index: 0,
+                byte_start: 0,
+                byte_end: 1,
+                resource_name: Some("F1".into()),
+            },
+        }
+    }
+
+    #[test]
+    fn a_one_line_equation_with_a_few_words_stays_a_formula() {
+        let mut glyphs = Vec::new();
+        let words = "and define the bound";
+        for (index, ch) in words.chars().enumerate() {
+            glyphs.push(math_glyph(
+                index as u32,
+                72.0 + index as f32 * 6.0,
+                400.0,
+                &ch.to_string(),
+                false,
+            ));
+        }
+        for index in 0..10 {
+            glyphs.push(math_glyph(
+                100 + index,
+                220.0 + index as f32 * 8.0,
+                400.0,
+                "x",
+                true,
+            ));
+        }
+        assert!(
+            !prose_carries_inline_math(&glyphs.iter().collect::<Vec<_>>()),
+            "the equation should stay original"
+        );
+        let mut sentence = Vec::new();
+        let body = "The method uses a bound and then compares the two estimates carefully.";
+        for (index, ch) in body.chars().enumerate() {
+            sentence.push(math_glyph(
+                index as u32,
+                72.0 + (index % 40) as f32 * 6.0,
+                500.0 - (index / 40) as f32 * 14.0,
+                &ch.to_string(),
+                false,
+            ));
+        }
+        sentence.push(math_glyph(400, 200.0, 500.0, "x", true));
+        assert!(
+            prose_carries_inline_math(&sentence.iter().collect::<Vec<_>>()),
+            "a sentence with one symbol is still prose"
+        );
     }
 
     #[test]

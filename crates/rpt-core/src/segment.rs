@@ -1733,7 +1733,12 @@ fn is_margin_strip(para: &[VisualLine<'_>]) -> bool {
 
 /// The next block keeps this sentence: it starts lowercase, or it finishes a
 /// hyphenated word. A sentence that already ended stays in its own paragraph.
+/// A display equation at the top of the next column, or at the bottom of this
+/// page, is not that continuation.
 fn prose_continues(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if line_has_formula(upper) || line_has_formula(lower) {
+        return false;
+    }
     let size = upper.size.max(lower.size).max(1.0);
     if (upper.size - lower.size).abs() > size * 0.35 {
         return false;
@@ -3547,6 +3552,101 @@ mod tests {
                 tail.ends_with("over-") || tail.ends_with("MetaMath-")
             })
         );
+    }
+
+    #[test]
+    fn a_display_equation_is_not_the_next_column() {
+        let mut left = glyph(0, 72.0, 80.0, "we run the base agent on", false);
+        left.font_size = 10.0;
+        let mut formula = glyph(1, 320.0, 700.0, "for any t in the open interval k", false);
+        formula.font_name = "CMMI10".into();
+        formula.font_size = 10.0;
+        let texts: Vec<_> = segment_glyphs(&[left, formula])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("base agent")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("open interval") && !text.contains("base agent")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("base agent") && text.contains("open interval")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_display_equation_does_not_open_the_next_page() {
+        let mut formula = glyph(0, 72.0, 70.0, "alpha equals the minimum of both", false);
+        formula.page_index = 0;
+        formula.font_name = "CMMI10".into();
+        formula.font_size = 10.0;
+        let mut prose = glyph(
+            1,
+            72.0,
+            700.0,
+            "the next page starts the following paragraph.",
+            false,
+        );
+        prose.page_index = 1;
+        prose.font_size = 10.0;
+        let texts: Vec<_> = segment_glyphs(&[formula, prose])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts.iter().any(|text| text.contains("minimum of both")));
+        assert!(texts
+            .iter()
+            .any(|text| text.contains("following paragraph")));
+    }
+
+    #[test]
+    fn display_equations_stay_out_of_the_surrounding_prose() {
+        let cases = [
+            (
+                "neurips-2023-00296c0e",
+                "triangular inequality",
+                "for any t",
+            ),
+            ("neurips-2023-00296c0e", "baseline method", "α"),
+            ("pmlr-v202-abbas23a", "k-nearest neighbours", "⟨fi"),
+        ];
+        for (name, prose, formula) in cases {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../corpus/ci/{name}.pdf"));
+            if !path.exists() {
+                continue;
+            }
+            let doc = crate::extract::PdfDocument::open(&path).unwrap();
+            let extraction = doc.extract();
+            let seg = segment_placed(
+                &extraction.glyphs,
+                &SegmentFlags::default(),
+                &extraction.regions,
+                &extraction.pages,
+            );
+            assert!(
+                seg.segments.iter().any(|item| item.text.contains(formula)),
+                "{name} lost the equation"
+            );
+            if let Some(item) = seg
+                .segments
+                .iter()
+                .find(|item| item.text.contains(prose) && item.text.contains(formula))
+            {
+                let sample: String = item.text.chars().take(180).collect();
+                panic!("{name} glued {formula:?} into {prose:?}: {sample}");
+            }
+        }
     }
 
     #[test]
