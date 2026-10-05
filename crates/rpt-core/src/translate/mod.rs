@@ -637,6 +637,11 @@ fn load_checkpoint(
             continue;
         }
         if let Some(done) = cache.get(&seg.text) {
+            // A cached echo of a body paragraph is not a translation. Leave it
+            // for the model, which retries once when the reply is still English.
+            if needs_english_retry(&seg.text, done) {
+                continue;
+            }
             translated[index] = Some(done.clone());
             hits += 1;
         }
@@ -949,14 +954,16 @@ fn url_char_mask(chars: &[char]) -> Vec<bool> {
     mask
 }
 
-/// A body paragraph the model echoed. Short lines, names, and any Chinese stay.
+/// A body paragraph the model echoed. Lines under 40 letters match the
+/// coverage check, so a shorter heading is not sent again. Names and any
+/// Chinese stay.
 fn needs_english_retry(source: &str, translated: &str) -> bool {
     let source = source.trim();
     let translated = translated.trim();
     if cjk_count(source) > 0 || cjk_count(translated) > 0 {
         return false;
     }
-    if latin_letters(source) < 80 || latin_letters(translated) < 80 {
+    if latin_letters(source) < 40 || latin_letters(translated) < 40 {
         return false;
     }
     let only_url = source.split_whitespace().all(|word| {
@@ -1428,6 +1435,19 @@ mod tests {
         );
         assert_ne!(report.segments[0].translated, source);
         assert!(report.calls >= 2, "calls={}", report.calls);
+    }
+
+    #[test]
+    fn a_body_echo_is_retried_and_a_short_heading_is_not() {
+        let body = "Graph-based clustering approaches, primarily among them multicut, are theoretically appealing.";
+        assert!(needs_english_retry(body, body));
+        assert!(!needs_english_retry(
+            body,
+            "基于图的聚类方法在理论上很有吸引力。"
+        ));
+        let header = "Clustering Fully connected Graphs by Multicut";
+        assert!(needs_english_retry(header, header), "{header}");
+        assert!(!needs_english_retry("Introduction", "Introduction"));
     }
 
     struct EchoThenChinese;
