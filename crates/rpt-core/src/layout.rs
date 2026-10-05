@@ -311,7 +311,14 @@ pub(crate) fn fit_cjk_block(
     metrics: CjkMeasure,
 ) -> Option<(Vec<String>, f32, f32, f32)> {
     let start = (source_size * scale).max(1.0);
-    let floor = (start * 0.78).max(source_size * 0.62).min(start);
+    // A one-line source has no second baseline to wrap onto. Shrink further
+    // so a slightly wider translation still paints, instead of leaving English.
+    let single_line = available <= 0.5;
+    let floor = if single_line {
+        (source_size * 0.62).min(start)
+    } else {
+        (start * 0.78).max(source_size * 0.62).min(start)
+    };
     let mut size = start;
     loop {
         let indent = size * indent_ems;

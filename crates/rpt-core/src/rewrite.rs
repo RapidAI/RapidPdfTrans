@@ -65,6 +65,9 @@ struct Drawn {
     resource: String,
     skew: f32,
     text: String,
+    /// Source glyphs this draw replaces. Used to drop a draw when its operator
+    /// cannot be blanked.
+    glyph_ids: Vec<u32>,
     /// User-space advance of each character.
     widths: Vec<f32>,
     /// Extra user-space gap after each character except the last.
@@ -113,6 +116,7 @@ pub fn rewrite_translation(
 
     let mut planned: Vec<(usize, String)> = Vec::new();
     let owners = operator_owners(&extraction.glyphs);
+    let mut toc_redraw: HashSet<u32> = HashSet::new();
     // An identity pass echoes every segment. Leftover English is a QA failure
     // only when this job actually produced Chinese for some other segment.
     let job_translates = report
@@ -158,10 +162,17 @@ pub fn rewrite_translation(
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
             .collect();
         if !operators_are_private(&glyphs, &owners) {
-            for id in &segment.glyph_ids {
-                keep.insert(*id, "shared-operator".into());
+            // A contents title shares its text operator with the leader dots and
+            // the page number. Blank the operator, draw the translation in the
+            // title box, and put the dots and page number back where they were.
+            if let Some(companions) = toc_companion_ids(&glyphs, &owners, extraction, &by_id) {
+                toc_redraw.extend(companions);
+            } else {
+                for id in &segment.glyph_ids {
+                    keep.insert(*id, "shared-operator".into());
+                }
+                continue;
             }
-            continue;
         }
         if segment.translated == segment.source {
             let reason = if job_translates && english_body_source(&segment.source) {
@@ -193,8 +204,18 @@ pub fn rewrite_translation(
     let mut drawn = Vec::new();
     let mut succeeded: HashSet<u32> = HashSet::new();
     let mut embedded: Vec<(String, SubsetFont)> = Vec::new();
+    let toc_chars: String = toc_redraw
+        .iter()
+        .filter_map(|id| extraction.glyphs.get(by_id[id]))
+        .map(|glyph| glyph.unicode.as_str())
+        .collect();
     if let Some(font_bytes) = opts.font_bytes.clone() {
-        let chars = cover_with_fallbacks(planned.iter().flat_map(|(_, text)| text.chars()));
+        let chars = cover_with_fallbacks(
+            planned
+                .iter()
+                .flat_map(|(_, text)| text.chars())
+                .chain(toc_chars.chars()),
+        );
         if let Some(font) = subset_ttf(&font_bytes, &chars) {
             place_segments(
                 &planned,
@@ -243,7 +264,12 @@ pub fn rewrite_translation(
         }
         let mut slot = 0u32;
         for (style, group) in groups {
-            let chars = cover_with_fallbacks(group.iter().flat_map(|(_, text)| text.chars()));
+            let chars = cover_with_fallbacks(
+                group
+                    .iter()
+                    .flat_map(|(_, text)| text.chars())
+                    .chain(toc_chars.chars()),
+            );
             let Some(font) = subset_for_style(
                 style,
                 &chars,
@@ -280,6 +306,16 @@ pub fn rewrite_translation(
         }
     }
 
+    commit_toc_operators(
+        &owners,
+        &toc_redraw,
+        &mut succeeded,
+        &mut keep,
+        &mut drawn,
+        extraction,
+        &by_id,
+        &embedded,
+    );
     let mut spans = Vec::new();
     if !overlay {
         for id in &succeeded {
@@ -754,6 +790,181 @@ fn operators_are_private(
     true
 }
 
+/// Glyphs that share an operator with `segment` and are contents marks
+/// (leader dots or a page number) already kept as `toc`.
+fn toc_companion_ids(
+    segment: &[&Glyph],
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Option<Vec<u32>> {
+    let inside: HashSet<u32> = segment.iter().map(|glyph| glyph.id).collect();
+    let mut foreign = Vec::new();
+    for glyph in segment {
+        let span = span_of(&glyph.source)?;
+        let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+        let ids = owners.get(&key)?;
+        for id in ids {
+            if !inside.contains(id) && !foreign.contains(id) {
+                foreign.push(*id);
+            }
+        }
+    }
+    if foreign.is_empty() {
+        return None;
+    }
+    let toc = foreign.iter().all(|id| {
+        extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
+            matches!(
+                &glyph.disposition,
+                Disposition::KeptOriginal { reason } if reason == "toc"
+            )
+        })
+    });
+    if toc {
+        Some(foreign)
+    } else {
+        None
+    }
+}
+
+/// Drop draws whose operator still contains ink we are not redrawing, then
+/// paint kept contents marks back at their source positions.
+fn commit_toc_operators(
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+    toc_redraw: &HashSet<u32>,
+    succeeded: &mut HashSet<u32>,
+    keep: &mut HashMap<u32, String>,
+    drawn: &mut Vec<Drawn>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+) {
+    let mut blocked = HashSet::new();
+    for ids in owners.values() {
+        let live: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|id| succeeded.contains(id) && !keep.contains_key(id))
+            .collect();
+        if live.is_empty() {
+            continue;
+        }
+        let toc_ok = ids.iter().filter(|id| toc_redraw.contains(*id)).all(|id| {
+            extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
+                embedded
+                    .iter()
+                    .any(|(_, font)| glyph_chars_covered(glyph, font))
+            })
+        });
+        let unsafe_ink = !toc_ok
+            || ids
+                .iter()
+                .any(|id| !live.contains(id) && !toc_redraw.contains(id));
+        if unsafe_ink {
+            blocked.extend(live);
+        }
+    }
+    for id in &blocked {
+        succeeded.remove(id);
+        keep.insert(*id, "shared-operator".into());
+    }
+    drawn.retain(|item| {
+        item.glyph_ids
+            .iter()
+            .any(|id| succeeded.contains(id) && !keep.contains_key(id))
+    });
+    let mut live_ops = HashSet::new();
+    for glyph in &extraction.glyphs {
+        if succeeded.contains(&glyph.id) && !keep.contains_key(&glyph.id) {
+            if let Some(span) = span_of(&glyph.source) {
+                live_ops.insert((span.object_id.0, span.object_id.1, span.start, span.end));
+            }
+        }
+    }
+    let mut restored = Vec::new();
+    for id in toc_redraw {
+        let Some(glyph) = extraction.glyphs.get(by_id[id]) else {
+            continue;
+        };
+        let Some(span) = span_of(&glyph.source) else {
+            continue;
+        };
+        let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+        if !live_ops.contains(&key) {
+            continue;
+        }
+        let Some((resource, font)) = font_for_page(glyph.page_index, glyph, embedded, drawn) else {
+            continue;
+        };
+        if let Some(item) = draw_toc_glyph(glyph, font, resource) {
+            restored.push(item);
+        }
+    }
+    drawn.extend(restored);
+}
+
+fn glyph_chars_covered(glyph: &Glyph, font: &SubsetFont) -> bool {
+    let text = glyph.unicode.trim();
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|ch| font.glyphs.contains_key(&(ch as u32)))
+}
+
+fn font_for_page<'a>(
+    page: u32,
+    glyph: &Glyph,
+    embedded: &'a [(String, SubsetFont)],
+    drawn: &[Drawn],
+) -> Option<(&'a str, &'a SubsetFont)> {
+    let preferred = drawn
+        .iter()
+        .find(|item| item.page == page)
+        .map(|item| item.resource.as_str());
+    if let Some(name) = preferred {
+        if let Some((resource, font)) = embedded.iter().find(|(resource, _)| resource == name) {
+            if glyph_chars_covered(glyph, font) {
+                return Some((resource.as_str(), font));
+            }
+        }
+    }
+    embedded
+        .iter()
+        .find(|(_, font)| glyph_chars_covered(glyph, font))
+        .map(|(resource, font)| (resource.as_str(), font))
+}
+
+fn draw_toc_glyph(glyph: &Glyph, font: &SubsetFont, resource: &str) -> Option<Drawn> {
+    let text: String = glyph
+        .unicode
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if text.is_empty() || !glyph_chars_covered(glyph, font) {
+        return None;
+    }
+    let supers = vec![false; text.chars().count()];
+    let size = glyph.font_size.max(1.0);
+    Some(Drawn {
+        page: glyph.page_index,
+        x: glyph.matrix[4],
+        y: glyph.matrix[5],
+        size,
+        color: glyph.fill_color.clone(),
+        cids: cids_of(&text, font),
+        resource: resource.to_string(),
+        skew: 0.0,
+        widths: widths_with_superscripts(&text, size, font, &supers, None),
+        gaps: vec![0.0; text.chars().count().saturating_sub(1)],
+        text,
+        supers,
+        sup_scale: 1.0,
+        sup_rise: 0.0,
+        glyph_ids: vec![glyph.id],
+    })
+}
+
 fn span_of(source: &GlyphSource) -> Option<Span> {
     let id = source.object_id.as_deref()?;
     let mut parts = id.split_whitespace();
@@ -809,6 +1020,35 @@ fn blank_operators(doc: &mut Document, spans: &[Span]) -> std::result::Result<()
     Ok(())
 }
 
+fn is_folio_segment(glyphs: &[&Glyph]) -> bool {
+    if glyphs.is_empty() {
+        return false;
+    }
+    let text: String = glyphs.iter().map(|glyph| glyph.unicode.as_str()).collect();
+    let text = text.trim();
+    let digits = !text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit()) && text.len() <= 3;
+    let roman = text.chars().count() >= 2
+        && text.chars().count() <= 6
+        && text.chars().all(|ch| {
+            matches!(
+                ch.to_ascii_lowercase(),
+                'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
+            )
+        });
+    if !digits && !roman {
+        return false;
+    }
+    let left = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min);
+    let right = glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]))
+        .fold(left, f32::max);
+    right - left <= 48.0
+}
+
 fn place_segments(
     planned: &[(usize, String)],
     font: &SubsetFont,
@@ -843,6 +1083,10 @@ fn place_segments(
                     .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
                 {
                     "missing-glyph"
+                } else if is_folio_segment(&glyphs) {
+                    // `xvi` translated to 十六 does not fit the folio box.
+                    // Leave the printed page number.
+                    "folio"
                 } else {
                     "overflow"
                 };
@@ -1114,6 +1358,7 @@ fn layout_segment(
                     supers,
                     sup_scale: sup.as_ref().map(|item| item.scale).unwrap_or(1.0),
                     sup_rise: sup.as_ref().map(|item| item.rise).unwrap_or(0.0),
+                    glyph_ids: glyphs.iter().map(|glyph| glyph.id).collect(),
                 }
             })
             .collect(),
@@ -1284,6 +1529,7 @@ fn layout_across_pages(
                 supers,
                 sup_scale: sup.as_ref().map(|item| item.scale).unwrap_or(1.0),
                 sup_rise: sup.as_ref().map(|item| item.rise).unwrap_or(0.0),
+                glyph_ids: glyphs.iter().map(|glyph| glyph.id).collect(),
             });
             first_line = false;
         }
@@ -3866,5 +4112,118 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
         }
+    }
+
+    #[test]
+    fn a_contents_title_is_translated_and_the_page_number_stays() {
+        let bytes = toc_row_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let title = segmentation
+            .segments
+            .iter()
+            .find(|seg| seg.text.contains("Introduction"))
+            .expect("title");
+        assert!(
+            !title.text.contains('3') && !title.text.contains('.'),
+            "{}",
+            title.text
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let report = TranslateReport {
+            segments: vec![TranslatedSegment {
+                id: title.id,
+                page_index: title.page_index,
+                glyph_ids: title.glyph_ids.clone(),
+                source: title.text.clone(),
+                translated: "简介".into(),
+            }],
+            calls: 0,
+            cache_hits: 0,
+        };
+        let font = box_ttf(
+            &"简介3."
+                .chars()
+                .map(|ch| ch as u32)
+                .chain(std::iter::once('.' as u32))
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            extraction.assert_complete().is_ok(),
+            "{:?}",
+            extraction.coverage_report()
+        );
+        let saved = doc.save_bytes().unwrap();
+        let text = PdfDocument::open_bytes(&saved)
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(text.contains("简介"), "{text}");
+        assert!(text.contains('3'), "{text}");
+        assert!(!text.contains("Introduction"), "{text}");
+    }
+
+    fn toc_row_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let content =
+            b"BT /F1 12 Tf 72 700 Td [(Introduction to AI agents) -4000 (........) -200 (3)] TJ ET"
+                .to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
     }
 }

@@ -335,7 +335,81 @@ fn toc_mark_glyphs(line: &VisualLine<'_>) -> Vec<u32> {
         }
         keep.extend(token.ids.iter().copied());
     }
+    // `.......1` is one token when the page number sits against the dots.
+    for id in toc_leader_suffix(&line.glyphs) {
+        if !keep.contains(&id) {
+            keep.push(id);
+        }
+    }
     keep
+}
+
+/// Leader dots at the right edge, plus a page number glued to them.
+fn toc_leader_suffix(glyphs: &[&Glyph]) -> Vec<u32> {
+    let mut ordered = glyphs.to_vec();
+    ordered.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
+    let mut index = ordered.len();
+    while index > 0 && ordered[index - 1].unicode.trim().is_empty() {
+        index -= 1;
+    }
+    let page_end = index;
+    let mut page = String::new();
+    let mut page_start = index;
+    while page_start > 0 {
+        let piece = ordered[page_start - 1].unicode.trim();
+        if piece.is_empty() {
+            break;
+        }
+        let next = format!("{piece}{page}");
+        if is_page_prefix(&next) {
+            page = next;
+            page_start -= 1;
+            continue;
+        }
+        break;
+    }
+    let page_ok = is_toc_page_token(&page);
+    let dots_end = if page_ok { page_start } else { page_end };
+    let mut dots_start = dots_end;
+    let mut dot_chars = 0usize;
+    while dots_start > 0 {
+        let text = ordered[dots_start - 1].unicode.trim();
+        if text.is_empty() {
+            dots_start -= 1;
+            continue;
+        }
+        if text.chars().all(is_leader_dot) {
+            dot_chars += text.chars().filter(|ch| is_leader_dot(*ch)).count();
+            dots_start -= 1;
+            continue;
+        }
+        break;
+    }
+    if dot_chars < 4 {
+        return Vec::new();
+    }
+    let end = if page_ok { page_end } else { dots_end };
+    ordered[dots_start..end]
+        .iter()
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .map(|glyph| glyph.id)
+        .collect()
+}
+
+fn is_page_prefix(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 6 {
+        return false;
+    }
+    if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return text.len() <= 3;
+    }
+    text.chars().all(|ch| {
+        matches!(
+            ch.to_ascii_lowercase(),
+            'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
+        )
+    })
 }
 
 struct LineToken {
@@ -3015,6 +3089,36 @@ mod tests {
                 .any(|text| text.contains("appendix B") && !text.contains("appendix A")),
             "{texts:?}"
         );
+        let glued = segment_with(
+            &[
+                block(
+                    0,
+                    90.0,
+                    400.0,
+                    170.0,
+                    10.0,
+                    "PART 1 GETTING STARTED WITH LLMS",
+                ),
+                block(1, 272.0, 400.0, 140.0, 10.0, "...................."),
+                block(2, 414.0, 400.0, 8.0, 10.0, "1"),
+            ],
+            &SegmentFlags::default(),
+        );
+        let glued_text: Vec<_> = glued
+            .segments
+            .iter()
+            .map(|item| item.text.clone())
+            .collect();
+        assert!(
+            glued_text
+                .iter()
+                .any(|text| text.contains("GETTING STARTED")
+                    && !text.contains('.')
+                    && !text.ends_with('1')),
+            "{glued_text:?}"
+        );
+        assert!(glued.kept.iter().any(|(id, _)| *id == 1));
+        assert!(glued.kept.iter().any(|(id, _)| *id == 2));
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
         for id in [1, 2, 4, 6, 8, 10] {
             assert!(
