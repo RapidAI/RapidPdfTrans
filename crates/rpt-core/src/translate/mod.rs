@@ -28,6 +28,7 @@ pub use google::GoogleTranslator;
 pub use llm::LlmTranslator;
 pub use protect::citation_end;
 pub use references::{identical_reference_operators, reference_glyph_ids, reference_stream_spans};
+pub(crate) use segment::is_inline_math_symbol;
 pub use segment::Segment;
 
 use crate::error::{Error, Result};

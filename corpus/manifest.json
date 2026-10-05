@@ -1625,6 +1625,23 @@
         "theory"
       ],
       "ci": false
+    },
+    {
+      "id": "arxiv-2610.03702",
+      "url": "https://arxiv.org/pdf/2610.03702.pdf",
+      "source": "arxiv",
+      "title": "LESSER: Post-Training Data Selection with Output-Layer Gradients",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "1494eec02691d4a0a34a83834adb8b8f4a473271f63ba5a1ca7aad57b443a570",
+      "bytes": 506539,
+      "pages": 25,
+      "tags": [
+        "arxiv",
+        "latex",
+        "ml",
+        "two-column"
+      ],
+      "ci": false
     }
   ]
 }

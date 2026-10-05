@@ -641,7 +641,9 @@ fn dominant_body_font(lines: &[VisualLine<'_>], page: u32) -> String {
 
 fn is_body_shape(line: &VisualLine<'_>) -> bool {
     let letters = line.text.chars().filter(|ch| ch.is_alphabetic()).count();
-    letters >= 45 && line.right - line.left >= 160.0
+    // The last line of a paragraph is shorter than the lines above it. 24
+    // letters still beats a figure label, which is a few words in a narrow box.
+    letters >= 24 && line.right - line.left >= 160.0
 }
 
 fn is_body_barrier(line: &VisualLine<'_>, body_font: &str) -> bool {
@@ -807,8 +809,9 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if upper.page != lower.page {
         return false;
     }
-    // An inline formula keeps its whole segment. Joining it onto the prose
-    // around it would leave that prose untranslated.
+    // A display formula keeps its whole segment. Joining it onto the prose
+    // around it would leave that prose untranslated. A times sign or a
+    // decimal point in an otherwise ordinary sentence does not.
     if line_has_formula(upper) || line_has_formula(lower) {
         return false;
     }
@@ -861,8 +864,50 @@ fn line_has_formula(line: &VisualLine<'_>) -> bool {
         math && !matches!(
             glyph.unicode.trim(),
             "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
-        )
+        ) && !is_inline_math_symbol(&glyph.unicode)
     })
+}
+
+/// Operators and digits that a CJK body font can redraw. They show up in
+/// TeX as one-glyph math fonts (`$9.7\times$`) inside a prose line.
+pub(crate) fn is_inline_math_symbol(text: &str) -> bool {
+    let mut chars = text.trim().chars();
+    let Some(ch) = chars.next() else {
+        return false;
+    };
+    if chars.next().is_some() {
+        return false;
+    }
+    matches!(
+        ch,
+        '.' | ','
+            | ':'
+            | ';'
+            | '+'
+            | '-'
+            | '='
+            | '/'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '×'
+            | '·'
+            | '±'
+            | '≤'
+            | '≥'
+            | '≈'
+            | '≠'
+            | '∞'
+            | '°'
+            | '%'
+            | '<'
+            | '>'
+            | '−'
+            | '–'
+            | '—'
+            | '0'..='9'
+    )
 }
 
 fn soft_hyphen_stem(text: &str) -> Option<&str> {
@@ -1480,6 +1525,95 @@ mod tests {
             texts.iter().any(|text| text.starts_with("The following")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn a_prose_line_with_a_times_sign_joins_the_paragraph() {
+        let mut above = wide(
+            0,
+            72.0,
+            500.0,
+            "We implement this as LESSER, a wrapper that reduces",
+            400.0,
+            10.0,
+        );
+        above.font_name = "NimbusRomNo9L-Regu".into();
+        let mut words = wide(
+            1,
+            72.0,
+            488.0,
+            "the feature-extraction FLOP cost by 9.7",
+            250.0,
+            10.0,
+        );
+        words.font_name = "NimbusRomNo9L-Regu".into();
+        let mut times = wide(2, 320.0, 488.0, "×", 8.0, 10.0);
+        times.font_name = "CMSY10".into();
+        let mut tail = wide(
+            3,
+            330.0,
+            488.0,
+            "for SFT and for RL benchmarks,",
+            120.0,
+            10.0,
+        );
+        tail.font_name = "NimbusRomNo9L-Regu".into();
+        let mut below = wide(
+            4,
+            72.0,
+            476.0,
+            "while tracking full-gradient performance on downstream tasks.",
+            380.0,
+            10.0,
+        );
+        below.font_name = "NimbusRomNo9L-Regu".into();
+        let seg = segment_with(
+            &[above, words, times, tail, below],
+            &SegmentFlags::default(),
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("LESSER")
+                && text.contains('×')
+                && text.contains("downstream")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_last_line_above_a_figure_stays_body_text() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let last = "ently, they select batches with aligned gradients.";
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(1, 72.0, 688.0, last, 280.0, 10.0),
+            wide(2, 90.0, 640.0, "USER PROMPT", 55.0, 9.0),
+            wide(
+                3,
+                72.0,
+                560.0,
+                "Figure 1: A diagram of the system and its parts.",
+                360.0,
+                10.0,
+            ),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("aligned gradients")),
+            "{texts:?} kept={:?}",
+            seg.kept
+        );
+        assert!(
+            !seg.kept.iter().any(|(id, _)| *id == 1),
+            "last body line was claimed as a figure: {:?}",
+            seg.kept
+        );
+        assert!(seg
+            .kept
+            .iter()
+            .any(|(id, reason)| *id == 2 && reason == "figure"));
     }
 
     #[test]

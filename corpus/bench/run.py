@@ -51,8 +51,8 @@ def engine_notes() -> list[dict]:
     notes = [
         {
             "engine": "rapidpdftrans",
-            "status": "no_translated_pdf",
-            "detail": "rpt_save still returns 'PDF rewriting is not implemented (milestone M3)'. Output metrics are not available.",
+            "status": "writes_pdf",
+            "detail": "rpt translate writes a PDF. Head-to-head scores are corpus/benchmarks/head-to-head.md.",
         }
     ]
     for name in ENGINES:
@@ -82,7 +82,7 @@ def markdown(payload: dict) -> str:
         "",
         f"Recorded {payload['recorded_at']} on commit `{payload['git']}`.",
         "",
-        "This snapshot scores each CI PDF against itself. That is the ceiling for drop rate, style, overflow, and non-text SSIM, and it is the live measurement of source-text recovery (`source_unmapped_ratio`). RapidPdfTrans does not emit a translated PDF yet, so it is not on the output comparison.",
+        "This snapshot scores each CI PDF against itself. That is the ceiling for drop rate, style, overflow, and non-text SSIM, and it is the live measurement of source-text recovery (`source_unmapped_ratio`). Translated-PDF scores are in `corpus/benchmarks/head-to-head.md`.",
         "",
         "## Means",
         "",
@@ -111,9 +111,8 @@ def markdown(payload: dict) -> str:
         "",
         "## Priority",
         "",
-        "1. Translated output does not exist yet (`rpt_save` is still the M3 stub). Every layout comparison against BabelDOC is blocked on a rewrite that deletes original text operators without dropping glyphs.",
-        "2. The glyphs that stay unmapped are almost all CMEX (big operators and delimiters). Their Type 1 names are not in the Adobe Glyph List, so formula characters still never reach the translator.",
-        "3. BabelDOC and PDFMathTranslate are not installed in this environment, so this snapshot has no external output scores. `corpus/bench/run.py --run-engines` is the hook once the commands exist and a shared translator URL is set.",
+        "1. Run `python3 corpus/bench/compete.py` with the identity server up to score RapidPdfTrans, BabelDOC, and pdf2zh_next on the same pages.",
+        "2. Glyphs that stay unmapped are mostly CMEX (big operators and delimiters) whose Type 1 names are outside the Adobe Glyph List.",
         "",
         "## Per file",
         "",
@@ -200,12 +199,8 @@ def main() -> int:
         "mean_nontext_ssim": mean(ok, "mean_nontext_ssim"),
     }
     if args.run_engines:
-        missing = [name for name in ENGINES if not shutil.which(name)]
-        if missing:
-            print("engines not on PATH:", ", ".join(missing), file=sys.stderr)
-            return 2
-        print("engine invocation is not wired until a shared translator command is configured", file=sys.stderr)
-        return 2
+        script = Path(__file__).resolve().parent / "compete.py"
+        return subprocess.call([sys.executable, str(script)])
     payload = {
         "recorded_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "git": git_head(),

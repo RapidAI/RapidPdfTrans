@@ -98,10 +98,20 @@ pub fn rewrite_translation(
             continue;
         }
         if segment.glyph_ids.iter().any(|id| {
-            extraction
-                .glyphs
-                .get(by_id[id])
-                .is_some_and(|glyph| glyph.disposition.is_final() || keep.contains_key(id))
+            extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
+                if glyph.disposition.is_final() {
+                    return true;
+                }
+                match keep.get(id).map(String::as_str) {
+                    // `$9.7\times$` is a prose line. Redraw the operator with
+                    // the body font instead of leaving the English in place.
+                    Some("formula") if crate::translate::is_inline_math_symbol(&glyph.unicode) => {
+                        false
+                    }
+                    Some(_) => true,
+                    None => false,
+                }
+            })
         }) {
             for id in &segment.glyph_ids {
                 if !extraction.glyphs[by_id[id]].disposition.is_final() {
@@ -132,6 +142,17 @@ pub fn rewrite_translation(
                 keep.insert(*id, "unchanged".into());
             }
             continue;
+        }
+        for id in &segment.glyph_ids {
+            if keep.get(id).is_some_and(|reason| reason == "formula") {
+                let inline = extraction
+                    .glyphs
+                    .get(by_id[id])
+                    .is_some_and(|glyph| crate::translate::is_inline_math_symbol(&glyph.unicode));
+                if inline {
+                    keep.remove(id);
+                }
+            }
         }
         planned.push((index, segment.translated.clone()));
         rewrite_ids.extend(segment.glyph_ids.iter().copied());
@@ -2581,6 +2602,57 @@ mod tests {
             .plain_text();
         assert!(text.contains("(Smith et al., 2020)"), "{text}");
         assert!(text.contains("参见"), "{text}");
+    }
+
+    fn otto_cid_streams(doc: &Document) -> usize {
+        doc.objects
+            .keys()
+            .filter(|id| {
+                let Ok(object) = doc.get_object(**id) else {
+                    return false;
+                };
+                let Ok(stream) = object.as_stream() else {
+                    return false;
+                };
+                let subtype = stream
+                    .dict
+                    .get(b"Subtype")
+                    .ok()
+                    .and_then(|obj| obj.as_name().ok());
+                if subtype != Some(b"CIDFontType0C".as_slice()) {
+                    return false;
+                }
+                let bytes = stream
+                    .decompressed_content()
+                    .unwrap_or_else(|_| stream.content.clone());
+                bytes.len() >= 4 && &bytes[0..4] == b"OTTO"
+            })
+            .count()
+    }
+
+    #[test]
+    fn lesser_stamp_font_is_unwrapped() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/cache/arxiv-2610.03702.pdf");
+        if !path.exists() {
+            return;
+        }
+        let mut doc = Document::load(&path).unwrap();
+        let before = otto_cid_streams(&doc);
+        unwrap_opentype_cid_fonts(&mut doc);
+        let after = otto_cid_streams(&doc);
+        assert!(before > 0, "expected an OTTO CID font in the source");
+        assert_eq!(after, 0, "OTTO CID fonts left: {after}");
+        let mut saved = Vec::new();
+        doc.save_to(&mut saved).unwrap();
+        let out = std::env::temp_dir().join("rpt-unwrapped-lesser.pdf");
+        std::fs::write(&out, &saved).unwrap();
+        let fonts = std::process::Command::new("pdffonts")
+            .arg(&out)
+            .output()
+            .expect("pdffonts");
+        let stderr = String::from_utf8_lossy(&fonts.stderr);
+        assert!(!stderr.contains("Mismatch between font type"), "{stderr}");
     }
 
     #[test]

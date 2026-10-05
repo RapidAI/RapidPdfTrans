@@ -22,13 +22,9 @@ External engines, when installed, should use that identity server so the transla
 
 ```bash
 python3 corpus/bench/identity_server.py --port 8765
-# BabelDOC
-babeldoc --openai --openai-model identity --openai-base-url http://127.0.0.1:8765/v1 \
-  --openai-api-key local --no-dual --pages 1 --files paper.pdf
-# PDFMathTranslate
-OPENAI_BASE_URL=http://127.0.0.1:8765/v1 OPENAI_API_KEY=local OPENAI_MODEL=identity \
-  pdf2zh paper.pdf -s openai -o /tmp/pdf2zh-out
+# Shared identity translator, first page of every CI paper.
+python3 corpus/bench/compete.py --pages 1
 cargo run -p rpt-qa --bin rpt-bench -- pair --source paper.pdf --output translated.pdf
 ```
 
-`python3 corpus/bench/run.py` refreshes the identity ceiling. It does not download BabelDOC or PDFMathTranslate.
+`python3 corpus/bench/run.py` refreshes the identity ceiling (each PDF against itself). `python3 corpus/bench/run.py --run-engines` runs the head-to-head. Neither command downloads BabelDOC or PDFMathTranslate.
