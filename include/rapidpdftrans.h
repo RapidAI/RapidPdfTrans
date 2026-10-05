@@ -39,6 +39,8 @@ char *rpt_extract(struct RptDocument *doc, const char *options_json);
  * `doc` was returned by `rpt_open` and has not been freed.
  * `options_json` is a null-terminated UTF-8 string, or null.
  * `RPT_LLM_API_KEY` must be set. An `api_key` field in JSON is ignored.
+ * `jobs` (or `RPT_TRANSLATE_JOBS`) is how many translation requests may run
+ * at once; the default is 1. Layout is not parallel.
  * The returned string is freed with `rpt_string_free`.
  */
 char *rpt_translate(struct RptDocument *doc, const char *options_json);

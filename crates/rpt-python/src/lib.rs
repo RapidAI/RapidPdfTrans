@@ -29,6 +29,9 @@ fn extract(path: &str, options_json: Option<&str>) -> PyResult<String> {
 }
 
 /// Translate extracted text. Requires `RPT_LLM_API_KEY`. Does not write a PDF.
+///
+/// `options_json` may set `jobs` (default 1, or `RPT_TRANSLATE_JOBS`).
+/// Parallel workers translate disjoint segments. Layout stays single-threaded.
 #[pyfunction]
 #[pyo3(signature = (path, options_json=None))]
 fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {

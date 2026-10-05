@@ -88,6 +88,10 @@ enum Command {
         /// Segments per model call.
         #[arg(long, default_value_t = 8)]
         batch_size: usize,
+        /// Parallel translation requests. Default 1, or `RPT_TRANSLATE_JOBS`.
+        /// Layout and rewrite stay single-threaded.
+        #[arg(long)]
+        jobs: Option<usize>,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -124,6 +128,7 @@ fn main() -> ExitCode {
             cjk_size_scale,
             cjk_leading,
             batch_size,
+            jobs,
             json: _,
             compact,
         } => {
@@ -131,6 +136,9 @@ fn main() -> ExitCode {
                 Ok(pairs) => pairs,
                 Err(err) => return fail(err),
             };
+            if matches!(jobs, Some(0)) {
+                return fail("jobs must be at least 1");
+            }
             let output_mode = if bilingual && mode == "replace" {
                 OutputMode::parse("bilingual", Some(&layout))
             } else {
@@ -167,6 +175,7 @@ fn main() -> ExitCode {
                     cjk_size_scale: cjk_size_scale.unwrap_or(0.0),
                     cjk_leading: cjk_leading.unwrap_or(0.0),
                     batch_size,
+                    jobs: jobs.unwrap_or(0),
                     output_mode,
                     ..TranslateOptions::default()
                 },

@@ -157,6 +157,8 @@ pub unsafe extern "C" fn rpt_extract(
 /// `doc` was returned by `rpt_open` and has not been freed.
 /// `options_json` is a null-terminated UTF-8 string, or null.
 /// `RPT_LLM_API_KEY` must be set. An `api_key` field in JSON is ignored.
+/// `jobs` (or `RPT_TRANSLATE_JOBS`) is how many translation requests may run
+/// at once; the default is 1. Layout is not parallel.
 /// The returned string is freed with `rpt_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn rpt_translate(

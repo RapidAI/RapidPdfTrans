@@ -42,7 +42,12 @@ pub const DEFAULT_LLM_BASE_URL: &str = "https://hub.mypapers.top/api/llm/v1";
 pub const DEFAULT_LLM_MODEL: &str = "auto";
 
 /// Something that turns a system prompt and a user payload into model text.
-pub trait Translator {
+///
+/// `complete` may run on several threads when [`TranslateOptions::jobs`] is
+/// greater than one. Each call gets its own prompt. Do not store segment
+/// text, placeholders, or glossary entries on `self`; workers share the
+/// translator only through `&self`.
+pub trait Translator: Sync {
     fn complete(&self, system: &str, user: &str) -> Result<String>;
 }
 
@@ -58,6 +63,9 @@ pub struct TranslateOptions {
     pub glossary: Vec<(String, String)>,
     pub context_window: usize,
     pub batch_size: usize,
+    /// Parallel model requests. `0` uses `RPT_TRANSLATE_JOBS`, then 1.
+    /// Layout and rewrite stay on the calling thread either way.
+    pub jobs: usize,
     pub temperature: f32,
     pub timeout_secs: u64,
     /// Sent only when set. Left unset so reasoning models can still emit content.
@@ -157,6 +165,7 @@ impl Default for TranslateOptions {
             glossary: Vec::new(),
             context_window: 2,
             batch_size: 8,
+            jobs: 0,
             temperature: 0.0,
             timeout_secs: 300,
             max_tokens: None,
@@ -198,6 +207,32 @@ impl TranslateOptions {
         )
     }
 
+    /// How many segment batches may be in flight. The default is one.
+    pub fn resolved_jobs(&self) -> Result<usize> {
+        if self.jobs > 0 {
+            return Ok(self.jobs);
+        }
+        match std::env::var("RPT_TRANSLATE_JOBS") {
+            Ok(value) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    Ok(1)
+                } else {
+                    value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| {
+                            Error::Options(format!(
+                                "RPT_TRANSLATE_JOBS must be a positive integer, got `{value}`"
+                            ))
+                        })
+                }
+            }
+            Err(_) => Ok(1),
+        }
+    }
+
     /// Parse translator fields from an options JSON object.
     /// `api_key` is ignored; a warning is returned when it is present.
     pub fn from_json(text: &str) -> Result<(Self, Vec<String>)> {
@@ -236,6 +271,12 @@ impl TranslateOptions {
         }
         if let Some(n) = value.get("batch_size").and_then(|v| v.as_u64()) {
             opts.batch_size = n as usize;
+        }
+        if let Some(n) = usize_field(&value, &["jobs", "translate_jobs"]) {
+            if n == 0 {
+                return Err(Error::Options("jobs must be at least 1".into()));
+            }
+            opts.jobs = n;
         }
         if let Some(t) = value.get("temperature").and_then(|v| v.as_f64()) {
             opts.temperature = t as f32;
@@ -288,6 +329,16 @@ pub fn resolve_choice(explicit: Option<&str>, env_value: Option<&str>, builtin: 
         .or_else(|| env_value.map(str::trim).filter(|s| !s.is_empty()))
         .unwrap_or(builtin)
         .to_string()
+}
+
+fn usize_field(value: &Value, names: &[&str]) -> Option<usize> {
+    names.iter().find_map(|name| {
+        value.get(*name).and_then(|item| {
+            item.as_u64()
+                .or_else(|| item.as_str().and_then(|text| text.trim().parse().ok()))
+                .map(|number| number as usize)
+        })
+    })
 }
 
 fn float_field(value: &Value, names: &[&str]) -> Option<f32> {
@@ -369,6 +420,7 @@ pub fn translate_extraction(
     if opts.batch_size == 0 {
         return Err(Error::Options("batch_size must be at least 1".into()));
     }
+    let jobs = opts.resolved_jobs()?;
     let segmentation = segment::segment_with(
         &extraction.glyphs,
         &segment::SegmentFlags {
@@ -417,57 +469,30 @@ pub fn translate_extraction(
     let mut calls = 0usize;
     let mut cache_hits = 0usize;
 
-    let mut cursor = 0usize;
-    while cursor < segments.len() {
-        let mut batch: Vec<usize> = Vec::new();
-        while cursor < segments.len() && batch.len() < opts.batch_size {
-            let i = cursor;
-            cursor += 1;
-            if translated[i].is_some() {
-                continue;
-            }
-            if segments[i].text.trim().is_empty() {
-                translated[i] = Some(segments[i].text.clone());
-                continue;
-            }
-            if let Some(hit) = cache.get(&segments[i].text) {
-                translated[i] = Some(hit.clone());
-                cache_hits += 1;
-                continue;
-            }
-            if batch.iter().any(|&j| segments[j].text == segments[i].text) {
-                batch.push(i);
-                continue;
-            }
-            batch.push(i);
+    for (i, seg) in segments.iter().enumerate() {
+        if translated[i].is_none() && seg.text.trim().is_empty() {
+            translated[i] = Some(seg.text.clone());
         }
-        if batch.is_empty() {
+    }
+    // One owner per distinct source string. A repeated paragraph is filled
+    // from that owner after the workers join, so two jobs never translate it.
+    let batches = plan_unique_batches(&segments, &translated, opts.batch_size);
+    let rendered = dispatch_batches(
+        &segments, &shielded, &batches, opts, translator, jobs, &mut calls,
+    )?;
+    for (i, text) in rendered {
+        cache.insert(segments[i].text.clone(), text.clone());
+        translated[i] = Some(text);
+    }
+    for i in 0..segments.len() {
+        if translated[i].is_some() {
             continue;
         }
-        let unique: Vec<usize> = {
-            let mut seen: Vec<usize> = Vec::new();
-            for &i in &batch {
-                if !seen.iter().any(|&j| segments[j].text == segments[i].text) {
-                    seen.push(i);
-                }
-            }
-            seen
-        };
-        let rendered =
-            translate_batch(&segments, &shielded, &unique, opts, translator, &mut calls)?;
-        for (i, text) in rendered {
-            cache.insert(segments[i].text.clone(), text.clone());
-            translated[i] = Some(text);
-        }
-        for &i in &batch {
-            if translated[i].is_none() {
-                let text = cache.get(&segments[i].text).cloned().ok_or_else(|| {
-                    Error::Translate(format!("no translation for segment {}", segments[i].id))
-                })?;
-                cache_hits += 1;
-                translated[i] = Some(text);
-            }
-        }
+        let text = cache.get(&segments[i].text).cloned().ok_or_else(|| {
+            Error::Translate(format!("no translation for segment {}", segments[i].id))
+        })?;
+        cache_hits += 1;
+        translated[i] = Some(text);
     }
 
     let mut report_segments = Vec::with_capacity(segments.len());
@@ -494,6 +519,119 @@ pub fn translate_extraction(
         calls,
         cache_hits,
     })
+}
+
+/// Distinct segments, in reading order, packed into batches of `batch_size`.
+/// Indexes in different batches are disjoint. Repeated source text is omitted
+/// so it cannot be sent to a second worker.
+fn plan_unique_batches(
+    segments: &[Segment],
+    translated: &[Option<String>],
+    batch_size: usize,
+) -> Vec<Vec<usize>> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for (i, seg) in segments.iter().enumerate() {
+        if translated[i].is_some() {
+            continue;
+        }
+        if !seen.insert(seg.text.clone()) {
+            continue;
+        }
+        unique.push(i);
+    }
+    unique
+        .chunks(batch_size.max(1))
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+/// Run each batch on a worker. `jobs == 1` stays on this thread, in order.
+/// Workers share the translator only as `&self` and never share a segment index.
+fn dispatch_batches(
+    segments: &[Segment],
+    shielded: &[protect::Shielded],
+    batches: &[Vec<usize>],
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    jobs: usize,
+    calls: &mut usize,
+) -> Result<Vec<(usize, String)>> {
+    if batches.is_empty() {
+        return Ok(Vec::new());
+    }
+    if jobs <= 1 {
+        let mut rendered = Vec::new();
+        for batch in batches {
+            rendered.extend(translate_batch(
+                segments, shielded, batch, opts, translator, calls,
+            )?);
+        }
+        return Ok(rendered);
+    }
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let call_count = std::sync::atomic::AtomicUsize::new(0);
+    let outputs = std::sync::Mutex::new(Vec::new());
+    let failure: std::sync::Mutex<Option<Error>> = std::sync::Mutex::new(None);
+    let workers = jobs.min(batches.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                if failure.lock().map(|guard| guard.is_some()).unwrap_or(true) {
+                    break;
+                }
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if index >= batches.len() {
+                    break;
+                }
+                let mut local_calls = 0usize;
+                match translate_batch(
+                    segments,
+                    shielded,
+                    &batches[index],
+                    opts,
+                    translator,
+                    &mut local_calls,
+                ) {
+                    Ok(part) => {
+                        call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                        match outputs.lock() {
+                            Ok(mut slot) => slot.extend(part),
+                            Err(_) => {
+                                if let Ok(mut slot) = failure.lock() {
+                                    if slot.is_none() {
+                                        *slot = Some(Error::Translate(
+                                            "translation worker lock poisoned".into(),
+                                        ));
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        if let Ok(mut slot) = failure.lock() {
+                            if slot.is_none() {
+                                *slot = Some(err);
+                            }
+                        }
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    *calls += call_count.load(std::sync::atomic::Ordering::SeqCst);
+    let failure = failure
+        .into_inner()
+        .map_err(|_| Error::Translate("translation worker lock poisoned".into()))?;
+    if let Some(err) = failure {
+        return Err(err);
+    }
+    outputs
+        .into_inner()
+        .map_err(|_| Error::Translate("translation worker lock poisoned".into()))
 }
 
 fn translate_batch(
@@ -1069,6 +1207,207 @@ mod tests {
             "{joined}"
         );
         assert!(!joined.contains("The transformer architecture"));
+    }
+
+    #[test]
+    fn jobs_default_to_one_and_json_accepts_an_explicit_count() {
+        assert_eq!(TranslateOptions::default().jobs, 0);
+        assert_eq!(TranslateOptions::from_json("{}").unwrap().0.jobs, 0);
+        assert_eq!(
+            TranslateOptions::from_json(r#"{"jobs":"3"}"#)
+                .unwrap()
+                .0
+                .jobs,
+            3
+        );
+        assert_eq!(
+            TranslateOptions::from_json(r#"{"translate_jobs":2}"#)
+                .unwrap()
+                .0
+                .jobs,
+            2
+        );
+        assert!(TranslateOptions::from_json(r#"{"jobs":0}"#).is_err());
+        let explicit = TranslateOptions {
+            jobs: 4,
+            ..TranslateOptions::default()
+        };
+        assert_eq!(explicit.resolved_jobs().unwrap(), 4);
+        let unset = TranslateOptions::default().resolved_jobs().unwrap();
+        let from_env = std::env::var("RPT_TRANSLATE_JOBS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(1);
+        assert_eq!(unset, from_env);
+    }
+
+    #[test]
+    fn concurrent_jobs_match_single_thread_and_keep_disjoint_scopes() {
+        let lines = [
+            "The transformer uses self-attention.",
+            "See https://example.com/a and {eq:1}.",
+            "The learning rate is 0.001.",
+            "Mail ada@example.com for the notes.",
+            "This paragraph is only on this line.",
+            "Another distinct sentence ends here.",
+            "Caption text for the figure stays here.",
+            "Hello world.",
+            "Hello world.",
+        ];
+        let single_opts = TranslateOptions {
+            glossary: vec![("transformer".into(), "Transformer".into())],
+            batch_size: 1,
+            jobs: 1,
+            ..TranslateOptions::default()
+        };
+        let mut single_doc = extraction_from_lines(&lines);
+        let single =
+            translate_extraction(&mut single_doc, &single_opts, &PrefixTranslator).unwrap();
+
+        let parallel_opts = TranslateOptions {
+            jobs: 4,
+            ..single_opts
+        };
+        let isolated = IsolatedTranslator {
+            inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
+            overlapped: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            leaked_context: AtomicUsize::new(0),
+        };
+        let mut parallel_doc = extraction_from_lines(&lines);
+        let parallel = translate_extraction(&mut parallel_doc, &parallel_opts, &isolated).unwrap();
+
+        assert_eq!(isolated.overlapped.load(Ordering::SeqCst), 0);
+        assert_eq!(isolated.leaked_context.load(Ordering::SeqCst), 0);
+        assert!(
+            isolated.peak.load(Ordering::SeqCst) > 1,
+            "expected overlapping workers, peak {}",
+            isolated.peak.load(Ordering::SeqCst)
+        );
+        assert_eq!(parallel.calls, single.calls);
+        assert_eq!(parallel.cache_hits, single.cache_hits);
+        assert_eq!(parallel.calls, 8);
+        assert_eq!(parallel.cache_hits, 1);
+        assert_eq!(single.segments.len(), parallel.segments.len());
+        for (left, right) in single.segments.iter().zip(parallel.segments.iter()) {
+            assert_eq!(left.id, right.id);
+            assert_eq!(left.glyph_ids, right.glyph_ids);
+            assert_eq!(left.source, right.source);
+            assert_eq!(left.translated, right.translated);
+        }
+        let ids: Vec<u32> = parallel.segments.iter().map(|seg| seg.id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "merge keeps reading order");
+        let snapshot = |doc: &Extraction| {
+            doc.glyphs
+                .iter()
+                .map(|glyph| format!("{:?}", glyph.disposition))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(snapshot(&single_doc), snapshot(&parallel_doc));
+        assert!(single_doc
+            .glyphs
+            .iter()
+            .all(|glyph| !matches!(glyph.disposition, Disposition::Pending)));
+
+        let url = parallel
+            .segments
+            .iter()
+            .find(|seg| seg.source.contains("https://"))
+            .unwrap();
+        assert!(url.translated.contains("https://example.com/a"));
+        assert!(url.translated.contains("{eq:1}"));
+        assert!(!url.translated.contains("ada@example.com"));
+        let mail = parallel
+            .segments
+            .iter()
+            .find(|seg| seg.source.contains('@'))
+            .unwrap();
+        assert!(mail.translated.contains("ada@example.com"));
+        assert!(!mail.translated.contains("https://"));
+        assert!(parallel.segments.iter().any(|seg| {
+            seg.source.contains("transformer") && seg.translated.contains("Transformer")
+        }));
+        assert!(parallel.segments.iter().all(|seg| {
+            seg.source.contains("transformer") || !seg.translated.contains("Transformer")
+        }));
+        let rate = parallel
+            .segments
+            .iter()
+            .find(|seg| seg.source.contains("0.001"))
+            .unwrap();
+        assert!(rate.translated.contains("0.001"));
+        let hellos: Vec<_> = parallel
+            .segments
+            .iter()
+            .filter(|seg| seg.source == "Hello world.")
+            .collect();
+        assert_eq!(hellos.len(), 2);
+        assert_eq!(hellos[0].translated, hellos[1].translated);
+    }
+
+    struct IsolatedTranslator {
+        inflight: std::sync::Mutex<std::collections::HashSet<u32>>,
+        overlapped: AtomicUsize,
+        peak: AtomicUsize,
+        leaked_context: AtomicUsize,
+    }
+
+    impl Translator for IsolatedTranslator {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let ids: Vec<u32> = segs
+                .iter()
+                .map(|seg| seg["id"].as_u64().unwrap() as u32)
+                .collect();
+            for seg in segs {
+                for key in ["context_before", "context_after"] {
+                    let Some(items) = seg.get(key).and_then(|value| value.as_array()) else {
+                        continue;
+                    };
+                    for item in items {
+                        let text = item.as_str().unwrap_or("");
+                        if text.contains('译') {
+                            self.leaked_context.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                }
+                let text = seg["text"].as_str().unwrap_or("");
+                if text.contains('译') {
+                    self.leaked_context.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            {
+                let mut guard = self.inflight.lock().unwrap();
+                for id in &ids {
+                    if !guard.insert(*id) {
+                        self.overlapped.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let n = guard.len();
+                self.peak.fetch_max(n, Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    serde_json::json!({
+                        "id": seg["id"],
+                        "text": format!("译{}", seg["text"].as_str().unwrap()),
+                    })
+                })
+                .collect();
+            {
+                let mut guard = self.inflight.lock().unwrap();
+                for id in &ids {
+                    guard.remove(id);
+                }
+            }
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
     }
 
     #[test]
