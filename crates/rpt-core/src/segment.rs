@@ -1166,7 +1166,9 @@ fn is_body_barrier(line: &VisualLine<'_>, body_font: &str) -> bool {
     if !is_body_shape(line) {
         return false;
     }
-    body_font.is_empty() || line.font == body_font
+    // Medium and regular are the same text face. A running header set in
+    // Medi must stop a figure walk the same way a Regu body line does.
+    body_font.is_empty() || same_font_family(&line.font, body_font)
 }
 
 /// "1 Introduction" is a section heading, not a label inside a figure.
@@ -2517,6 +2519,59 @@ mod tests {
     }
 
     #[test]
+    fn a_medium_running_header_above_a_figure_is_still_translated() {
+        let mut header = wide(
+            0,
+            180.0,
+            738.0,
+            "Clustering Fully connected Graphs by Multicut",
+            180.0,
+            9.0,
+        );
+        header.font_name = "NimbusRomNo9L-Medi".into();
+        let mut body = wide(
+            4,
+            72.0,
+            500.0,
+            "This sentence is long enough to count as ordinary body text in the column today.",
+            360.0,
+            10.0,
+        );
+        body.font_name = "NimbusRomNo9L-Regu".into();
+        let glyphs = vec![
+            header,
+            wide(1, 90.0, 640.0, "USER PROMPT", 55.0, 9.0),
+            wide(2, 230.0, 640.0, "REASONING", 50.0, 9.0),
+            wide(
+                3,
+                72.0,
+                560.0,
+                "Figure 1: A diagram of the system and its parts.",
+                360.0,
+                10.0,
+            ),
+            body,
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Clustering Fully connected")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("USER PROMPT")),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept.iter().all(|(id, _)| *id != 0),
+            "header was claimed as a figure: {:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
     fn a_preprint_header_above_a_figure_is_still_translated() {
         let glyphs = vec![
             wide(0, 108.0, 756.0, "Preprint", 40.0, 9.0),
@@ -2907,6 +2962,14 @@ mod tests {
             texts
                 .iter()
                 .find(|text| text.contains("fundamental limitation"))
+        );
+        let headers = texts
+            .iter()
+            .filter(|text| text.trim() == "Clustering Fully connected Graphs by Multicut")
+            .count();
+        assert!(
+            headers >= 11,
+            "running headers were kept inside figures or tables: {headers}"
         );
     }
 
