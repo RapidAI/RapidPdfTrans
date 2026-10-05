@@ -192,7 +192,7 @@ fn piece_width(piece: &[&Glyph]) -> f32 {
     right - left
 }
 
-fn piece_ends_with_page_number(piece: &[&Glyph]) -> bool {
+pub(crate) fn piece_ends_with_page_number(piece: &[&Glyph]) -> bool {
     let mut index = piece.len();
     let mut token = String::new();
     while index > 0 {

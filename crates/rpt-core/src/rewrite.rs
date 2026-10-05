@@ -1175,7 +1175,15 @@ fn segment_crosses_column(glyphs: &[&Glyph], size: f32) -> bool {
     let median = sorted[sorted.len() / 2].max(0.0);
     let hard = (size * 2.0).max(24.0);
     let trigger = (median * 3.5).max(size * 1.25).min(hard);
-    gaps.iter().any(|gap| *gap > trigger)
+    gaps.iter().enumerate().any(|(index, gap)| {
+        if *gap <= trigger {
+            return false;
+        }
+        // A contents bullet leaves ~14pt between a page number and the next
+        // entry. That is not a second column.
+        let left = &ordered[..=index];
+        !(*gap <= hard && crate::segment::piece_ends_with_page_number(left))
+    })
 }
 
 struct InkLine<'a> {
