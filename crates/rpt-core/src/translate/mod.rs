@@ -451,7 +451,13 @@ fn translate_batch(
             Ok(left)
         }
         Err(err) if recoverable(&err) => {
-            translate_batch_once(segments, shielded, indexes, opts, translator, calls)
+            match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
+                Ok(restored) => Ok(restored),
+                Err(_) => Ok(indexes
+                    .iter()
+                    .map(|&index| (index, segments[index].text.clone()))
+                    .collect()),
+            }
         }
         Err(err) => Err(err),
     }
@@ -463,6 +469,7 @@ fn recoverable(err: &Error) -> bool {
         || msg.contains("omitted segment")
         || msg.contains("invalid translation json")
         || msg.contains("did not contain a json")
+        || msg.contains("empty message.content")
 }
 
 fn translate_batch_once(
@@ -790,6 +797,23 @@ mod tests {
         assert!(texts.iter().any(|text| text.contains("Alpha")), "{texts:?}");
         assert!(texts.iter().any(|text| text.contains("Beta")), "{texts:?}");
         assert!(report.calls >= 3, "calls={}", report.calls);
+    }
+
+    #[test]
+    fn an_empty_model_reply_keeps_the_source_text() {
+        let mut ex = extraction_from_lines(&["Alpha one"]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &AlwaysEmpty).unwrap();
+        assert_eq!(report.segments[0].translated, "Alpha one");
+    }
+
+    struct AlwaysEmpty;
+    impl Translator for AlwaysEmpty {
+        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            Err(Error::Translate(
+                "LLM response had empty message.content (reasoning tokens are ignored)".into(),
+            ))
+        }
     }
 
     #[test]
