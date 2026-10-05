@@ -1580,12 +1580,7 @@ fn layout_segment(
     }
     let size0 = ink
         .iter()
-        .map(|line| {
-            line.glyphs
-                .iter()
-                .map(|glyph| glyph.font_size)
-                .fold(1.0f32, f32::max)
-        })
+        .map(|line| crate::segment::representative_size(&line.glyphs))
         .fold(1.0f32, f32::max);
     if ink
         .iter()
@@ -2245,10 +2240,11 @@ fn ink_lines<'a>(glyphs: &[&'a Glyph]) -> Vec<InkLine<'a>> {
     });
     let mut groups: Vec<Vec<&Glyph>> = Vec::new();
     for glyph in ordered {
-        let size = glyph.font_size.max(1.0);
         let same = groups.last().is_some_and(|group| {
             let anchor = group[0];
-            (anchor.matrix[5] - glyph.matrix[5]).abs() <= anchor.font_size.max(size) * 0.35
+            // A drop cap on this baseline must not swallow the next line.
+            let limit = crate::segment::representative_size(group);
+            (anchor.matrix[5] - glyph.matrix[5]).abs() <= limit * 0.35
         });
         if same {
             groups.last_mut().unwrap().push(glyph);
@@ -3433,6 +3429,73 @@ mod tests {
     };
     use lopdf::dictionary;
 
+    fn ink_glyph(id: u32, x: f32, y: f32, size: f32, text: &str) -> Glyph {
+        Glyph {
+            id,
+            page_index: 0,
+            unicode: text.into(),
+            unmapped: false,
+            char_code: vec![b'A'],
+            gid: None,
+            font_resource: "F1".into(),
+            font_name: "Times-Roman".into(),
+            font_object: None,
+            font_size: size,
+            matrix: [size, 0.0, 0.0, size, x, y],
+            bbox: [x, y - size * 0.2, x + size * 0.5, y + size * 0.8],
+            advance: [size * 0.5, 0.0],
+            fill_color: Color::black(),
+            stroke_color: Color::black(),
+            render_mode: 0,
+            invisible: false,
+            clipped: false,
+            clip_uncertain: false,
+            vertical: false,
+            disposition: Disposition::Pending,
+            source: GlyphSource {
+                kind: SourceKind::PageContent,
+                object_id: None,
+                stream_index: 0,
+                operator_index: 0,
+                byte_start: 0,
+                byte_end: 1,
+                resource_name: Some("F1".into()),
+            },
+        }
+    }
+
+    #[test]
+    fn a_drop_cap_does_not_merge_the_next_baseline() {
+        let mut glyphs = vec![ink_glyph(0, 126.0, 402.0, 48.0, "T")];
+        let mut x = 154.0;
+        for (index, ch) in "his opening part".chars().enumerate() {
+            let width = if ch == ' ' { 3.0 } else { 5.2 };
+            let mut item = ink_glyph(1 + index as u32, x, 402.0, 10.0, &ch.to_string());
+            item.bbox = [x, 400.0, x + width, 410.0];
+            x += width;
+            glyphs.push(item);
+        }
+        let mut x = 126.0;
+        let base = glyphs.len() as u32;
+        for (index, ch) in "explore the rest".chars().enumerate() {
+            let width = if ch == ' ' { 3.0 } else { 5.2 };
+            let mut item = ink_glyph(base + index as u32, x, 389.0, 10.0, &ch.to_string());
+            item.bbox = [x, 387.0, x + width, 397.0];
+            x += width;
+            glyphs.push(item);
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let lines = ink_lines(&refs);
+        assert_eq!(
+            lines.len(),
+            2,
+            "{:?}",
+            lines.iter().map(|line| line.y).collect::<Vec<_>>()
+        );
+        assert!((lines[0].y - 402.0).abs() < 0.5);
+        assert!((lines[1].y - 389.0).abs() < 0.5);
+    }
+
     #[test]
     fn affiliation_marks_are_superscripts_and_years_are_not() {
         let author = superscript_mask("Zhang1,2 Lee");
@@ -3899,7 +3962,7 @@ mod tests {
 
     #[test]
     fn an_empty_gutter_is_still_a_second_column() {
-        let line = vec![
+        let line = [
             math_glyph(0, 72.0, 400.0, "w", false),
             math_glyph(1, 80.0, 400.0, "e", false),
             math_glyph(2, 320.0, 400.0, "t", false),

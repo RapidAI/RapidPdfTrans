@@ -118,11 +118,13 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
             .iter()
             .map(|item| item.bbox[0].max(item.bbox[2]))
             .fold(line_left, f32::max);
-        let line_size = current
-            .iter()
-            .map(|item| item.font_size)
-            .fold(last_size, f32::max)
-            .max(1.0);
+        // A drop cap is one glyph several times the letters beside it.
+        // The body size is what a gutter digit and the next column use.
+        let line_size = if current.is_empty() {
+            last_size
+        } else {
+            representative_size(&current)
+        };
         // A line number in the gutter is lower and smaller than this line,
         // but still inside the baseline tolerance. Gluing it to the hyphen
         // makes the line look like a contents entry, so the word never joins.
@@ -174,10 +176,7 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         let left = pair[1].bbox[0].min(pair[1].bbox[2]);
         gaps.push(left - right);
     }
-    let size = line
-        .iter()
-        .map(|glyph| glyph.font_size)
-        .fold(1.0f32, f32::max);
+    let size = representative_size(&line);
     // Wider than a justified word space. A fixed 18pt floor misses a column
     // whose left line runs close to the right column (the remaining gutter is
     // ~17pt). Short lines still split only on the hard gap.
@@ -199,10 +198,7 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // (`client 83`). A real column is much wider, and a short last line
         // that does not end in a page number still splits.
         let crumb = gap <= hard && narrow_page_crumb(&current);
-        let prev_size = current
-            .iter()
-            .map(|item| item.font_size)
-            .fold(1.0f32, f32::max);
+        let prev_size = representative_size(&current);
         // A smaller line number just past the hyphen is inside the column
         // trigger. Leaving it here glues the digit to the word, and the line
         // is then read as a contents entry. A small index such as `(i)` has
@@ -515,6 +511,9 @@ fn assemble(
     attach_markers(&mut lines);
     attach_math_scripts(&mut lines);
     let mut kept = detach_toc_marks(&mut lines);
+    // A right-hand title on a contents row has no page number of its own
+    // (`Q&A on a metadata-` after `232`). It is still a contents title.
+    share_toc_baseline(&mut lines);
     kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
     kept.extend(margin_stamps(&lines));
@@ -558,7 +557,9 @@ fn assemble(
             });
         };
         let mut lines = para.iter();
+        let mut prev_toc = false;
         if let Some(first) = lines.next() {
+            prev_toc = first.toc;
             if let Some((label, rest)) = styled_run_in(first) {
                 // "Definition 1.1." is bold and "Proof." is italic. The sentence
                 // after either label keeps the body face.
@@ -588,6 +589,7 @@ fn assemble(
             if buf.trim().is_empty() {
                 buf = line.text.clone();
                 buf_ids.extend(line.glyphs.iter().map(|glyph| glyph.id));
+                prev_toc = line.toc;
                 continue;
             }
             let piece = if url_continues(&buf, &line.text) {
@@ -595,13 +597,20 @@ fn assemble(
             } else if let Some(stem) = soft_hyphen_stem(&buf) {
                 let rest = line.text.trim_start();
                 if rest.starts_with(|ch: char| ch.is_ascii_alphanumeric()) {
-                    join_hyphenated_word(stem, rest)
+                    // A contents title broken at its own hyphen keeps that
+                    // hyphen (`metadata-enriched`). A body soft hyphen does not.
+                    if prev_toc && line.toc {
+                        format!("{stem}-{rest}")
+                    } else {
+                        join_hyphenated_word(stem, rest)
+                    }
                 } else {
                     format!("{} {}", buf.trim_end(), line.text.trim_start())
                 }
             } else {
                 format!("{} {}", buf.trim_end(), line.text.trim_start())
             };
+            prev_toc = line.toc;
             if piece.chars().count() > LONG_LINE && sentence_end(&buf) {
                 flush(&mut segments, &mut buf_ids, &mut buf);
                 buf = line.text.clone();
@@ -664,6 +673,28 @@ fn detach_toc_marks(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
     }
     *lines = expanded;
     kept
+}
+
+/// A title that shares a contents baseline is part of that row, even when the
+/// page number belongs to the title on its left.
+fn share_toc_baseline(lines: &mut [VisualLine<'_>]) {
+    let anchors: Vec<(u32, f32)> = lines
+        .iter()
+        .filter(|line| line.toc)
+        .map(|line| (line.page, line.y))
+        .collect();
+    for line in lines.iter_mut() {
+        if line.toc {
+            continue;
+        }
+        let limit = line.size.max(1.0) * 0.35;
+        if anchors
+            .iter()
+            .any(|(page, y)| *page == line.page && (line.y - y).abs() <= limit)
+        {
+            line.toc = true;
+        }
+    }
 }
 
 fn push_toc_title<'a>(expanded: &mut Vec<VisualLine<'a>>, title: &mut Vec<&'a Glyph>) {
@@ -887,7 +918,9 @@ fn glyph_right(glyph: &Glyph) -> f32 {
 }
 
 fn line_bounds(glyphs: &[&Glyph]) -> Option<(f32, f32, f32, f32)> {
-    let first = *glyphs.first()?;
+    if glyphs.is_empty() {
+        return None;
+    }
     let left = glyphs
         .iter()
         .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
@@ -899,12 +932,32 @@ fn line_bounds(glyphs: &[&Glyph]) -> Option<(f32, f32, f32, f32)> {
     let mut ys: Vec<f32> = glyphs.iter().map(|glyph| glyph.matrix[5]).collect();
     ys.sort_by(|a, b| a.total_cmp(b));
     let y = ys[ys.len() / 2];
-    let size = glyphs
+    let size = representative_size(glyphs);
+    Some((left, right, y, size))
+}
+
+/// Size used for leading and column joins.
+///
+/// A drop cap is one glyph several times the letters it sits in. Using that
+/// size as the line size refuses the body underneath it. The median is the
+/// body size once the line is more than a couple of glyphs.
+pub(crate) fn representative_size(glyphs: &[&Glyph]) -> f32 {
+    let mut sizes: Vec<f32> = glyphs
         .iter()
         .map(|glyph| glyph.font_size)
-        .fold(first.font_size, f32::max)
-        .max(1.0);
-    Some((left, right, y, size))
+        .filter(|size| *size >= 1.0)
+        .collect();
+    if sizes.is_empty() {
+        return 1.0;
+    }
+    sizes.sort_by(|a, b| a.total_cmp(b));
+    let median = sizes[sizes.len() / 2];
+    let max = sizes[sizes.len() - 1];
+    if sizes.len() >= 4 && max > median * 1.8 {
+        median
+    } else {
+        max.max(1.0)
+    }
 }
 
 fn line_text(glyphs: &[&Glyph]) -> String {
@@ -1132,7 +1185,7 @@ fn release_hyphen_continuations(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, S
         for lower in lines {
             // The other column can sit one leading lower. Only the same
             // column is the rest of this word.
-            if (upper.left - lower.left).abs() > 36.0 || !continues_paragraph(upper, lower) {
+            if (upper.left - lower.left).abs() > 36.0 || !continues_paragraph(upper, lower, 0.0) {
                 continue;
             }
             let lower_kept = lower
@@ -1377,7 +1430,7 @@ fn caption_block(start: usize, lines: &[VisualLine<'_>], order: &[usize]) -> Vec
             break;
         }
         let prev = *block.last().unwrap_or(&start);
-        if !continues_paragraph(&lines[prev], &lines[index]) {
+        if !continues_paragraph(&lines[prev], &lines[index], 0.0) {
             break;
         }
         let width = lines[index].right - lines[index].left;
@@ -1635,21 +1688,39 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
     // A left-edge stamp between two body baselines must not split the paragraph.
     // Join each column on its own. The anchor is that column's median left edge,
     // so a chain of small indents cannot pull the other column in.
+    let measures = page_measures(&lines);
     let mut columns: Vec<Vec<VisualLine>> = Vec::new();
     for line in lines {
-        let slot = columns.iter().position(|column| {
-            column_anchor(column, line.page).is_some_and(|anchor| {
-                let distance = (anchor - line.left).abs();
-                // A wrapped word can start a list-indented line and finish
-                // back on the column margin. That line sits to the right of
-                // the margin. A body line to the left of a centered title is
-                // a different column, even when a hyphen makes the gap look
-                // like an indent.
-                let indented = line.left + 1.0 >= anchor;
-                distance <= 28.0
-                    || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some())
-            }) || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
-        });
+        // A contents title broken at the right of the row continues at the
+        // left indent (`Q&A on a metadata-` / `enriched`). That return is
+        // wider than a body indent, and the left entry's column would
+        // otherwise claim it.
+        let slot = columns
+            .iter()
+            .position(|column| {
+                column
+                    .iter()
+                    .rev()
+                    .find(|prev| line_has_letter(prev))
+                    .is_some_and(|prev| toc_hyphen_wrap(prev, &line))
+            })
+            .or_else(|| {
+                columns.iter().position(|column| {
+                    column_anchor(column, line.page).is_some_and(|anchor| {
+                        let distance = (anchor - line.left).abs();
+                        // A wrapped word can start a list-indented line and finish
+                        // back on the column margin. That line sits to the right of
+                        // the margin. A body line to the left of a centered title is
+                        // a different column, even when a hyphen makes the gap look
+                        // like an indent.
+                        let indented = line.left + 1.0 >= anchor;
+                        distance <= 28.0
+                            || (distance <= 64.0
+                                && indented
+                                && soft_hyphen_stem(&line.text).is_some())
+                    }) || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
+                })
+            });
         if let Some(slot) = slot {
             columns[slot].push(line);
         } else {
@@ -1666,9 +1737,16 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
         });
         let mut current: Vec<VisualLine> = Vec::new();
         for line in column {
+            let measure = measures.get(&line.page).copied().unwrap_or(0.0);
+            // A contents bullet sits between a hyphenated title and its
+            // continuation. It is not a paragraph break.
+            if is_mark_line(&line) {
+                paragraphs.push(vec![line]);
+                continue;
+            }
             if current
                 .last()
-                .is_some_and(|prev| continues_paragraph(prev, &line))
+                .is_some_and(|prev| continues_paragraph(prev, &line, measure))
             {
                 current.push(line);
             } else {
@@ -2025,8 +2103,28 @@ fn column_anchor(column: &[VisualLine<'_>], page: u32) -> Option<f32> {
     Some(xs[xs.len() / 2])
 }
 
-fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
-    if upper.page != lower.page || upper.toc || lower.toc {
+/// Upper quartile of line widths on one page. A banner does not set it, and
+/// a stack of short address rows does not either when the page has body text.
+fn page_measures(lines: &[VisualLine<'_>]) -> std::collections::HashMap<u32, f32> {
+    let mut widths: std::collections::HashMap<u32, Vec<f32>> = std::collections::HashMap::new();
+    for line in lines {
+        let width = line.right - line.left;
+        if width > 1.0 {
+            widths.entry(line.page).or_default().push(width);
+        }
+    }
+    widths
+        .into_iter()
+        .map(|(page, mut samples)| {
+            samples.sort_by(|a, b| a.total_cmp(b));
+            let index = samples.len() * 3 / 4;
+            (page, samples[index.min(samples.len() - 1)])
+        })
+        .collect()
+}
+
+fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: f32) -> bool {
+    if upper.page != lower.page {
         return false;
     }
     let next = lower.text.trim_start();
@@ -2034,6 +2132,11 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     // `83 Generating` only when the line above is not finishing that token.
     let hyphen = soft_hyphen_stem(&upper.text).is_some()
         && next.starts_with(|ch: char| ch.is_ascii_alphanumeric());
+    // Two contents titles stay apart. A title broken across lines
+    // (`metadata-` / `enriched`, `Human-in-the-` / `loop`) is still one entry.
+    if (upper.toc || lower.toc) && !(hyphen && upper.toc && lower.toc) {
+        return false;
+    }
     // A detailed-contents line already holds several entries (`83 Generating`).
     // Joining the wrap makes one block the Chinese leading cannot fit.
     if !hyphen && (inline_contents_entry(&upper.text) || inline_contents_entry(&lower.text)) {
@@ -2070,6 +2173,13 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if hyphen {
         return true;
     }
+    // An address or a credits row is a stack of short lines under a full
+    // measure. Joining them makes one paragraph, and the Chinese then puts
+    // a single character on each source line. A wrapped sentence still joins:
+    // its upper line fills the column, and a short tail starts lowercase.
+    if stacked_short_items(upper, lower, measure) {
+        return false;
+    }
     if toc_entry_boundary(upper, lower) {
         return false;
     }
@@ -2087,6 +2197,25 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     let overlap = (upper.right.min(lower.right) - upper.left.max(lower.left)).max(0.0);
     let narrow = upper_w.min(lower_w).max(1.0);
     overlap >= narrow * 0.35 || (upper.left - lower.left).abs() <= 8.0
+}
+
+/// Both lines are well under the page's column measure, and the next one
+/// starts a new item (`Manning Publications`, `20 Baldwin Road`).
+fn stacked_short_items(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: f32) -> bool {
+    let size = upper.size.max(lower.size).max(1.0);
+    if measure < size * 18.0 {
+        return false;
+    }
+    let cap = measure * 0.5;
+    let upper_w = upper.right - upper.left;
+    let lower_w = lower.right - lower.left;
+    if upper_w >= cap || lower_w >= cap {
+        return false;
+    }
+    lower
+        .text
+        .trim_start()
+        .starts_with(|ch: char| ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
 fn line_has_formula(line: &VisualLine<'_>) -> bool {
@@ -2334,7 +2463,11 @@ fn join_hyphenated_word(stem: &str, rest: &str) -> String {
         .next()
         .unwrap_or(rest)
         .trim_matches(|ch: char| !ch.is_ascii_alphabetic());
-    if is_hard_prefix(stem_word) && next_word.len() >= 3 && !is_hyphen_suffix(next_word) {
+    // `Human-in-the-` / `loop` already has hyphens in the stem. The break
+    // hyphen is part of the compound, not a soft hyphen inside a word.
+    if stem_word.contains('-')
+        || (is_hard_prefix(stem_word) && next_word.len() >= 3 && !is_hyphen_suffix(next_word))
+    {
         format!("{stem}-{rest}")
     } else {
         format!("{stem}{rest}")
@@ -2374,6 +2507,33 @@ fn is_hyphen_suffix(word: &str) -> bool {
         "red", "ies", "ability", "ibility", "ation", "ition", "ful", "less", "ship", "hood",
     ];
     SUFFIXES.contains(&word.as_str())
+}
+
+fn line_has_letter(line: &VisualLine<'_>) -> bool {
+    line.text.chars().any(|ch| ch.is_alphabetic())
+}
+
+fn is_mark_line(line: &VisualLine<'_>) -> bool {
+    let text = line.text.trim();
+    !text.is_empty() && text.chars().count() <= 2 && !text.chars().any(|ch| ch.is_alphanumeric())
+}
+
+/// A contents wrap returns from the right-hand title to the row indent.
+/// `Q&A on a metadata-` sits near x=336 and `enriched` returns to x=177.
+fn toc_hyphen_wrap(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
+    if !prev.toc || !line.toc {
+        return false;
+    }
+    let shift = line.left - prev.left;
+    prev.page == line.page
+        && soft_hyphen_stem(&prev.text).is_some()
+        && line
+            .text
+            .trim_start()
+            .starts_with(|ch: char| ch.is_ascii_alphabetic())
+        && (-240.0..=8.0).contains(&shift)
+        && prev.y > line.y
+        && prev.y - line.y < prev.size.max(line.size).max(1.0) * 1.6
 }
 
 /// A hanging indent that finishes `multi-` / `per-` belongs to that column
@@ -2751,7 +2911,11 @@ mod tests {
         push(&mut glyphs, &mut id, 268.0, 488.0, "the", 16.0);
         push(&mut glyphs, &mut id, 287.0, 488.0, "web", 18.0);
         let seg = segment_with(&glyphs, &SegmentFlags::default());
-        let texts: Vec<_> = seg.segments.iter().map(|segment| segment.text.as_str()).collect();
+        let texts: Vec<_> = seg
+            .segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect();
         assert!(!texts.contains(&"client 83 results 83"), "{texts:?}");
         assert!(
             texts
@@ -5112,6 +5276,57 @@ mod tests {
     }
 
     #[test]
+    fn a_hyphenated_contents_title_keeps_its_compound() {
+        // The broken title sits on the right of the row. Its continuation
+        // returns to the contents indent, under the previous entry.
+        let glyphs = vec![
+            block(
+                0,
+                177.0,
+                210.0,
+                124.0,
+                10.0,
+                "Ingestion: Metadata enrichment",
+            ),
+            block(1, 306.0, 210.0, 18.0, 10.0, "232"),
+            block(2, 336.0, 210.0, 110.0, 10.0, "Q&A on a metadata-"),
+            block(3, 177.0, 198.0, 70.0, 10.0, "enriched collection"),
+            block(4, 252.0, 198.0, 18.0, 10.0, "234"),
+            block(
+                5,
+                186.0,
+                515.0,
+                150.0,
+                10.0,
+                "Long-term user and application memory",
+            ),
+            block(6, 345.0, 515.0, 18.0, 10.0, "346"),
+            block(7, 375.0, 515.0, 70.0, 10.0, "Human-in-the-"),
+            block(10, 348.0, 509.0, 8.0, 10.0, "■"),
+            block(8, 186.0, 503.0, 22.0, 10.0, "loop"),
+            block(9, 213.0, 503.0, 18.0, 10.0, "346"),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("metadata-enriched")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("Human-in-the-loop")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains("metadata- ") && !text.ends_with('-')),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn a_wrapped_contents_title_still_joins() {
         let glyphs = vec![
             block(0, 153.0, 400.0, 240.0, 10.0, "Executing prompts"),
@@ -5661,6 +5876,105 @@ mod tests {
             seg.kept.iter().any(|(_, reason)| reason == "figure"),
             "{:?}",
             seg.kept
+        );
+    }
+
+    #[test]
+    fn a_drop_cap_joins_the_body_under_it() {
+        let mut glyphs = Vec::new();
+        let mut cap = glyph(0, 126.0, 402.0, "T", false);
+        cap.font_size = 48.0;
+        cap.matrix = [48.0, 0.0, 0.0, 48.0, 126.0, 402.0];
+        cap.bbox = [126.0, 392.0, 158.0, 440.0];
+        glyphs.push(cap);
+        let mut id = 1u32;
+        let mut paint = |text: &str, x: f32, y: f32| {
+            let mut cursor = x;
+            for ch in text.chars() {
+                let mut item = glyph(id, cursor, y, &ch.to_string(), false);
+                id += 1;
+                item.font_size = 10.0;
+                item.matrix = [10.0, 0.0, 0.0, 10.0, cursor, y];
+                let width = if ch == ' ' { 3.0 } else { 5.2 };
+                item.bbox = [cursor, y - 2.0, cursor + width, y + 8.0];
+                cursor += width;
+                glyphs.push(item);
+            }
+        };
+        paint(
+            "his opening part lays the foundation for the book.",
+            154.0,
+            402.0,
+        );
+        paint(
+            "explore why the rest of this opening part matters.",
+            126.0,
+            389.0,
+        );
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("opening") && text.contains("explore")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn short_address_rows_stay_separate_under_a_full_measure() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            66.0,
+            560.0,
+            "For online information and ordering of this and other Manning books, please visit",
+            "Times-Roman",
+        );
+        glyphs.extend(paint_word(
+            &mut id,
+            90.0,
+            420.0,
+            "Special Sales Department",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            90.0,
+            409.0,
+            "Manning Publications Co.",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            90.0,
+            398.0,
+            "20 Baldwin Road",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(
+                |text| text.contains("Special Sales") && !text.contains("Manning Publications")
+            ),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Manning Publications") && !text.contains("Baldwin")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Baldwin") && !text.contains("Manning")),
+            "{texts:?}"
         );
     }
 
