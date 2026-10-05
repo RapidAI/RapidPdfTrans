@@ -435,6 +435,7 @@ mod tests {
                 rotate: 0,
             }],
             glyphs,
+            regions: Vec::new(),
             diagnostics: Vec::new(),
         }
     }

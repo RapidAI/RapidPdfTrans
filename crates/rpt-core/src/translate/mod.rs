@@ -533,12 +533,14 @@ fn prepare_segments(
     if opts.batch_size == 0 {
         return Err(Error::Options("batch_size must be at least 1".into()));
     }
-    let segmentation = segment::segment_with(
+    let segmentation = segment::segment_placed(
         &extraction.glyphs,
         &segment::SegmentFlags {
             skip_figures: opts.skip_figures,
             skip_tables: opts.skip_tables,
         },
+        &extraction.regions,
+        &extraction.pages,
     );
     let segments = segmentation.segments;
     let reference_ids = if opts.skip_references {
@@ -798,7 +800,9 @@ fn translate_batch(
     calls: &mut usize,
 ) -> Result<Vec<(usize, String)>> {
     match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
-        Ok(restored) => Ok(restored),
+        Ok(restored) => Ok(polish(echo_fix(
+            segments, shielded, restored, opts, translator, calls,
+        ))),
         Err(err) if recoverable(&err) && indexes.len() > 1 => {
             let mid = indexes.len() / 2;
             let mut left =
@@ -815,15 +819,132 @@ fn translate_batch(
         }
         Err(err) if recoverable(&err) => {
             match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
-                Ok(restored) => Ok(restored),
-                Err(_) => Ok(indexes
-                    .iter()
-                    .map(|&index| (index, segments[index].text.clone()))
-                    .collect()),
+                Ok(restored) => Ok(polish(echo_fix(
+                    segments, shielded, restored, opts, translator, calls,
+                ))),
+                Err(_) => Ok(polish(
+                    indexes
+                        .iter()
+                        .map(|&index| (index, segments[index].text.clone()))
+                        .collect(),
+                )),
             }
         }
         Err(err) => Err(err),
     }
+}
+
+/// One more call when a long Latin paragraph comes back still in English.
+fn echo_fix(
+    segments: &[Segment],
+    shielded: &[protect::Shielded],
+    mut restored: Vec<(usize, String)>,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+) -> Vec<(usize, String)> {
+    let retry: Vec<usize> = restored
+        .iter()
+        .filter(|(index, text)| needs_english_retry(&segments[*index].text, text))
+        .map(|(index, _)| *index)
+        .collect();
+    if retry.is_empty() {
+        return restored;
+    }
+    let Ok(parsed) = call_batch(
+        segments, shielded, &retry, opts, translator, calls, false, true,
+    ) else {
+        return restored;
+    };
+    let Ok(second) = restore_all(&retry, shielded, &parsed) else {
+        return restored;
+    };
+    for (index, text) in second {
+        if let Some(slot) = restored.iter_mut().find(|(id, _)| *id == index) {
+            slot.1 = text;
+        }
+    }
+    restored
+}
+
+fn polish(items: Vec<(usize, String)>) -> Vec<(usize, String)> {
+    items
+        .into_iter()
+        .map(|(index, text)| (index, strip_cjk_hyphens(&text)))
+        .collect()
+}
+
+/// A body paragraph the model echoed. Short lines, names, and any Chinese stay.
+fn needs_english_retry(source: &str, translated: &str) -> bool {
+    let source = source.trim();
+    let translated = translated.trim();
+    if cjk_count(source) > 0 || cjk_count(translated) > 0 {
+        return false;
+    }
+    if latin_letters(source) < 80 || latin_letters(translated) < 80 {
+        return false;
+    }
+    let only_url = source.split_whitespace().all(|word| {
+        word.starts_with("http://") || word.starts_with("https://") || word.contains('@')
+    });
+    !only_url
+}
+
+fn latin_letters(text: &str) -> usize {
+    text.chars().filter(|ch| ch.is_ascii_alphabetic()).count()
+}
+
+fn cjk_count(text: &str) -> usize {
+    text.chars().filter(|ch| is_cjk_char(*ch)).count()
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3000}'..='\u{303F}'
+            | '\u{3040}'..='\u{30FF}'
+            | '\u{3400}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FF00}'..='\u{FFEF}'
+    )
+}
+
+/// Drop a hyphen sitting between CJK characters, or a dangling hyphen after CJK.
+/// Hyphens inside a URL stay.
+fn strip_cjk_hyphens(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut in_url = vec![false; chars.len()];
+    let mut index = 0;
+    while index < chars.len() {
+        let rest: String = chars[index..].iter().collect();
+        if rest.starts_with("https://") || rest.starts_with("http://") {
+            while index < chars.len() && !chars[index].is_whitespace() {
+                in_url[index] = true;
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    let mut out = String::new();
+    for (index, ch) in chars.iter().enumerate() {
+        if !in_url[index] && matches!(*ch, '-' | '\u{00ad}' | '\u{2010}') {
+            let prev = chars[..index]
+                .iter()
+                .rev()
+                .find(|item| !item.is_whitespace())
+                .copied();
+            let next = chars[index + 1..]
+                .iter()
+                .copied()
+                .find(|item| !item.is_whitespace());
+            if prev.is_some_and(is_cjk_char) && (next.is_none() || next.is_some_and(is_cjk_char)) {
+                continue;
+            }
+        }
+        out.push(*ch);
+    }
+    out
 }
 
 fn recoverable(err: &Error) -> bool {
@@ -852,11 +973,15 @@ fn translate_batch_once(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Result<Vec<(usize, String)>> {
-    let first = call_batch(segments, shielded, indexes, opts, translator, calls, false)?;
+    let first = call_batch(
+        segments, shielded, indexes, opts, translator, calls, false, false,
+    )?;
     match restore_all(indexes, shielded, &first) {
         Ok(restored) => Ok(restored),
         Err(_) => {
-            let second = call_batch(segments, shielded, indexes, opts, translator, calls, true)?;
+            let second = call_batch(
+                segments, shielded, indexes, opts, translator, calls, true, false,
+            )?;
             restore_all(indexes, shielded, &second).map_err(|err| {
                 Error::Translate(format!("placeholder was not preserved after retry: {err}"))
             })
@@ -872,13 +997,14 @@ fn call_batch(
     translator: &dyn Translator,
     calls: &mut usize,
     strict: bool,
+    echo: bool,
 ) -> Result<Vec<(u32, String)>> {
     let prompts = indexes
         .iter()
         .map(|&i| prompt_for(segments, shielded, i, opts.context_window))
         .collect::<Vec<_>>();
     let user = user_payload(&prompts)?;
-    let system = system_prompt(&opts.source_lang, &opts.target_lang, strict);
+    let system = system_prompt(&opts.source_lang, &opts.target_lang, strict, echo);
     *calls += 1;
     let raw = translator.complete(&system, &user)?;
     let parsed = parse_translations(&raw)?;
@@ -987,6 +1113,7 @@ mod tests {
                 rotate: 0,
             }],
             glyphs,
+            regions: Vec::new(),
             diagnostics: Vec::<Diagnostic>::new(),
         }
     }
@@ -1211,6 +1338,51 @@ mod tests {
         let report =
             translate_extraction(&mut ex, &TranslateOptions::default(), &AlwaysEmpty).unwrap();
         assert_eq!(report.segments[0].translated, "Alpha one");
+    }
+
+    #[test]
+    fn an_echoed_english_paragraph_is_translated_on_retry() {
+        let source = "The projects target modern versions of Python and use standard tools such as pip and virtual environments for every chapter.";
+        let mut ex = extraction_from_lines(&[source]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &EchoThenChinese).unwrap();
+        assert!(
+            report.segments[0].translated.chars().any(is_cjk_char),
+            "{}",
+            report.segments[0].translated
+        );
+        assert_ne!(report.segments[0].translated, source);
+        assert!(report.calls >= 2, "calls={}", report.calls);
+    }
+
+    struct EchoThenChinese;
+    impl Translator for EchoThenChinese {
+        fn complete(&self, system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = if system.contains("copied the English") {
+                        "这些项目面向较新的 Python 版本，并使用标准工具。"
+                    } else {
+                        seg["text"].as_str().unwrap()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn cjk_hyphens_are_removed_and_url_hyphens_stay() {
+        assert_eq!(strip_cjk_hyphens("多-文档"), "多文档");
+        assert_eq!(strip_cjk_hyphens("摘要链, 多-"), "摘要链, 多");
+        assert_eq!(
+            strip_cjk_hyphens("见 https://livebook.manning.com/book/ai-agents-and-applications"),
+            "见 https://livebook.manning.com/book/ai-agents-and-applications"
+        );
     }
 
     struct AlwaysEmpty;

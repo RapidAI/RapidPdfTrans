@@ -7,7 +7,8 @@
 //! Figure interiors and table cells are not segments; only their captions
 //! are. Unmapped glyphs stay out of every segment.
 
-use crate::glyph::Glyph;
+use crate::geom::Rect;
+use crate::glyph::{Glyph, PageInfo, PaintedRegion};
 
 const LONG_LINE: usize = 1600;
 
@@ -47,8 +48,18 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
 }
 
 pub fn segment_with(glyphs: &[Glyph], flags: &SegmentFlags) -> Segmentation {
+    segment_placed(glyphs, flags, &[], &[])
+}
+
+/// Like [`segment_with`], and also keeps labels inside painted boxes and images.
+pub fn segment_placed(
+    glyphs: &[Glyph],
+    flags: &SegmentFlags,
+    regions: &[PaintedRegion],
+    pages: &[PageInfo],
+) -> Segmentation {
     let lines = raw_lines(glyphs);
-    assemble(lines, flags)
+    assemble(lines, flags, regions, pages)
 }
 
 fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
@@ -165,10 +176,16 @@ struct VisualLine<'a> {
     font: String,
 }
 
-fn assemble(raw: Vec<Vec<&Glyph>>, flags: &SegmentFlags) -> Segmentation {
+fn assemble(
+    raw: Vec<Vec<&Glyph>>,
+    flags: &SegmentFlags,
+    regions: &[PaintedRegion],
+    pages: &[PageInfo],
+) -> Segmentation {
     let mut lines: Vec<VisualLine> = raw.into_iter().map(visual_line).collect();
     attach_markers(&mut lines);
     let mut kept = interior_glyphs(&lines, flags);
+    kept.extend(region_interiors(&lines, flags, regions, pages));
     kept.extend(margin_stamps(&lines));
     let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     if !kept_ids.is_empty() {
@@ -211,10 +228,12 @@ fn assemble(raw: Vec<Vec<&Glyph>>, flags: &SegmentFlags) -> Segmentation {
         for (index, line) in para.iter().enumerate() {
             let piece = if index == 0 {
                 line.text.clone()
+            } else if url_continues(&buf, &line.text) {
+                format!("{}{}", buf.trim_end(), line.text.trim_start())
             } else if let Some(stem) = soft_hyphen_stem(&buf) {
                 let rest = line.text.trim_start();
                 if rest.starts_with(|ch: char| ch.is_ascii_lowercase()) {
-                    format!("{stem}{rest}")
+                    join_hyphenated_word(stem, rest)
                 } else {
                     format!("{} {}", buf.trim_end(), line.text.trim_start())
                 }
@@ -475,6 +494,179 @@ fn interior_glyphs(lines: &[VisualLine<'_>], flags: &SegmentFlags) -> Vec<(u32, 
         }
     }
     kept
+}
+
+/// Labels inside a cluster of boxes, or on an image, stay original.
+/// A "Figure N" caption is not required. Body lines and captions are not kept.
+fn region_interiors(
+    lines: &[VisualLine<'_>],
+    flags: &SegmentFlags,
+    regions: &[PaintedRegion],
+    pages: &[PageInfo],
+) -> Vec<(u32, String)> {
+    if !flags.skip_figures || regions.is_empty() {
+        return Vec::new();
+    }
+    let mut by_page: std::collections::HashMap<u32, Vec<&PaintedRegion>> =
+        std::collections::HashMap::new();
+    for region in regions {
+        by_page.entry(region.page_index).or_default().push(region);
+    }
+    let mut kept = Vec::new();
+    for (page, regs) in by_page {
+        let (width, height) = page_size(pages, page);
+        let unions = figure_unions(&regs, width, height);
+        for line in lines.iter().filter(|line| line.page == page) {
+            if !line_in_figure(line, &unions) {
+                continue;
+            }
+            for glyph in &line.glyphs {
+                kept.push((glyph.id, "figure".to_string()));
+            }
+        }
+    }
+    kept
+}
+
+fn page_size(pages: &[PageInfo], page: u32) -> (f32, f32) {
+    pages
+        .iter()
+        .find(|info| info.index == page)
+        .map(|info| {
+            (
+                info.media_box[2] - info.media_box[0],
+                info.media_box[3] - info.media_box[1],
+            )
+        })
+        .unwrap_or((0.0, 0.0))
+}
+
+fn figure_unions(regions: &[&PaintedRegion], page_w: f32, page_h: f32) -> Vec<Rect> {
+    struct Item {
+        rect: Rect,
+        image: bool,
+        fat: bool,
+    }
+    let mut items = Vec::new();
+    for region in regions {
+        let rect = Rect::new(
+            region.bbox[0],
+            region.bbox[1],
+            region.bbox[2],
+            region.bbox[3],
+        );
+        let width = rect.width();
+        let height = rect.height();
+        // A short hairline is an underline. A long thin edge is a box border.
+        let thin = width < 1.5 || height < 1.5;
+        let short = width < 24.0 && height < 24.0;
+        if (width < 4.0 && height < 4.0) || (thin && short) {
+            continue;
+        }
+        if page_w > 1.0 && page_h > 1.0 && width > page_w * 0.85 && height > page_h * 0.70 {
+            continue;
+        }
+        items.push(Item {
+            rect,
+            image: region.kind == "image",
+            fat: width >= 6.0 && height >= 6.0,
+        });
+    }
+    let count = items.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut parent: Vec<usize> = (0..count).collect();
+    for left in 0..count {
+        for right in left + 1..count {
+            if rects_near(items[left].rect, items[right].rect, 8.0) {
+                unite(&mut parent, left, right);
+            }
+        }
+    }
+    let mut groups: std::collections::HashMap<usize, (Rect, bool, bool, usize)> =
+        std::collections::HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        let root = find_root(&mut parent, index);
+        let entry = groups.entry(root).or_insert((item.rect, false, false, 0));
+        entry.0 = union_rect(entry.0, item.rect);
+        entry.1 |= item.image;
+        entry.2 |= item.fat;
+        entry.3 += 1;
+    }
+    groups
+        .into_values()
+        .filter(|(_, image, fat, boxes)| *image || (*fat && *boxes >= 2))
+        .map(|(rect, _, _, _)| rect)
+        .collect()
+}
+
+fn find_root(parent: &mut [usize], mut index: usize) -> usize {
+    while parent[index] != index {
+        parent[index] = parent[parent[index]];
+        index = parent[index];
+    }
+    index
+}
+
+fn unite(parent: &mut [usize], left: usize, right: usize) {
+    let left = find_root(parent, left);
+    let right = find_root(parent, right);
+    if left != right {
+        parent[right] = left;
+    }
+}
+
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    Rect {
+        x0: a.x0.min(b.x0),
+        y0: a.y0.min(b.y0),
+        x1: a.x1.max(b.x1),
+        y1: a.y1.max(b.y1),
+    }
+}
+
+fn rects_near(a: Rect, b: Rect, gap: f32) -> bool {
+    a.x1 + gap >= b.x0 && b.x1 + gap >= a.x0 && a.y1 + gap >= b.y0 && b.y1 + gap >= a.y0
+}
+
+fn line_in_figure(line: &VisualLine<'_>, unions: &[Rect]) -> bool {
+    if unions.is_empty()
+        || caption_kind(&line.text).is_some()
+        || is_running_header(&line.text)
+        || is_footer_line(&line.text)
+        || is_page_folio_text(&line.text)
+        || is_body_shape(line)
+    {
+        return false;
+    }
+    let total = line.glyphs.len();
+    if total == 0 {
+        return false;
+    }
+    for rect in unions {
+        let inside = line
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                let x = (glyph.bbox[0] + glyph.bbox[2]) * 0.5;
+                let y = (glyph.bbox[1] + glyph.bbox[3]) * 0.5;
+                x >= rect.x0 - 6.0 && x <= rect.x1 + 6.0 && y >= rect.y0 - 6.0 && y <= rect.y1 + 6.0
+            })
+            .count();
+        let above = line.y > rect.y1
+            && line.y <= rect.y1 + line.size * 2.4
+            && line.left >= rect.x0 - 8.0
+            && line.right <= rect.x1 + 24.0;
+        if inside * 2 <= total && !above {
+            continue;
+        }
+        let width = line.right - line.left;
+        if above || width <= rect.width() + 24.0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn caption_kind(text: &str) -> Option<&'static str> {
@@ -786,11 +978,13 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
     // so a chain of small indents cannot pull the other column in.
     let mut columns: Vec<Vec<VisualLine>> = Vec::new();
     for line in lines {
-        if let Some(column) = columns.iter_mut().find(|column| {
+        let slot = columns.iter().position(|column| {
             column_anchor(column, line.page)
                 .is_some_and(|anchor| (anchor - line.left).abs() <= 28.0)
-        }) {
-            column.push(line);
+                || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
+        });
+        if let Some(slot) = slot {
+            columns[slot].push(line);
         } else {
             columns.push(vec![line]);
         }
@@ -1032,8 +1226,14 @@ fn substantial_paragraph(para: &[VisualLine<'_>]) -> bool {
 }
 
 fn is_page_bridge(para: &[VisualLine<'_>]) -> bool {
-    let text = para.first().map(|line| line.text.trim()).unwrap_or("");
+    let Some(line) = para.first() else {
+        return false;
+    };
+    let text = line.text.trim();
     if text.is_empty() || is_running_header(text) || caption_kind(text).is_some() {
+        return true;
+    }
+    if is_footer_line(text) || is_narrow_folio(line) {
         return true;
     }
     text.chars()
@@ -1044,6 +1244,9 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
     let Some(upper) = prev.last() else {
         return false;
     };
+    if is_footer_line(&upper.text) || is_narrow_folio(upper) {
+        return false;
+    }
     let Some(lower) = next.first() else {
         return false;
     };
@@ -1066,13 +1269,21 @@ fn column_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool
     if lower.page != upper.page {
         return false;
     }
+    if is_footer_line(&upper.text)
+        || is_footer_line(&lower.text)
+        || is_narrow_folio(upper)
+        || is_narrow_folio(lower)
+    {
+        return false;
+    }
     if lower.left <= upper.left + 36.0 || lower.left >= upper.left + 360.0 {
         return false;
     }
     // A line beside this one is the other column's matching row, not the
-    // continuation. The next column's text starts above this tail.
+    // continuation. The next column's text starts near the top of the page,
+    // not a folio a few lines above a footer.
     let size = upper.size.max(lower.size).max(1.0);
-    if lower.y < upper.y + size * 1.2 {
+    if lower.y < upper.y + size * 8.0 {
         return false;
     }
     if is_margin_strip(next) {
@@ -1148,8 +1359,17 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if (upper.left - lower.left).abs() > 36.0 && !hyphen {
         return false;
     }
+    // A first-line indent, with the same leading and no extra gap, is a new
+    // paragraph. A hyphenated word's continuation is indented the other way
+    // and is handled above.
+    if !hyphen && lower.left > upper.left + size * 0.55 {
+        return false;
+    }
     if hyphen {
         return true;
+    }
+    if toc_entry_boundary(upper, lower) {
+        return false;
     }
     let upper_w = upper.right - upper.left;
     let lower_w = lower.right - lower.left;
@@ -1266,6 +1486,245 @@ fn is_cjk(ch: char) -> bool {
 fn sentence_end(text: &str) -> bool {
     let t = text.trim_end();
     t.ends_with(['.', '!', '?', '。', '！', '？']) && t.len() > 1
+}
+
+/// A wrapped URL continues on the next line (`and` + `-applications`, or
+/// `manning` + `.com/...`). The join keeps the hyphen so the shield sees one token.
+fn url_continues(buf: &str, next: &str) -> bool {
+    let buf = buf.trim_end();
+    let next = next.trim_start();
+    let Some(token) = buf.split_whitespace().last() else {
+        return false;
+    };
+    if !(token.starts_with("https://") || token.starts_with("http://")) {
+        return false;
+    }
+    let mut chars = next.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let Some(second) = chars.next() else {
+        return false;
+    };
+    second.is_ascii_alphanumeric()
+        && matches!(
+            first,
+            '-' | '.' | '/' | '%' | '?' | '&' | '=' | '#' | '_' | '~'
+        )
+}
+
+fn join_hyphenated_word(stem: &str, rest: &str) -> String {
+    if line_ends_with_url(stem) {
+        return format!("{stem}-{rest}");
+    }
+    let stem_word = stem.split_whitespace().last().unwrap_or(stem);
+    let next_word = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or(rest)
+        .trim_matches(|ch: char| !ch.is_ascii_alphabetic());
+    if is_hard_prefix(stem_word) && next_word.len() >= 3 && !is_hyphen_suffix(next_word) {
+        format!("{stem}-{rest}")
+    } else {
+        format!("{stem}{rest}")
+    }
+}
+
+fn is_hard_prefix(word: &str) -> bool {
+    // Prefixes that almost always start a compound (`multi-document`).
+    // `pre`, `over`, and `inter` are omitted: papers break ordinary words
+    // after them (`pre-serve`, `over-flow`, `inter-mediate`).
+    const PREFIXES: &[&str] = &[
+        "multi", "self", "semi", "cross", "meta", "pseudo", "ultra", "micro", "macro", "anti",
+        "non",
+    ];
+    let word = word.to_ascii_lowercase();
+    PREFIXES.contains(&word.as_str())
+}
+
+fn line_ends_with_url(text: &str) -> bool {
+    text.split_whitespace()
+        .last()
+        .is_some_and(|token| token.starts_with("https://") || token.starts_with("http://"))
+}
+
+fn is_hyphen_suffix(word: &str) -> bool {
+    let word = word.to_ascii_lowercase();
+    const SUFFIXES: &[&str] = &[
+        "ed", "ing", "tion", "sion", "ified", "ally", "ment", "ness", "able", "ible", "ence",
+        "ance", "ous", "ive", "ers", "ly", "es", "er", "al", "ity", "or", "ions", "ted", "ned",
+        "red", "ies", "ability", "ibility", "ation", "ition", "ful", "less", "ship", "hood",
+    ];
+    SUFFIXES.contains(&word.as_str())
+}
+
+/// A hanging indent that finishes `multi-` / `per-` belongs to that column
+/// even when the column's median left edge is the body margin.
+fn hyphen_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
+    prev.page == line.page
+        && soft_hyphen_stem(&prev.text).is_some()
+        && line
+            .text
+            .trim_start()
+            .starts_with(|ch: char| ch.is_ascii_lowercase())
+        && line.left + 1.0 >= prev.left
+        && line.left - prev.left <= 36.0
+        && prev.y > line.y
+        && prev.y - line.y < prev.size.max(line.size).max(1.0) * 1.6
+}
+
+fn toc_entry_boundary(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if contents_marker_line(&upper.text)
+        && (contents_marker_line(&lower.text) || starts_new_contents_entry(&lower.text))
+    {
+        return true;
+    }
+    ends_with_page_number(&upper.text) && starts_new_contents_entry(&lower.text)
+}
+
+fn contents_marker_line(text: &str) -> bool {
+    let mut core = String::new();
+    let mut bullet = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() || is_toc_bullet(ch) {
+            bullet |= is_toc_bullet(ch);
+            continue;
+        }
+        core.push(ch);
+    }
+    if core.is_empty() {
+        return bullet;
+    }
+    is_section_number_token(&core)
+}
+
+fn is_toc_bullet(ch: char) -> bool {
+    matches!(ch, '■' | '▪' | '●' | '•' | '◦' | '·')
+}
+
+fn is_section_number_token(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut index = 0;
+    let mut groups = 0;
+    while index < bytes.len() {
+        if groups > 0 {
+            if bytes[index] != b'.' {
+                return false;
+            }
+            index += 1;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == start || index - start > 2 {
+            return false;
+        }
+        groups += 1;
+        if groups > 4 {
+            return false;
+        }
+    }
+    groups >= 1
+}
+
+fn starts_new_contents_entry(text: &str) -> bool {
+    let text = text.trim_start();
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    if is_toc_bullet(first) || starts_with_section_number(text) {
+        return true;
+    }
+    first.is_ascii_uppercase()
+}
+
+fn starts_with_section_number(text: &str) -> bool {
+    let Some(token) = text.split_whitespace().next() else {
+        return false;
+    };
+    is_section_number_token(token)
+}
+
+fn ends_with_page_number(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    if lower.starts_with("figure")
+        || lower.starts_with("fig.")
+        || lower.starts_with("fig ")
+        || lower.starts_with("table")
+        || lower.starts_with("tab.")
+        || lower.starts_with("tab ")
+    {
+        return false;
+    }
+    let text = text.trim_end();
+    let Some(token) = text.split_whitespace().last() else {
+        return false;
+    };
+    if token.is_empty() || token.len() > 3 || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    text.split_whitespace().count() >= 2
+}
+
+fn is_footer_line(text: &str) -> bool {
+    text.trim().to_ascii_lowercase().starts_with("licensed to")
+}
+
+fn is_narrow_folio(line: &VisualLine<'_>) -> bool {
+    let width = line.right - line.left;
+    width <= 48.0 && is_page_folio_text(&line.text)
+}
+
+fn is_page_folio_text(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 6 {
+        return false;
+    }
+    text.chars().all(|ch| ch.is_ascii_digit()) || is_roman_numeral(text)
+}
+
+fn is_roman_numeral(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    if lower.is_empty() || lower.len() > 8 {
+        return false;
+    }
+    let bytes = lower.as_bytes();
+    let mut index = 0;
+    let mut ems = 0;
+    while index < bytes.len() && bytes[index] == b'm' && ems < 4 {
+        index += 1;
+        ems += 1;
+    }
+    index = eat_roman_group(bytes, index, b'c', b'd', b'm');
+    index = eat_roman_group(bytes, index, b'x', b'l', b'c');
+    index = eat_roman_group(bytes, index, b'i', b'v', b'x');
+    index == bytes.len()
+}
+
+fn eat_roman_group(bytes: &[u8], index: usize, one: u8, five: u8, ten: u8) -> usize {
+    if index >= bytes.len() {
+        return index;
+    }
+    if bytes[index] == one
+        && index + 1 < bytes.len()
+        && (bytes[index + 1] == five || bytes[index + 1] == ten)
+    {
+        return index + 2;
+    }
+    let mut index = index;
+    if index < bytes.len() && bytes[index] == five {
+        index += 1;
+    }
+    let mut count = 0;
+    while index < bytes.len() && bytes[index] == one && count < 3 {
+        index += 1;
+        count += 1;
+    }
+    index
 }
 
 #[cfg(test)]
@@ -2218,5 +2677,417 @@ mod tests {
             !texts.iter().any(|text| text.ends_with("tra-")),
             "{texts:?}"
         );
+    }
+
+    fn block(id: u32, x: f32, y: f32, w: f32, size: f32, text: &str) -> Glyph {
+        let mut item = glyph(id, x, y, text, false);
+        item.font_size = size;
+        item.matrix = [size, 0.0, 0.0, size, x, y];
+        item.bbox = [x, y, x + w, y + size];
+        item
+    }
+
+    #[test]
+    fn a_contents_entry_does_not_merge_with_the_next_page_number() {
+        let glyphs = vec![
+            block(
+                0,
+                153.0,
+                378.0,
+                220.0,
+                10.0,
+                "Introduction to AI agents and applications 3",
+            ),
+            block(
+                1,
+                153.0,
+                364.0,
+                210.0,
+                10.0,
+                "Executing prompts programmatically 27",
+            ),
+            block(
+                2,
+                133.0,
+                604.0,
+                280.0,
+                10.0,
+                "4.4 Enhancing the architecture 76",
+            ),
+            block(3, 133.0, 590.0, 220.0, 10.0, "4.5 Prompt engineering 78"),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == "Introduction to AI agents and applications 3"),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == "Executing prompts programmatically 27"),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == "4.4 Enhancing the architecture 76"),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text == "4.5 Prompt engineering 78"),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains(" 3 Executing")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("76 4.5")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_contents_title_still_joins() {
+        let glyphs = vec![
+            block(0, 153.0, 400.0, 240.0, 10.0, "Executing prompts"),
+            block(1, 153.0, 386.0, 220.0, 10.0, "programmatically 27"),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert_eq!(texts, ["Executing prompts programmatically 27"]);
+    }
+
+    #[test]
+    fn an_indented_paragraph_without_a_gap_stays_separate() {
+        let glyphs = vec![
+            block(
+                0,
+                72.0,
+                400.0,
+                330.0,
+                10.0,
+                "The line above ends a sentence and fills the measure.",
+            ),
+            block(
+                1,
+                84.0,
+                387.0,
+                300.0,
+                10.0,
+                "My own journey starts a new paragraph.",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts[0].contains("sentence") || texts[1].contains("sentence"));
+        assert!(texts.iter().any(|text| text.starts_with("My own")));
+    }
+
+    #[test]
+    fn a_flush_line_after_an_indent_stays_in_the_paragraph() {
+        let glyphs = vec![
+            block(
+                0,
+                84.0,
+                400.0,
+                280.0,
+                10.0,
+                "My own journey starts here and",
+            ),
+            block(
+                1,
+                72.0,
+                387.0,
+                290.0,
+                10.0,
+                "continues on the flush line underneath.",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("journey") && texts[0].contains("underneath"));
+    }
+
+    #[test]
+    fn a_page_folio_stays_off_the_license_line() {
+        let glyphs = vec![
+            block(
+                0,
+                166.0,
+                19.0,
+                200.0,
+                8.0,
+                "Licensed to THIAGO BANDEIRA <thiago@lar.ifce.edu.br>",
+            ),
+            block(1, 255.0, 60.0, 16.0, 9.0, "xvi"),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert!(texts.iter().any(|text| text == "xvi"), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with("Licensed") && !text.contains("xvi")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_license_footer_does_not_steal_the_next_page() {
+        let mut body = block(
+            0,
+            132.0,
+            120.0,
+            280.0,
+            10.0,
+            "pipelines that preserve key ideas and then evolve",
+        );
+        let license = block(
+            1,
+            166.0,
+            19.0,
+            200.0,
+            8.0,
+            "Licensed to THIAGO BANDEIRA <thiago@lar.ifce.edu.br>",
+        );
+        let mut next = block(
+            2,
+            142.0,
+            640.0,
+            280.0,
+            10.0,
+            "from a single tool into a full agent with tracing.",
+        );
+        next.page_index = 1;
+        body.page_index = 0;
+        let texts: Vec<_> = segment_glyphs(&[body, license, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("evolve from a single")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with("Licensed") && !text.contains("evolve")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_url_broken_after_a_hyphen_stays_one_token() {
+        let glyphs = vec![
+            block(
+                0,
+                72.0,
+                500.0,
+                360.0,
+                10.0,
+                "See https://livebook.manning.com/book/ai-agents-and",
+            ),
+            block(1, 72.0, 487.0, 120.0, 10.0, "-applications."),
+            block(
+                2,
+                72.0,
+                400.0,
+                320.0,
+                10.0,
+                "visit https://livebook.manning",
+            ),
+            block(
+                3,
+                72.0,
+                387.0,
+                280.0,
+                10.0,
+                ".com/book/ai-agents-and-applications/discussion.",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("https://livebook.manning.com/book/ai-agents-and-applications")
+                    && !text.contains("and -")
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| {
+                text.contains(
+                    "https://livebook.manning.com/book/ai-agents-and-applications/discussion",
+                )
+            }),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_hanging_hyphen_joins_back_into_its_column() {
+        let glyphs = vec![
+            block(
+                0,
+                102.0,
+                400.0,
+                340.0,
+                10.0,
+                "This book is divided into chapters across five parts.",
+            ),
+            block(
+                1,
+                102.0,
+                387.0,
+                340.0,
+                10.0,
+                "Each part builds on the previous one in order.",
+            ),
+            block(
+                2,
+                130.0,
+                200.0,
+                250.0,
+                10.0,
+                "summarization chains for documents, multi-",
+            ),
+            block(
+                3,
+                142.0,
+                187.0,
+                250.0,
+                10.0,
+                "document corpora stay together here.",
+            ),
+            block(4, 130.0, 160.0, 180.0, 10.0, "covering per-"),
+            block(
+                5,
+                142.0,
+                147.0,
+                220.0,
+                10.0,
+                "sona and context stay one word.",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("multi-document")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("persona")),
+            "{texts:?}"
+        );
+        let fused = segment_glyphs(&[
+            block(10, 72.0, 400.0, 300.0, 10.0, "avoiding over-"),
+            block(11, 72.0, 387.0, 280.0, 10.0, "flow in the window."),
+            block(12, 72.0, 360.0, 300.0, 10.0, "what to pre-"),
+            block(13, 72.0, 347.0, 280.0, 10.0, "serve in the policy."),
+            block(14, 72.0, 320.0, 300.0, 10.0, "when inter-"),
+            block(15, 72.0, 307.0, 280.0, 10.0, "mediate evidence remains."),
+        ]);
+        let fused: Vec<_> = fused.iter().map(|seg| seg.text.clone()).collect();
+        let fused_text = fused.join("\n");
+        assert!(
+            fused_text.contains("overflow") && !fused_text.contains("over-"),
+            "{fused:?}"
+        );
+        assert!(
+            fused_text.contains("preserve") && !fused_text.contains("pre-"),
+            "{fused:?}"
+        );
+        assert!(
+            fused_text.contains("intermediate") && !fused_text.contains("inter-"),
+            "{fused:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("per-sona")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn boxed_diagram_labels_stay_original_without_a_figure_caption() {
+        let label = block(0, 140.0, 450.0, 70.0, 10.0, "Retriever");
+        let caption = block(
+            1,
+            80.0,
+            250.0,
+            360.0,
+            10.0,
+            "Retrieval-Augmented Generation stage overview of the pipeline",
+        );
+        let regions = vec![
+            crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [100.0, 420.0, 300.0, 600.0],
+                kind: "path".into(),
+            },
+            crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [100.0, 320.0, 300.0, 430.0],
+                kind: "path".into(),
+            },
+        ];
+        let pages = vec![crate::glyph::PageInfo {
+            index: 0,
+            object_id: "1 0".into(),
+            media_box: [0.0, 0.0, 612.0, 792.0],
+            rotate: 0,
+        }];
+        let seg = segment_placed(
+            &[label, caption],
+            &SegmentFlags::default(),
+            &regions,
+            &pages,
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Retrieval-Augmented")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("Retriever")),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept.iter().any(|(_, reason)| reason == "figure"),
+            "{:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn roman_page_numbers_are_folios() {
+        assert!(is_roman_numeral("xvi"));
+        assert!(is_roman_numeral("XVIII"));
+        assert!(is_roman_numeral("xxvi"));
+        assert!(!is_roman_numeral("did"));
+        assert!(!is_roman_numeral("civil"));
     }
 }

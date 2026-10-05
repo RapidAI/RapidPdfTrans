@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::content::{interpret_document, InterpretOptions};
 use crate::coverage::{self, CoverageReport};
 use crate::error::{Error, Result};
-use crate::glyph::{Diagnostic, Disposition, Glyph, PageInfo};
+use crate::glyph::{Diagnostic, Disposition, Glyph, PageInfo, PaintedRegion};
 
 /// Page user space, origin bottom-left, y up. `/Rotate` is not applied.
 pub const COORDINATE_SPACE: &str = "pdf-user-space-origin-bottom-left-y-up";
@@ -180,6 +180,7 @@ impl PdfDocument {
             coordinate_space: COORDINATE_SPACE,
             pages: interpreted.pages,
             glyphs: interpreted.glyphs,
+            regions: interpreted.regions,
             diagnostics: interpreted.diagnostics,
         }
     }
@@ -199,6 +200,10 @@ pub struct Extraction {
     pub coordinate_space: &'static str,
     pub pages: Vec<PageInfo>,
     pub glyphs: Vec<Glyph>,
+    /// Stroked or filled boxes and images. Empty for extractions saved before
+    /// figure regions were recorded.
+    #[serde(default)]
+    pub regions: Vec<PaintedRegion>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -382,5 +387,48 @@ mod tests {
             .find(|glyph| glyph.unicode == "A")
             .expect("A");
         assert!((letter.font_size - 10.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn a_filled_rectangle_is_recorded_as_a_region() {
+        let mut doc = lopdf::Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let ops = b"100 400 80 50 re f\n";
+        let content_id = doc.add_object(lopdf::Stream::new(dictionary! {}, ops.to_vec()));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let pdf = PdfDocument::open_bytes(&bytes).unwrap();
+        let extraction = pdf.extract();
+        assert!(
+            extraction.regions.iter().any(|region| {
+                region.kind == "path"
+                    && (region.bbox[0] - 100.0).abs() < 0.5
+                    && (region.bbox[1] - 400.0).abs() < 0.5
+                    && (region.bbox[2] - 180.0).abs() < 0.5
+                    && (region.bbox[3] - 450.0).abs() < 0.5
+            }),
+            "{:?}",
+            extraction.regions
+        );
     }
 }

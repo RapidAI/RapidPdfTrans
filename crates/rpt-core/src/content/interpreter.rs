@@ -11,7 +11,9 @@ use lopdf::{Document, Object, ObjectId};
 
 use crate::color::Color;
 use crate::geom::{Matrix, Rect};
-use crate::glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKind};
+use crate::glyph::{
+    Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, PaintedRegion, SourceKind,
+};
 use crate::pdfutil::{array_of, as_f32, as_name, deref, dict_of, object_id_string, stream_bytes};
 use crate::resources::Resources;
 use crate::{font::load_font, font::DecodedGlyph, font::Font};
@@ -43,12 +45,14 @@ impl Default for InterpretOptions {
 pub struct Interpreted {
     pub pages: Vec<PageInfo>,
     pub glyphs: Vec<Glyph>,
+    pub regions: Vec<PaintedRegion>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
 pub fn interpret_document(doc: &Document, opts: &InterpretOptions) -> Interpreted {
     let mut pages = Vec::new();
     let mut glyphs = Vec::new();
+    let mut regions = Vec::new();
     let mut diagnostics = Vec::new();
     let page_map = doc.get_pages();
     if page_map.is_empty() {
@@ -98,6 +102,7 @@ pub fn interpret_document(doc: &Document, opts: &InterpretOptions) -> Interprete
         machine.paint_annotations(page_id);
         diagnostics.extend(machine.diagnostics);
         glyphs.extend(machine.glyphs);
+        regions.extend(machine.regions);
     }
     for (i, glyph) in glyphs.iter_mut().enumerate() {
         glyph.id = i as u32;
@@ -105,6 +110,7 @@ pub fn interpret_document(doc: &Document, opts: &InterpretOptions) -> Interprete
     Interpreted {
         pages,
         glyphs,
+        regions,
         diagnostics,
     }
 }
@@ -160,7 +166,17 @@ enum Clip {
 enum Path {
     Empty,
     Rect(Rect),
-    Complex,
+    /// Bounding box of a path built from lines and curves, in path space.
+    Complex(Rect),
+}
+
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    Rect {
+        x0: a.x0.min(b.x0),
+        y0: a.y0.min(b.y0),
+        x1: a.x1.max(b.x1),
+        y1: a.y1.max(b.y1),
+    }
 }
 
 struct SourceCtx {
@@ -183,7 +199,10 @@ struct Machine<'a> {
     fonts: Vec<Font>,
     font_cache: HashMap<ObjectId, usize>,
     glyphs: Vec<Glyph>,
+    regions: Vec<PaintedRegion>,
     diagnostics: Vec<Diagnostic>,
+    /// Type3 charprocs paint glyph ink, not figures.
+    record_regions: bool,
     depth: u32,
     form_stack: Vec<ObjectId>,
     in_text: bool,
@@ -210,7 +229,9 @@ impl<'a> Machine<'a> {
             fonts: Vec::new(),
             font_cache: HashMap::new(),
             glyphs: Vec::new(),
+            regions: Vec::new(),
             diagnostics: Vec::new(),
+            record_regions: true,
             depth: 0,
             form_stack: Vec::new(),
             in_text: false,
@@ -332,12 +353,29 @@ impl<'a> Machine<'a> {
                 let rect = Rect::new(n[0], n[1], n[0] + n[2], n[1] + n[3]);
                 self.path = match self.path {
                     Path::Empty => Path::Rect(rect),
-                    _ => Path::Complex,
+                    Path::Rect(prev) => Path::Complex(union_rect(prev, rect)),
+                    Path::Complex(prev) => Path::Complex(union_rect(prev, rect)),
                 };
             }
-            "m" | "l" | "c" | "v" | "y" | "h" => self.path = Path::Complex,
+            "m" | "l" => {
+                let n = numbers(op, 2)?;
+                self.extend_path(&[(n[0], n[1])]);
+            }
+            "c" => {
+                let n = numbers(op, 6)?;
+                self.extend_path(&[(n[0], n[1]), (n[2], n[3]), (n[4], n[5])]);
+            }
+            "v" | "y" => {
+                let n = numbers(op, 4)?;
+                self.extend_path(&[(n[0], n[1]), (n[2], n[3])]);
+            }
+            "h" => {}
             "W" | "W*" => self.apply_clip(),
-            "n" | "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => self.path = Path::Empty,
+            "n" => self.path = Path::Empty,
+            "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                self.record_painted_path();
+                self.path = Path::Empty;
+            }
             "d0" | "d1" | "BI" | "ID" | "EI" | "BX" | "EX" | "BMC" | "BDC" | "EMC" | "MP"
             | "DP" | "w" | "J" | "j" | "M" | "d" | "ri" | "i" | "sh" => {}
             other => {
@@ -390,7 +428,7 @@ impl<'a> Machine<'a> {
     fn apply_clip(&mut self) {
         match self.path.clone() {
             Path::Empty => self.diag("clip with an empty path"),
-            Path::Complex => self.gs.clip = Clip::Complex,
+            Path::Complex(_) => self.gs.clip = Clip::Complex,
             Path::Rect(rect) => {
                 let page = rect.transform(self.gs.ctm);
                 self.gs.clip = match self.gs.clip {
@@ -706,6 +744,8 @@ impl<'a> Machine<'a> {
             return;
         }
         self.depth += 1;
+        let saved_regions = self.record_regions;
+        self.record_regions = false;
         let trm = {
             let th = self.gs.tz / 100.0;
             let fs = self.gs.font_size;
@@ -741,7 +781,43 @@ impl<'a> Machine<'a> {
         self.tlm = saved_tlm;
         self.path = saved_path;
         self.in_text = saved_text;
+        self.record_regions = saved_regions;
         self.depth -= 1;
+    }
+
+    fn extend_path(&mut self, points: &[(f32, f32)]) {
+        if points.is_empty() {
+            return;
+        }
+        let added = Rect::from_points(points);
+        self.path = match self.path {
+            Path::Empty => Path::Complex(added),
+            Path::Rect(prev) | Path::Complex(prev) => Path::Complex(union_rect(prev, added)),
+        };
+    }
+
+    fn record_painted_path(&mut self) {
+        let rect = match self.path {
+            Path::Empty => return,
+            Path::Rect(rect) | Path::Complex(rect) => rect,
+        };
+        self.push_region(rect.transform(self.gs.ctm), "path");
+    }
+
+    fn push_region(&mut self, rect: Rect, kind: &str) {
+        if !self.record_regions {
+            return;
+        }
+        let width = rect.width();
+        let height = rect.height();
+        if !width.is_finite() || !height.is_finite() || (width < 0.4 && height < 0.4) {
+            return;
+        }
+        self.regions.push(PaintedRegion {
+            page_index: self.page_index,
+            bbox: rect.to_array(),
+            kind: kind.to_string(),
+        });
     }
 
     fn paint_xobject(&mut self, name: &str, _index: u32, _range: std::ops::Range<usize>) {
@@ -762,6 +838,11 @@ impl<'a> Machine<'a> {
         if subtype.as_deref() == Some("Image")
             || (subtype.is_none() && dict.has(b"Width") && dict.has(b"Height"))
         {
+            // An image XObject is the unit square mapped through the CTM.
+            self.push_region(
+                Rect::new(0.0, 0.0, 1.0, 1.0).transform(self.gs.ctm),
+                "image",
+            );
             return;
         }
         if let Some(kind) = subtype.as_deref() {

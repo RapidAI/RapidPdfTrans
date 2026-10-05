@@ -128,3 +128,15 @@ pub struct Diagnostic {
     pub page_index: Option<u32>,
     pub message: String,
 }
+
+/// A stroked or filled path, or an image, in page user space.
+///
+/// Figure detection uses these boxes when a diagram has no "Figure N" caption.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaintedRegion {
+    pub page_index: u32,
+    /// `[x0, y0, x1, y1]`, origin bottom-left.
+    pub bbox: [f32; 4],
+    /// `path` or `image`.
+    pub kind: String,
+}
