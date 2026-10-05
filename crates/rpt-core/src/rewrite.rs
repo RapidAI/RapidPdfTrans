@@ -950,37 +950,39 @@ fn layout_segment(
         .iter()
         .map(|(_, right)| *right)
         .fold(block_left, f32::max);
-    let mut indent = 0.0f32;
+    // An English first line may sit to the right of the column. Chinese
+    // indent is measured from the body edge, not added on top of that gap.
     if spans.len() >= 2 {
         let body_left = spans[1..]
             .iter()
             .map(|(left, _)| *left)
             .fold(f32::MAX, f32::min);
         if spans[0].0 > body_left + source_size * 0.6 {
-            indent = spans[0].0 - body_left;
             block_left = body_left;
         }
     }
     block_right = block_right.min(media[2] - 1.0);
     block_left = block_left.max(media[0]);
     let width = (block_right - block_left).max(source_size);
-    let first_width = (width - indent).max(source_size * 0.5);
     let available = (top_y - bottom_y).max(0.0);
-    let scale = if ink.len() < 2 && source_size >= 12.5 {
+    let bold = paragraph_is_bold(&ink);
+    let indent_ems = cjk_indent_ems(ink.len(), source_size, bold, text);
+    let scale = if indent_ems == 0.0 && ink.len() < 2 && source_size >= 12.5 {
         metrics.heading_scale
     } else {
         metrics.body_scale
     };
-    let (lines, size, leading) = fit_cjk_block(
+    let (lines, size, leading, indent) = fit_cjk_block(
         text,
         source_size,
         scale,
-        first_width,
         width,
+        indent_ems,
         available,
         font,
         metrics,
     )?;
+    let first_width = (width - indent).max(size * 0.5);
     let mut origin_y = top_y;
     if bilingual {
         let above = top_y + size * 1.2;
@@ -1026,20 +1028,102 @@ fn layout_segment(
 /// Body text starts below the English point size. Leading stays near a
 /// Chinese academic ratio (about 1.6 em) and the size shrinks before that
 /// ratio collapses back to the English baseline gap.
+/// Two ems for a body or abstract paragraph. Zero for a heading or caption.
+fn cjk_indent_ems(line_count: usize, source_size: f32, bold: bool, text: &str) -> f32 {
+    if is_cjk_caption(text) || is_cjk_heading(line_count, source_size, bold, text) {
+        0.0
+    } else if line_count >= 2 || is_one_line_prose(text, source_size, bold) {
+        2.0
+    } else {
+        0.0
+    }
+}
+
+fn paragraph_is_bold(ink: &[InkLine<'_>]) -> bool {
+    let mut saw = false;
+    for line in ink {
+        for glyph in &line.glyphs {
+            saw = true;
+            if !face_style(&glyph.font_name).bold {
+                return false;
+            }
+        }
+    }
+    saw
+}
+
+fn is_cjk_heading(line_count: usize, source_size: f32, bold: bool, text: &str) -> bool {
+    let trimmed = text.trim();
+    let chars = trimmed.chars().count();
+    if source_size >= 12.5 && line_count <= 3 && chars < 120 {
+        return true;
+    }
+    if line_count == 1 && bold && chars < 80 {
+        return true;
+    }
+    line_count == 1 && chars < 40 && !ends_sentence(trimmed)
+}
+
+fn is_one_line_prose(text: &str, source_size: f32, bold: bool) -> bool {
+    if bold || source_size >= 12.5 || text.contains('@') {
+        return false;
+    }
+    let trimmed = text.trim();
+    let letters = trimmed.chars().filter(|ch| ch.is_alphabetic()).count();
+    letters >= 24 && ends_sentence(trimmed)
+}
+
+fn ends_sentence(text: &str) -> bool {
+    text.ends_with('.')
+        || text.ends_with('。')
+        || text.ends_with('!')
+        || text.ends_with('?')
+        || text.ends_with('？')
+        || text.ends_with('！')
+}
+
+fn is_cjk_caption(text: &str) -> bool {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("figure")
+        || lower.starts_with("fig.")
+        || lower.starts_with("fig ")
+        || lower.starts_with("table")
+        || lower.starts_with("tab.")
+        || lower.starts_with("tab ")
+    {
+        return true;
+    }
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first != '图' && first != '表' {
+        return false;
+    }
+    let rest: String = chars.collect();
+    rest.trim_start()
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit() || ch == '：' || ch == ':')
+}
+
 fn fit_cjk_block(
     text: &str,
     source_size: f32,
     scale: f32,
-    first_width: f32,
     width: f32,
+    indent_ems: f32,
     available: f32,
     font: &SubsetFont,
     metrics: CjkMeasure,
-) -> Option<(Vec<String>, f32, f32)> {
+) -> Option<(Vec<String>, f32, f32, f32)> {
     let start = (source_size * scale).max(1.0);
     let floor = (start * 0.78).max(source_size * 0.62).min(start);
     let mut size = start;
     loop {
+        let indent = size * indent_ems;
+        let first_width = (width - indent).max(size * 0.5);
         let lines = wrap_text(text, size, first_width, width, font)?;
         let gaps = lines.len().saturating_sub(1);
         let within = lines.iter().enumerate().all(|(index, line)| {
@@ -1049,24 +1133,24 @@ fn fit_cjk_block(
         let single_source = available <= 0.5;
         if within && (!single_source || lines.len() == 1) {
             if gaps == 0 {
-                return Some((lines, size, size * metrics.leading_ratio));
+                return Some((lines, size, size * metrics.leading_ratio, indent));
             }
             let room = available / gaps as f32;
             let min_lead = size * metrics.min_leading_ratio;
             let want = size * metrics.leading_ratio;
             if room + 0.8 >= min_lead {
-                return Some((lines, size, want.min(room)));
+                return Some((lines, size, want.min(room), indent));
             }
         }
         if size <= floor + 0.01 {
             if within && !single_source && gaps > 0 {
                 let room = available / gaps as f32;
                 if room >= size * 1.05 {
-                    return Some((lines, size, room));
+                    return Some((lines, size, room, indent));
                 }
             }
             if within && lines.len() == 1 {
-                return Some((lines, size, size * metrics.leading_ratio));
+                return Some((lines, size, size * metrics.leading_ratio, indent));
             }
             return None;
         }
@@ -2477,15 +2561,8 @@ mod tests {
         let font = uniform_font(text);
         // 22 ideographs. At 9pt a 90pt column holds 10, so this is three lines.
         // Two English gaps of 20pt each leave room for a 1.6em Chinese leading.
-        let (lines, size, leading) = fit_cjk_block(
-            text,
-            10.0,
-            metrics.body_scale,
-            90.0,
-            90.0,
-            40.0,
-            &font,
-            metrics,
+        let (lines, size, leading, _) = fit_cjk_block(
+            text, 10.0, metrics.body_scale, 90.0, 0.0, 40.0, &font, metrics,
         )
         .unwrap();
         assert_eq!(lines.len(), 3, "{lines:?}");
@@ -2498,16 +2575,8 @@ mod tests {
             "leading {leading} / size {size}"
         );
 
-        let (tight_lines, tight_size, tight_leading) = fit_cjk_block(
-            text,
-            10.0,
-            metrics.body_scale,
-            90.0,
-            90.0,
-            22.0,
-            &font,
-            metrics,
-        )
+        let (tight_lines, tight_size, tight_leading, _) =
+            fit_cjk_block(text, 10.0, metrics.body_scale, 90.0, 0.0, 22.0, &font, metrics)
         .unwrap();
         assert!(tight_lines.len() >= 2, "{tight_lines:?}");
         assert!(
@@ -2521,12 +2590,12 @@ mod tests {
 
         let title = "论文标题";
         let title_font = uniform_font(title);
-        let (_, title_size, _) = fit_cjk_block(
+        let (_, title_size, _, _) = fit_cjk_block(
             title,
             16.0,
             metrics.heading_scale,
             200.0,
-            200.0,
+            0.0,
             0.0,
             &title_font,
             metrics,
@@ -2539,18 +2608,62 @@ mod tests {
 
         let author = "作者甲";
         let author_font = uniform_font(author);
-        let (_, author_size, _) = fit_cjk_block(
+        let (_, author_size, _, _) = fit_cjk_block(
             author,
             10.0,
             metrics.body_scale,
             200.0,
-            200.0,
+            0.0,
             0.0,
             &author_font,
             metrics,
         )
         .unwrap();
         assert!((author_size - 9.0).abs() < 0.05, "{author_size}");
+    }
+
+    #[test]
+    fn body_paragraphs_indent_two_characters_and_headings_do_not() {
+        let body = "编程智能体通过长轨迹解决仓库级任务。随着任务推进，早期探索会过时。";
+        assert_eq!(cjk_indent_ems(5, 10.0, false, body), 2.0);
+        assert_eq!(
+            cjk_indent_ems(
+                1,
+                10.0,
+                false,
+                "这是单独成段的一句完整正文，句末有句号，所以仍然应当首行缩进。",
+            ),
+            2.0
+        );
+        assert_eq!(cjk_indent_ems(1, 14.0, true, "1 引言"), 0.0);
+        assert_eq!(cjk_indent_ems(1, 11.0, true, "实验设置"), 0.0);
+        assert_eq!(
+            cjk_indent_ems(2, 16.0, false, "AutoCompact: 学习何时压缩"),
+            0.0
+        );
+        assert_eq!(cjk_indent_ems(3, 9.0, false, "图1：压缩流程示意"), 0.0);
+        assert_eq!(
+            cjk_indent_ems(1, 10.0, false, "{xuanzhang826, ltzheng01}@gmail.com"),
+            0.0
+        );
+
+        let font = uniform_font(body);
+        let metrics = CjkMeasure::resolve(0.90, 1.60);
+        let (lines, size, _, indent) =
+            fit_cjk_block(body, 10.0, metrics.body_scale, 180.0, 2.0, 80.0, &font, metrics)
+                .unwrap();
+        assert!((indent - size * 2.0).abs() < 0.05, "{indent} {size}");
+        assert!(lines.len() >= 2, "{lines:?}");
+        let first = measure(lines[0].as_str(), size, &font);
+        let second = measure(lines[1].as_str(), size, &font);
+        assert!(
+            first + indent <= 180.0 + 1.0,
+            "first line {first} plus indent {indent}"
+        );
+        assert!(
+            first + size < second || first <= 180.0 - indent,
+            "the first line should be the narrower one: {lines:?}"
+        );
     }
 
     #[test]
