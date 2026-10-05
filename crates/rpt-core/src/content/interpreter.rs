@@ -589,6 +589,14 @@ impl<'a> Machine<'a> {
         src: &SourceCtx,
     ) {
         let trm = self.rendering_matrix(glyph);
+        // FrameMaker sets Tf to 1 and scales the text matrix. The size that
+        // layout sees has to be the user-space height, not the Tf number.
+        let visual = (trm.c * trm.c + trm.d * trm.d).sqrt();
+        let font_size = if visual > 0.01 {
+            visual
+        } else {
+            self.gs.font_size
+        };
         let width = glyph.w0.max(0.0);
         let corners = [
             trm.transform_point(0.0, -0.2),
@@ -618,7 +626,7 @@ impl<'a> Machine<'a> {
             font_resource: resource.into(),
             font_name: base.into(),
             font_object: object,
-            font_size: self.gs.font_size,
+            font_size,
             matrix: trm.to_array(),
             bbox: bbox.to_array(),
             advance: [0.0, 0.0],

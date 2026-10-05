@@ -316,3 +316,71 @@ impl Extraction {
             .map_err(|e| Error::Message(e.to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lopdf::dictionary;
+
+    #[test]
+    fn text_matrix_scale_is_the_font_size() {
+        let mut doc = lopdf::Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let ops = b"BT\n/F1 1 Tf\n9.96 0 0 9.96 72 700 Tm\n(Hi) Tj\n/F1 10 Tf\n1 0 0 1 72 680 Tm\n(A) Tj\nET\n";
+        let content_id = doc.add_object(lopdf::Stream::new(dictionary! {}, ops.to_vec()));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let pdf = PdfDocument::open_bytes(&bytes).unwrap();
+        let extraction = pdf.extract();
+        let hi: Vec<_> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[5] > 690.0)
+            .collect();
+        assert!(hi.len() >= 2, "glyphs {}", extraction.glyphs.len());
+        for glyph in &hi {
+            assert!(
+                (glyph.font_size - 9.96).abs() < 0.05,
+                "scaled Tf 1 should be 9.96pt, got {}",
+                glyph.font_size
+            );
+        }
+        let letter = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "A")
+            .expect("A");
+        assert!((letter.font_size - 10.0).abs() < 0.05);
+    }
+}
