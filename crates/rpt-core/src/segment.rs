@@ -829,12 +829,15 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
 fn stitch_page_continuations<'a>(
     mut paragraphs: Vec<Vec<VisualLine<'a>>>,
 ) -> Vec<Vec<VisualLine<'a>>> {
+    // Reading order: finish the left column before the right one, so a sentence
+    // at the bottom of a column can claim the top of the next column. The next
+    // page is still later, so a page-break join is unchanged.
     paragraphs.sort_by(|left, right| {
         left[0]
             .page
             .cmp(&right[0].page)
-            .then(right[0].y.total_cmp(&left[0].y))
             .then(left[0].left.total_cmp(&right[0].left))
+            .then(right[0].y.total_cmp(&left[0].y))
     });
     let mut used = vec![false; paragraphs.len()];
     let mut stitched = Vec::new();
@@ -845,8 +848,8 @@ fn stitch_page_continuations<'a>(
         used[index] = true;
         let mut current = std::mem::take(&mut paragraphs[index]);
         let mut joins = 0;
-        while joins < 4 && closes_the_page(&current, &paragraphs, &used) {
-            let Some(next) = find_page_continuation(&current, &paragraphs, &used) else {
+        while joins < 4 {
+            let Some(next) = find_reading_continuation(&current, &paragraphs, &used) else {
                 break;
             };
             used[next] = true;
@@ -857,7 +860,100 @@ fn stitch_page_continuations<'a>(
             stitched.push(current);
         }
     }
+    // Callers and tests read top-to-bottom. Reading order above is only how a
+    // column bottom claims the next column before that column is consumed.
+    stitched.sort_by(|left, right| {
+        left[0]
+            .page
+            .cmp(&right[0].page)
+            .then(right[0].y.total_cmp(&left[0].y))
+            .then(left[0].left.total_cmp(&right[0].left))
+    });
     stitched
+}
+
+/// Column bottom first, then the bottom of the page. A later column on this
+/// page blocks a jump to the next page, so the right column is not skipped.
+fn find_reading_continuation(
+    current: &[VisualLine<'_>],
+    paragraphs: &[Vec<VisualLine<'_>>],
+    used: &[bool],
+) -> Option<usize> {
+    if let Some(next) = find_column_continuation(current, paragraphs, used) {
+        return Some(next);
+    }
+    if closes_the_page(current, paragraphs, used) {
+        return find_page_continuation(current, paragraphs, used);
+    }
+    None
+}
+
+fn find_column_continuation(
+    current: &[VisualLine<'_>],
+    paragraphs: &[Vec<VisualLine<'_>>],
+    used: &[bool],
+) -> Option<usize> {
+    if !closes_the_column(current, paragraphs, used) {
+        return None;
+    }
+    let upper = current.last()?;
+    let mut next_left = f32::MAX;
+    for (index, para) in paragraphs.iter().enumerate() {
+        if used[index] || para.is_empty() || is_page_bridge(para) {
+            continue;
+        }
+        let lower = &para[0];
+        if lower.page == upper.page
+            && lower.left > upper.left + 36.0
+            && lower.left < upper.left + 360.0
+        {
+            next_left = next_left.min(lower.left);
+        }
+    }
+    if next_left == f32::MAX {
+        return None;
+    }
+    let mut best: Option<(usize, f32)> = None;
+    for (index, para) in paragraphs.iter().enumerate() {
+        if used[index] || para.is_empty() || is_page_bridge(para) {
+            continue;
+        }
+        let lower = &para[0];
+        if lower.page != upper.page || (lower.left - next_left).abs() > 28.0 {
+            continue;
+        }
+        if best.is_none_or(|(_, y)| lower.y > y) {
+            best = Some((index, lower.y));
+        }
+    }
+    let index = best?.0;
+    column_continuation(current, &paragraphs[index]).then_some(index)
+}
+
+fn closes_the_column(
+    current: &[VisualLine<'_>],
+    paragraphs: &[Vec<VisualLine<'_>>],
+    used: &[bool],
+) -> bool {
+    let Some(upper) = current.last() else {
+        return false;
+    };
+    for (index, para) in paragraphs.iter().enumerate() {
+        if used[index] || para.is_empty() || is_page_bridge(para) {
+            continue;
+        }
+        let lower = &para[0];
+        if lower.page != upper.page || (lower.left - upper.left).abs() > 36.0 {
+            continue;
+        }
+        if lower.y >= upper.y - 0.5 {
+            continue;
+        }
+        if substantial_paragraph(para) {
+            return false;
+        }
+    }
+    true
 }
 
 fn find_page_continuation(
@@ -911,18 +1007,34 @@ fn closes_the_page(
             continue;
         }
         let lower = &para[0];
-        if lower.page != upper.page || lower.y >= upper.y - 0.5 {
+        if lower.page != upper.page {
             continue;
         }
-        let letters: usize = para
-            .iter()
-            .map(|line| line.text.chars().filter(|ch| ch.is_alphabetic()).count())
-            .sum();
-        if letters >= 40 || para.len() >= 2 {
+        // A real second column is later in reading order even when its top
+        // sits higher on the page. A centered heading or a margin stamp is not
+        // that column, and must not block a page-break join.
+        if lower.left > upper.left + 36.0 && lower.left < upper.left + 360.0 {
+            if substantial_paragraph(para) && !is_margin_strip(para) {
+                return false;
+            }
+            continue;
+        }
+        if (lower.left - upper.left).abs() > 36.0 || lower.y >= upper.y - 0.5 {
+            continue;
+        }
+        if substantial_paragraph(para) {
             return false;
         }
     }
     true
+}
+
+fn substantial_paragraph(para: &[VisualLine<'_>]) -> bool {
+    let letters: usize = para
+        .iter()
+        .map(|line| line.text.chars().filter(|ch| ch.is_alphabetic()).count())
+        .sum();
+    letters >= 40 || para.len() >= 2
 }
 
 fn is_page_bridge(para: &[VisualLine<'_>]) -> bool {
@@ -944,11 +1056,49 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
     if lower.page != upper.page + 1 {
         return false;
     }
-    let size = upper.size.max(lower.size).max(1.0);
-    if (upper.size - lower.size).abs() > size * 0.35 {
+    if (upper.left - lower.left).abs() > 36.0 {
         return false;
     }
-    if (upper.left - lower.left).abs() > 36.0 {
+    prose_continues(upper, lower)
+}
+
+fn column_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
+    let Some(upper) = prev.last() else {
+        return false;
+    };
+    let Some(lower) = next.first() else {
+        return false;
+    };
+    if lower.page != upper.page {
+        return false;
+    }
+    if lower.left <= upper.left + 36.0 || lower.left >= upper.left + 360.0 {
+        return false;
+    }
+    // A line beside this one is the other column's matching row, not the
+    // continuation. The next column's text starts above this tail.
+    let size = upper.size.max(lower.size).max(1.0);
+    if lower.y < upper.y + size * 1.2 {
+        return false;
+    }
+    if is_margin_strip(next) {
+        return false;
+    }
+    prose_continues(upper, lower)
+}
+
+fn is_margin_strip(para: &[VisualLine<'_>]) -> bool {
+    let left = para.iter().map(|line| line.left).fold(f32::MAX, f32::min);
+    let right = para.iter().map(|line| line.right).fold(0.0f32, f32::max);
+    let width = right - left;
+    width <= 30.0 && (left <= 64.0 || left >= 500.0)
+}
+
+/// The next block keeps this sentence: it starts lowercase, or it finishes a
+/// hyphenated word. A sentence that already ended stays in its own paragraph.
+fn prose_continues(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    let size = upper.size.max(lower.size).max(1.0);
+    if (upper.size - lower.size).abs() > size * 0.35 {
         return false;
     }
     let tail = upper.text.trim_end();
@@ -1871,6 +2021,63 @@ mod tests {
     }
 
     #[test]
+    fn a_column_break_does_not_cut_the_sentence_or_skip_to_the_next_page() {
+        let left = glyph(0, 72.0, 80.0, "we run the base agent on", false);
+        let right = glyph(
+            1,
+            320.0,
+            700.0,
+            "training tasks and the judge reviews the trace.",
+            false,
+        );
+        let mut next_page = glyph(
+            2,
+            72.0,
+            700.0,
+            "another page should stay its own paragraph.",
+            false,
+        );
+        next_page.page_index = 1;
+        let segs = segment_glyphs(&[left, right, next_page]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("base agent on training tasks")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("base agent on") && text.contains("another page")),
+            "column bottom must not jump over the next column: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("another page should stay")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_column_does_not_swallow_the_next_column() {
+        let left = glyph(0, 72.0, 80.0, "This paragraph is finished.", false);
+        let right = glyph(
+            1,
+            320.0,
+            700.0,
+            "The next column starts a new paragraph with its own sentence.",
+            false,
+        );
+        let segs = segment_glyphs(&[left, right]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts.iter().any(|text| text.ends_with("finished.")));
+        assert!(texts.iter().any(|text| text.starts_with("The next column")));
+    }
+
+    #[test]
     fn a_page_break_hyphen_is_joined() {
         let mut upper = glyph(0, 72.0, 70.0, "rules were spec-", false);
         upper.page_index = 0;
@@ -1967,10 +2174,30 @@ mod tests {
         assert!(seg.segments.iter().any(|item| {
             item.text.contains("generated # Auto") || item.text.contains("by # Auto")
         }));
+        let intro_pages: std::collections::HashSet<u32> = intro
+            .glyph_ids
+            .iter()
+            .filter_map(|id| {
+                extraction
+                    .glyphs
+                    .iter()
+                    .find(|glyph| glyph.id == *id)
+                    .map(|glyph| glyph.page_index)
+            })
+            .collect();
+        assert!(
+            intro_pages.len() > 1,
+            "intro should cross the page break, pages {intro_pages:?}"
+        );
         for item in &seg.segments {
             let tail = item.text.trim_end();
             assert!(
-                !tail.ends_with("spec-") && !tail.ends_with("in-") && !tail.ends_with(" on"),
+                soft_hyphen_stem(tail).is_none(),
+                "soft hyphen at a page or column boundary p{}: {tail}",
+                item.page_index
+            );
+            assert!(
+                !tail.ends_with(" on"),
                 "mid-sentence segment p{}: {tail}",
                 item.page_index
             );

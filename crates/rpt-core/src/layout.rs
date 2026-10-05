@@ -69,7 +69,7 @@ pub fn heading_level(line_count: usize, source_size: f32, bold: bool, text: &str
         return HeadingLevel::Title;
     }
     match numbered_depth(trimmed) {
-        Some(1) if line_count <= 2 && chars < 80 && source_size >= 10.5 && !sentence => {
+        Some(1) if line_count <= 2 && chars < 80 && !sentence => {
             return HeadingLevel::Section;
         }
         Some(depth) if depth >= 2 && line_count <= 2 && chars < 100 && !sentence => {
@@ -89,13 +89,27 @@ pub fn heading_level(line_count: usize, source_size: f32, bold: bool, text: &str
     HeadingLevel::Body
 }
 
-pub(crate) fn scale_for_heading(level: HeadingLevel, metrics: CjkMeasure) -> f32 {
-    match level {
-        HeadingLevel::Body => metrics.body_scale,
-        HeadingLevel::Subsection => metrics.subsection_scale,
-        HeadingLevel::Section => metrics.section_scale,
-        HeadingLevel::Title => metrics.heading_scale,
-    }
+pub(crate) fn scale_for_heading(level: HeadingLevel, source_size: f32, metrics: CjkMeasure) -> f32 {
+    let source_size = source_size.max(1.0);
+    let target = match level {
+        HeadingLevel::Body => source_size * metrics.body_scale,
+        // Small-caps headings are stored below the body size. Lift them off a
+        // 10pt body so a subsection stays larger than Chinese body text.
+        HeadingLevel::Subsection => {
+            let floor = 10.0 * metrics.subsection_scale;
+            floor.max(source_size * metrics.subsection_scale)
+        }
+        HeadingLevel::Section => {
+            if source_size >= 12.0 {
+                source_size * metrics.section_scale
+            } else {
+                let floor = 10.0 * (metrics.subsection_scale + 0.14);
+                floor.max(source_size * metrics.section_scale)
+            }
+        }
+        HeadingLevel::Title => source_size * metrics.heading_scale,
+    };
+    (target / source_size).clamp(metrics.body_scale, 1.35)
 }
 
 /// `1` for `1 Introduction`, `2` for `2.2 Methods`.
@@ -121,10 +135,21 @@ fn numbered_depth(text: &str) -> Option<u8> {
         }
         break;
     }
-    if groups > 2 || index >= bytes.len() || bytes[index] != b' ' {
+    if groups > 2 || index > bytes.len() {
         return None;
     }
-    Some(groups)
+    if index == bytes.len() {
+        return Some(groups);
+    }
+    if bytes[index] == b' ' {
+        return Some(groups);
+    }
+    // Chinese often drops the space: "2.2裁判引导".
+    let rest = text.get(index..)?;
+    rest.chars()
+        .next()
+        .filter(|ch| !ch.is_ascii())
+        .map(|_| groups)
 }
 
 fn positive_or_env(explicit: f32, key: &str, builtin: f32) -> f32 {
@@ -165,7 +190,7 @@ pub fn fit_paragraph(
 ) -> Option<FittedParagraph> {
     let level = heading_level(line_count, source_size, bold, text);
     let indent_ems = cjk_indent_ems(line_count, source_size, bold, text);
-    let scale = scale_for_heading(level, metrics);
+    let scale = scale_for_heading(level, source_size, metrics);
     let (lines, size, leading, indent) = fit_cjk_block(
         text,
         source_size,
@@ -759,6 +784,37 @@ mod tests {
             section.size,
             sub.size
         );
+
+        let small_caps = "2.2 裁判引导的数据收集与SFT";
+        let lifted = fit_paragraph(
+            small_caps,
+            7.97,
+            360.0,
+            0.0,
+            1,
+            false,
+            &uniform_font(small_caps),
+            metrics,
+        )
+        .expect("small-cap subsection");
+        let body = fit_paragraph(
+            "正文应当使用更小的字号并且保持首行缩进两个汉字。",
+            9.96,
+            360.0,
+            40.0,
+            3,
+            false,
+            &uniform_font("正文应当使用更小的字号并且保持首行缩进两个汉字。"),
+            metrics,
+        )
+        .expect("body");
+        assert!(
+            lifted.size > body.size + 0.6,
+            "small-cap subsection {} should exceed body {}",
+            lifted.size,
+            body.size
+        );
+        assert_eq!(lifted.indent, 0.0);
     }
 
     #[test]

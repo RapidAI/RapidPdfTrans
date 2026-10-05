@@ -70,6 +70,12 @@ struct Drawn {
     /// Extra user-space gap after each character except the last.
     /// Only CJK–CJK gaps are filled, so a Latin citation stays tight.
     gaps: Vec<f32>,
+    /// True when this character keeps a source superscript (author marks).
+    supers: Vec<bool>,
+    /// Superscript size as a fraction of `size`, from the source glyphs.
+    sup_scale: f32,
+    /// Superscript baseline rise as a fraction of `size`, from the source glyphs.
+    sup_rise: f32,
 }
 
 /// Rewrite `extraction` using `report` and remember the dispositions on the glyphs.
@@ -990,7 +996,7 @@ fn layout_segment(
     let bold = paragraph_is_bold(&ink);
     let level = heading_level(ink.len(), source_size, bold, text);
     let indent_ems = cjk_indent_ems(ink.len(), source_size, bold, text);
-    let scale = scale_for_heading(level, metrics);
+    let scale = scale_for_heading(level, source_size, metrics);
     let (lines, size, leading, indent) = fit_cjk_block(
         text,
         source_size,
@@ -1002,6 +1008,12 @@ fn layout_segment(
         metrics,
     )?;
     let first_width = (width - indent).max(size * 0.5);
+    let sup = superscript_metrics(glyphs);
+    let mask = sup
+        .as_ref()
+        .map(|_| superscript_mask(text))
+        .unwrap_or_default();
+    let line_masks = split_superscripts(text, &lines, &mask);
     let mut origin_y = top_y;
     if bilingual {
         let above = top_y + size * 1.2;
@@ -1024,6 +1036,7 @@ fn layout_segment(
             .map(|(index, line)| {
                 let limit = if index == 0 { first_width } else { width };
                 let justify = index + 1 != count;
+                let supers = line_masks.get(index).cloned().unwrap_or_default();
                 Drawn {
                     page,
                     x: block_left + if index == 0 { indent } else { 0.0 },
@@ -1033,9 +1046,12 @@ fn layout_segment(
                     cids: cids_of(&line, font),
                     resource: resource.to_string(),
                     skew,
-                    widths: char_widths(&line, size, font),
+                    widths: widths_with_superscripts(&line, size, font, &supers, sup.as_ref()),
                     gaps: justify_gaps(&line, size, limit, font, justify),
                     text: line,
+                    supers,
+                    sup_scale: sup.as_ref().map(|item| item.scale).unwrap_or(1.0),
+                    sup_rise: sup.as_ref().map(|item| item.rise).unwrap_or(0.0),
                 }
             })
             .collect(),
@@ -1123,7 +1139,7 @@ fn layout_across_pages(
     let bold = glyphs.iter().all(|glyph| face_style(&glyph.font_name).bold);
     let level = heading_level(line_count, source_size, bold, text);
     let indent_ems = cjk_indent_ems(line_count, source_size, bold, text);
-    let scale = scale_for_heading(level, metrics);
+    let scale = scale_for_heading(level, source_size, metrics);
     let start = (source_size * scale).max(1.0);
     let floor = (start * 0.78).max(source_size * 0.62).min(start);
     let mut size = start;
@@ -1152,11 +1168,17 @@ fn layout_across_pages(
     };
     let color = glyphs[0].fill_color.clone();
     let indent = size * indent_ems;
+    let sup = superscript_metrics(glyphs);
+    let mask = sup
+        .as_ref()
+        .map(|_| superscript_mask(text))
+        .unwrap_or_default();
+    let flat_lines: Vec<String> = packed.iter().flatten().cloned().collect();
+    let line_masks = split_superscripts(text, &flat_lines, &mask);
+    let mut mask_index = 0usize;
     let mut drawn = Vec::new();
     let mut first_line = true;
-    for (box_index, ((page, ink, left, _), lines)) in
-        ink_pages.iter().zip(packed).enumerate()
-    {
+    for (box_index, ((page, ink, left, _), lines)) in ink_pages.iter().zip(packed).enumerate() {
         if lines.is_empty() {
             continue;
         }
@@ -1183,6 +1205,8 @@ fn layout_across_pages(
         for (index, line) in lines.into_iter().enumerate() {
             let line_indent = if first_line { indent } else { 0.0 };
             let limit = (width - line_indent).max(size * 0.5);
+            let supers = line_masks.get(mask_index).cloned().unwrap_or_default();
+            mask_index += 1;
             drawn.push(Drawn {
                 page: *page,
                 x: left + line_indent,
@@ -1192,9 +1216,12 @@ fn layout_across_pages(
                 cids: cids_of(&line, font),
                 resource: resource.to_string(),
                 skew,
-                widths: char_widths(&line, size, font),
+                widths: widths_with_superscripts(&line, size, font, &supers, sup.as_ref()),
                 gaps: justify_gaps(&line, size, limit, font, false),
                 text: line,
+                supers,
+                sup_scale: sup.as_ref().map(|item| item.scale).unwrap_or(1.0),
+                sup_rise: sup.as_ref().map(|item| item.rise).unwrap_or(0.0),
             });
             first_line = false;
         }
@@ -1629,16 +1656,242 @@ fn hex_cids(cids: &[u16]) -> String {
     cids.iter().map(|cid| format!("{cid:04X}")).collect()
 }
 
+struct SupMetrics {
+    scale: f32,
+    rise: f32,
+}
+
+/// Source affiliation marks are smaller and, when `Ts` raised them, sit above
+/// the body baseline. Body digits such as a year stay on the baseline.
+fn superscript_metrics(glyphs: &[&Glyph]) -> Option<SupMetrics> {
+    let mut body_sizes = Vec::new();
+    let mut body_ys = Vec::new();
+    for glyph in glyphs {
+        if affil_marker(&glyph.unicode) {
+            continue;
+        }
+        body_sizes.push(glyph.font_size);
+        body_ys.push(glyph.matrix[5]);
+    }
+    if body_sizes.is_empty() {
+        return None;
+    }
+    body_sizes.sort_by(|left, right| left.total_cmp(right));
+    body_ys.sort_by(|left, right| left.total_cmp(right));
+    let body = body_sizes[body_sizes.len() / 2].max(1.0);
+    let base = body_ys[body_ys.len() / 2];
+    let mut scales = Vec::new();
+    let mut rises = Vec::new();
+    for glyph in glyphs {
+        if !affil_marker(&glyph.unicode) {
+            continue;
+        }
+        let smaller = glyph.font_size <= body * 0.85;
+        let raised = glyph.matrix[5] >= base + body * 0.12;
+        if !smaller && !raised {
+            continue;
+        }
+        scales.push((glyph.font_size / body).clamp(0.45, 1.0));
+        let rise = ((glyph.matrix[5] - base) / body).max(0.0);
+        rises.push(rise.clamp(0.0, 0.6));
+    }
+    if scales.is_empty() {
+        return None;
+    }
+    scales.sort_by(|left, right| left.total_cmp(right));
+    rises.sort_by(|left, right| left.total_cmp(right));
+    Some(SupMetrics {
+        scale: scales[scales.len() / 2],
+        rise: rises[rises.len() / 2],
+    })
+}
+
+fn affil_marker(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().count() <= 2
+        && text
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆'))
+}
+
+/// Author marks follow a name (`张轩1`). Affiliation marks lead a name (`1新加坡`).
+/// A run of three or more digits is a year or a count and stays on the baseline.
+fn superscript_mask(text: &str) -> Vec<bool> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut mask = vec![false; chars.len()];
+    let mut index = 0;
+    while index < chars.len() {
+        if !sup_char(chars[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && sup_char(chars[index]) && index - start < 2 {
+            index += 1;
+        }
+        if index < chars.len() && chars[index].is_ascii_digit() {
+            while index < chars.len() && chars[index].is_ascii_digit() {
+                index += 1;
+            }
+            continue;
+        }
+        let prev = start.checked_sub(1).map(|slot| chars[slot]);
+        let run = index - start;
+        // One digit after a name, or one digit before an institution word.
+        // `16K` is a body token: two digits glued to a single letter.
+        let word = chars
+            .iter()
+            .skip(index)
+            .take_while(|ch| ch.is_alphabetic())
+            .count();
+        let after_name = run == 1 && prev.is_some_and(char::is_alphabetic);
+        let before_name = run == 1
+            && word >= 2
+            && prev.is_none_or(|ch| {
+                ch.is_whitespace() || matches!(ch, ',' | '，' | ';' | '；' | '*' | '∗')
+            });
+        if after_name || before_name {
+            for flag in mask.iter_mut().take(index).skip(start) {
+                *flag = true;
+            }
+        }
+    }
+    // `Zhang1,2` and `1,2Singapore`: a short mark beside a comma follows its neighbor.
+    let mut again = true;
+    while again {
+        again = false;
+        index = 0;
+        while index < chars.len() {
+            if mask[index] || !chars[index].is_ascii_digit() {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < chars.len() && chars[index].is_ascii_digit() && index - start < 2 {
+                index += 1;
+            }
+            if index < chars.len() && chars[index].is_ascii_digit() {
+                while index < chars.len() && chars[index].is_ascii_digit() {
+                    index += 1;
+                }
+                continue;
+            }
+            let before = start.checked_sub(1).is_some_and(|slot| {
+                matches!(chars[slot], ',' | '，') && slot > 0 && mask[slot - 1]
+            });
+            let after = chars.get(index).is_some_and(|ch| matches!(ch, ',' | '，'))
+                && chars
+                    .get(index + 1)
+                    .is_some_and(|ch| ch.is_ascii_digit() && mask.get(index + 1) == Some(&true));
+            if before || after {
+                for flag in mask.iter_mut().take(index).skip(start) {
+                    if !*flag {
+                        *flag = true;
+                        again = true;
+                    }
+                }
+            }
+        }
+    }
+    mask
+}
+
+fn sup_char(ch: char) -> bool {
+    ch.is_ascii_digit() || matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆')
+}
+
+fn split_superscripts(text: &str, lines: &[String], mask: &[bool]) -> Vec<Vec<bool>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut cursor = 0usize;
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut line_mask = Vec::new();
+        for ch in line.chars() {
+            while cursor < chars.len() && chars[cursor] != ch && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len() && chars[cursor] == ch {
+                line_mask.push(mask.get(cursor).copied().unwrap_or(false));
+                cursor += 1;
+            } else {
+                line_mask.push(false);
+            }
+        }
+        out.push(line_mask);
+    }
+    out
+}
+
+fn widths_with_superscripts(
+    text: &str,
+    size: f32,
+    font: &SubsetFont,
+    supers: &[bool],
+    metrics: Option<&SupMetrics>,
+) -> Vec<f32> {
+    let mut widths = char_widths(text, size, font);
+    let Some(metrics) = metrics else {
+        return widths;
+    };
+    for (width, sup) in widths.iter_mut().zip(supers) {
+        if *sup {
+            *width *= metrics.scale;
+        }
+    }
+    widths
+}
+
 fn show_text(line: &Drawn) -> String {
     let count = line.text.chars().count();
-    if line.cids.len() != count || line.gaps.iter().all(|gap| *gap == 0.0) || line.size <= 0.0 {
-        return format!("<{}> Tj", hex_cids(&line.cids));
+    let raised = line.cids.len() == count
+        && line.supers.len() == count
+        && line.supers.iter().any(|flag| *flag);
+    if !raised {
+        if line.cids.len() != count || line.gaps.iter().all(|gap| *gap == 0.0) || line.size <= 0.0 {
+            return format!("<{}> Tj", hex_cids(&line.cids));
+        }
+        return show_run(&line.cids, &line.gaps, 0, line.size);
     }
-    let mut parts = Vec::with_capacity(line.cids.len() * 2);
-    for (index, cid) in line.cids.iter().enumerate() {
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < line.cids.len() {
+        let sup = line.supers[index];
+        let mut end = index + 1;
+        while end < line.cids.len() && line.supers[end] == sup {
+            end += 1;
+        }
+        let size = if sup {
+            (line.size * line.sup_scale).max(0.5)
+        } else {
+            line.size
+        };
+        let rise = if sup { line.size * line.sup_rise } else { 0.0 };
+        out.push_str(&format!(
+            "{} Ts /{} {} Tf {} ",
+            pdf_num(rise),
+            line.resource,
+            pdf_num(size),
+            show_run(&line.cids[index..end], &line.gaps, index, size)
+        ));
+        index = end;
+    }
+    out.push_str("0 Ts ");
+    out
+}
+
+fn show_run(cids: &[u16], gaps: &[f32], start: usize, size: f32) -> String {
+    let internal = (start..start + cids.len())
+        .any(|index| index > 0 && gaps.get(index - 1).is_some_and(|gap| *gap != 0.0));
+    if cids.is_empty() || !internal || size <= 0.0 {
+        return format!("<{}> Tj", hex_cids(cids));
+    }
+    let mut parts = Vec::with_capacity(cids.len() * 2);
+    for (offset, cid) in cids.iter().enumerate() {
+        let index = start + offset;
         if index > 0 {
-            let extra = line.gaps.get(index - 1).copied().unwrap_or(0.0);
-            let adj = -((extra / line.size) * 1000.0).round() as i32;
+            let extra = gaps.get(index - 1).copied().unwrap_or(0.0);
+            let adj = -((extra / size) * 1000.0).round() as i32;
             if adj != 0 {
                 parts.push(adj.to_string());
             }
@@ -2092,6 +2345,179 @@ mod tests {
         TranslatedSegment, Translator,
     };
     use lopdf::dictionary;
+
+    #[test]
+    fn affiliation_marks_are_superscripts_and_years_are_not() {
+        let author = superscript_mask("Zhang1,2 Lee");
+        assert!(author[5] && author[7], "{author:?}");
+        assert!(author.iter().filter(|flag| **flag).count() == 2);
+        let both = superscript_mask("1,2Singapore");
+        assert!(both[0] && both[2], "{both:?}");
+        let cjk = superscript_mask("张轩1 1新加坡");
+        assert!(cjk[2] && cjk[4], "{cjk:?}");
+        assert!(superscript_mask("Anno 2024").iter().all(|flag| !flag));
+        assert!(superscript_mask("9.2% and 16K").iter().all(|flag| !flag));
+        let star = superscript_mask("*Equal Contribution");
+        assert!(star[0], "{star:?}");
+        assert!(star.iter().skip(1).all(|flag| !flag));
+    }
+
+    #[test]
+    fn author_marks_keep_the_source_rise_and_a_year_stays_on_the_baseline() {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let body = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", body);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let mut ops = String::from("BT\n");
+        let mut x = 72.0f32;
+        for ch in ['Z', 'h', 'a', 'n', 'g'] {
+            ops.push_str(&format!("/F1 10 Tf 1 0 0 1 {x:.1} 700 Tm ({ch}) Tj\n"));
+            x += 8.0;
+        }
+        ops.push_str(&format!("/F1 6 Tf 1 0 0 1 {x:.1} 703.5 Tm (1) Tj\n"));
+        x += 8.0;
+        for ch in ['L', 'e', 'e'] {
+            ops.push_str(&format!("/F1 10 Tf 1 0 0 1 {x:.1} 700 Tm ({ch}) Tj\n"));
+            x += 8.0;
+        }
+        x = 72.0;
+        for ch in "Anno 2024".chars() {
+            ops.push_str(&format!("/F1 10 Tf 1 0 0 1 {x:.1} 660 Tm ({ch}) Tj\n"));
+            x += 8.0;
+        }
+        ops.push_str("ET\n");
+        let content = ops.into_bytes();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+
+        let mut pdf = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = pdf.extract();
+        let author_ids: Vec<u32> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[5] > 690.0)
+            .map(|glyph| glyph.id)
+            .collect();
+        let year_ids: Vec<u32> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[5] < 690.0)
+            .map(|glyph| glyph.id)
+            .collect();
+        assert!(author_ids.len() > 5 && year_ids.len() > 4);
+        let report = TranslateReport {
+            segments: vec![
+                TranslatedSegment {
+                    id: 0,
+                    page_index: 0,
+                    glyph_ids: author_ids,
+                    source: "Zhang1 Lee".into(),
+                    translated: "Author1 Lee".into(),
+                },
+                TranslatedSegment {
+                    id: 1,
+                    page_index: 0,
+                    glyph_ids: year_ids,
+                    source: "Anno 2024".into(),
+                    translated: "Year 2024".into(),
+                },
+            ],
+            calls: 0,
+            cache_hits: 0,
+        };
+        let font = box_ttf(
+            &"Author1 LeeYear 2024X"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        pdf.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let saved = pdf.save_bytes().unwrap();
+        let again = PdfDocument::open_bytes(&saved).unwrap().extract();
+        let dumped: Vec<_> = again
+            .glyphs
+            .iter()
+            .map(|glyph| {
+                format!(
+                    "{} s{:.2} y{:.1}",
+                    glyph.unicode, glyph.font_size, glyph.matrix[5]
+                )
+            })
+            .collect();
+        let digit = again
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "1")
+            .unwrap_or_else(|| panic!("author mark missing in {dumped:?}"));
+        let name = again
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "A")
+            .expect("author name");
+        assert!(
+            digit.font_size < name.font_size * 0.85,
+            "mark {} should be smaller than name {}",
+            digit.font_size,
+            name.font_size
+        );
+        assert!(
+            digit.matrix[5] > name.matrix[5] + name.font_size * 0.2,
+            "mark y {} should rise above name y {}",
+            digit.matrix[5],
+            name.matrix[5]
+        );
+        let year: Vec<_> = again
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().all(|ch| ch.is_ascii_digit()))
+            .filter(|glyph| glyph.matrix[5] < name.matrix[5] - 5.0)
+            .collect();
+        assert!(!year.is_empty(), "year digits missing");
+        assert!(
+            year.iter()
+                .all(|glyph| (glyph.font_size - name.font_size).abs() < 0.4),
+            "year should stay at body size: {:?}",
+            year.iter().map(|glyph| glyph.font_size).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn a_star_operator_uses_an_ascii_asterisk_when_the_face_lacks_it() {

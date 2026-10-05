@@ -6,8 +6,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use rpt_core::{
-    translate_extraction, ExtractOptions, OpenOptions, OutputMode, PdfDocument, RewriteOptions,
-    TranslateOptions, TranslatorBackend,
+    replay_extraction, translate_extraction, ExtractOptions, OpenOptions, OutputMode, PdfDocument,
+    RewriteOptions, TranslateOptions, TranslatedSegment, TranslatorBackend,
 };
 
 #[derive(Parser)]
@@ -92,6 +92,10 @@ enum Command {
         /// Layout and rewrite stay single-threaded.
         #[arg(long)]
         jobs: Option<usize>,
+        /// Reuse translations from a previous `rpt translate` JSON file.
+        /// Segments are matched by exact source text. No model is called.
+        #[arg(long)]
+        replay: Option<PathBuf>,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -129,6 +133,7 @@ fn main() -> ExitCode {
             cjk_leading,
             batch_size,
             jobs,
+            replay,
             json: _,
             compact,
         } => {
@@ -161,6 +166,7 @@ fn main() -> ExitCode {
             }
             run_translate(
                 &path,
+                replay.as_deref(),
                 TranslateOptions {
                     source_lang,
                     target_lang,
@@ -210,8 +216,10 @@ fn run_extract(path: &PathBuf, compact: bool, options: &str) -> ExitCode {
     emit(&value, compact)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_translate(
     path: &PathBuf,
+    replay: Option<&std::path::Path>,
     opts: TranslateOptions,
     compact: bool,
     output: Option<PathBuf>,
@@ -223,17 +231,40 @@ fn run_translate(
         Ok(doc) => doc,
         Err(err) => return fail(err),
     };
-    let client = match TranslatorBackend::from_env(&opts) {
-        Ok(client) => client,
-        Err(err) => return fail(err),
-    };
     let mut extraction = doc.extract_with(&ExtractOptions {
         max_pages,
         ..ExtractOptions::default()
     });
-    let report = match translate_extraction(&mut extraction, &opts, &client) {
-        Ok(report) => report,
-        Err(err) => return fail(err),
+    let (report, backend, model, endpoint) = if let Some(replay) = replay {
+        let saved = match load_replay(replay) {
+            Ok(saved) => saved,
+            Err(err) => return fail(err),
+        };
+        let report = match replay_extraction(&mut extraction, &opts, &saved) {
+            Ok(report) => report,
+            Err(err) => return fail(err),
+        };
+        (
+            report,
+            "replay".to_string(),
+            "replay".to_string(),
+            String::new(),
+        )
+    } else {
+        let client = match TranslatorBackend::from_env(&opts) {
+            Ok(client) => client,
+            Err(err) => return fail(err),
+        };
+        let report = match translate_extraction(&mut extraction, &opts, &client) {
+            Ok(report) => report,
+            Err(err) => return fail(err),
+        };
+        (
+            report,
+            client.label().to_string(),
+            client.model().to_string(),
+            client.endpoint().to_string(),
+        )
     };
     if let Some(output) = output.as_ref() {
         if let Err(err) = doc.rewrite(
@@ -302,15 +333,33 @@ fn run_translate(
         obj.insert(
             "translator".into(),
             serde_json::json!({
-                "model": client.model(),
-                "backend": client.label(),
-                "base_url": client.endpoint(),
+                "model": model,
+                "backend": backend,
+                "base_url": endpoint,
                 "calls": report.calls,
                 "cache_hits": report.cache_hits,
             }),
         );
     }
     emit(&value, compact)
+}
+
+fn load_replay(path: &std::path::Path) -> Result<Vec<TranslatedSegment>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read replay file {}: {err}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|err| format!("replay file {} is not JSON: {err}", path.display()))?;
+    let items = value
+        .as_array()
+        .or_else(|| value.get("translations").and_then(|item| item.as_array()))
+        .ok_or_else(|| "replay file needs a translations array".to_string())?;
+    items
+        .iter()
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|err| format!("replay segment is invalid: {err}"))
+        })
+        .collect()
 }
 
 fn parse_glossary(entries: &[String]) -> Result<Vec<(String, String)>, String> {

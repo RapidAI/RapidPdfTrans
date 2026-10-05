@@ -417,41 +417,8 @@ pub fn translate_extraction(
     opts: &TranslateOptions,
     translator: &dyn Translator,
 ) -> Result<TranslateReport> {
-    if opts.batch_size == 0 {
-        return Err(Error::Options("batch_size must be at least 1".into()));
-    }
     let jobs = opts.resolved_jobs()?;
-    let segmentation = segment::segment_with(
-        &extraction.glyphs,
-        &segment::SegmentFlags {
-            skip_figures: opts.skip_figures,
-            skip_tables: opts.skip_tables,
-        },
-    );
-    let segments = segmentation.segments;
-    let reference_ids = if opts.skip_references {
-        references::reference_glyph_ids(&extraction.glyphs)
-    } else {
-        HashSet::new()
-    };
-    for id in &reference_ids {
-        extraction.mark_kept(*id, "references")?;
-    }
-    let by_id: HashMap<u32, usize> = extraction
-        .glyphs
-        .iter()
-        .enumerate()
-        .map(|(index, glyph)| (glyph.id, index))
-        .collect();
-    for (id, reason) in &segmentation.kept {
-        let Some(index) = by_id.get(id) else {
-            continue;
-        };
-        if extraction.glyphs[*index].disposition.is_final() {
-            continue;
-        }
-        extraction.mark_kept(*id, reason.clone())?;
-    }
+    let (segments, reference_ids) = prepare_segments(extraction, opts)?;
     let shielded: Vec<protect::Shielded> = segments
         .iter()
         .map(|seg| shield(&seg.text, &opts.glossary))
@@ -495,6 +462,118 @@ pub fn translate_extraction(
         translated[i] = Some(text);
     }
 
+    finish_report(
+        extraction,
+        &segments,
+        &reference_ids,
+        translated,
+        calls,
+        cache_hits,
+    )
+}
+
+/// Apply a previous translation to the current segmentation.
+///
+/// Each segment is matched by its exact source string. No model is called.
+/// A segment that would have been sent to the model and has no saved
+/// translation is an error, so a layout replay cannot silently drop a tail.
+pub fn replay_extraction(
+    extraction: &mut Extraction,
+    opts: &TranslateOptions,
+    saved: &[TranslatedSegment],
+) -> Result<TranslateReport> {
+    let mut saved_map: HashMap<String, String> = HashMap::new();
+    for item in saved {
+        if let Some(previous) = saved_map.get(&item.source) {
+            if previous != &item.translated {
+                return Err(Error::Translate(
+                    "saved translations disagree for one source string".into(),
+                ));
+            }
+        } else {
+            saved_map.insert(item.source.clone(), item.translated.clone());
+        }
+    }
+    let (segments, reference_ids) = prepare_segments(extraction, opts)?;
+    let mut translated: Vec<Option<String>> = Vec::with_capacity(segments.len());
+    let mut cache_hits = 0usize;
+    let mut seen = HashSet::new();
+    for seg in &segments {
+        if seg.glyph_ids.iter().any(|id| reference_ids.contains(id)) || seg.text.trim().is_empty() {
+            translated.push(Some(seg.text.clone()));
+            continue;
+        }
+        let Some(text) = saved_map.get(&seg.text) else {
+            let preview: String = seg.text.chars().take(48).collect();
+            return Err(Error::Translate(format!(
+                "no saved translation for segment {} ({preview})",
+                seg.id
+            )));
+        };
+        if !seen.insert(seg.text.clone()) {
+            cache_hits += 1;
+        }
+        translated.push(Some(text.clone()));
+    }
+    finish_report(
+        extraction,
+        &segments,
+        &reference_ids,
+        translated,
+        0,
+        cache_hits,
+    )
+}
+
+fn prepare_segments(
+    extraction: &mut Extraction,
+    opts: &TranslateOptions,
+) -> Result<(Vec<Segment>, HashSet<u32>)> {
+    if opts.batch_size == 0 {
+        return Err(Error::Options("batch_size must be at least 1".into()));
+    }
+    let segmentation = segment::segment_with(
+        &extraction.glyphs,
+        &segment::SegmentFlags {
+            skip_figures: opts.skip_figures,
+            skip_tables: opts.skip_tables,
+        },
+    );
+    let segments = segmentation.segments;
+    let reference_ids = if opts.skip_references {
+        references::reference_glyph_ids(&extraction.glyphs)
+    } else {
+        HashSet::new()
+    };
+    for id in &reference_ids {
+        extraction.mark_kept(*id, "references")?;
+    }
+    let by_id: HashMap<u32, usize> = extraction
+        .glyphs
+        .iter()
+        .enumerate()
+        .map(|(index, glyph)| (glyph.id, index))
+        .collect();
+    for (id, reason) in &segmentation.kept {
+        let Some(index) = by_id.get(id) else {
+            continue;
+        };
+        if extraction.glyphs[*index].disposition.is_final() {
+            continue;
+        }
+        extraction.mark_kept(*id, reason.clone())?;
+    }
+    Ok((segments, reference_ids))
+}
+
+fn finish_report(
+    extraction: &mut Extraction,
+    segments: &[Segment],
+    reference_ids: &HashSet<u32>,
+    translated: Vec<Option<String>>,
+    calls: usize,
+    cache_hits: usize,
+) -> Result<TranslateReport> {
     let mut report_segments = Vec::with_capacity(segments.len());
     for (i, seg) in segments.iter().enumerate() {
         let text = translated[i]
@@ -1431,5 +1510,32 @@ mod tests {
             .map(|seg| seg.translated.as_str())
             .collect();
         assert_eq!(texts, ["译Fig 1", "译Fig 2", "译3"]);
+    }
+
+    #[test]
+    fn replay_matches_each_source_and_rejects_a_missing_segment() {
+        let opts = TranslateOptions::default();
+        let mut live_doc = extraction_from_lines(&["Hello world.", "Second sentence stays."]);
+        let live =
+            translate_extraction(&mut live_doc, &opts, &PrefixTranslator).expect("live translate");
+        let mut replay_doc = extraction_from_lines(&["Hello world.", "Second sentence stays."]);
+        let replayed = replay_extraction(&mut replay_doc, &opts, &live.segments).expect("replay");
+        assert_eq!(replayed.calls, 0);
+        assert_eq!(replayed.segments.len(), live.segments.len());
+        for (saved, fresh) in live.segments.iter().zip(&replayed.segments) {
+            assert_eq!(fresh.source, saved.source);
+            assert_eq!(fresh.translated, saved.translated);
+            assert_eq!(fresh.glyph_ids, saved.glyph_ids);
+        }
+        assert!(replay_doc
+            .glyphs
+            .iter()
+            .all(|glyph| !matches!(glyph.disposition, Disposition::Pending)));
+
+        let mut hole = live.segments.clone();
+        hole.pop();
+        let mut again = extraction_from_lines(&["Hello world.", "Second sentence stays."]);
+        let err = replay_extraction(&mut again, &opts, &hole).unwrap_err();
+        assert!(err.to_string().contains("no saved translation"), "{err}");
     }
 }
