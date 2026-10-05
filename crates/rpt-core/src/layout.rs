@@ -314,8 +314,15 @@ pub(crate) fn fit_cjk_block(
     let start = (source_size * scale).max(1.0);
     // A paragraph that already fits stays at `start`. A narrow column, or a
     // one-line source, may shrink to 0.62 of the English size before the
-    // English is left in place.
-    let floor = (source_size * 0.62).min(start);
+    // English is left in place. A short one-line title (a contents entry)
+    // may go to 0.50: the Chinese is often longer than that ink, and leaving
+    // it English fails the page. A full column stays at 0.62.
+    let floor_ratio = if available <= 0.5 && width <= source_size * 16.0 {
+        0.50
+    } else {
+        0.62
+    };
+    let floor = (source_size * floor_ratio).min(start);
     let mut size = start;
     loop {
         let indent = size * indent_ems;
@@ -948,6 +955,45 @@ mod tests {
         assert!(
             column.is_some(),
             "27-line narrow abstract should fit at the 0.62 floor"
+        );
+
+        let crumb = "基于大语言模型的聊天机器人";
+        let fitted = fit_paragraph(
+            crumb,
+            10.0,
+            78.0,
+            0.0,
+            1,
+            false,
+            &uniform_font(crumb),
+            metrics,
+        )
+        .expect("a short contents title still fits");
+        assert!(
+            fitted.size + 0.05 >= 5.0,
+            "contents title shrunk past 0.50: {}",
+            fitted.size
+        );
+        assert!(
+            fitted.size < 6.2,
+            "contents title should be below the body floor, got {}",
+            fitted.size
+        );
+        assert_eq!(fitted.lines.len(), 1);
+        let wide = "基于大语言模型的聊天机器人".repeat(3);
+        assert!(
+            fit_paragraph(
+                &wide,
+                10.0,
+                200.0,
+                0.0,
+                1,
+                false,
+                &uniform_font(&wide),
+                metrics,
+            )
+            .is_none(),
+            "a wide one-line paragraph stays at the 0.62 floor"
         );
 
         let affil = "1新加坡管理大学2南洋理工大学3哈佛大学";
