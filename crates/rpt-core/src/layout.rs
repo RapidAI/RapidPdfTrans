@@ -20,6 +20,8 @@ use crate::font::SubsetFont;
 #[derive(Clone, Copy, Debug)]
 pub struct CjkMeasure {
     pub body_scale: f32,
+    pub subsection_scale: f32,
+    pub section_scale: f32,
     pub heading_scale: f32,
     pub leading_ratio: f32,
     pub min_leading_ratio: f32,
@@ -31,11 +33,98 @@ impl CjkMeasure {
         let leading = positive_or_env(leading, "RPT_CJK_LEADING", 1.60).clamp(1.25, 2.20);
         Self {
             body_scale: body,
+            // A subsection is often small-caps at the body size. Chinese still
+            // needs it larger than the shrunk body, and a section larger than that.
+            subsection_scale: (body + 0.12).min(1.05).max(body),
+            section_scale: (body + 0.06).clamp(0.96, 1.0).max(body),
             heading_scale: (body + 0.06).min(1.0),
             leading_ratio: leading,
             min_leading_ratio: (leading * 0.88).max(1.40).min(leading),
         }
     }
+}
+
+/// How a source line should be ranked once it is set in Chinese.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeadingLevel {
+    Body,
+    Subsection,
+    Section,
+    Title,
+}
+
+/// Rank a paragraph from its source size and the translated text.
+///
+/// Numbered heads such as `2.2` stay subsections even when the English face
+/// is the same size as the body. A section number at a larger size stays
+/// above that. Captions are body for this ranking; indent treats them apart.
+pub fn heading_level(line_count: usize, source_size: f32, bold: bool, text: &str) -> HeadingLevel {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || is_cjk_caption(trimmed) {
+        return HeadingLevel::Body;
+    }
+    let chars = trimmed.chars().count();
+    let sentence = ends_sentence(trimmed);
+    if source_size >= 14.0 && line_count <= 3 && chars < 160 {
+        return HeadingLevel::Title;
+    }
+    match numbered_depth(trimmed) {
+        Some(1) if line_count <= 2 && chars < 80 && source_size >= 10.5 && !sentence => {
+            return HeadingLevel::Section;
+        }
+        Some(depth) if depth >= 2 && line_count <= 2 && chars < 100 && !sentence => {
+            return HeadingLevel::Subsection;
+        }
+        _ => {}
+    }
+    if line_count == 1 && bold && chars < 80 && !sentence {
+        return HeadingLevel::Subsection;
+    }
+    if source_size >= 12.5 && line_count <= 3 && chars < 120 && !sentence {
+        return HeadingLevel::Title;
+    }
+    if line_count == 1 && source_size >= 11.2 && chars < 24 && !sentence {
+        return HeadingLevel::Section;
+    }
+    HeadingLevel::Body
+}
+
+pub(crate) fn scale_for_heading(level: HeadingLevel, metrics: CjkMeasure) -> f32 {
+    match level {
+        HeadingLevel::Body => metrics.body_scale,
+        HeadingLevel::Subsection => metrics.subsection_scale,
+        HeadingLevel::Section => metrics.section_scale,
+        HeadingLevel::Title => metrics.heading_scale,
+    }
+}
+
+/// `1` for `1 Introduction`, `2` for `2.2 Methods`.
+fn numbered_depth(text: &str) -> Option<u8> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let mut groups = 0u8;
+    loop {
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == start || index - start > 2 {
+            return None;
+        }
+        groups = groups.saturating_add(1);
+        if index < bytes.len() && bytes[index] == b'.' {
+            let after = index + 1;
+            if after < bytes.len() && bytes[after].is_ascii_digit() {
+                index = after;
+                continue;
+            }
+        }
+        break;
+    }
+    if groups > 2 || index >= bytes.len() || bytes[index] != b' ' {
+        return None;
+    }
+    Some(groups)
 }
 
 fn positive_or_env(explicit: f32, key: &str, builtin: f32) -> f32 {
@@ -74,12 +163,9 @@ pub fn fit_paragraph(
     font: &SubsetFont,
     metrics: CjkMeasure,
 ) -> Option<FittedParagraph> {
+    let level = heading_level(line_count, source_size, bold, text);
     let indent_ems = cjk_indent_ems(line_count, source_size, bold, text);
-    let scale = if indent_ems == 0.0 && line_count < 2 && source_size >= 12.5 {
-        metrics.heading_scale
-    } else {
-        metrics.body_scale
-    };
+    let scale = scale_for_heading(level, metrics);
     let (lines, size, leading, indent) = fit_cjk_block(
         text,
         source_size,
@@ -100,25 +186,15 @@ pub fn fit_paragraph(
 
 /// Two ems for a body or abstract paragraph. Zero for a heading or caption.
 pub fn cjk_indent_ems(line_count: usize, source_size: f32, bold: bool, text: &str) -> f32 {
-    if is_cjk_caption(text) || is_cjk_heading(line_count, source_size, bold, text) {
+    if is_cjk_caption(text)
+        || heading_level(line_count, source_size, bold, text) != HeadingLevel::Body
+    {
         0.0
     } else if line_count >= 2 || is_one_line_prose(text, source_size, bold) {
         2.0
     } else {
         0.0
     }
-}
-
-fn is_cjk_heading(line_count: usize, source_size: f32, bold: bool, text: &str) -> bool {
-    let trimmed = text.trim();
-    let chars = trimmed.chars().count();
-    if source_size >= 12.5 && line_count <= 3 && chars < 120 {
-        return true;
-    }
-    if line_count == 1 && bold && chars < 80 {
-        return true;
-    }
-    line_count == 1 && chars < 40 && !ends_sentence(trimmed)
 }
 
 fn is_one_line_prose(text: &str, source_size: f32, bold: bool) -> bool {
@@ -525,6 +601,87 @@ fn break_after(ch: char) -> bool {
     !matches!(ch, '《' | '「' | '『' | '【' | '(' | '[' | '{')
 }
 
+/// One page's measure: how many source lines it can hold, and how wide they are.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LineSlots {
+    pub width: f32,
+    pub slots: usize,
+}
+
+/// Wrap `text` across page boxes. Every non-space character is placed, or the
+/// fit is refused. A short first box must not keep a prefix and drop the tail.
+pub(crate) fn pack_into_slots(
+    text: &str,
+    size: f32,
+    indent: f32,
+    boxes: &[LineSlots],
+    font: &SubsetFont,
+) -> Option<Vec<Vec<String>>> {
+    if boxes.is_empty() || size <= 0.0 || text.trim().is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut packed = Vec::with_capacity(boxes.len());
+    let mut cursor = 0usize;
+    let mut first_line = true;
+    for slot in boxes {
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= chars.len() {
+            packed.push(Vec::new());
+            continue;
+        }
+        let width = slot.width.max(size);
+        let first_width = if first_line {
+            (width - indent).max(size * 0.5)
+        } else {
+            width
+        };
+        let remaining: String = chars[cursor..].iter().collect();
+        let wrapped = wrap_text(&remaining, size, first_width, width, font)?;
+        let take = wrapped.len().min(slot.slots.max(1));
+        if take == 0 {
+            return None;
+        }
+        let used = wrapped[..take].to_vec();
+        let consumed = consumed_chars(&chars[cursor..], &used);
+        if consumed == 0 {
+            return None;
+        }
+        cursor += consumed;
+        packed.push(used);
+        first_line = false;
+    }
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    if cursor < chars.len() {
+        return None;
+    }
+    Some(packed)
+}
+
+fn consumed_chars(src: &[char], lines: &[String]) -> usize {
+    let mut index = 0usize;
+    for line in lines {
+        for ch in line.chars() {
+            while index < src.len() && src[index].is_whitespace() && src[index] != ch {
+                index += 1;
+            }
+            if index < src.len() && src[index] == ch {
+                index += 1;
+            } else {
+                return 0;
+            }
+        }
+        while index < src.len() && src[index].is_whitespace() {
+            index += 1;
+        }
+    }
+    index
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,6 +723,70 @@ mod tests {
         .expect("title fits");
         assert_eq!(title.indent, 0.0);
         assert!((title.size - 14.0 * metrics.heading_scale).abs() < 0.05);
+
+        let sub_text = "2.2 评判引导的数据收集与SFT";
+        let sub = fit_paragraph(
+            sub_text,
+            10.0,
+            360.0,
+            0.0,
+            1,
+            false,
+            &uniform_font(sub_text),
+            metrics,
+        )
+        .expect("subsection fits");
+        assert_eq!(sub.indent, 0.0);
+        assert!(
+            sub.size > 9.0 + 0.5,
+            "subsection should sit above the 9pt body, got {}",
+            sub.size
+        );
+        let section = fit_paragraph(
+            "1 引言",
+            12.0,
+            360.0,
+            0.0,
+            1,
+            false,
+            &uniform_font("1 引言"),
+            metrics,
+        )
+        .expect("section fits");
+        assert!(
+            section.size > sub.size,
+            "section {} should exceed subsection {}",
+            section.size,
+            sub.size
+        );
+    }
+
+    #[test]
+    fn pack_into_slots_keeps_the_tail_or_fits_nothing() {
+        let text = "为了收集训练数据我们在编码任务上运行基础智能体并使用评审器审查压缩决策";
+        let font = uniform_font(text);
+        let wide = LineSlots {
+            width: 200.0,
+            slots: 2,
+        };
+        let packed = pack_into_slots(text, 10.0, 0.0, &[wide, wide], &font).expect("two boxes");
+        let flat: String = packed.iter().flatten().map(|line| line.as_str()).collect();
+        assert_eq!(flat, text, "{packed:?}");
+        assert!(packed[0].len() <= 2 && packed[1].len() <= 2, "{packed:?}");
+        assert!(
+            pack_into_slots(
+                text,
+                10.0,
+                0.0,
+                &[LineSlots {
+                    width: 200.0,
+                    slots: 1,
+                }],
+                &font,
+            )
+            .is_none(),
+            "one short line must not keep a prefix"
+        );
     }
 
     #[test]

@@ -25,7 +25,8 @@ use crate::extract::Extraction;
 use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSources, SubsetFont};
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
-    char_widths, cids_of, cjk_indent_ems, fit_cjk_block, justify_gaps, CjkMeasure,
+    char_widths, cids_of, cjk_indent_ems, fit_cjk_block, heading_level, justify_gaps,
+    pack_into_slots, scale_for_heading, CjkMeasure, HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
@@ -201,16 +202,23 @@ pub fn rewrite_translation(
     } else {
         let mut groups: HashMap<FaceStyle, Vec<(usize, String)>> = HashMap::new();
         for (index, text) in &planned {
-            let style = report.segments[*index]
+            let glyphs: Vec<&Glyph> = report.segments[*index]
                 .glyph_ids
+                .iter()
+                .filter_map(|id| extraction.glyphs.get(by_id[id]))
+                .collect();
+            let mut style = glyphs
                 .first()
-                .and_then(|id| extraction.glyphs.get(by_id[id]))
                 .map(|glyph| face_style(&glyph.font_name))
                 .unwrap_or(FaceStyle {
                     serif: true,
                     bold: false,
                     italic: false,
                 });
+            if heading_wants_bold(&glyphs, text) {
+                style.bold = true;
+                style.italic = false;
+            }
             groups
                 .entry(style)
                 .or_default()
@@ -928,6 +936,10 @@ fn layout_segment(
     if ink.is_empty() {
         return None;
     }
+    let pages = pages_of(glyphs);
+    if pages.len() > 1 {
+        return layout_across_pages(glyphs, text, font, extraction, resource, skew, metrics);
+    }
     let size0 = ink
         .iter()
         .map(|line| {
@@ -976,12 +988,9 @@ fn layout_segment(
     let width = (block_right - block_left).max(source_size);
     let available = (top_y - bottom_y).max(0.0);
     let bold = paragraph_is_bold(&ink);
+    let level = heading_level(ink.len(), source_size, bold, text);
     let indent_ems = cjk_indent_ems(ink.len(), source_size, bold, text);
-    let scale = if indent_ems == 0.0 && ink.len() < 2 && source_size >= 12.5 {
-        metrics.heading_scale
-    } else {
-        metrics.body_scale
-    };
+    let scale = scale_for_heading(level, metrics);
     let (lines, size, leading, indent) = fit_cjk_block(
         text,
         source_size,
@@ -1031,6 +1040,175 @@ fn layout_segment(
             })
             .collect(),
     )
+}
+
+fn pages_of(glyphs: &[&Glyph]) -> Vec<u32> {
+    let mut pages: Vec<u32> = glyphs.iter().map(|glyph| glyph.page_index).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    pages
+}
+
+fn heading_wants_bold(glyphs: &[&Glyph], text: &str) -> bool {
+    if glyphs.is_empty() {
+        return false;
+    }
+    let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    let size = sizes[sizes.len() / 2];
+    let mut rows: Vec<i32> = glyphs
+        .iter()
+        .map(|glyph| (glyph.matrix[5] * 2.0) as i32)
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    let bold = glyphs.iter().all(|glyph| face_style(&glyph.font_name).bold);
+    matches!(
+        heading_level(rows.len().max(1), size, bold, text),
+        HeadingLevel::Subsection | HeadingLevel::Section
+    )
+}
+
+/// Place one translated paragraph into the source boxes on each page it
+/// crosses. Shrinking is allowed. A tail that still does not fit keeps the
+/// original paragraph instead of painting a prefix.
+fn layout_across_pages(
+    glyphs: &[&Glyph],
+    text: &str,
+    font: &SubsetFont,
+    extraction: &Extraction,
+    resource: &str,
+    skew: f32,
+    metrics: CjkMeasure,
+) -> Option<Vec<Drawn>> {
+    let pages = pages_of(glyphs);
+    let mut boxes = Vec::new();
+    let mut ink_pages = Vec::new();
+    for page in pages {
+        let subset: Vec<&Glyph> = glyphs
+            .iter()
+            .copied()
+            .filter(|glyph| glyph.page_index == page)
+            .collect();
+        let ink = ink_lines(&subset);
+        if ink.is_empty() {
+            continue;
+        }
+        let size0 = ink
+            .iter()
+            .flat_map(|line| line.glyphs.iter().map(|glyph| glyph.font_size))
+            .fold(1.0f32, f32::max);
+        if ink
+            .iter()
+            .any(|line| segment_crosses_column(&line.glyphs, size0))
+        {
+            return None;
+        }
+        let spans: Vec<(f32, f32)> = ink.iter().map(|line| line_span(line, size0)).collect();
+        let left = spans.iter().map(|(left, _)| *left).fold(f32::MAX, f32::min);
+        let right = spans.iter().map(|(_, right)| *right).fold(left, f32::max);
+        boxes.push(LineSlots {
+            width: (right - left).max(size0),
+            slots: ink.len(),
+        });
+        ink_pages.push((page, ink, left, right));
+    }
+    if boxes.len() < 2 {
+        return None;
+    }
+    let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    let source_size = sizes[sizes.len() / 2].max(1.0);
+    let line_count: usize = boxes.iter().map(|slot| slot.slots).sum();
+    let bold = glyphs.iter().all(|glyph| face_style(&glyph.font_name).bold);
+    let level = heading_level(line_count, source_size, bold, text);
+    let indent_ems = cjk_indent_ems(line_count, source_size, bold, text);
+    let scale = scale_for_heading(level, metrics);
+    let start = (source_size * scale).max(1.0);
+    let floor = (start * 0.78).max(source_size * 0.62).min(start);
+    let mut size = start;
+    let packed = loop {
+        let indent = size * indent_ems;
+        if let Some(packed) = pack_into_slots(text, size, indent, &boxes, font) {
+            let flat: String = packed
+                .iter()
+                .flatten()
+                .flat_map(|line| line.chars())
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            let wanted: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+            if flat == wanted {
+                break packed;
+            }
+        }
+        if size <= floor + 0.01 {
+            return None;
+        }
+        let next = (size * 0.94).max(floor);
+        if (next - size).abs() < 0.01 {
+            return None;
+        }
+        size = next;
+    };
+    let color = glyphs[0].fill_color.clone();
+    let indent = size * indent_ems;
+    let mut drawn = Vec::new();
+    let mut first_line = true;
+    for (box_index, ((page, ink, left, _), lines)) in
+        ink_pages.iter().zip(packed).enumerate()
+    {
+        if lines.is_empty() {
+            continue;
+        }
+        let top = ink[0].y;
+        let bottom = ink[ink.len() - 1].y;
+        let gaps = lines.len().saturating_sub(1) as f32;
+        let leading = if gaps == 0.0 {
+            size * metrics.leading_ratio
+        } else {
+            let room = (top - bottom) / gaps;
+            room.min(size * metrics.leading_ratio).max(size * 1.05)
+        };
+        let last_y = top - gaps * leading;
+        let media = extraction
+            .pages
+            .iter()
+            .find(|info| info.index == *page)
+            .map(|info| info.media_box)
+            .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+        if last_y < media[1] - 0.5 || top > media[3] {
+            return None;
+        }
+        let width = boxes[box_index].width;
+        for (index, line) in lines.into_iter().enumerate() {
+            let line_indent = if first_line { indent } else { 0.0 };
+            let limit = (width - line_indent).max(size * 0.5);
+            drawn.push(Drawn {
+                page: *page,
+                x: left + line_indent,
+                y: top - index as f32 * leading,
+                size,
+                color: color.clone(),
+                cids: cids_of(&line, font),
+                resource: resource.to_string(),
+                skew,
+                widths: char_widths(&line, size, font),
+                gaps: justify_gaps(&line, size, limit, font, false),
+                text: line,
+            });
+            first_line = false;
+        }
+    }
+    let painted: String = drawn
+        .iter()
+        .flat_map(|line| line.text.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    let wanted: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if painted != wanted {
+        return None;
+    }
+    Some(drawn)
 }
 
 fn ink_lines<'a>(glyphs: &[&'a Glyph]) -> Vec<InkLine<'a>> {

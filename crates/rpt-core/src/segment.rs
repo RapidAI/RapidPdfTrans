@@ -189,7 +189,7 @@ fn assemble(raw: Vec<Vec<&Glyph>>, flags: &SegmentFlags) -> Segmentation {
         }
         lines.retain(|line| !line.glyphs.is_empty());
     }
-    let paragraphs = join_paragraphs(lines);
+    let paragraphs = stitch_page_continuations(join_paragraphs(lines));
     let mut segments = Vec::new();
     for para in paragraphs {
         let page = para[0].page;
@@ -278,7 +278,7 @@ fn line_text(glyphs: &[&Glyph]) -> String {
     let mut previous: Option<&Glyph> = None;
     for glyph in glyphs {
         if let Some(prev) = previous {
-            if word_space(prev, glyph) && !is_marker_text(&glyph.unicode) {
+            if word_space(prev, glyph) && !is_superscript_marker(glyph, prev) {
                 buf.push(' ');
             }
         }
@@ -294,6 +294,20 @@ fn font_key(name: &str) -> String {
 
 fn same_font_family(a: &str, b: &str) -> bool {
     font_family(a) == font_family(b)
+}
+
+fn fonts_can_join(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if same_font_family(&upper.font, &lower.font) {
+        return true;
+    }
+    let families = |line: &VisualLine<'_>| {
+        line.glyphs
+            .iter()
+            .map(|glyph| font_family(&glyph.font_name))
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let left = families(upper);
+    families(lower).iter().any(|family| left.contains(family))
 }
 
 fn font_family(name: &str) -> String {
@@ -403,6 +417,12 @@ fn is_marker_line(line: &VisualLine<'_>) -> bool {
             .glyphs
             .iter()
             .all(|glyph| is_marker_text(&glyph.unicode))
+}
+
+/// A footnote mark is smaller than the glyph it follows. A body-size `#`
+/// in a monospace span is a character, so it keeps the word space in front.
+fn is_superscript_marker(glyph: &Glyph, prev: &Glyph) -> bool {
+    is_marker_text(&glyph.unicode) && glyph.font_size <= prev.font_size * 0.85
 }
 
 fn is_marker_text(text: &str) -> bool {
@@ -804,6 +824,142 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
     paragraphs
 }
 
+/// A sentence that ends at the bottom of a page continues in the next page's
+/// first body paragraph, including after a figure caption or a running header.
+fn stitch_page_continuations<'a>(
+    mut paragraphs: Vec<Vec<VisualLine<'a>>>,
+) -> Vec<Vec<VisualLine<'a>>> {
+    paragraphs.sort_by(|left, right| {
+        left[0]
+            .page
+            .cmp(&right[0].page)
+            .then(right[0].y.total_cmp(&left[0].y))
+            .then(left[0].left.total_cmp(&right[0].left))
+    });
+    let mut used = vec![false; paragraphs.len()];
+    let mut stitched = Vec::new();
+    for index in 0..paragraphs.len() {
+        if used[index] {
+            continue;
+        }
+        used[index] = true;
+        let mut current = std::mem::take(&mut paragraphs[index]);
+        let mut joins = 0;
+        while joins < 4 && closes_the_page(&current, &paragraphs, &used) {
+            let Some(next) = find_page_continuation(&current, &paragraphs, &used) else {
+                break;
+            };
+            used[next] = true;
+            current.extend(std::mem::take(&mut paragraphs[next]));
+            joins += 1;
+        }
+        if !current.is_empty() {
+            stitched.push(current);
+        }
+    }
+    stitched
+}
+
+fn find_page_continuation(
+    current: &[VisualLine<'_>],
+    paragraphs: &[Vec<VisualLine<'_>>],
+    used: &[bool],
+) -> Option<usize> {
+    let upper = current.last()?;
+    let mut skipped_bridge = false;
+    for (index, para) in paragraphs.iter().enumerate() {
+        if used[index] || para.is_empty() {
+            continue;
+        }
+        let lower = &para[0];
+        if lower.page < upper.page || (lower.page == upper.page && lower.y >= upper.y - 0.5) {
+            continue;
+        }
+        if lower.page > upper.page + 1 {
+            break;
+        }
+        if is_page_bridge(para) {
+            skipped_bridge = true;
+            continue;
+        }
+        if page_continuation(current, para) {
+            return Some(index);
+        }
+        // A real paragraph that does not continue the sentence stops the search,
+        // unless we have only stepped over headers and captions.
+        if !skipped_bridge && lower.page == upper.page {
+            continue;
+        }
+        if lower.page == upper.page + 1 {
+            return None;
+        }
+    }
+    None
+}
+
+/// True when nothing but a footer, caption, or header sits below this paragraph.
+fn closes_the_page(
+    current: &[VisualLine<'_>],
+    paragraphs: &[Vec<VisualLine<'_>>],
+    used: &[bool],
+) -> bool {
+    let Some(upper) = current.last() else {
+        return false;
+    };
+    for (index, para) in paragraphs.iter().enumerate() {
+        if used[index] || para.is_empty() || is_page_bridge(para) {
+            continue;
+        }
+        let lower = &para[0];
+        if lower.page != upper.page || lower.y >= upper.y - 0.5 {
+            continue;
+        }
+        let letters: usize = para
+            .iter()
+            .map(|line| line.text.chars().filter(|ch| ch.is_alphabetic()).count())
+            .sum();
+        if letters >= 40 || para.len() >= 2 {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_page_bridge(para: &[VisualLine<'_>]) -> bool {
+    let text = para.first().map(|line| line.text.trim()).unwrap_or("");
+    if text.is_empty() || is_running_header(text) || caption_kind(text).is_some() {
+        return true;
+    }
+    text.chars()
+        .all(|ch| ch.is_ascii_digit() || ch.is_whitespace())
+}
+
+fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
+    let Some(upper) = prev.last() else {
+        return false;
+    };
+    let Some(lower) = next.first() else {
+        return false;
+    };
+    if lower.page != upper.page + 1 {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    if (upper.size - lower.size).abs() > size * 0.35 {
+        return false;
+    }
+    if (upper.left - lower.left).abs() > 36.0 {
+        return false;
+    }
+    let tail = upper.text.trim_end();
+    let hyphen = soft_hyphen_stem(tail).is_some();
+    if sentence_end(tail) && !hyphen {
+        return false;
+    }
+    let start = lower.text.trim_start();
+    start.starts_with(|ch: char| ch.is_ascii_lowercase())
+}
+
 fn column_anchor(column: &[VisualLine<'_>], page: u32) -> Option<f32> {
     let mut xs: Vec<f32> = column
         .iter()
@@ -836,14 +992,15 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
         return false;
     }
     // A bold or italic run-in is the same paragraph as the regular line under it.
-    if !same_font_family(&upper.font, &lower.font) {
-        return false;
-    }
+    // A monospace phrase at the start of a line is not a new paragraph.
     let hyphen = soft_hyphen_stem(&upper.text).is_some()
         && lower
             .text
             .trim_start()
             .starts_with(|ch: char| ch.is_ascii_lowercase());
+    if !hyphen && !fonts_can_join(upper, lower) {
+        return false;
+    }
     if (upper.left - lower.left).abs() > 36.0 && !hyphen {
         return false;
     }
@@ -1676,6 +1833,148 @@ mod tests {
             "{:?}",
             segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_page_break_does_not_cut_the_sentence() {
+        let mut tail = glyph(0, 72.0, 80.0, "we run the base agent on", false);
+        tail.page_index = 0;
+        let mut caption = glyph(
+            1,
+            72.0,
+            700.0,
+            "Figure 1: length triggered compaction versus AutoCompact.",
+            false,
+        );
+        caption.page_index = 1;
+        let mut next = glyph(
+            2,
+            72.0,
+            400.0,
+            "training tasks and use a judge to review it.",
+            false,
+        );
+        next.page_index = 1;
+        let segs = segment_glyphs(&[tail, caption, next]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("base agent on training tasks")),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|text| text.ends_with(" on")), "{texts:?}");
+        assert!(
+            texts.iter().any(|text| text.starts_with("Figure")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_break_hyphen_is_joined() {
+        let mut upper = glyph(0, 72.0, 70.0, "rules were spec-", false);
+        upper.page_index = 0;
+        let mut lower = glyph(
+            1,
+            72.0,
+            700.0,
+            "ified in the prompt and the model continued.",
+            false,
+        );
+        lower.page_index = 1;
+        let segs = segment_glyphs(&[upper, lower]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("specified")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("spec-")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_monospace_phrase_does_not_split_the_sentence_or_swallow_a_hash() {
+        let mut generated = glyph(0, 72.0, 500.0, "generated", false);
+        let mut hash = glyph(1, 82.0, 500.0, "#", false);
+        let mut auto = glyph(2, 92.0, 500.0, "Auto", false);
+        let mut context = glyph(3, 72.0, 486.0, "Context Summary ", false);
+        context.font_name = "NimbusMonL-Regu".into();
+        let mut rest = glyph(4, 80.0, 486.0, "accurately preserves execution, in-", false);
+        let mut cont = glyph(
+            5,
+            72.0,
+            472.0,
+            "cluding the information needed after compaction.",
+            false,
+        );
+        generated.font_size = 10.0;
+        hash.font_size = 10.0;
+        auto.font_size = 10.0;
+        context.font_size = 10.0;
+        rest.font_size = 10.0;
+        cont.font_size = 10.0;
+        let segs = segment_glyphs(&[generated, hash, auto, context, rest, cont]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        let joined = texts.join("\n");
+        assert!(
+            joined.contains("generated # Auto"),
+            "hash should keep its word space: {texts:?}"
+        );
+        assert!(
+            joined.contains("including"),
+            "hyphen should join across the monospace span: {texts:?}"
+        );
+        assert!(!joined.contains("in-"), "{texts:?}");
+    }
+
+    #[test]
+    fn the_sample_paper_does_not_cut_a_sentence_at_the_page_bottom() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/arxiv-2610.02163.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract_with(&crate::extract::ExtractOptions {
+            max_pages: Some(4),
+            ..crate::extract::ExtractOptions::default()
+        });
+        let seg = segment_with(&extraction.glyphs, &SegmentFlags::default());
+        let intro = seg.segments.iter().find(|item| {
+            item.text
+                .contains("what to preserve, and how to continue as part of its policy")
+        });
+        let intro = intro.expect("intro paragraph");
+        assert!(
+            intro.text.contains("training tasks"),
+            "page 1 stopped mid-sentence: {}",
+            intro.text.chars().rev().take(120).collect::<String>()
+        );
+        assert!(
+            seg.segments
+                .iter()
+                .any(|item| item.text.contains("specified")),
+            "spec- was left at the page break"
+        );
+        assert!(
+            seg.segments
+                .iter()
+                .any(|item| item.text.contains("including")),
+            "in- was left in the working-state sentence"
+        );
+        assert!(seg.segments.iter().any(|item| {
+            item.text.contains("generated # Auto") || item.text.contains("by # Auto")
+        }));
+        for item in &seg.segments {
+            let tail = item.text.trim_end();
+            assert!(
+                !tail.ends_with("spec-") && !tail.ends_with("in-") && !tail.ends_with(" on"),
+                "mid-sentence segment p{}: {tail}",
+                item.page_index
+            );
+        }
     }
 
     #[test]
