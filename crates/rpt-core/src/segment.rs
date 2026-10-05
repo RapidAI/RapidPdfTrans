@@ -86,8 +86,10 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
     let mut last_size = 12.0f32;
     for glyph in ordered {
         if glyph.unmapped || glyph.unicode.is_empty() {
+            // The gutter often holds an unmapped drawing. Flushing the line
+            // without a column split glues the equation to the prose.
             if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
+                lines.extend(finish_line(std::mem::take(&mut current)));
             }
             last_page = None;
             last_y = None;
@@ -2053,12 +2055,14 @@ fn url_continues(buf: &str, next: &str) -> bool {
 }
 
 fn join_hyphenated_word(stem: &str, rest: &str) -> String {
-    // `GPT-2` and `https://...` keep the hyphen. An ordinary break
-    // (`transfor-` / `mation`) does not.
+    // `GPT-2`, `round-to-nearest`, and `https://...` keep the hyphen.
+    // An ordinary break (`transfor-` / `mation`) does not.
+    let next_token = rest.split_whitespace().next().unwrap_or("");
     if line_ends_with_url(stem)
         || rest
             .trim_start()
             .starts_with(|ch: char| ch.is_ascii_digit())
+        || next_token.contains('-')
     {
         return format!("{stem}-{rest}");
     }
@@ -3513,6 +3517,14 @@ mod tests {
         );
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
         assert!(
+            texts.iter().any(|text| text.contains("round-to-nearest")),
+            "round- was not joined"
+        );
+        assert!(
+            !texts.iter().any(|text| text.trim_end().ends_with("round-")),
+            "round- was left split"
+        );
+        assert!(
             texts
                 .iter()
                 .any(|text| text.contains("overall performance")),
@@ -3534,6 +3546,51 @@ mod tests {
                 let tail = text.trim_end();
                 tail.ends_with("over-") || tail.ends_with("MetaMath-")
             })
+        );
+    }
+
+    #[test]
+    fn an_unmapped_gutter_does_not_glue_an_equation_to_round_to_nearest() {
+        let mut equation = block(0, 205.0, 535.0, 16.0, 6.0, "|{y}|");
+        equation.font_name = "CMR6".into();
+        let mut prose = block(
+            1,
+            306.0,
+            535.0,
+            220.0,
+            10.9,
+            "Baselines include vanilla round-",
+        );
+        prose.font_name = "NimbusRomNo9L-Regu".into();
+        let mut hole = block(2, 260.0, 530.0, 4.0, 10.0, "x");
+        hole.unicode.clear();
+        hole.unmapped = true;
+        let mut next = block(
+            3,
+            306.0,
+            521.4,
+            220.0,
+            10.9,
+            "to-nearest (RTN), GPTQ and AWQ.",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let texts: Vec<_> = segment_glyphs(&[equation, prose, hole, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("round-to-nearest")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("|{y}|") && !text.contains("round-")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("roundto")),
+            "{texts:?}"
         );
     }
 
