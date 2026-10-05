@@ -1394,7 +1394,7 @@ fn cover_with_fallbacks(chars: impl Iterator<Item = char>) -> Vec<u32> {
 /// when none of these stand-ins are in the subset, so a mark is never dropped.
 fn coverage_fallbacks(ch: char) -> &'static [char] {
     match ch {
-        '\u{2217}' | '\u{204E}' | '\u{FE61}' | '\u{FF0A}' => &['*'],
+        '\u{2217}' | '\u{204E}' | '\u{FE61}' | '\u{FF0A}' | '\u{22C6}' => &['*'],
         // Inner products and a combining slash. The Song face has neither.
         '\u{27E8}' => &['<'],
         '\u{27E9}' => &['>'],
@@ -3186,6 +3186,8 @@ mod tests {
         let subset = subset_ttf(&font, &cover_with_fallbacks("中∗".chars())).unwrap();
         assert_eq!(substitute_covered("中∗", &subset), "中*");
         assert_eq!(substitute_covered("中†", &subset), "中†");
+        let star = subset_ttf(&font, &cover_with_fallbacks("中⋆".chars())).unwrap();
+        assert_eq!(substitute_covered("中⋆", &star), "中*");
         assert!(cover_with_fallbacks("∗".chars()).contains(&('*' as u32)));
     }
 

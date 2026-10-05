@@ -247,6 +247,7 @@ fn assemble(
 ) -> Segmentation {
     let mut lines: Vec<VisualLine> = raw.into_iter().map(visual_line).collect();
     attach_markers(&mut lines);
+    attach_math_scripts(&mut lines);
     let mut kept = detach_toc_marks(&mut lines);
     kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
@@ -1631,9 +1632,9 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if inline_contents_entry(&upper.text) || inline_contents_entry(&lower.text) {
         return false;
     }
-    // A display formula keeps its whole segment. Joining it onto the prose
-    // around it would leave that prose untranslated. A times sign or a
-    // decimal point in an otherwise ordinary sentence does not.
+    // A display equation keeps its own segment. Joining it onto the prose
+    // around it would leave that prose untranslated. A calligraphic letter
+    // or a subscript inside a sentence does not.
     if line_has_formula(upper) || line_has_formula(lower) {
         return false;
     }
@@ -1687,17 +1688,108 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
 }
 
 fn line_has_formula(line: &VisualLine<'_>) -> bool {
-    line.glyphs.iter().any(|glyph| {
-        let upper = glyph.font_name.to_ascii_uppercase();
-        let math = ["CMMI", "CMSY", "CMEX", "MSAM", "MSBM", "STIX"]
-            .iter()
-            .any(|needle| upper.contains(needle))
-            || upper.contains("MATH");
-        math && !matches!(
-            glyph.unicode.trim(),
-            "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
-        ) && !is_inline_math_symbol(&glyph.unicode)
-    })
+    let mut math = 0usize;
+    let mut letters = 0usize;
+    for glyph in &line.glyphs {
+        if math_font_glyph(glyph) {
+            math += 1;
+        } else {
+            letters += glyph
+                .unicode
+                .chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .count();
+        }
+    }
+    // One math letter inside a sentence is still that sentence. A display
+    // equation has more math glyphs than prose letters.
+    math > 0 && (letters < 16 || math >= letters)
+}
+
+fn math_font_glyph(glyph: &Glyph) -> bool {
+    let upper = glyph.font_name.to_ascii_uppercase();
+    let math = ["CMMI", "CMSY", "CMEX", "MSAM", "MSBM", "STIX"]
+        .iter()
+        .any(|needle| upper.contains(needle))
+        || upper.contains("MATH");
+    math && !matches!(
+        glyph.unicode.trim(),
+        "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
+    ) && !is_inline_math_symbol(&glyph.unicode)
+}
+
+/// A subscript or superscript (`f_i`, `N_i^+`) drawn on its own baseline.
+/// It belongs to the prose line it sits on, not between two paragraphs.
+fn attach_math_scripts(lines: &mut Vec<VisualLine<'_>>) {
+    let mut drop = vec![false; lines.len()];
+    let hosts: Vec<Option<usize>> = (0..lines.len())
+        .map(|index| math_script_host(index, lines))
+        .collect();
+    for (index, host) in hosts.into_iter().enumerate() {
+        let Some(host) = host else {
+            continue;
+        };
+        let scripts = std::mem::take(&mut lines[index].glyphs);
+        lines[host].glyphs.extend(scripts);
+        lines[host]
+            .glyphs
+            .sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+        lines[host].text = line_text(&lines[host].glyphs);
+        if let Some((left, right, _, _)) = line_bounds(&lines[host].glyphs) {
+            lines[host].left = left;
+            lines[host].right = right;
+        }
+        drop[index] = true;
+    }
+    let mut index = 0;
+    lines.retain(|_| {
+        let keep = !drop[index];
+        index += 1;
+        keep
+    });
+}
+
+fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
+    let line = &lines[index];
+    if !is_math_script(line) {
+        return None;
+    }
+    let mut best: Option<(usize, f32)> = None;
+    for (other_index, other) in lines.iter().enumerate() {
+        if other_index == index || other.page != line.page || is_math_script(other) {
+            continue;
+        }
+        let letters = other
+            .text
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .count();
+        if letters < 16 {
+            continue;
+        }
+        let dy = (line.y - other.y).abs();
+        let size = other.size.max(1.0);
+        if dy < size * 0.08 || dy > size * 0.7 {
+            continue;
+        }
+        if line.left < other.left - size || line.right > other.right + size {
+            continue;
+        }
+        if best.is_none_or(|(_, best_dy)| dy < best_dy) {
+            best = Some((other_index, dy));
+        }
+    }
+    best.map(|(host, _)| host)
+}
+
+fn is_math_script(line: &VisualLine<'_>) -> bool {
+    let width = line.right - line.left;
+    width <= line.size.max(1.0) * 6.0
+        && (1..=6).contains(&line.glyphs.len())
+        && line.glyphs.iter().any(|glyph| math_font_glyph(glyph))
+        && line.glyphs.iter().all(|glyph| {
+            math_font_glyph(glyph) || !glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+        })
 }
 
 /// Operators and digits that a CJK body font can redraw. They show up in
@@ -2661,7 +2753,7 @@ mod tests {
     }
 
     #[test]
-    fn an_inline_formula_line_does_not_swallow_neighboring_prose() {
+    fn an_inline_symbol_stays_inside_its_paragraph() {
         let prose = "This sentence is long enough to stand as its own prose line today.";
         let mut above = wide(0, 72.0, 500.0, prose, 320.0, 10.0);
         above.font_name = "CMR10".into();
@@ -2688,13 +2780,153 @@ mod tests {
         let seg = segment_with(&[above, words, theta, below], &SegmentFlags::default());
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
         assert!(
+            texts.iter().any(|text| {
+                text.contains("This sentence") && text.contains('θ') && text.contains("following")
+            }),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_display_equation_does_not_join_the_prose_around_it() {
+        let mut above = wide(
+            0,
+            72.0,
+            500.0,
+            "The identity below is used in the proof of the claim.",
+            320.0,
+            10.0,
+        );
+        above.font_name = "CMR10".into();
+        let mut equation = wide(1, 160.0, 488.0, "a+b=c", 80.0, 10.0);
+        equation.font_name = "CMMI10".into();
+        let mut below = wide(
+            2,
+            72.0,
+            476.0,
+            "The next sentence returns to ordinary prose in the column.",
+            320.0,
+            10.0,
+        );
+        below.font_name = "CMR10".into();
+        let seg = segment_with(&[above, equation, below], &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
             texts
                 .iter()
-                .any(|text| text.starts_with("This sentence") && !text.contains("following")),
+                .any(|text| text.starts_with("The identity") && !text.contains("next sentence")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|text| text.contains("a+b=c")), "{texts:?}");
+        assert!(
+            texts.iter().any(|text| text.starts_with("The next")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_math_letter_does_not_split_a_hyphenated_sentence() {
+        let mut head = wide(0, 72.0, 500.0, "arcset ", 36.0, 10.0);
+        head.font_name = "NimbusRomNo9L-Regu".into();
+        let mut letter = wide(1, 110.0, 500.0, "A", 8.0, 10.0);
+        letter.font_name = "CMSY10".into();
+        let mut tail = wide(
+            2,
+            120.0,
+            500.0,
+            "will contain all nearest neighbour arcs after contrac-",
+            250.0,
+            10.0,
+        );
+        tail.font_name = "NimbusRomNo9L-Regu".into();
+        let mut next = wide(
+            3,
+            72.0,
+            488.0,
+            "tion. Instead it guarantees the most attractive edge.",
+            280.0,
+            10.0,
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let segs = segment_glyphs(&[head, letter, tail, next]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("contraction") && text.contains('A')),
             "{texts:?}"
         );
         assert!(
-            texts.iter().any(|text| text.starts_with("The following")),
+            !texts.iter().any(|text| text.ends_with("contrac-")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn clusterfug_prose_with_math_letters_stays_one_paragraph() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/pmlr-v202-abbas23a.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let segs = segment_glyphs(&extraction.glyphs);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            !texts.iter().any(|text| text.ends_with("contrac-")),
+            "hyphen split: {:?}",
+            texts.iter().find(|text| text.contains("contrac-"))
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("contraction")),
+            "contrac- was not joined"
+        );
+        assert!(
+            !texts.contains(&"neighbours k is set to 1, a larger value does not benefit"),
+            "math k split the sentence"
+        );
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("fundamental limitation") && text.contains("quadrants")
+            }),
+            "subscript split the limitation sentence: {:?}",
+            texts
+                .iter()
+                .find(|text| text.contains("fundamental limitation"))
+        );
+    }
+
+    #[test]
+    fn a_subscript_between_baselines_stays_in_the_paragraph() {
+        let mut above = wide(
+            0,
+            72.0,
+            500.0,
+            "f and f have one fundamental limitation: Clusters will by",
+            300.0,
+            10.0,
+        );
+        above.font_name = "NimbusRomNo9L-Regu".into();
+        let mut sub = wide(1, 78.0, 494.0, "i", 4.0, 6.0);
+        sub.font_name = "CMMI7".into();
+        let mut below = wide(
+            2,
+            72.0,
+            488.0,
+            "default occupy whole quadrants whenever the angle is small.",
+            300.0,
+            10.0,
+        );
+        below.font_name = "NimbusRomNo9L-Regu".into();
+        let segs = segment_glyphs(&[above, sub, below]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("fundamental limitation")
+                    && text.contains('i')
+                    && text.contains("quadrants")
+            }),
             "{texts:?}"
         );
     }
