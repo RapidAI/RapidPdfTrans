@@ -306,13 +306,63 @@ struct VisualLine<'a> {
     toc: bool,
 }
 
-/// A bold label at the start of a line (`Definition 1.1.`) and the sentence
-/// that follows it. The label is its own segment so the body is not heiti.
-fn bold_run_in<'a>(line: &VisualLine<'a>) -> Option<(Vec<&'a Glyph>, Vec<&'a Glyph>)> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunFace {
+    Bold,
+    Italic,
+}
+
+fn run_face(name: &str) -> Option<RunFace> {
+    let style = crate::font::face_style(name);
+    if style.bold {
+        Some(RunFace::Bold)
+    } else if style.italic {
+        Some(RunFace::Italic)
+    } else {
+        None
+    }
+}
+
+fn tail_starts_upper(text: &str) -> bool {
+    text.trim_start()
+        .chars()
+        .find(|ch| ch.is_ascii_alphabetic())
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn known_run_in(label: &str) -> bool {
+    let word = label
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|ch: char| !ch.is_ascii_alphabetic())
+        .to_ascii_lowercase();
+    matches!(
+        word.as_str(),
+        "proof"
+            | "definition"
+            | "theorem"
+            | "lemma"
+            | "proposition"
+            | "corollary"
+            | "remark"
+            | "example"
+            | "note"
+            | "claim"
+            | "observation"
+            | "assumption"
+    )
+}
+
+/// A styled label at the start of a line (`Definition 1.1.`, `Proof.`) and the
+/// sentence that follows it. The label keeps its own face so the body does not
+/// become heiti or italic.
+fn styled_run_in<'a>(line: &VisualLine<'a>) -> Option<(Vec<&'a Glyph>, Vec<&'a Glyph>)> {
     let mut ordered = line.glyphs.clone();
     ordered.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
+    let kind = run_face(&ordered.first()?.font_name)?;
     let mut split = 0;
-    while split < ordered.len() && crate::font::face_style(&ordered[split].font_name).bold {
+    while split < ordered.len() && run_face(&ordered[split].font_name) == Some(kind) {
         split += 1;
     }
     if split < 3 || split == ordered.len() {
@@ -322,10 +372,18 @@ fn bold_run_in<'a>(line: &VisualLine<'a>) -> Option<(Vec<&'a Glyph>, Vec<&'a Gly
     let tail = line_text(&ordered[split..]);
     let label_letters = label.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
     let tail_letters = tail.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    if !(3..48).contains(&label_letters) || tail_letters < 8 {
+    if !(3..80).contains(&label_letters) || tail_letters < 8 {
         return None;
     }
-    if !label.trim_end().ends_with(['.', ':']) {
+    let trimmed = label.trim_end();
+    let ends_colon = trimmed.ends_with(':');
+    let ends_period = trimmed.ends_with('.');
+    if !ends_colon && !ends_period {
+        return None;
+    }
+    // "Smith et al. showed" is a citation, not a label. "Proof. Let" is.
+    if kind == RunFace::Italic && ends_period && !tail_starts_upper(&tail) && !known_run_in(&label)
+    {
         return None;
     }
     Some((ordered[..split].to_vec(), ordered[split..].to_vec()))
@@ -385,9 +443,9 @@ fn assemble(
         };
         let mut lines = para.iter();
         if let Some(first) = lines.next() {
-            if let Some((label, rest)) = bold_run_in(first) {
-                // "Definition 1.1." is bold. The sentence after it is not, so
-                // the label keeps a heiti face and the body keeps Song.
+            if let Some((label, rest)) = styled_run_in(first) {
+                // "Definition 1.1." is bold and "Proof." is italic. The sentence
+                // after either label keeps the body face.
                 buf = line_text(&label);
                 buf_ids.extend(label.iter().map(|glyph| glyph.id));
                 flush(&mut segments, &mut buf_ids, &mut buf);
@@ -3646,6 +3704,65 @@ mod tests {
     }
 
     #[test]
+    fn an_italic_proof_label_is_its_own_segment() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(&mut id, 46.0, 400.0, "Proof. ", "CMTI10");
+        glyphs.extend(paint_word(
+            &mut id,
+            90.0,
+            400.0,
+            "Let the field be given here and",
+            "CMR10",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            46.0,
+            386.0,
+            "the bound follows from the lemma.",
+            "CMR10",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Proof") && !text.contains("field")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("field")
+                && text.contains("lemma")
+                && !text.contains("Proof")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_italic_citation_stays_inside_the_sentence() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(&mut id, 46.0, 400.0, "Smith et al. ", "CMTI10");
+        glyphs.extend(paint_word(
+            &mut id,
+            116.0,
+            400.0,
+            "showed that the bound holds.",
+            "CMR10",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Smith") && text.contains("showed")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn a_bold_heading_stays_one_segment() {
         let mut id = 0u32;
         let glyphs = paint_word(&mut id, 46.0, 438.0, "4 Proof of Theorem 1.2.", "CMBX12");
@@ -3694,6 +3811,19 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("Proof of Theorem 1.2")),
             "the heading was split"
+        );
+        assert!(
+            texts.iter().any(|text| {
+                let trimmed = text.trim();
+                trimmed.starts_with("Proof.") && !trimmed.contains("field")
+            }),
+            "italic Proof. was left on the body"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Let K be the field") && !text.contains("Proof.")),
+            "the proof body still starts with the label"
         );
     }
 
