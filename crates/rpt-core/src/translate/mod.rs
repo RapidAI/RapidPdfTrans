@@ -756,6 +756,10 @@ fn recoverable(err: &Error) -> bool {
         || msg.contains("omitted segment")
         || msg.contains("invalid translation json")
         || msg.contains("did not contain a json")
+        || msg.contains("no translations array")
+        || msg.contains("missing id")
+        || msg.contains("missing text")
+        || msg.contains("placeholder was not preserved")
         || msg.contains("empty message.content")
         || msg.contains("http status 500")
         || msg.contains("http status 502")
@@ -1089,6 +1093,24 @@ mod tests {
         assert!(texts.iter().any(|text| text.contains("Alpha")), "{texts:?}");
         assert!(texts.iter().any(|text| text.contains("Beta")), "{texts:?}");
         assert!(report.calls >= 3, "calls={}", report.calls);
+    }
+
+    #[test]
+    fn a_response_without_translations_keeps_the_source_and_does_not_abort() {
+        let mut ex = extraction_from_lines(&["Alpha one", "Beta two"]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &AlwaysNoArray).unwrap();
+        assert_eq!(report.segments[0].translated, "Alpha one");
+        assert_eq!(report.segments[1].translated, "Beta two");
+    }
+
+    struct AlwaysNoArray;
+    impl Translator for AlwaysNoArray {
+        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            Err(Error::Translate(
+                "translation JSON has no translations array".into(),
+            ))
+        }
     }
 
     #[test]
