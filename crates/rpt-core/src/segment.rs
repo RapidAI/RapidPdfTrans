@@ -232,7 +232,7 @@ fn assemble(
                 format!("{}{}", buf.trim_end(), line.text.trim_start())
             } else if let Some(stem) = soft_hyphen_stem(&buf) {
                 let rest = line.text.trim_start();
-                if rest.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+                if rest.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
                     join_hyphenated_word(stem, rest)
                 } else {
                     format!("{} {}", buf.trim_end(), line.text.trim_start())
@@ -1312,6 +1312,9 @@ fn prose_continues(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
         return false;
     }
     let start = lower.text.trim_start();
+    if hyphen {
+        return start.starts_with(|ch: char| ch.is_ascii_alphabetic());
+    }
     start.starts_with(|ch: char| ch.is_ascii_lowercase())
 }
 
@@ -1352,7 +1355,7 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
         && lower
             .text
             .trim_start()
-            .starts_with(|ch: char| ch.is_ascii_lowercase());
+            .starts_with(|ch: char| ch.is_ascii_alphabetic());
     if !hyphen && !fonts_can_join(upper, lower) {
         return false;
     }
@@ -1574,7 +1577,7 @@ fn hyphen_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
         && line
             .text
             .trim_start()
-            .starts_with(|ch: char| ch.is_ascii_lowercase())
+            .starts_with(|ch: char| ch.is_ascii_alphabetic())
         && line.left + 1.0 >= prev.left
         && line.left - prev.left <= 36.0
         && prev.y > line.y
@@ -3053,6 +3056,26 @@ mod tests {
         assert!(
             fused_text.contains("intermediate") && !fused_text.contains("inter-"),
             "{fused:?}"
+        );
+        let proper = segment_glyphs(&[
+            block(20, 72.0, 400.0, 280.0, 10.0, "memory via Lang-"),
+            block(
+                21,
+                72.0,
+                387.0,
+                220.0,
+                10.0,
+                "Graph checkpoints stay one word.",
+            ),
+        ]);
+        let proper: Vec<_> = proper.iter().map(|seg| seg.text.clone()).collect();
+        assert!(
+            proper.iter().any(|text| text.contains("LangGraph")),
+            "{proper:?}"
+        );
+        assert!(
+            !proper.iter().any(|text| text.contains("Lang-")),
+            "{proper:?}"
         );
         assert!(
             !texts.iter().any(|text| text.contains("per-sona")),
