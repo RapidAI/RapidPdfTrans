@@ -2383,7 +2383,20 @@ fn toc_entry_boundary(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     {
         return true;
     }
+    // "1.1. Notation" and "1.2. Sturmian" are two contents rows. The page
+    // number may already have been split into the right margin.
+    if dotted_section_heading(&upper.text) && dotted_section_heading(&lower.text) {
+        return true;
+    }
     ends_with_page_number(&upper.text) && starts_new_contents_entry(&lower.text)
+}
+
+fn dotted_section_heading(text: &str) -> bool {
+    let Some(token) = text.split_whitespace().next() else {
+        return false;
+    };
+    let trimmed = token.trim_end_matches('.');
+    trimmed.contains('.') && is_section_number_token(trimmed)
 }
 
 fn contents_marker_line(text: &str) -> bool {
@@ -2450,6 +2463,11 @@ fn starts_with_section_number(text: &str) -> bool {
     let Some(token) = text.split_whitespace().next() else {
         return false;
     };
+    // "1.1." is a section number. A bare "1." is a list item, not one.
+    let trimmed = token.trim_end_matches('.');
+    if trimmed.contains('.') {
+        return is_section_number_token(trimmed);
+    }
     is_section_number_token(token)
 }
 
@@ -4933,6 +4951,65 @@ mod tests {
             .map(|seg| seg.text)
             .collect();
         assert_eq!(texts, ["Executing prompts programmatically 27"]);
+    }
+
+    #[test]
+    fn dotted_section_headings_stay_on_their_own_rows() {
+        let glyphs = vec![
+            block(
+                0,
+                72.0,
+                400.0,
+                235.0,
+                10.0,
+                "1.1. Notation, and typical periodic optimization",
+            ),
+            block(
+                1,
+                72.0,
+                386.0,
+                220.0,
+                10.0,
+                "1.2. Sturmian beta-shifts stay separate",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("1.1.") && !text.contains("1.2.")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("1.2.") && !text.contains("1.1.")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_dotted_heading_still_joins_its_wrap() {
+        let glyphs = vec![
+            block(0, 72.0, 400.0, 240.0, 10.0, "1.1. Notation, and typical"),
+            block(
+                1,
+                72.0,
+                386.0,
+                220.0,
+                10.0,
+                "periodic optimization of the shift",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("Notation") && texts[0].contains("periodic"));
     }
 
     #[test]
