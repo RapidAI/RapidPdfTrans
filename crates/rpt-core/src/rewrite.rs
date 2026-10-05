@@ -1363,7 +1363,7 @@ fn place_segments(
     }
 }
 
-fn segment_crosses_column(glyphs: &[&Glyph], size: f32) -> bool {
+fn segment_crosses_column(glyphs: &[&Glyph], neighbors: &[&Glyph], size: f32) -> bool {
     if glyphs.len() < 4 {
         return false;
     }
@@ -1387,7 +1387,20 @@ fn segment_crosses_column(glyphs: &[&Glyph], size: f32) -> bool {
         // A contents bullet leaves ~14pt between a page number and the next
         // entry. That is not a second column.
         let left = &ordered[..=index];
-        !(*gap <= hard && crate::segment::piece_ends_with_page_number(left))
+        if *gap <= hard && crate::segment::piece_ends_with_page_number(left) {
+            return false;
+        }
+        // An inline formula leaves a hole on this baseline where the
+        // subscript sits. A column gutter is empty above and below too.
+        let right_edge = ordered[index].bbox[0].max(ordered[index].bbox[2]);
+        let left_edge = ordered[index + 1].bbox[0].min(ordered[index + 1].bbox[2]);
+        let y = ordered[index].matrix[5];
+        let filled = neighbors.iter().any(|glyph| {
+            let x = (glyph.bbox[0] + glyph.bbox[2]) * 0.5;
+            let dy = (glyph.matrix[5] - y).abs();
+            x > right_edge + 0.5 && x < left_edge - 0.5 && dy > size * 0.12 && dy < size * 1.25
+        });
+        !filled
     })
 }
 
@@ -1539,7 +1552,7 @@ fn layout_segment(
         .fold(1.0f32, f32::max);
     if ink
         .iter()
-        .any(|line| segment_crosses_column(&line.glyphs, size0))
+        .any(|line| segment_crosses_column(&line.glyphs, glyphs, size0))
     {
         return None;
     }
@@ -1700,7 +1713,7 @@ fn layout_across_pages(
             .fold(1.0f32, f32::max);
         if ink
             .iter()
-            .any(|line| segment_crosses_column(&line.glyphs, size0))
+            .any(|line| segment_crosses_column(&line.glyphs, &subset, size0))
         {
             return None;
         }
@@ -3406,6 +3419,42 @@ mod tests {
                 resource_name: Some("F1".into()),
             },
         }
+    }
+
+    #[test]
+    fn a_subscript_in_a_formula_hole_is_not_a_second_column() {
+        let line = vec![
+            math_glyph(0, 72.0, 400.0, "L", false),
+            math_glyph(1, 80.0, 400.0, "=", false),
+            math_glyph(2, 88.0, 400.0, "E", false),
+            math_glyph(3, 160.0, 400.0, "v", false),
+        ];
+        let refs: Vec<&Glyph> = line.iter().collect();
+        assert!(
+            segment_crosses_column(&refs, &refs, 10.0),
+            "an empty hole is still a gap"
+        );
+        let sub = math_glyph(4, 120.0, 396.0, "t", true);
+        let mut all = line.clone();
+        all.push(sub);
+        let refs: Vec<&Glyph> = all.iter().collect();
+        let baseline: Vec<&Glyph> = refs[..4].to_vec();
+        assert!(
+            !segment_crosses_column(&baseline, &refs, 10.0),
+            "the subscript fills the formula hole"
+        );
+    }
+
+    #[test]
+    fn an_empty_gutter_is_still_a_second_column() {
+        let line = vec![
+            math_glyph(0, 72.0, 400.0, "w", false),
+            math_glyph(1, 80.0, 400.0, "e", false),
+            math_glyph(2, 320.0, 400.0, "t", false),
+            math_glyph(3, 328.0, 400.0, "o", false),
+        ];
+        let refs: Vec<&Glyph> = line.iter().collect();
+        assert!(segment_crosses_column(&refs, &refs, 10.0));
     }
 
     #[test]

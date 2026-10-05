@@ -33,6 +33,8 @@ pub fn face_style(font_name: &str) -> FaceStyle {
         "TIMES",
         "NIMBUSROM",
         "CMR",
+        "CMTI",
+        "CMBX",
         "SONG",
         "MING",
         "STIX",
@@ -887,5 +889,9 @@ mod tests {
         assert!(bold.serif && bold.bold);
         let semi = face_style("IBMPlexMono-SemiBold");
         assert!(semi.bold);
+        let italic = face_style("CMTI10");
+        assert!(italic.serif && italic.italic && !italic.bold);
+        let cm_bold = face_style("CMBX10");
+        assert!(cm_bold.bold);
     }
 }

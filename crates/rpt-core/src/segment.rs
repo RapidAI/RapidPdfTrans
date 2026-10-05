@@ -306,6 +306,31 @@ struct VisualLine<'a> {
     toc: bool,
 }
 
+/// A bold label at the start of a line (`Definition 1.1.`) and the sentence
+/// that follows it. The label is its own segment so the body is not heiti.
+fn bold_run_in<'a>(line: &VisualLine<'a>) -> Option<(Vec<&'a Glyph>, Vec<&'a Glyph>)> {
+    let mut ordered = line.glyphs.clone();
+    ordered.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
+    let mut split = 0;
+    while split < ordered.len() && crate::font::face_style(&ordered[split].font_name).bold {
+        split += 1;
+    }
+    if split < 3 || split == ordered.len() {
+        return None;
+    }
+    let label = line_text(&ordered[..split]);
+    let tail = line_text(&ordered[split..]);
+    let label_letters = label.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    let tail_letters = tail.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    if !(3..48).contains(&label_letters) || tail_letters < 8 {
+        return None;
+    }
+    if !label.trim_end().ends_with(['.', ':']) {
+        return None;
+    }
+    Some((ordered[..split].to_vec(), ordered[split..].to_vec()))
+}
+
 fn assemble(
     raw: Vec<Vec<&Glyph>>,
     flags: &SegmentFlags,
@@ -358,10 +383,23 @@ fn assemble(
                 text: std::mem::take(buf),
             });
         };
-        for (index, line) in para.iter().enumerate() {
-            let piece = if index == 0 {
-                line.text.clone()
-            } else if url_continues(&buf, &line.text) {
+        let mut lines = para.iter();
+        if let Some(first) = lines.next() {
+            if let Some((label, rest)) = bold_run_in(first) {
+                // "Definition 1.1." is bold. The sentence after it is not, so
+                // the label keeps a heiti face and the body keeps Song.
+                buf = line_text(&label);
+                buf_ids.extend(label.iter().map(|glyph| glyph.id));
+                flush(&mut segments, &mut buf_ids, &mut buf);
+                buf = line_text(&rest);
+                buf_ids.extend(rest.iter().map(|glyph| glyph.id));
+            } else {
+                buf = first.text.clone();
+                buf_ids.extend(first.glyphs.iter().map(|glyph| glyph.id));
+            }
+        }
+        for line in lines {
+            let piece = if url_continues(&buf, &line.text) {
                 format!("{}{}", buf.trim_end(), line.text.trim_start())
             } else if let Some(stem) = soft_hyphen_stem(&buf) {
                 let rest = line.text.trim_start();
@@ -373,7 +411,7 @@ fn assemble(
             } else {
                 format!("{} {}", buf.trim_end(), line.text.trim_start())
             };
-            if index > 0 && piece.chars().count() > LONG_LINE && sentence_end(&buf) {
+            if piece.chars().count() > LONG_LINE && sentence_end(&buf) {
                 flush(&mut segments, &mut buf_ids, &mut buf);
                 buf = line.text.clone();
             } else {
@@ -3551,6 +3589,111 @@ mod tests {
                 let tail = text.trim_end();
                 tail.ends_with("over-") || tail.ends_with("MetaMath-")
             })
+        );
+    }
+
+    fn paint_word(id: &mut u32, x: f32, y: f32, text: &str, font: &str) -> Vec<Glyph> {
+        let mut glyphs = Vec::new();
+        let mut cursor = x;
+        for ch in text.chars() {
+            let mut glyph = glyph(*id, cursor, y, &ch.to_string(), false);
+            *id += 1;
+            glyph.font_name = font.into();
+            glyph.font_size = 10.0;
+            glyph.matrix = [10.0, 0.0, 0.0, 10.0, cursor, y];
+            let width = if ch == ' ' { 3.0 } else { 5.5 };
+            glyph.bbox = [cursor, y, cursor + width, y + 8.0];
+            cursor += width;
+            glyphs.push(glyph);
+        }
+        glyphs
+    }
+
+    #[test]
+    fn a_bold_run_in_label_is_its_own_segment() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(&mut id, 46.0, 460.0, "Definition 1.1. ", "CMBX10");
+        glyphs.extend(paint_word(
+            &mut id,
+            132.0,
+            460.0,
+            "If psi is a Dirichlet character then",
+            "CMTI10",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            46.0,
+            446.0,
+            "the pair of numbers is admissible.",
+            "CMTI10",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Definition")
+                && text.contains("1.1")
+                && !text.contains("Dirichlet")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("Dirichlet")
+                && text.contains("admissible")
+                && !text.contains("Definition")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_bold_heading_stays_one_segment() {
+        let mut id = 0u32;
+        let glyphs = paint_word(&mut id, 46.0, 438.0, "4 Proof of Theorem 1.2.", "CMBX12");
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains("Proof") && texts[0].contains("Theorem"),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn definition_run_ins_are_split_from_the_theorem_body() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/arxiv-2610.01998.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let seg = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| {
+                let trimmed = text.trim();
+                trimmed.starts_with("Definition 1.1") && !trimmed.contains("Dirichlet")
+            }),
+            "label was not peeled"
+        );
+        assert!(
+            texts.iter().any(
+                |text| text.contains("Dirichlet character") && !text.contains("Definition 1.1")
+            ),
+            "body still contains the label"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Proof of Theorem 1.2")),
+            "the heading was split"
         );
     }
 
