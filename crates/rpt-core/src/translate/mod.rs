@@ -64,8 +64,71 @@ pub struct TranslateOptions {
     pub translator: Option<String>,
     /// Leave References / Bibliography as original text. Default is on.
     pub skip_references: bool,
-    /// Draw the translation as well as the original text.
-    pub bilingual: bool,
+    /// `replace` writes only the translation. `bilingual` keeps an English page.
+    pub output_mode: OutputMode,
+}
+
+/// How a finished PDF presents the translation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OutputMode {
+    /// Chinese (or the target language) replaces the source text in place.
+    #[default]
+    Replace,
+    /// English and the translation are both kept. See [`BilingualLayout`].
+    Bilingual(BilingualLayout),
+}
+
+/// Where the English page sits relative to the translated page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BilingualLayout {
+    /// One wide page: original on the left, translation on the right.
+    #[default]
+    SideBySide,
+    /// Original page, then its translated page, for every page.
+    Alternating,
+    /// Same page: original operators stay, and the translation is drawn too.
+    Overlay,
+}
+
+impl OutputMode {
+    /// `mode` is `replace`, `bilingual`, `side-by-side`, `alternating`, or `overlay`.
+    /// `layout` is used when `mode` is `bilingual`.
+    pub fn parse(mode: &str, layout: Option<&str>) -> Result<Self> {
+        let mode = normalize_mode(mode);
+        match mode.as_str() {
+            "replace" | "mono" | "translation" => Ok(Self::Replace),
+            "bilingual" | "bi" => Ok(Self::Bilingual(BilingualLayout::parse(
+                layout.unwrap_or("side-by-side"),
+            )?)),
+            "side-by-side" | "sidebyside" | "parallel" => {
+                Ok(Self::Bilingual(BilingualLayout::SideBySide))
+            }
+            "alternating" | "alternate" | "interleaved" => {
+                Ok(Self::Bilingual(BilingualLayout::Alternating))
+            }
+            "overlay" => Ok(Self::Bilingual(BilingualLayout::Overlay)),
+            _ => Err(Error::Options(format!(
+                "unknown output mode `{mode}`; use replace, side-by-side, alternating, or overlay"
+            ))),
+        }
+    }
+}
+
+impl BilingualLayout {
+    pub fn parse(layout: &str) -> Result<Self> {
+        match normalize_mode(layout).as_str() {
+            "side-by-side" | "sidebyside" | "parallel" => Ok(Self::SideBySide),
+            "alternating" | "alternate" | "interleaved" => Ok(Self::Alternating),
+            "overlay" => Ok(Self::Overlay),
+            other => Err(Error::Options(format!(
+                "unknown bilingual layout `{other}`; use side-by-side, alternating, or overlay"
+            ))),
+        }
+    }
+}
+
+fn normalize_mode(text: &str) -> String {
+    text.trim().to_ascii_lowercase().replace('_', "-")
 }
 
 impl Default for TranslateOptions {
@@ -83,7 +146,7 @@ impl Default for TranslateOptions {
             max_tokens: None,
             translator: None,
             skip_references: true,
-            bilingual: false,
+            output_mode: OutputMode::Replace,
         }
     }
 }
@@ -164,8 +227,13 @@ impl TranslateOptions {
         if let Some(skip) = value.get("skip_references").and_then(|v| v.as_bool()) {
             opts.skip_references = skip;
         }
-        if let Some(bilingual) = value.get("bilingual").and_then(|v| v.as_bool()) {
-            opts.bilingual = bilingual;
+        let layout = string_field(&value, &["bilingual_layout", "layout"]);
+        if let Some(mode) = string_field(&value, &["output_mode", "mode"]) {
+            opts.output_mode = OutputMode::parse(&mode, layout.as_deref())?;
+        } else if value.get("bilingual").and_then(|v| v.as_bool()) == Some(true) {
+            opts.output_mode = OutputMode::parse("bilingual", layout.as_deref())?;
+        } else if let Some(layout) = layout {
+            opts.output_mode = OutputMode::parse("bilingual", Some(&layout))?;
         }
         opts.glossary = parse_glossary(value.get("glossary"));
         if opts.batch_size == 0 {
@@ -292,12 +360,12 @@ pub fn translate_extraction(
                 translated[i] = Some(segments[i].text.clone());
                 continue;
             }
-            if let Some(hit) = cache.get(&shielded[i].text) {
+            if let Some(hit) = cache.get(&segments[i].text) {
                 translated[i] = Some(hit.clone());
                 cache_hits += 1;
                 continue;
             }
-            if batch.iter().any(|&j| shielded[j].text == shielded[i].text) {
+            if batch.iter().any(|&j| segments[j].text == segments[i].text) {
                 batch.push(i);
                 continue;
             }
@@ -309,7 +377,7 @@ pub fn translate_extraction(
         let unique: Vec<usize> = {
             let mut seen: Vec<usize> = Vec::new();
             for &i in &batch {
-                if !seen.iter().any(|&j| shielded[j].text == shielded[i].text) {
+                if !seen.iter().any(|&j| segments[j].text == segments[i].text) {
                     seen.push(i);
                 }
             }
@@ -318,12 +386,12 @@ pub fn translate_extraction(
         let rendered =
             translate_batch(&segments, &shielded, &unique, opts, translator, &mut calls)?;
         for (i, text) in rendered {
-            cache.insert(shielded[i].text.clone(), text.clone());
+            cache.insert(segments[i].text.clone(), text.clone());
             translated[i] = Some(text);
         }
         for &i in &batch {
             if translated[i].is_none() {
-                let text = cache.get(&shielded[i].text).cloned().ok_or_else(|| {
+                let text = cache.get(&segments[i].text).cloned().ok_or_else(|| {
                     Error::Translate(format!("no translation for segment {}", segments[i].id))
                 })?;
                 cache_hits += 1;
@@ -701,6 +769,28 @@ mod tests {
         assert!(!format!("{opts:?}").contains("nope"));
         let (opts, _) = TranslateOptions::from_json(r#"{"skip_references":false}"#).unwrap();
         assert!(!opts.skip_references);
+        assert_eq!(
+            TranslateOptions::from_json(r#"{"output_mode":"replace"}"#)
+                .unwrap()
+                .0
+                .output_mode,
+            OutputMode::Replace
+        );
+        assert_eq!(
+            TranslateOptions::from_json(r#"{"bilingual":true,"bilingual_layout":"alternating"}"#)
+                .unwrap()
+                .0
+                .output_mode,
+            OutputMode::Bilingual(BilingualLayout::Alternating)
+        );
+        assert_eq!(
+            TranslateOptions::from_json(r#"{"mode":"side-by-side"}"#)
+                .unwrap()
+                .0
+                .output_mode,
+            OutputMode::Bilingual(BilingualLayout::SideBySide)
+        );
+        assert!(TranslateOptions::from_json(r#"{"output_mode":"nope"}"#).is_err());
     }
 
     #[test]
@@ -763,5 +853,18 @@ mod tests {
         assert_eq!(report.calls, 1);
         assert_eq!(report.cache_hits, 1);
         assert_eq!(report.segments[0].translated, report.segments[1].translated);
+    }
+
+    #[test]
+    fn different_numbers_do_not_share_a_placeholder_cache_entry() {
+        let mut ex = extraction_from_lines(&["Fig 1", "Fig 2", "3"]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &PrefixTranslator).unwrap();
+        let texts: Vec<_> = report
+            .segments
+            .iter()
+            .map(|seg| seg.translated.as_str())
+            .collect();
+        assert_eq!(texts, ["译Fig 1", "译Fig 2", "译3"]);
     }
 }

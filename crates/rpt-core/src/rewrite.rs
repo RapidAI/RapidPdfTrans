@@ -18,14 +18,15 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use crate::color::Color;
 use crate::error::{Error, Result};
 use crate::extract::Extraction;
-use crate::font::{load_cjk_font, subset_ttf, SubsetFont};
+use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, SubsetFont};
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::pdfutil::{dict_of, object_id_string};
-use crate::translate::TranslateReport;
+use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
 
 #[derive(Clone, Debug, Default)]
 pub struct RewriteOptions {
-    pub bilingual: bool,
+    /// `replace` is pure target-language text. Bilingual layouts keep English too.
+    pub mode: OutputMode,
     /// Font bytes to subset. `None` searches `RPT_CJK_FONT` and common CJK fonts.
     pub font_bytes: Option<Vec<u8>>,
 }
@@ -43,6 +44,8 @@ struct Drawn {
     size: f32,
     color: Color,
     cids: Vec<u16>,
+    resource: String,
+    skew: f32,
 }
 
 /// Rewrite `extraction` using `report` and remember the dispositions on the glyphs.
@@ -52,6 +55,14 @@ pub fn rewrite_translation(
     report: &TranslateReport,
     opts: &RewriteOptions,
 ) -> Result<()> {
+    let compose = match opts.mode {
+        OutputMode::Bilingual(
+            layout @ (BilingualLayout::SideBySide | BilingualLayout::Alternating),
+        ) => Some(layout),
+        _ => None,
+    };
+    let original = compose.map(|_| doc.clone());
+    let overlay = matches!(opts.mode, OutputMode::Bilingual(BilingualLayout::Overlay));
     let by_id = glyph_index(&extraction.glyphs);
     let mut keep: HashMap<u32, String> = HashMap::new();
     let mut non_text: HashMap<u32, String> = HashMap::new();
@@ -105,61 +116,98 @@ pub fn rewrite_translation(
             }
             continue;
         }
+        if segment.translated == segment.source {
+            for id in &segment.glyph_ids {
+                keep.insert(*id, "unchanged".into());
+            }
+            continue;
+        }
         planned.push((index, segment.translated.clone()));
         rewrite_ids.extend(segment.glyph_ids.iter().copied());
     }
 
-    let font_bytes = opts.font_bytes.clone().or_else(load_cjk_font);
     let mut drawn = Vec::new();
     let mut succeeded: HashSet<u32> = HashSet::new();
-    let mut embedded: Option<SubsetFont> = None;
-    if let Some(font_bytes) = font_bytes {
+    let mut embedded: Vec<(String, SubsetFont)> = Vec::new();
+    if let Some(font_bytes) = opts.font_bytes.clone() {
         let chars = planned
             .iter()
             .flat_map(|(_, text)| text.chars().map(|ch| ch as u32))
             .collect::<Vec<_>>();
         if let Some(font) = subset_ttf(&font_bytes, &chars) {
-            for (index, text) in &planned {
-                let segment = &report.segments[*index];
-                let glyphs: Vec<&Glyph> = segment
-                    .glyph_ids
-                    .iter()
-                    .filter_map(|id| extraction.glyphs.get(by_id[id]))
-                    .collect();
-                match layout_segment(&glyphs, text, &font, extraction, opts.bilingual) {
-                    Some(lines) => {
-                        succeeded.extend(segment.glyph_ids.iter().copied());
-                        drawn.extend(lines);
-                    }
-                    None => {
-                        let reason = if text
-                            .chars()
-                            .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
-                        {
-                            "missing-glyph"
-                        } else {
-                            "overflow"
-                        };
-                        for id in &segment.glyph_ids {
-                            keep.insert(*id, reason.into());
-                        }
-                    }
-                }
-            }
-            embedded = Some(font);
+            place_segments(
+                &planned,
+                &font,
+                "RPTF",
+                0.0,
+                report,
+                extraction,
+                &by_id,
+                overlay,
+                &mut succeeded,
+                &mut drawn,
+                &mut keep,
+            );
+            embedded.push(("RPTF".into(), font));
         } else {
             for id in &rewrite_ids {
                 keep.insert(*id, "missing-glyph".into());
             }
         }
     } else {
-        for id in &rewrite_ids {
-            keep.insert(*id, "no-font".into());
+        let mut groups: HashMap<FaceStyle, Vec<(usize, String)>> = HashMap::new();
+        for (index, text) in &planned {
+            let style = report.segments[*index]
+                .glyph_ids
+                .first()
+                .and_then(|id| extraction.glyphs.get(by_id[id]))
+                .map(|glyph| face_style(&glyph.font_name))
+                .unwrap_or(FaceStyle {
+                    serif: true,
+                    bold: false,
+                    italic: false,
+                });
+            groups
+                .entry(style)
+                .or_default()
+                .push((*index, text.clone()));
+        }
+        let mut slot = 0u32;
+        for (style, group) in groups {
+            let chars = group
+                .iter()
+                .flat_map(|(_, text)| text.chars().map(|ch| ch as u32))
+                .collect::<Vec<_>>();
+            let Some(font) = subset_for_style(style, &chars) else {
+                for (index, _) in &group {
+                    for id in &report.segments[*index].glyph_ids {
+                        keep.insert(*id, "no-font".into());
+                    }
+                }
+                continue;
+            };
+            let resource = format!("RPT{slot}");
+            slot += 1;
+            let skew = if style.italic { 0.25 } else { 0.0 };
+            place_segments(
+                &group,
+                &font,
+                &resource,
+                skew,
+                report,
+                extraction,
+                &by_id,
+                overlay,
+                &mut succeeded,
+                &mut drawn,
+                &mut keep,
+            );
+            embedded.push((resource, font));
         }
     }
 
     let mut spans = Vec::new();
-    if !opts.bilingual {
+    if !overlay {
         for id in &succeeded {
             if keep.contains_key(id) {
                 continue;
@@ -190,10 +238,8 @@ pub fn rewrite_translation(
         .copied()
         .filter(|id| !keep.contains_key(id))
         .collect();
-    if !draw_ids.is_empty() {
-        if let Some(font) = embedded {
-            embed_and_draw(doc, extraction, &drawn, &font)?;
-        }
+    if !draw_ids.is_empty() && !embedded.is_empty() {
+        embed_and_draw(doc, extraction, &drawn, &embedded)?;
     }
 
     for (id, reason) in non_text {
@@ -229,7 +275,311 @@ pub fn rewrite_translation(
         extraction.mark_kept(id, "untranslated")?;
     }
     let _ = spans;
+    if let (Some(layout), Some(original)) = (compose, original) {
+        compose_bilingual(doc, &original, layout)?;
+    }
     Ok(())
+}
+
+/// Place each original page beside, or just before, its translated page.
+fn compose_bilingual(
+    translated: &mut Document,
+    original: &Document,
+    layout: BilingualLayout,
+) -> Result<()> {
+    let source_ids: Vec<ObjectId> = original.get_pages().into_values().collect();
+    let target_ids: Vec<ObjectId> = translated.get_pages().into_values().collect();
+    if source_ids.len() != target_ids.len() {
+        return Err(Error::Pdf(
+            "bilingual compose saw different page counts".into(),
+        ));
+    }
+    let source_pages: Vec<PageSnap> = source_ids
+        .iter()
+        .map(|id| snap_page(original, *id))
+        .collect();
+    let target_pages: Vec<PageSnap> = target_ids
+        .iter()
+        .map(|id| snap_page(translated, *id))
+        .collect();
+    let mut imported = HashMap::new();
+    let mut kids = Vec::new();
+    let root = pages_root(translated)?;
+    for (src, dst) in source_pages.into_iter().zip(target_pages) {
+        let src_resources = remap_dict(translated, original, src.resources, &mut imported)?;
+        let src_form = make_form(translated, src.content, src_resources, src.media);
+        let dst_form = make_form(translated, dst.content, dst.resources, dst.media);
+        match layout {
+            BilingualLayout::SideBySide => {
+                let width = dst.media[2] - dst.media[0];
+                let media = [
+                    dst.media[0],
+                    dst.media[1],
+                    dst.media[0] + width * 2.0,
+                    dst.media[3],
+                ];
+                let mut xobjects = Dictionary::new();
+                xobjects.set("RPTSrc", src_form);
+                xobjects.set("RPTDst", dst_form);
+                let content = format!(
+                    "q /RPTSrc Do Q\nq 1 0 0 1 {} 0 cm /RPTDst Do Q\n",
+                    pdf_num(width)
+                );
+                kids.push(make_page(
+                    translated, root, media, dst.rotate, xobjects, content,
+                ));
+            }
+            BilingualLayout::Alternating => {
+                kids.push(single_page(
+                    translated, root, src.media, src.rotate, src_form,
+                ));
+                kids.push(single_page(
+                    translated, root, dst.media, dst.rotate, dst_form,
+                ));
+            }
+            BilingualLayout::Overlay => {}
+        }
+    }
+    let count = kids.len() as i64;
+    let pages = translated
+        .get_object_mut(root)
+        .map_err(|err| Error::Pdf(err.to_string()))?
+        .as_dict_mut()
+        .map_err(|err| Error::Pdf(err.to_string()))?;
+    pages.set("Kids", kids);
+    pages.set("Count", count);
+    Ok(())
+}
+
+struct PageSnap {
+    content: Vec<u8>,
+    resources: Dictionary,
+    media: [f32; 4],
+    rotate: i32,
+}
+
+fn snap_page(doc: &Document, page_id: ObjectId) -> PageSnap {
+    PageSnap {
+        content: doc.get_page_content(page_id),
+        resources: merged_resources(doc, page_id),
+        media: inherited_box(doc, page_id).unwrap_or([0.0, 0.0, 612.0, 792.0]),
+        rotate: inherited_rotate(doc, page_id),
+    }
+}
+
+fn single_page(
+    doc: &mut Document,
+    parent: ObjectId,
+    media: [f32; 4],
+    rotate: i32,
+    form: ObjectId,
+) -> Object {
+    let mut xobjects = Dictionary::new();
+    xobjects.set("RPTPage", form);
+    make_page(
+        doc,
+        parent,
+        media,
+        rotate,
+        xobjects,
+        "q /RPTPage Do Q\n".into(),
+    )
+}
+
+fn make_form(
+    doc: &mut Document,
+    content: Vec<u8>,
+    resources: Dictionary,
+    bbox: [f32; 4],
+) -> ObjectId {
+    let mut dict = Dictionary::new();
+    dict.set("Type", "XObject");
+    dict.set("Subtype", "Form");
+    dict.set("FormType", 1);
+    dict.set("BBox", rect_objects(bbox));
+    dict.set("Resources", resources);
+    doc.add_object(Stream::new(dict, content))
+}
+
+fn make_page(
+    doc: &mut Document,
+    parent: ObjectId,
+    media: [f32; 4],
+    rotate: i32,
+    xobjects: Dictionary,
+    content: String,
+) -> Object {
+    let mut resources = Dictionary::new();
+    resources.set("XObject", xobjects);
+    let stream_id = doc.add_object(Stream::new(Dictionary::new(), content.into_bytes()));
+    let mut page = Dictionary::new();
+    page.set("Type", "Page");
+    page.set("Parent", parent);
+    page.set("MediaBox", rect_objects(media));
+    if rotate != 0 {
+        page.set("Rotate", i64::from(rotate));
+    }
+    page.set("Resources", resources);
+    page.set("Contents", stream_id);
+    Object::Reference(doc.add_object(page))
+}
+
+fn rect_objects(rect: [f32; 4]) -> Vec<Object> {
+    rect.into_iter().map(Object::Real).collect()
+}
+
+fn pages_root(doc: &Document) -> Result<ObjectId> {
+    let catalog_id = doc
+        .trailer
+        .get(b"Root")
+        .map_err(|err| Error::Pdf(err.to_string()))?
+        .as_reference()
+        .map_err(|err| Error::Pdf(err.to_string()))?;
+    doc.get_dictionary(catalog_id)
+        .map_err(|err| Error::Pdf(err.to_string()))?
+        .get(b"Pages")
+        .map_err(|err| Error::Pdf(err.to_string()))?
+        .as_reference()
+        .map_err(|err| Error::Pdf(err.to_string()))
+}
+
+fn inherited_box(doc: &Document, page_id: ObjectId) -> Option<[f32; 4]> {
+    let mut id = page_id;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(id) {
+            return None;
+        }
+        let dict = doc.get_dictionary(id).ok()?;
+        if let Ok(value) = dict.get(b"MediaBox") {
+            if let Some(rect) = rect_from_object(doc, value) {
+                return Some(rect);
+            }
+        }
+        id = dict
+            .get(b"Parent")
+            .ok()
+            .and_then(|obj| obj.as_reference().ok())?;
+    }
+}
+
+fn inherited_rotate(doc: &Document, page_id: ObjectId) -> i32 {
+    let mut id = page_id;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(id) {
+            return 0;
+        }
+        let Ok(dict) = doc.get_dictionary(id) else {
+            return 0;
+        };
+        if let Ok(value) = dict.get(b"Rotate") {
+            if let Some(angle) = number_of(doc, value) {
+                return angle as i32;
+            }
+        }
+        let Some(parent) = dict
+            .get(b"Parent")
+            .ok()
+            .and_then(|obj| obj.as_reference().ok())
+        else {
+            return 0;
+        };
+        id = parent;
+    }
+}
+
+fn rect_from_object(doc: &Document, object: &Object) -> Option<[f32; 4]> {
+    let array = match object {
+        Object::Array(items) => items,
+        Object::Reference(id) => {
+            return doc
+                .get_object(*id)
+                .ok()
+                .and_then(|obj| rect_from_object(doc, obj));
+        }
+        _ => return None,
+    };
+    if array.len() < 4 {
+        return None;
+    }
+    Some([
+        number_of(doc, &array[0])?,
+        number_of(doc, &array[1])?,
+        number_of(doc, &array[2])?,
+        number_of(doc, &array[3])?,
+    ])
+}
+
+fn number_of(doc: &Document, object: &Object) -> Option<f32> {
+    match object {
+        Object::Integer(value) => Some(*value as f32),
+        Object::Real(value) => Some(*value),
+        Object::Reference(id) => doc.get_object(*id).ok().and_then(|obj| number_of(doc, obj)),
+        _ => None,
+    }
+}
+
+fn remap_dict(
+    dst: &mut Document,
+    src: &Document,
+    dict: Dictionary,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) -> Result<Dictionary> {
+    let mut out = Dictionary::new();
+    for (key, value) in dict.into_iter() {
+        out.set(key, remap_object(dst, src, value, map)?);
+    }
+    Ok(out)
+}
+
+fn remap_object(
+    dst: &mut Document,
+    src: &Document,
+    object: Object,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) -> Result<Object> {
+    match object {
+        Object::Reference(id) => Ok(Object::Reference(import_object(dst, src, id, map)?)),
+        Object::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(remap_object(dst, src, item, map)?);
+            }
+            Ok(Object::Array(out))
+        }
+        Object::Dictionary(dict) => Ok(Object::Dictionary(remap_dict(dst, src, dict, map)?)),
+        Object::Stream(stream) => {
+            let dict = remap_dict(dst, src, stream.dict, map)?;
+            Ok(Object::Stream(Stream {
+                dict,
+                content: stream.content,
+                allows_compression: stream.allows_compression,
+                start_position: None,
+            }))
+        }
+        other => Ok(other),
+    }
+}
+
+fn import_object(
+    dst: &mut Document,
+    src: &Document,
+    id: ObjectId,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) -> Result<ObjectId> {
+    if let Some(existing) = map.get(&id) {
+        return Ok(*existing);
+    }
+    let new_id = dst.new_object_id();
+    map.insert(id, new_id);
+    let object = src
+        .get_object(id)
+        .map_err(|err| Error::Pdf(err.to_string()))?
+        .clone();
+    let mapped = remap_object(dst, src, object, map)?;
+    dst.set_object(new_id, mapped);
+    Ok(new_id)
 }
 
 fn keep_contains(glyph: &Glyph) -> bool {
@@ -358,12 +708,56 @@ fn blank_operators(doc: &mut Document, spans: &[Span]) -> std::result::Result<()
     Ok(())
 }
 
+fn place_segments(
+    planned: &[(usize, String)],
+    font: &SubsetFont,
+    resource: &str,
+    skew: f32,
+    report: &TranslateReport,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    bilingual: bool,
+    succeeded: &mut HashSet<u32>,
+    drawn: &mut Vec<Drawn>,
+    keep: &mut HashMap<u32, String>,
+) {
+    for (index, text) in planned {
+        let segment = &report.segments[*index];
+        let glyphs: Vec<&Glyph> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extraction.glyphs.get(by_id[id]))
+            .collect();
+        match layout_segment(&glyphs, text, font, extraction, bilingual, resource, skew) {
+            Some(lines) => {
+                succeeded.extend(segment.glyph_ids.iter().copied());
+                drawn.extend(lines);
+            }
+            None => {
+                let reason = if text
+                    .chars()
+                    .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
+                {
+                    "missing-glyph"
+                } else {
+                    "overflow"
+                };
+                for id in &segment.glyph_ids {
+                    keep.insert(*id, reason.into());
+                }
+            }
+        }
+    }
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
     font: &SubsetFont,
     extraction: &Extraction,
     bilingual: bool,
+    resource: &str,
+    skew: f32,
 ) -> Option<Vec<Drawn>> {
     if glyphs.is_empty() || text.trim().is_empty() {
         return None;
@@ -390,7 +784,16 @@ fn layout_segment(
         .iter()
         .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
         .fold(x, f32::max);
-    let line_width = (right - x).max(glyphs[0].font_size);
+    let from_advance: f32 = glyphs.iter().map(|glyph| glyph.advance[0].abs()).sum();
+    let measured = (right - x).max(from_advance);
+    // Standard-14 fonts often omit /Widths. A zero span would wrap every
+    // translation onto one glyph per line, so estimate a Latin run instead.
+    let size0 = glyphs[0].font_size.max(1.0);
+    let line_width = if measured < size0 * 0.25 {
+        (glyphs.len() as f32 * size0 * 0.5).max(size0)
+    } else {
+        measured
+    };
     let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
     sizes.sort_by(|a, b| a.total_cmp(b));
     let mut size = sizes[sizes.len() / 2].max(1.0);
@@ -432,6 +835,8 @@ fn layout_segment(
                 size,
                 color: color.clone(),
                 cids: cids_of(&line, font),
+                resource: resource.to_string(),
+                skew,
             })
             .collect(),
     )
@@ -535,12 +940,15 @@ fn embed_and_draw(
     doc: &mut Document,
     extraction: &Extraction,
     drawn: &[Drawn],
-    font: &SubsetFont,
+    fonts: &[(String, SubsetFont)],
 ) -> Result<()> {
     if drawn.is_empty() {
         return Ok(());
     }
-    let font_id = embed_font(doc, font);
+    let mut font_ids: HashMap<String, ObjectId> = HashMap::new();
+    for (name, font) in fonts {
+        font_ids.insert(name.clone(), embed_font(doc, font));
+    }
     let mut by_page: HashMap<u32, Vec<&Drawn>> = HashMap::new();
     for line in drawn {
         by_page.entry(line.page).or_default().push(line);
@@ -559,9 +967,11 @@ fn embed_and_draw(
         let mut stream = String::from("BT\n");
         for line in lines {
             stream.push_str(&format!(
-                "/RPTF {} Tf {} 1 0 0 1 {} {} Tm <{}> Tj\n",
+                "/{} {} Tf {} 1 0 {} 1 {} {} Tm <{}> Tj\n",
+                line.resource,
                 pdf_num(line.size),
                 color_ops(&line.color),
+                pdf_num(line.skew),
                 pdf_num(line.x),
                 pdf_num(line.y),
                 hex_cids(&line.cids)
@@ -569,14 +979,21 @@ fn embed_and_draw(
         }
         stream.push_str("ET\n");
         let stream_id = doc.add_object(Stream::new(Dictionary::new(), stream.into_bytes()));
-        attach_font(doc, page_id, font_id)?;
+        attach_fonts(doc, page_id, &font_ids)?;
         append_contents(doc, page_id, stream_id)?;
     }
     Ok(())
 }
 
 fn embed_font(doc: &mut Document, font: &SubsetFont) -> ObjectId {
-    let file_id = doc.add_object(Stream::new(Dictionary::new(), font.bytes.clone()));
+    let cff = font.bytes.len() >= 4 && &font.bytes[0..4] == b"OTTO";
+    let file_id = if cff {
+        let mut file = Dictionary::new();
+        file.set("Subtype", "CIDFontType0C");
+        doc.add_object(Stream::new(file, font.bytes.clone()))
+    } else {
+        doc.add_object(Stream::new(Dictionary::new(), font.bytes.clone()))
+    };
     let mut descriptor = Dictionary::new();
     descriptor.set("Type", "FontDescriptor");
     descriptor.set("FontName", "RPTCJK");
@@ -590,7 +1007,11 @@ fn embed_font(doc: &mut Document, font: &SubsetFont) -> ObjectId {
     descriptor.set("Descent", -200);
     descriptor.set("CapHeight", 700);
     descriptor.set("StemV", 80);
-    descriptor.set("FontFile2", file_id);
+    if cff {
+        descriptor.set("FontFile3", file_id);
+    } else {
+        descriptor.set("FontFile2", file_id);
+    }
     let descriptor_id = doc.add_object(descriptor);
 
     let mut widths = Vec::new();
@@ -614,13 +1035,15 @@ fn embed_font(doc: &mut Document, font: &SubsetFont) -> ObjectId {
     system.set("Supplement", 0);
     let mut cid = Dictionary::new();
     cid.set("Type", "Font");
-    cid.set("Subtype", "CIDFontType2");
+    cid.set("Subtype", if cff { "CIDFontType0" } else { "CIDFontType2" });
     cid.set("BaseFont", "RPTCJK");
     cid.set("CIDSystemInfo", system);
     cid.set("FontDescriptor", descriptor_id);
     cid.set("DW", 1000);
     cid.set("W", widths);
-    cid.set("CIDToGIDMap", "Identity");
+    if !cff {
+        cid.set("CIDToGIDMap", "Identity");
+    }
     let cid_id = doc.add_object(cid);
     let tounicode = doc.add_object(Stream::new(
         Dictionary::new(),
@@ -657,7 +1080,11 @@ fn tounicode_cmap(font: &SubsetFont) -> String {
     out
 }
 
-fn attach_font(doc: &mut Document, page_id: ObjectId, font_id: ObjectId) -> Result<()> {
+fn attach_fonts(
+    doc: &mut Document,
+    page_id: ObjectId,
+    font_ids: &HashMap<String, ObjectId>,
+) -> Result<()> {
     let mut resources = merged_resources(doc, page_id);
     let mut fonts = resources
         .get(b"Font")
@@ -665,7 +1092,9 @@ fn attach_font(doc: &mut Document, page_id: ObjectId, font_id: ObjectId) -> Resu
         .and_then(|obj| dict_of(doc, obj))
         .cloned()
         .unwrap_or_default();
-    fonts.set("RPTF", font_id);
+    for (name, id) in font_ids {
+        fonts.set(name.clone(), *id);
+    }
     resources.set("Font", fonts);
     let page = doc
         .get_object_mut(page_id)
@@ -803,9 +1232,12 @@ fn pdf_num(value: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extract::Extraction;
     use crate::extract::PdfDocument;
     use crate::font::box_ttf;
-    use crate::translate::{translate_extraction, TranslateOptions, Translator};
+    use crate::translate::{
+        translate_extraction, BilingualLayout, OutputMode, TranslateOptions, Translator,
+    };
     use lopdf::dictionary;
 
     struct MapHello;
@@ -886,8 +1318,8 @@ mod tests {
             &mut extraction,
             &report,
             &RewriteOptions {
-                bilingual: false,
                 font_bytes: Some(font),
+                ..RewriteOptions::default()
             },
         )
         .unwrap();
@@ -927,6 +1359,130 @@ mod tests {
         assert!(text.contains("AB"), "{text}");
         assert!(text.contains("References"), "{text}");
         assert!(!text.contains("Hello"), "{text}");
+    }
+
+    #[test]
+    fn a_changed_line_is_drawn_in_a_cjk_face() {
+        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc")
+            .is_file()
+        {
+            return;
+        }
+        let bytes = sample_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        struct ToChinese;
+        impl Translator for ToChinese {
+            fn complete(&self, _system: &str, user: &str) -> Result<String> {
+                let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+                let translations: Vec<serde_json::Value> = payload["segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|seg| {
+                        let text = seg["text"].as_str().unwrap_or("");
+                        let translated = if text.contains("Hello") {
+                            "你好"
+                        } else {
+                            text
+                        };
+                        serde_json::json!({"id": seg["id"], "text": translated})
+                    })
+                    .collect();
+                Ok(serde_json::json!({"translations": translations}).to_string())
+            }
+        }
+        let report =
+            translate_extraction(&mut extraction, &TranslateOptions::default(), &ToChinese)
+                .unwrap();
+        doc.rewrite(&mut extraction, &report, &RewriteOptions::default())
+            .unwrap();
+        let saved = doc.save_bytes().unwrap();
+        let text = PdfDocument::open_bytes(&saved)
+            .unwrap()
+            .extract()
+            .plain_text();
+        let squashed: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(squashed.contains("你好"), "{text}");
+        assert!(text.contains("References"), "{text}");
+        assert!(
+            text.lines().any(|line| line.contains("你好")),
+            "CJK replacement should stay on one line: {text}"
+        );
+    }
+
+    #[test]
+    fn bilingual_layouts_keep_english_and_the_translation() {
+        let bytes = sample_pdf();
+        let font = box_ttf(&[b'A' as u32, b'B' as u32]);
+        let side = rewrite_mode(
+            &bytes,
+            &font,
+            OutputMode::Bilingual(BilingualLayout::SideBySide),
+        );
+        assert_eq!(side.pages.len(), 1);
+        let width = side.pages[0].media_box[2] - side.pages[0].media_box[0];
+        assert!((width - 1224.0).abs() < 1.0, "width={width}");
+        let text = side.plain_text();
+        assert!(text.contains("Hello"), "{text}");
+        assert!(text.contains("AB"), "{text}");
+        assert!(text.contains("References"), "{text}");
+
+        let pages = rewrite_mode(
+            &bytes,
+            &font,
+            OutputMode::Bilingual(BilingualLayout::Alternating),
+        );
+        assert_eq!(pages.pages.len(), 2, "alternating should add a page");
+        let english = page_text(&pages, 0);
+        let chinese = page_text(&pages, 1);
+        assert!(english.contains("Hello"), "{english}");
+        assert!(!english.contains("AB"), "{english}");
+        assert!(chinese.contains("AB"), "{chinese}");
+        assert!(!chinese.contains("Hello"), "{chinese}");
+        assert!(english.contains("References") && chinese.contains("References"));
+
+        let overlay = rewrite_mode(
+            &bytes,
+            &font,
+            OutputMode::Bilingual(BilingualLayout::Overlay),
+        );
+        assert_eq!(overlay.pages.len(), 1);
+        let overlay_width = overlay.pages[0].media_box[2] - overlay.pages[0].media_box[0];
+        assert!((overlay_width - 612.0).abs() < 1.0, "width={overlay_width}");
+        let overlay_text = overlay.plain_text();
+        assert!(
+            overlay_text.contains("Hello") && overlay_text.contains("AB"),
+            "{overlay_text}"
+        );
+    }
+
+    fn rewrite_mode(bytes: &[u8], font: &[u8], mode: OutputMode) -> Extraction {
+        let mut doc = PdfDocument::open_bytes(bytes).unwrap();
+        let mut extraction = doc.extract();
+        let report =
+            translate_extraction(&mut extraction, &TranslateOptions::default(), &MapHello).unwrap();
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                mode,
+                font_bytes: Some(font.to_vec()),
+            },
+        )
+        .unwrap();
+        extraction.assert_complete().unwrap();
+        let saved = doc.save_bytes().unwrap();
+        PdfDocument::open_bytes(&saved).unwrap().extract()
+    }
+
+    fn page_text(extraction: &Extraction, page: u32) -> String {
+        extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.page_index == page)
+            .map(|glyph| glyph.unicode.as_str())
+            .collect()
     }
 
     struct Echo;
@@ -970,8 +1526,8 @@ mod tests {
             &mut extraction,
             &report,
             &RewriteOptions {
-                bilingual: false,
                 font_bytes: Some(font),
+                ..RewriteOptions::default()
             },
         )
         .unwrap();
@@ -992,7 +1548,14 @@ mod tests {
                 *reasons.entry(reason.clone()).or_default() += 1;
             }
         }
-        assert!(rewritten > 20, "rewritten={rewritten} kept={reasons:?}");
+        assert_eq!(
+            rewritten, 0,
+            "identity text should keep the source drawing, rewritten={rewritten} kept={reasons:?}"
+        );
+        assert!(
+            reasons.get("unchanged").copied().unwrap_or(0) > 20,
+            "kept={reasons:?}"
+        );
         let saved = doc.save_bytes().unwrap();
         let out = std::env::temp_dir().join("rpt-identity-page1.pdf");
         std::fs::write(&out, &saved).unwrap();
@@ -1008,9 +1571,10 @@ mod tests {
                 after.contains("ABSTRACT") || before.contains("ABSTRACT"),
                 "missing heading"
             );
+            let squashed: String = after.chars().filter(|ch| !ch.is_whitespace()).collect();
             assert!(
-                after.contains("We introduce") || after.contains("Coding agents"),
-                "word spaces were not rebuilt"
+                squashed.contains("2123") && squashed.contains("123"),
+                "affiliation numbers were rewritten into the wrong digits"
             );
         }
         assert!(after.chars().filter(|ch| !ch.is_whitespace()).count() > 100);

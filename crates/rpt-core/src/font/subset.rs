@@ -17,6 +17,162 @@ pub struct SubsetFont {
     pub glyphs: HashMap<u32, (u16, u16)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FaceStyle {
+    pub serif: bool,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+pub fn face_style(font_name: &str) -> FaceStyle {
+    let upper = font_name.to_ascii_uppercase();
+    let serif = [
+        "SERIF",
+        "ROMAN",
+        "TIMES",
+        "NIMBUSROM",
+        "CMR",
+        "SONG",
+        "MING",
+        "STIX",
+        "TINOS",
+        "GEORGIA",
+        "PLEXSERIF",
+        "NOTOSERIF",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle));
+    let bold = [
+        "BOLD", "BLACK", "HEAVY", "SEMIBOLD", "DEMIBOLD", "CMBX", "MEDI",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle));
+    let italic = ["ITAL", "OBLIQUE", "CMTI"]
+        .iter()
+        .any(|needle| upper.contains(needle));
+    FaceStyle {
+        serif,
+        bold,
+        italic,
+    }
+}
+
+/// Subset a style-matched CJK face. Noto CJK (CFF) is preferred; a glyf font is the fallback.
+pub fn subset_for_style(style: FaceStyle, codepoints: &[u32]) -> Option<SubsetFont> {
+    if let Some(face) = noto_face(style) {
+        if let Some(font) = subset_cff(face.0, face.1, codepoints) {
+            return Some(font);
+        }
+    }
+    let bytes = load_cjk_font()?;
+    subset_ttf(&bytes, codepoints)
+}
+
+fn noto_face(style: FaceStyle) -> Option<(&'static str, u32)> {
+    let path = match (style.serif, style.bold) {
+        (true, true) => "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
+        (true, false) => "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        (false, true) => "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        (false, false) => "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    };
+    std::path::Path::new(path).is_file().then_some((path, 2))
+}
+
+fn subset_cff(path: &str, face_index: u32, codepoints: &[u32]) -> Option<SubsetFont> {
+    let mut codes: Vec<u32> = codepoints
+        .iter()
+        .copied()
+        .filter(|code| *code > 0 && *code <= 0xFFFF)
+        .collect();
+    codes.push(0x20);
+    codes.sort_unstable();
+    codes.dedup();
+    if codes.is_empty() {
+        return None;
+    }
+    let list = codes
+        .iter()
+        .map(|code| format!("{code:X}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let dir = std::env::temp_dir();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let font_out = dir.join(format!("rpt-cff-{stamp}.otf"));
+    let json_out = dir.join(format!("rpt-cff-{stamp}.json"));
+    let script = r#"
+import json, sys
+from fontTools.ttLib import TTFont
+from fontTools.subset import Subsetter, Options
+src, face, unicodes, out_font, out_json = sys.argv[1:]
+codes = [int(item, 16) for item in unicodes.split(",") if item]
+opt = Options()
+opt.layout_features = ["*"]
+opt.notdef_outline = True
+opt.recommended_glyphs = True
+font = TTFont(src, fontNumber=int(face))
+subsetter = Subsetter(options=opt)
+subsetter.populate(unicodes=codes)
+subsetter.subset(font)
+font.save(out_font)
+cmap = {}
+for table in font["cmap"].tables:
+    if table.platformID == 3 and table.platEncID in (1, 10):
+        for cp, name in table.cmap.items():
+            cmap[cp] = name
+order = font.getGlyphOrder()
+upem = int(font["head"].unitsPerEm)
+glyphs = []
+for cp, name in cmap.items():
+    if isinstance(name, str) and name.startswith("cid") and name[3:].isdigit():
+        cid = int(name[3:])
+    elif name in order:
+        cid = order.index(name)
+    else:
+        continue
+    if cid > 65535:
+        continue
+    advance = int(font["hmtx"].metrics.get(name, (upem, 0))[0])
+    glyphs.append({"cp": int(cp), "cid": cid, "adv": advance})
+json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
+"#;
+    let status = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(path)
+        .arg(face_index.to_string())
+        .arg(&list)
+        .arg(&font_out)
+        .arg(&json_out)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let bytes = std::fs::read(&font_out).ok()?;
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(&json_out).ok()?).ok()?;
+    let _ = std::fs::remove_file(&font_out);
+    let _ = std::fs::remove_file(&json_out);
+    let upem = meta.get("upem")?.as_u64()? as u16;
+    let mut glyphs = HashMap::new();
+    for item in meta.get("glyphs")?.as_array()? {
+        let cp = item.get("cp")?.as_u64()? as u32;
+        let cid = item.get("cid")?.as_u64()? as u16;
+        let adv = item.get("adv")?.as_u64()? as u16;
+        glyphs.insert(cp, (cid, adv));
+    }
+    if glyphs.is_empty() {
+        return None;
+    }
+    Some(SubsetFont {
+        bytes,
+        units_per_em: upem.max(1),
+        glyphs,
+    })
+}
+
 pub fn load_cjk_font() -> Option<Vec<u8>> {
     if let Ok(path) = std::env::var("RPT_CJK_FONT") {
         if let Ok(bytes) = std::fs::read(path.trim()) {

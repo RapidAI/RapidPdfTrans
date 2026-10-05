@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use rpt_core::{
-    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, RewriteOptions,
+    translate_extraction, ExtractOptions, OpenOptions, OutputMode, PdfDocument, RewriteOptions,
     TranslateOptions, TranslatorBackend,
 };
 
@@ -34,10 +34,19 @@ enum Command {
     /// Translate extracted text. `--output` writes the translated PDF.
     Translate {
         path: PathBuf,
-        /// Write the translated PDF here.
+        /// Write the translated PDF here. The mode is `--mode` (default: replace).
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Keep the original text and draw the translation as well.
+        /// Also write a bilingual PDF from the same translation. Layout is `--layout`.
+        #[arg(long)]
+        bilingual_output: Option<PathBuf>,
+        /// `replace` (default), `bilingual`, `side-by-side`, `alternating`, or `overlay`.
+        #[arg(long, default_value = "replace")]
+        mode: String,
+        /// Used with `--mode bilingual` or `--bilingual`: `side-by-side`, `alternating`, or `overlay`.
+        #[arg(long, default_value = "side-by-side")]
+        layout: String,
+        /// Bilingual output. Layout comes from `--layout` (default: side-by-side).
         #[arg(long)]
         bilingual: bool,
         /// Extract and translate only the first N pages.
@@ -57,6 +66,9 @@ enum Command {
         /// Translate the References section. By default that section is kept unchanged.
         #[arg(long)]
         translate_references: bool,
+        /// Segments per model call.
+        #[arg(long, default_value_t = 8)]
+        batch_size: usize,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -75,6 +87,9 @@ fn main() -> ExitCode {
         Command::Translate {
             path,
             output,
+            bilingual_output,
+            mode,
+            layout,
             bilingual,
             max_pages,
             source_lang,
@@ -83,6 +98,7 @@ fn main() -> ExitCode {
             base_url,
             glossary,
             translate_references,
+            batch_size,
             json: _,
             compact,
         } => {
@@ -90,6 +106,16 @@ fn main() -> ExitCode {
                 Ok(pairs) => pairs,
                 Err(err) => return fail(err),
             };
+            let output_mode = if bilingual && mode == "replace" {
+                OutputMode::parse("bilingual", Some(&layout))
+            } else {
+                OutputMode::parse(&mode, Some(&layout))
+            };
+            let output_mode = match output_mode {
+                Ok(mode) => mode,
+                Err(err) => return fail(err.to_string()),
+            };
+            let bilingual_mode = OutputMode::parse("bilingual", Some(&layout)).ok();
             run_translate(
                 &path,
                 TranslateOptions {
@@ -99,11 +125,14 @@ fn main() -> ExitCode {
                     base_url,
                     glossary,
                     skip_references: !translate_references,
-                    bilingual,
+                    batch_size,
+                    output_mode,
                     ..TranslateOptions::default()
                 },
                 compact,
                 output,
+                bilingual_output,
+                bilingual_mode,
                 max_pages,
             )
         }
@@ -136,6 +165,8 @@ fn run_translate(
     opts: TranslateOptions,
     compact: bool,
     output: Option<PathBuf>,
+    bilingual_output: Option<PathBuf>,
+    bilingual_mode: Option<OutputMode>,
     max_pages: Option<u32>,
 ) -> ExitCode {
     let mut doc = match PdfDocument::open(path) {
@@ -159,7 +190,7 @@ fn run_translate(
             &mut extraction,
             &report,
             &RewriteOptions {
-                bilingual: opts.bilingual,
+                mode: opts.output_mode,
                 font_bytes: None,
             },
         ) {
@@ -169,6 +200,35 @@ fn run_translate(
             return fail(err);
         }
         if let Err(err) = doc.save_file(output) {
+            return fail(err);
+        }
+    }
+    if let Some(bilingual_output) = bilingual_output.as_ref() {
+        let Some(mode) = bilingual_mode else {
+            return fail("bilingual layout is invalid");
+        };
+        let mut copy = match PdfDocument::open(path) {
+            Ok(doc) => doc,
+            Err(err) => return fail(err),
+        };
+        let mut bilingual_extraction = copy.extract_with(&ExtractOptions {
+            max_pages,
+            ..ExtractOptions::default()
+        });
+        if let Err(err) = copy.rewrite(
+            &mut bilingual_extraction,
+            &report,
+            &RewriteOptions {
+                mode,
+                font_bytes: None,
+            },
+        ) {
+            return fail(err);
+        }
+        if let Err(err) = bilingual_extraction.assert_complete() {
+            return fail(err);
+        }
+        if let Err(err) = copy.save_file(bilingual_output) {
             return fail(err);
         }
     }

@@ -74,7 +74,7 @@ export RPT_LLM_API_KEY=...
   --glossary transformer=Transformer
 ```
 
-`--bilingual` 保留原文并额外画出译文。`--max-pages N` 只处理前 N 页。中文字体来自 `RPT_CJK_FONT`，否则使用已安装的 Droid Sans Fallback、文泉驿或 Noto Sans CJK。嵌入的是 glyf 子集（Identity-H 和 ToUnicode）。水平前进量来自 `hmtx`，没有做 OpenType GSUB。放不下、或与公式等保留字形共用操作符的段落，仍留原文。
+`--mode replace`（默认）在原位写入纯译文。`--mode side-by-side` 左页原文、右页译文。`--mode alternating` 先放原文页，再放译文页。`--mode overlay` 保留原文并在同一页画出译文。`--bilingual` 默认是左右并排；用 `--layout alternating` 或 `--layout overlay` 改版式。C ABI 的 `rpt_save`、C++ `save` 和 Python `save` 用选项 JSON 的 `output_mode` / `bilingual_layout` 做同样的选择。`--max-pages N` 只处理前 N 页。中文字体来自 `RPT_CJK_FONT`，否则使用已安装的 Droid Sans Fallback、文泉驿或 Noto Sans CJK。嵌入的是 glyf 子集（Identity-H 和 ToUnicode）。水平前进量来自 `hmtx`，没有做 OpenType GSUB。放不下、或与公式等保留字形共用操作符的段落，仍留原文。
 
 调用前会把 URL、邮箱、`{花括号}`、数字、文内引用（`[12]`、`[1-3]`、`(Smith et al., 2020)`、`Smith (2019)`）和术语表替换成 `⟦N⟧` 占位符，译完再还原。术语在本地替换（更长的优先，ASCII 按词边界），不指望模型遵守一张术语表。占位符丢失会重试一次，仍然丢失就报错。
 

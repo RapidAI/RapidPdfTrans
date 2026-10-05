@@ -237,7 +237,7 @@ pub unsafe extern "C" fn rpt_save(
                 &mut extraction,
                 &report,
                 &RewriteOptions {
-                    bilingual: translate_opts.bilingual,
+                    mode: translate_opts.output_mode,
                     font_bytes: None,
                 },
             )

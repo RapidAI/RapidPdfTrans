@@ -50,6 +50,8 @@ class Document {
     return take(rpt_translate(doc_, options.c_str()));
   }
 
+  // options JSON: {"output_mode":"replace"} or
+  // {"output_mode":"bilingual","bilingual_layout":"side-by-side"|"alternating"|"overlay"}
   void save(const std::string& path, const std::string& options = "") const {
     if (rpt_save(doc_, path.c_str(), options.c_str()) != 0) {
       throw std::runtime_error(last_error());

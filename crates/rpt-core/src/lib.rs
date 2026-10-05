@@ -44,8 +44,8 @@ pub use glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKin
 pub use rewrite::{rewrite_translation, RewriteOptions};
 pub use translate::{
     citation_end, identical_reference_operators, reference_glyph_ids, translate_extraction,
-    LlmTranslator, TranslateOptions, TranslateReport, TranslatedSegment, Translator,
-    TranslatorBackend, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
+    BilingualLayout, LlmTranslator, OutputMode, TranslateOptions, TranslateReport,
+    TranslatedSegment, Translator, TranslatorBackend, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
 };
 
 #[cfg(test)]

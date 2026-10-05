@@ -61,6 +61,10 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
 }
 
 /// Translate and write a PDF. Requires `RPT_LLM_API_KEY`.
+///
+/// `options_json` selects the output: `{"output_mode":"replace"}` (pure
+/// translation) or `{"output_mode":"bilingual","bilingual_layout":"side-by-side"}`.
+/// Layouts are `side-by-side`, `alternating`, and `overlay`.
 #[pyfunction]
 #[pyo3(signature = (path, output, options_json=None))]
 fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
@@ -75,7 +79,7 @@ fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
         &mut extraction,
         &report,
         &RewriteOptions {
-            bilingual: opts.bilingual,
+            mode: opts.output_mode,
             font_bytes: None,
         },
     )
