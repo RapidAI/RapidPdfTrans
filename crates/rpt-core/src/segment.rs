@@ -154,7 +154,13 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
     let mut parts = Vec::new();
     let mut current = vec![line[0]];
     for (index, glyph) in line.iter().copied().enumerate().skip(1) {
-        if gaps[index - 1] > trigger && !current.is_empty() {
+        let gap = gaps[index - 1];
+        // A detailed-contents bullet is a drawing, so the title and the next
+        // entry look like a ~14pt gutter. The left piece is a narrow crumb
+        // (`client 83`). A real column is much wider, and a short last line
+        // that does not end in a page number still splits.
+        let crumb = gap <= hard && narrow_page_crumb(&current);
+        if gap > trigger && !current.is_empty() && !crumb {
             parts.push(std::mem::take(&mut current));
         }
         current.push(glyph);
@@ -163,6 +169,60 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         parts.push(current);
     }
     parts
+}
+
+/// Left side of a contents bullet: a short title ending in its page number.
+/// Wider than this is a column, so a 17pt gutter still splits.
+fn narrow_page_crumb(piece: &[&Glyph]) -> bool {
+    if piece.len() < 2 || piece_width(piece) > 140.0 {
+        return false;
+    }
+    piece_ends_with_page_number(piece)
+}
+
+fn piece_width(piece: &[&Glyph]) -> f32 {
+    let left = piece
+        .iter()
+        .map(|glyph| glyph.bbox[0].min(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min);
+    let right = piece
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+        .fold(left, f32::max);
+    right - left
+}
+
+fn piece_ends_with_page_number(piece: &[&Glyph]) -> bool {
+    let mut index = piece.len();
+    let mut token = String::new();
+    while index > 0 {
+        let glyph = piece[index - 1];
+        if index < piece.len() {
+            let right = glyph.bbox[0].max(glyph.bbox[2]);
+            let left = piece[index].bbox[0].min(piece[index].bbox[2]);
+            let size = glyph.font_size.max(piece[index].font_size).max(1.0);
+            if left - right > size * 0.18 {
+                break;
+            }
+        }
+        let chunk = glyph.unicode.trim();
+        if chunk.is_empty() {
+            if !token.is_empty() {
+                break;
+            }
+            index -= 1;
+            continue;
+        }
+        token.insert_str(0, chunk);
+        index -= 1;
+        if token.len() > 3 {
+            return false;
+        }
+    }
+    !token.is_empty()
+        && token.len() <= 3
+        && token.bytes().all(|byte| byte.is_ascii_digit())
+        && index > 0
 }
 
 struct VisualLine<'a> {
@@ -2117,6 +2177,56 @@ mod tests {
         assert!(segs
             .iter()
             .any(|seg| seg.text.chars().all(|ch| ch == 'b' || ch == ' ')));
+    }
+
+    #[test]
+    fn a_narrow_contents_crumb_stays_with_the_rest_of_its_line() {
+        // The bullet between "83" and the next entry is a drawing, so the
+        // text gap is ~14pt. That must not peel "client 83" off the line.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let push =
+            |glyphs: &mut Vec<Glyph>, id: &mut u32, x: f32, y: f32, text: &str, width: f32| {
+                glyphs.push(wide(*id, x, y, text, width, 10.0));
+                *id += 1;
+            };
+        push(&mut glyphs, &mut id, 177.0, 500.0, "client", 21.0);
+        push(&mut glyphs, &mut id, 203.0, 500.0, "83", 10.0);
+        push(&mut glyphs, &mut id, 227.0, 500.0, "Generating", 40.0);
+        push(&mut glyphs, &mut id, 270.0, 500.0, "the", 16.0);
+        push(&mut glyphs, &mut id, 289.0, 500.0, "web", 18.0);
+        push(&mut glyphs, &mut id, 310.0, 500.0, "searches", 30.0);
+        push(&mut glyphs, &mut id, 177.0, 488.0, "results", 25.0);
+        push(&mut glyphs, &mut id, 207.0, 488.0, "83", 10.0);
+        push(&mut glyphs, &mut id, 231.0, 488.0, "Scraping", 34.0);
+        push(&mut glyphs, &mut id, 268.0, 488.0, "the", 16.0);
+        push(&mut glyphs, &mut id, 287.0, 488.0, "web", 18.0);
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert!(!texts.contains(&"client 83 results 83"), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("client") && text.contains("Generating")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_left_column_line_without_a_page_number_still_splits() {
+        let mut glyphs = vec![wide(0, 72.0, 400.0, "Note", 28.0, 10.0)];
+        for index in 0..8 {
+            let x = 117.0 + index as f32 * 10.0;
+            glyphs.push(wide(1 + index, x, 400.0, "b", 8.0, 10.0));
+        }
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Note"))
+                && texts.iter().any(|text| text.contains('b')),
+            "{texts:?}"
+        );
+        assert_eq!(segs.len(), 2, "{texts:?}");
     }
 
     fn wide(id: u32, x: f32, y: f32, text: &str, width: f32, size: f32) -> Glyph {

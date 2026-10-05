@@ -629,7 +629,7 @@ fn load_checkpoint(
         ) else {
             continue;
         };
-        cache.insert(source.to_string(), done.to_string());
+        cache.insert(source.to_string(), localize_part_heading(done));
     }
     let mut hits = 0usize;
     for (index, seg) in segments.iter().enumerate() {
@@ -870,8 +870,83 @@ fn echo_fix(
 fn polish(items: Vec<(usize, String)>) -> Vec<(usize, String)> {
     items
         .into_iter()
-        .map(|(index, text)| (index, strip_cjk_hyphens(&text)))
+        .map(|(index, text)| (index, localize_part_heading(&strip_cjk_hyphens(&text))))
         .collect()
+}
+
+/// A contents heading the model left as `PART 4 高级 RAG`. The word is a
+/// structural label, so it becomes 部分 once the rest of the line is Chinese.
+/// A bare `PART 1` is the same heading. An English sentence that merely
+/// contains the word stays for the model.
+pub(crate) fn localize_part_heading(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if let Some(replaced) = bare_part_line(&chars) {
+        return replaced;
+    }
+    if !chars.iter().copied().any(is_cjk_char) {
+        return text.to_string();
+    }
+    let urls = url_char_mask(&chars);
+    let mut out = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].is_ascii_alphabetic() && !urls[index] {
+            let start = index;
+            while index < chars.len() && chars[index].is_ascii_alphabetic() && !urls[index] {
+                index += 1;
+            }
+            let word: String = chars[start..index].iter().collect();
+            let bounded = (start == 0 || !chars[start - 1].is_ascii_alphabetic())
+                && (index == chars.len() || !chars[index].is_ascii_alphabetic());
+            if bounded && word.eq_ignore_ascii_case("part") {
+                out.push_str("部分");
+            } else {
+                out.push_str(&word);
+            }
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// `PART 4` with nothing after the number. `PART 4 ADVANCED RAG` is not bare.
+fn bare_part_line(chars: &[char]) -> Option<String> {
+    let text: String = chars.iter().collect();
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = lower.strip_prefix("part")?;
+    if rest.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
+        return None;
+    }
+    let number = trimmed[4..].trim();
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let start = text.find(trimmed)?;
+    let mut out = text[..start].to_string();
+    out.push_str("部分 ");
+    out.push_str(number);
+    out.push_str(&text[start + trimmed.len()..]);
+    Some(out)
+}
+
+fn url_char_mask(chars: &[char]) -> Vec<bool> {
+    let mut mask = vec![false; chars.len()];
+    let mut index = 0;
+    while index < chars.len() {
+        let rest: String = chars[index..].iter().collect();
+        if rest.starts_with("https://") || rest.starts_with("http://") || rest.starts_with("www.") {
+            while index < chars.len() && !chars[index].is_whitespace() {
+                mask[index] = true;
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    mask
 }
 
 /// A body paragraph the model echoed. Short lines, names, and any Chinese stay.
@@ -1383,6 +1458,60 @@ mod tests {
             strip_cjk_hyphens("见 https://livebook.manning.com/book/ai-agents-and-applications"),
             "见 https://livebook.manning.com/book/ai-agents-and-applications"
         );
+    }
+
+    #[test]
+    fn a_leftover_part_heading_becomes_chinese() {
+        assert_eq!(
+            localize_part_heading("PART 4 高级 RAG "),
+            "部分 4 高级 RAG "
+        );
+        assert_eq!(
+            localize_part_heading("\u{f0a1} Part 5: AI 智能体"),
+            "\u{f0a1} 部分 5: AI 智能体"
+        );
+        assert_eq!(localize_part_heading("PART 1"), "部分 1");
+        assert_eq!(
+            localize_part_heading("PART 4 ADVANCED RAG"),
+            "PART 4 ADVANCED RAG"
+        );
+        assert_eq!(
+            localize_part_heading("见 https://example.com/part/4 的说明"),
+            "见 https://example.com/part/4 的说明"
+        );
+        assert_eq!(localize_part_heading("Partial 结果"), "Partial 结果");
+    }
+
+    struct PartHeadingTranslator;
+    impl Translator for PartHeadingTranslator {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text =
+                        seg["text"]
+                            .as_str()
+                            .unwrap()
+                            .replacen("ADVANCED RAG", "高级 RAG", 1);
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn polish_rewrites_a_part_heading_the_model_left_in_english() {
+        let mut ex = extraction_from_lines(&["PART 4 ADVANCED RAG "]);
+        let report = translate_extraction(
+            &mut ex,
+            &TranslateOptions::default(),
+            &PartHeadingTranslator,
+        )
+        .unwrap();
+        assert_eq!(report.segments[0].translated, "部分 4 高级 RAG ");
     }
 
     struct AlwaysEmpty;

@@ -174,7 +174,8 @@ pub fn rewrite_translation(
                 continue;
             }
         }
-        if segment.translated == segment.source {
+        let translated = crate::translate::localize_part_heading(&segment.translated);
+        if translated == segment.source {
             let reason = if job_translates && english_body_source(&segment.source) {
                 "english-body"
             } else {
@@ -196,7 +197,7 @@ pub fn rewrite_translation(
                 }
             }
         }
-        planned.push((index, segment.translated.clone()));
+        planned.push((index, translated));
         rewrite_ids.extend(segment.glyph_ids.iter().copied());
     }
 
