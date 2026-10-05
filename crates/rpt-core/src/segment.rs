@@ -511,9 +511,6 @@ fn assemble(
     attach_markers(&mut lines);
     attach_math_scripts(&mut lines);
     let mut kept = detach_toc_marks(&mut lines);
-    // A right-hand title on a contents row has no page number of its own
-    // (`Q&A on a metadata-` after `232`). It is still a contents title.
-    share_toc_baseline(&mut lines);
     kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
     kept.extend(margin_stamps(&lines));
@@ -557,9 +554,7 @@ fn assemble(
             });
         };
         let mut lines = para.iter();
-        let mut prev_toc = false;
         if let Some(first) = lines.next() {
-            prev_toc = first.toc;
             if let Some((label, rest)) = styled_run_in(first) {
                 // "Definition 1.1." is bold and "Proof." is italic. The sentence
                 // after either label keeps the body face.
@@ -589,7 +584,6 @@ fn assemble(
             if buf.trim().is_empty() {
                 buf = line.text.clone();
                 buf_ids.extend(line.glyphs.iter().map(|glyph| glyph.id));
-                prev_toc = line.toc;
                 continue;
             }
             let piece = if url_continues(&buf, &line.text) {
@@ -597,20 +591,13 @@ fn assemble(
             } else if let Some(stem) = soft_hyphen_stem(&buf) {
                 let rest = line.text.trim_start();
                 if rest.starts_with(|ch: char| ch.is_ascii_alphanumeric()) {
-                    // A contents title broken at its own hyphen keeps that
-                    // hyphen (`metadata-enriched`). A body soft hyphen does not.
-                    if prev_toc && line.toc {
-                        format!("{stem}-{rest}")
-                    } else {
-                        join_hyphenated_word(stem, rest)
-                    }
+                    join_hyphenated_word(stem, rest)
                 } else {
                     format!("{} {}", buf.trim_end(), line.text.trim_start())
                 }
             } else {
                 format!("{} {}", buf.trim_end(), line.text.trim_start())
             };
-            prev_toc = line.toc;
             if piece.chars().count() > LONG_LINE && sentence_end(&buf) {
                 flush(&mut segments, &mut buf_ids, &mut buf);
                 buf = line.text.clone();
@@ -673,28 +660,6 @@ fn detach_toc_marks(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
     }
     *lines = expanded;
     kept
-}
-
-/// A title that shares a contents baseline is part of that row, even when the
-/// page number belongs to the title on its left.
-fn share_toc_baseline(lines: &mut [VisualLine<'_>]) {
-    let anchors: Vec<(u32, f32)> = lines
-        .iter()
-        .filter(|line| line.toc)
-        .map(|line| (line.page, line.y))
-        .collect();
-    for line in lines.iter_mut() {
-        if line.toc {
-            continue;
-        }
-        let limit = line.size.max(1.0) * 0.35;
-        if anchors
-            .iter()
-            .any(|(page, y)| *page == line.page && (line.y - y).abs() <= limit)
-        {
-            line.toc = true;
-        }
-    }
 }
 
 fn push_toc_title<'a>(expanded: &mut Vec<VisualLine<'a>>, title: &mut Vec<&'a Glyph>) {
@@ -1691,36 +1656,19 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
     let measures = page_measures(&lines);
     let mut columns: Vec<Vec<VisualLine>> = Vec::new();
     for line in lines {
-        // A contents title broken at the right of the row continues at the
-        // left indent (`Q&A on a metadata-` / `enriched`). That return is
-        // wider than a body indent, and the left entry's column would
-        // otherwise claim it.
-        let slot = columns
-            .iter()
-            .position(|column| {
-                column
-                    .iter()
-                    .rev()
-                    .find(|prev| line_has_letter(prev))
-                    .is_some_and(|prev| toc_hyphen_wrap(prev, &line))
-            })
-            .or_else(|| {
-                columns.iter().position(|column| {
-                    column_anchor(column, line.page).is_some_and(|anchor| {
-                        let distance = (anchor - line.left).abs();
-                        // A wrapped word can start a list-indented line and finish
-                        // back on the column margin. That line sits to the right of
-                        // the margin. A body line to the left of a centered title is
-                        // a different column, even when a hyphen makes the gap look
-                        // like an indent.
-                        let indented = line.left + 1.0 >= anchor;
-                        distance <= 28.0
-                            || (distance <= 64.0
-                                && indented
-                                && soft_hyphen_stem(&line.text).is_some())
-                    }) || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
-                })
-            });
+        let slot = columns.iter().position(|column| {
+            column_anchor(column, line.page).is_some_and(|anchor| {
+                let distance = (anchor - line.left).abs();
+                // A wrapped word can start a list-indented line and finish
+                // back on the column margin. That line sits to the right of
+                // the margin. A body line to the left of a centered title is
+                // a different column, even when a hyphen makes the gap look
+                // like an indent.
+                let indented = line.left + 1.0 >= anchor;
+                distance <= 28.0
+                    || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some())
+            }) || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
+        });
         if let Some(slot) = slot {
             columns[slot].push(line);
         } else {
@@ -1738,12 +1686,6 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
         let mut current: Vec<VisualLine> = Vec::new();
         for line in column {
             let measure = measures.get(&line.page).copied().unwrap_or(0.0);
-            // A contents bullet sits between a hyphenated title and its
-            // continuation. It is not a paragraph break.
-            if is_mark_line(&line) {
-                paragraphs.push(vec![line]);
-                continue;
-            }
             if current
                 .last()
                 .is_some_and(|prev| continues_paragraph(prev, &line, measure))
@@ -2132,9 +2074,9 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     // `83 Generating` only when the line above is not finishing that token.
     let hyphen = soft_hyphen_stem(&upper.text).is_some()
         && next.starts_with(|ch: char| ch.is_ascii_alphanumeric());
-    // Two contents titles stay apart. A title broken across lines
-    // (`metadata-` / `enriched`, `Human-in-the-` / `loop`) is still one entry.
-    if (upper.toc || lower.toc) && !(hyphen && upper.toc && lower.toc) {
+    // Two contents titles stay apart. Joining a right-hand title to the
+    // left indent under it paints one block across the whole row.
+    if upper.toc || lower.toc {
         return false;
     }
     // A detailed-contents line already holds several entries (`83 Generating`).
@@ -2507,33 +2449,6 @@ fn is_hyphen_suffix(word: &str) -> bool {
         "red", "ies", "ability", "ibility", "ation", "ition", "ful", "less", "ship", "hood",
     ];
     SUFFIXES.contains(&word.as_str())
-}
-
-fn line_has_letter(line: &VisualLine<'_>) -> bool {
-    line.text.chars().any(|ch| ch.is_alphabetic())
-}
-
-fn is_mark_line(line: &VisualLine<'_>) -> bool {
-    let text = line.text.trim();
-    !text.is_empty() && text.chars().count() <= 2 && !text.chars().any(|ch| ch.is_alphanumeric())
-}
-
-/// A contents wrap returns from the right-hand title to the row indent.
-/// `Q&A on a metadata-` sits near x=336 and `enriched` returns to x=177.
-fn toc_hyphen_wrap(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
-    if !prev.toc || !line.toc {
-        return false;
-    }
-    let shift = line.left - prev.left;
-    prev.page == line.page
-        && soft_hyphen_stem(&prev.text).is_some()
-        && line
-            .text
-            .trim_start()
-            .starts_with(|ch: char| ch.is_ascii_alphabetic())
-        && (-240.0..=8.0).contains(&shift)
-        && prev.y > line.y
-        && prev.y - line.y < prev.size.max(line.size).max(1.0) * 1.6
 }
 
 /// A hanging indent that finishes `multi-` / `per-` belongs to that column
@@ -5276,9 +5191,9 @@ mod tests {
     }
 
     #[test]
-    fn a_hyphenated_contents_title_keeps_its_compound() {
-        // The broken title sits on the right of the row. Its continuation
-        // returns to the contents indent, under the previous entry.
+    fn a_contents_hyphen_that_returns_to_the_left_indent_stays_two_titles() {
+        // Joining these paints one block from the right-hand title back to
+        // the left indent and smashes the neighboring entries.
         let glyphs = vec![
             block(
                 0,
@@ -5311,17 +5226,48 @@ mod tests {
             .map(|seg| seg.text.clone())
             .collect();
         assert!(
-            texts.iter().any(|text| text.contains("metadata-enriched")),
+            texts
+                .iter()
+                .all(|text| !text.contains("metadata-enriched")
+                    && !text.contains("Human-in-the-loop")),
             "{texts:?}"
         );
         assert!(
-            texts.iter().any(|text| text.contains("Human-in-the-loop")),
+            texts.iter().any(|text| text.contains("Q&A on a metadata-")),
             "{texts:?}"
         );
         assert!(
             texts
                 .iter()
-                .all(|text| !text.contains("metadata- ") && !text.ends_with('-')),
+                .any(|text| text.contains("enriched collection") && !text.contains("Q&A")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Human-in-the-") && !text.contains("loop")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("loop") && !text.contains("Human")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_body_compound_keeps_hyphens_already_in_the_stem() {
+        let glyphs = vec![
+            block(0, 72.0, 400.0, 90.0, 10.0, "Human-in-the-"),
+            block(1, 72.0, 386.0, 24.0, 10.0, "loop"),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Human-in-the-loop")),
             "{texts:?}"
         );
     }
