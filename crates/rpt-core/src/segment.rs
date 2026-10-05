@@ -317,6 +317,7 @@ fn assemble(
     kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
     kept.extend(margin_stamps(&lines));
+    release_hyphen_continuations(&lines, &mut kept);
     let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     if !kept_ids.is_empty() {
         lines.retain(|line| {
@@ -853,6 +854,48 @@ fn interior_glyphs(lines: &[VisualLine<'_>], flags: &SegmentFlags) -> Vec<(u32, 
         }
     }
     kept
+}
+
+/// A box can cover the second half of a line-break hyphen (`over-` / `all`).
+/// The stem is still body prose, so that continuation is body prose too.
+/// A label that does not finish the word stays inside the drawing.
+fn release_hyphen_continuations(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
+    let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let mut release = std::collections::HashSet::new();
+    for upper in lines {
+        if soft_hyphen_stem(&upper.text).is_none() {
+            continue;
+        }
+        let upper_kept = upper
+            .glyphs
+            .iter()
+            .filter(|glyph| kept_ids.contains(&glyph.id))
+            .count();
+        if upper.glyphs.is_empty() || upper_kept * 2 > upper.glyphs.len() {
+            continue;
+        }
+        for lower in lines {
+            // The other column can sit one leading lower. Only the same
+            // column is the rest of this word.
+            if (upper.left - lower.left).abs() > 36.0 || !continues_paragraph(upper, lower) {
+                continue;
+            }
+            let lower_kept = lower
+                .glyphs
+                .iter()
+                .filter(|glyph| kept_ids.contains(&glyph.id))
+                .count();
+            if lower.glyphs.is_empty() || lower_kept * 2 <= lower.glyphs.len() {
+                continue;
+            }
+            for glyph in &lower.glyphs {
+                release.insert(glyph.id);
+            }
+        }
+    }
+    if !release.is_empty() {
+        kept.retain(|(id, _)| !release.contains(id));
+    }
 }
 
 /// Labels inside a cluster of boxes, or on an image, stay original.
@@ -1879,12 +1922,21 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
 
 fn is_math_script(line: &VisualLine<'_>) -> bool {
     let width = line.right - line.left;
+    let symbol = |glyph: &Glyph| math_font_glyph(glyph) || vector_symbol_glyph(glyph);
     width <= line.size.max(1.0) * 6.0
         && (1..=6).contains(&line.glyphs.len())
-        && line.glyphs.iter().any(|glyph| math_font_glyph(glyph))
-        && line.glyphs.iter().all(|glyph| {
-            math_font_glyph(glyph) || !glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
-        })
+        && line.glyphs.iter().any(|glyph| symbol(glyph))
+        && line
+            .glyphs
+            .iter()
+            .all(|glyph| symbol(glyph) || !glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
+}
+
+/// A TeX vector arrow (`#»`) drawn a little under the word it marks.
+/// It is not a text font, so the math-font check does not see it.
+fn vector_symbol_glyph(glyph: &Glyph) -> bool {
+    glyph.font_name.to_ascii_uppercase().contains("VECT")
+        && !glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
 /// Operators and digits that a CJK body font can redraw. They show up in
@@ -3445,6 +3497,47 @@ mod tests {
     }
 
     #[test]
+    fn acl_hyphen_continuations_are_not_kept_inside_the_figure() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/2024-acl-long-7.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let seg = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("overall performance")),
+            "over- was kept inside the figure"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("MetaMath-7B with domain-specific")),
+            "MetaMath- was kept inside the table"
+        );
+        assert!(
+            !texts.iter().any(|text| {
+                let tail = text.trim_end();
+                tail.ends_with("over-") || tail.ends_with("MetaMath-")
+            }),
+            "{:?}",
+            texts.iter().find(|text| {
+                let tail = text.trim_end();
+                tail.ends_with("over-") || tail.ends_with("MetaMath-")
+            })
+        );
+    }
+
+    #[test]
     fn hc_dlm_subscript_does_not_leave_a_line_break_hyphen() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/ci/arxiv-2610.02193.pdf");
@@ -3478,6 +3571,14 @@ mod tests {
         let segs = segment_glyphs(&extraction.glyphs);
         let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
         assert!(
+            texts.iter().any(|text| text.contains("Similarly")),
+            "Simi- was not joined past the vector arrow"
+        );
+        assert!(
+            !texts.iter().any(|text| text.trim_end().ends_with("Simi-")),
+            "Simi- was left split"
+        );
+        assert!(
             texts.iter().any(|text| text.contains("detecting")),
             "de- was not joined across the page"
         );
@@ -3509,6 +3610,80 @@ mod tests {
                 let tail = text.trim_end();
                 tail.ends_with("de-") || tail.ends_with("parti-") || tail.ends_with("non-")
             })
+        );
+    }
+
+    #[test]
+    fn a_figure_box_does_not_keep_the_rest_of_a_body_hyphen() {
+        let mut upper = block(
+            0,
+            306.0,
+            560.0,
+            220.0,
+            10.0,
+            "verges more rapidly but also delivers superior over-",
+        );
+        upper.font_name = "NimbusRomNo9L-Regu".into();
+        let mut lower = block(
+            1,
+            306.0,
+            546.5,
+            158.0,
+            10.0,
+            "all performance compared to TSLD.",
+        );
+        lower.font_name = "NimbusRomNo9L-Regu".into();
+        let regions = [crate::glyph::PaintedRegion {
+            page_index: 0,
+            bbox: [300.0, 530.0, 480.0, 560.0],
+            kind: "image".into(),
+        }];
+        let texts: Vec<_> =
+            segment_placed(&[upper, lower], &SegmentFlags::default(), &regions, &[])
+                .segments
+                .iter()
+                .map(|seg| seg.text.clone())
+                .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("overall performance")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_vector_arrow_between_baselines_does_not_split_the_hyphen() {
+        // The arrow sits 5.3pt under the line, just past the same-baseline
+        // cutoff, between the hyphen and the next line.
+        let mut lead = block(0, 307.0, 601.0, 70.0, 10.0, "matrix of the ");
+        lead.font_name = "NimbusRomNo9L-Regu".into();
+        let mut hash = block(1, 332.0, 595.7, 6.0, 10.0, "#");
+        hash.font_name = "TeX-vect10".into();
+        let mut arrow = block(2, 338.0, 595.7, 6.0, 10.0, "»");
+        arrow.font_name = "TeX-vect10".into();
+        let mut tail = block(3, 400.0, 601.0, 140.0, 10.0, "context at time t. Simi-");
+        tail.font_name = "NimbusRomNo9L-Regu".into();
+        let mut next = block(
+            4,
+            307.0,
+            589.0,
+            230.0,
+            10.0,
+            "larly, the column denotes this matrix.",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let texts: Vec<_> = segment_glyphs(&[lead, hash, arrow, tail, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Similarly")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.trim_end().ends_with("Simi-")),
+            "{texts:?}"
         );
     }
 
