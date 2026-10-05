@@ -354,39 +354,155 @@ fn known_run_in(label: &str) -> bool {
     )
 }
 
-/// A styled label at the start of a line (`Definition 1.1.`, `Proof.`) and the
-/// sentence that follows it. The label keeps its own face so the body does not
-/// become heiti or italic.
+fn prose_letter(glyph: &Glyph) -> bool {
+    glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) && !math_font_glyph(glyph)
+}
+
+fn letter_count(glyph: &Glyph) -> usize {
+    glyph
+        .unicode
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count()
+}
+
+fn has_year(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() < 4 {
+        return false;
+    }
+    for index in 0..=chars.len() - 4 {
+        let window = &chars[index..index + 4];
+        if !window.iter().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let before = index > 0 && chars[index - 1].is_ascii_digit();
+        let after = index + 4 < chars.len() && chars[index + 4].is_ascii_digit();
+        if before || after {
+            continue;
+        }
+        let year: String = window.iter().collect();
+        if year.starts_with("19") || year.starts_with("20") {
+            return true;
+        }
+    }
+    false
+}
+
+fn label_terminator(label: &str) -> Option<LabelEnd> {
+    let trimmed = label.trim_end();
+    if trimmed.ends_with('→') || trimmed.ends_with('➔') || trimmed.ends_with("->") {
+        return Some(LabelEnd::Arrow);
+    }
+    if trimmed.ends_with(':') {
+        return Some(LabelEnd::Colon);
+    }
+    if trimmed.ends_with('.') || trimmed.ends_with('?') {
+        return Some(LabelEnd::Period);
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LabelEnd {
+    Period,
+    Colon,
+    Arrow,
+}
+
+/// A styled label at the start of a line (`Definition 1.1.`, `Proof.`,
+/// `Ratings →`) and the sentence that follows it. Punctuation and a math
+/// letter inside the label do not end the run. The label keeps its own face
+/// so the body does not become heiti or italic.
 fn styled_run_in<'a>(line: &VisualLine<'a>) -> Option<(Vec<&'a Glyph>, Vec<&'a Glyph>)> {
     let mut ordered = line.glyphs.clone();
     ordered.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
-    let kind = run_face(&ordered.first()?.font_name)?;
+    let kind = ordered.iter().find_map(|glyph| {
+        if prose_letter(glyph) {
+            run_face(&glyph.font_name)
+        } else {
+            None
+        }
+    })?;
     let mut split = 0;
-    while split < ordered.len() && run_face(&ordered[split].font_name) == Some(kind) {
+    let mut label_letters = 0usize;
+    while split < ordered.len() {
+        let glyph = ordered[split];
+        if prose_letter(glyph) {
+            if run_face(&glyph.font_name) != Some(kind) {
+                break;
+            }
+            label_letters += letter_count(glyph);
+        }
         split += 1;
     }
-    if split < 3 || split == ordered.len() {
+    if !(3..160).contains(&label_letters) || split == ordered.len() {
         return None;
     }
     let label = line_text(&ordered[..split]);
     let tail = line_text(&ordered[split..]);
-    let label_letters = label.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
     let tail_letters = tail.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    if !(3..80).contains(&label_letters) || tail_letters < 8 {
+    if tail_letters < 8 || has_year(&tail) {
         return None;
     }
-    let trimmed = label.trim_end();
-    let ends_colon = trimmed.ends_with(':');
-    let ends_period = trimmed.ends_with('.');
-    if !ends_colon && !ends_period {
-        return None;
-    }
+    let end = label_terminator(&label)?;
     // "Smith et al. showed" is a citation, not a label. "Proof. Let" is.
-    if kind == RunFace::Italic && ends_period && !tail_starts_upper(&tail) && !known_run_in(&label)
+    if kind == RunFace::Italic
+        && end == LabelEnd::Period
+        && !tail_starts_upper(&tail)
+        && !known_run_in(&label)
     {
         return None;
     }
     Some((ordered[..split].to_vec(), ordered[split..].to_vec()))
+}
+
+/// The whole first line is one bold or italic sentence (`Obstacle 1: … .`).
+/// The following line is a different face, so the sentence must not set the
+/// body face.
+fn styled_lead_line(line: &VisualLine<'_>) -> Option<RunFace> {
+    let mut face: Option<RunFace> = None;
+    let mut letters = 0usize;
+    for glyph in &line.glyphs {
+        if !prose_letter(glyph) {
+            continue;
+        }
+        let kind = run_face(&glyph.font_name)?;
+        match face {
+            None => face = Some(kind),
+            Some(prev) if prev != kind => return None,
+            Some(_) => {}
+        }
+        letters += letter_count(glyph);
+    }
+    if !(3..160).contains(&letters) || label_terminator(&line.text).is_none() {
+        return None;
+    }
+    face
+}
+
+fn majority_run(line: &VisualLine<'_>) -> Option<RunFace> {
+    let mut bold = 0usize;
+    let mut italic = 0usize;
+    let mut roman = 0usize;
+    for glyph in &line.glyphs {
+        if !prose_letter(glyph) {
+            continue;
+        }
+        let n = letter_count(glyph);
+        match run_face(&glyph.font_name) {
+            Some(RunFace::Bold) => bold += n,
+            Some(RunFace::Italic) => italic += n,
+            None => roman += n,
+        }
+    }
+    if bold > italic && bold > roman {
+        Some(RunFace::Bold)
+    } else if italic > bold && italic > roman {
+        Some(RunFace::Italic)
+    } else {
+        None
+    }
 }
 
 fn assemble(
@@ -452,11 +568,28 @@ fn assemble(
                 buf = line_text(&rest);
                 buf_ids.extend(rest.iter().map(|glyph| glyph.id));
             } else {
+                let split_lead = styled_lead_line(first).is_some_and(|face| {
+                    lines.clone().next().is_some_and(|next| {
+                        majority_run(next) != Some(face)
+                            && !has_year(&first.text)
+                            && !has_year(&next.text)
+                    })
+                });
                 buf = first.text.clone();
                 buf_ids.extend(first.glyphs.iter().map(|glyph| glyph.id));
+                // "Obstacle 1: … inconsistent." is its own italic line. The
+                // roman explanation under it is the body.
+                if split_lead {
+                    flush(&mut segments, &mut buf_ids, &mut buf);
+                }
             }
         }
         for line in lines {
+            if buf.trim().is_empty() {
+                buf = line.text.clone();
+                buf_ids.extend(line.glyphs.iter().map(|glyph| glyph.id));
+                continue;
+            }
             let piece = if url_continues(&buf, &line.text) {
                 format!("{}{}", buf.trim_end(), line.text.trim_start())
             } else if let Some(stem) = soft_hyphen_stem(&buf) {
@@ -3763,6 +3896,121 @@ mod tests {
     }
 
     #[test]
+    fn an_arrow_label_is_its_own_segment() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(&mut id, 46.0, 400.0, "Ratings → ", "Times-Italic");
+        glyphs.extend(paint_word(
+            &mut id,
+            104.0,
+            400.0,
+            "score is kept for the ordered scale here.",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Ratings") && !text.contains("score")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("score") && !text.contains("Ratings")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_italic_sentence_above_roman_body_is_its_own_segment() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            46.0,
+            400.0,
+            "Obstacle 1: the predictor is wasteful.",
+            "Times-Italic",
+        );
+        glyphs.extend(paint_word(
+            &mut id,
+            46.0,
+            386.0,
+            "The underlying signal stays fixed here.",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Obstacle") && !text.contains("underlying")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("underlying") && !text.contains("Obstacle")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn two_italic_lines_stay_one_paragraph() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            46.0,
+            400.0,
+            "The bound is strict for this field.",
+            "Times-Italic",
+        );
+        glyphs.extend(paint_word(
+            &mut id,
+            46.0,
+            386.0,
+            "It follows from the lemma above.",
+            "Times-Italic",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains("bound") && texts[0].contains("lemma"),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_bibliography_title_stays_with_its_year() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(&mut id, 46.0, 400.0, "Algorithms. ", "Times-Italic");
+        glyphs.extend(paint_word(
+            &mut id,
+            112.0,
+            400.0,
+            "SIAM Publications, 1993.",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Algorithms") && text.contains("1993")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn a_bold_heading_stays_one_segment() {
         let mut id = 0u32;
         let glyphs = paint_word(&mut id, 46.0, 438.0, "4 Proof of Theorem 1.2.", "CMBX12");
@@ -3775,6 +4023,77 @@ mod tests {
             texts[0].contains("Proof") && texts[0].contains("Theorem"),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn an_italic_email_label_is_its_own_segment() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(&mut id, 46.0, 400.0, "Email address", "Times-Italic");
+        glyphs.extend(paint_word(&mut id, 115.0, 400.0, ": ", "Times-Roman"));
+        glyphs.extend(paint_word(
+            &mut id,
+            128.0,
+            400.0,
+            "name@ucl.ac.uk is listed",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Email") && !text.contains("ucl")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("ucl") && !text.contains("Email")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn glossary_lines_and_obstacle_sentences_leave_the_body() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/ci");
+        let cases = [
+            (
+                "arxiv-2609.36965.pdf",
+                "category labels",
+                "retain the original",
+            ),
+            ("arxiv-2610.02193.pdf", "Obstacle 1", "underlying signal"),
+            ("arxiv-2610.01998.pdf", "Email address", "@"),
+        ];
+        for (file, label, body) in cases {
+            let path = root.join(file);
+            if !path.exists() {
+                continue;
+            }
+            let doc = crate::extract::PdfDocument::open(&path).unwrap();
+            let extraction = doc.extract();
+            let seg = segment_placed(
+                &extraction.glyphs,
+                &SegmentFlags::default(),
+                &extraction.regions,
+                &extraction.pages,
+            );
+            let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+            assert!(
+                texts
+                    .iter()
+                    .any(|text| text.contains(label) && !text.contains(body)),
+                "{file} label stayed on the body"
+            );
+            assert!(
+                texts
+                    .iter()
+                    .any(|text| text.contains(body) && !text.contains(label)),
+                "{file} body still starts with the label"
+            );
+        }
     }
 
     #[test]

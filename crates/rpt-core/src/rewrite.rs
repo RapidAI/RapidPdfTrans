@@ -257,14 +257,7 @@ pub fn rewrite_translation(
                 .iter()
                 .filter_map(|id| extraction.glyphs.get(by_id[id]))
                 .collect();
-            let mut style = glyphs
-                .first()
-                .map(|glyph| face_style(&glyph.font_name))
-                .unwrap_or(FaceStyle {
-                    serif: true,
-                    bold: false,
-                    italic: false,
-                });
+            let mut style = paragraph_style(&glyphs);
             if heading_wants_bold(&glyphs, text) {
                 style.bold = true;
                 style.italic = false;
@@ -1660,6 +1653,64 @@ fn pages_of(glyphs: &[&Glyph]) -> Vec<u32> {
     pages.sort_unstable();
     pages.dedup();
     pages
+}
+
+/// The face of a paragraph is the majority of its prose letters. A short
+/// italic citation or a bold label that stayed on the sentence must not
+/// paint the roman body in heiti or with a skew.
+fn paragraph_style(glyphs: &[&Glyph]) -> FaceStyle {
+    let mut serif = 0usize;
+    let mut letters = 0usize;
+    let mut bold = 0usize;
+    let mut italic = 0usize;
+    for glyph in glyphs {
+        if !style_vote(glyph) {
+            continue;
+        }
+        let n = glyph
+            .unicode
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .count();
+        let style = face_style(&glyph.font_name);
+        letters += n;
+        if style.serif {
+            serif += n;
+        }
+        if style.bold {
+            bold += n;
+        }
+        if style.italic {
+            italic += n;
+        }
+    }
+    if letters == 0 {
+        return glyphs
+            .first()
+            .map(|glyph| face_style(&glyph.font_name))
+            .unwrap_or(FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            });
+    }
+    FaceStyle {
+        serif: serif * 2 >= letters,
+        bold: bold * 2 > letters,
+        italic: italic * 2 > letters,
+    }
+}
+
+fn style_vote(glyph: &Glyph) -> bool {
+    if !glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+    let upper = glyph.font_name.to_ascii_uppercase();
+    let math = ["CMMI", "CMSY", "CMEX", "MSAM", "MSBM"]
+        .iter()
+        .any(|needle| upper.contains(needle))
+        || upper.contains("MATH");
+    !math
 }
 
 fn heading_wants_bold(glyphs: &[&Glyph], text: &str) -> bool {
@@ -3419,6 +3470,58 @@ mod tests {
                 resource_name: Some("F1".into()),
             },
         }
+    }
+
+    #[test]
+    fn a_short_italic_prefix_does_not_skew_the_paragraph() {
+        let mut mixed = Vec::new();
+        for (index, ch) in "Note".chars().enumerate() {
+            let mut glyph = math_glyph(
+                index as u32,
+                index as f32 * 6.0,
+                400.0,
+                &ch.to_string(),
+                false,
+            );
+            glyph.font_name = "Times-Italic".into();
+            mixed.push(glyph);
+        }
+        for (index, ch) in "showed that the bound holds".chars().enumerate() {
+            let mut glyph = math_glyph(
+                20 + index as u32,
+                40.0 + index as f32 * 6.0,
+                400.0,
+                &ch.to_string(),
+                false,
+            );
+            glyph.font_name = "Times-Roman".into();
+            mixed.push(glyph);
+        }
+        let refs: Vec<&Glyph> = mixed.iter().collect();
+        let style = paragraph_style(&refs);
+        assert!(!style.italic && !style.bold, "{style:?}");
+
+        let mut italic_only = Vec::new();
+        for (index, ch) in "The bound is strict".chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            let mut glyph = math_glyph(
+                index as u32,
+                index as f32 * 6.0,
+                400.0,
+                &ch.to_string(),
+                false,
+            );
+            glyph.font_name = "Times-Italic".into();
+            italic_only.push(glyph);
+        }
+        let refs: Vec<&Glyph> = italic_only.iter().collect();
+        assert!(
+            paragraph_style(&refs).italic,
+            "{:?}",
+            paragraph_style(&refs)
+        );
     }
 
     #[test]
