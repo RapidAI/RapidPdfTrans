@@ -82,6 +82,8 @@ fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
             mode: opts.output_mode,
             cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
             cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+            cjk_size_scale: opts.cjk_size_scale,
+            cjk_leading: opts.cjk_leading,
             ..RewriteOptions::default()
         },
     )

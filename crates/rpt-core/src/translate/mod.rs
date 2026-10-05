@@ -73,6 +73,11 @@ pub struct TranslateOptions {
     pub cjk_font: Option<String>,
     /// Sans CJK font file for regular sans text.
     pub cjk_sans: Option<String>,
+    /// Chinese body size as a fraction of the source size. `0` uses 0.90,
+    /// or `RPT_CJK_SIZE_SCALE` when that is set.
+    pub cjk_size_scale: f32,
+    /// Chinese baseline distance in ems. `0` uses 1.60, or `RPT_CJK_LEADING`.
+    pub cjk_leading: f32,
     /// `replace` writes only the translation. `bilingual` keeps an English page.
     pub output_mode: OutputMode,
 }
@@ -159,6 +164,8 @@ impl Default for TranslateOptions {
             skip_tables: true,
             cjk_font: None,
             cjk_sans: None,
+            cjk_size_scale: 0.0,
+            cjk_leading: 0.0,
             output_mode: OutputMode::Replace,
         }
     }
@@ -252,6 +259,12 @@ impl TranslateOptions {
         if let Some(v) = string_field(&value, &["cjk_sans"]) {
             opts.cjk_sans = Some(v);
         }
+        if let Some(v) = float_field(&value, &["cjk_size_scale", "cjkSizeScale"]) {
+            opts.cjk_size_scale = v;
+        }
+        if let Some(v) = float_field(&value, &["cjk_leading", "cjkLeading"]) {
+            opts.cjk_leading = v;
+        }
         let layout = string_field(&value, &["bilingual_layout", "layout"]);
         if let Some(mode) = string_field(&value, &["output_mode", "mode"]) {
             opts.output_mode = OutputMode::parse(&mode, layout.as_deref())?;
@@ -273,6 +286,16 @@ pub fn resolve_choice(explicit: Option<&str>, env_value: Option<&str>, builtin: 
         .or_else(|| env_value.map(str::trim).filter(|s| !s.is_empty()))
         .unwrap_or(builtin)
         .to_string()
+}
+
+fn float_field(value: &Value, names: &[&str]) -> Option<f32> {
+    names.iter().find_map(|name| {
+        value.get(*name).and_then(|item| {
+            item.as_f64()
+                .or_else(|| item.as_str().and_then(|text| text.trim().parse().ok()))
+                .map(|number| number as f32)
+        })
+    })
 }
 
 fn string_field(value: &Value, names: &[&str]) -> Option<String> {
@@ -976,6 +999,13 @@ mod tests {
             TranslateOptions::from_json("{}").unwrap().0.output_mode,
             OutputMode::Replace
         );
+        let sized = TranslateOptions::from_json(r#"{"cjk_size_scale":0.92,"cjk_leading":1.5}"#)
+            .unwrap()
+            .0;
+        assert!((sized.cjk_size_scale - 0.92).abs() < 0.001);
+        assert!((sized.cjk_leading - 1.5).abs() < 0.001);
+        assert_eq!(TranslateOptions::default().cjk_size_scale, 0.0);
+        assert_eq!(TranslateOptions::default().cjk_leading, 0.0);
         assert_eq!(
             TranslateOptions::from_json(r#"{"layout":"side-by-side"}"#)
                 .unwrap()

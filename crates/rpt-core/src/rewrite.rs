@@ -33,6 +33,50 @@ pub struct RewriteOptions {
     pub cjk_serif: Option<std::path::PathBuf>,
     /// Sans CJK file used for regular sans text. Bold text stays Noto Sans CJK.
     pub cjk_sans: Option<std::path::PathBuf>,
+    /// Chinese body size as a fraction of the source size. `0` uses 0.90,
+    /// or `RPT_CJK_SIZE_SCALE` when that is set. Titles stay a little larger.
+    pub cjk_size_scale: f32,
+    /// Baseline distance in ems of the Chinese size. `0` uses 1.60,
+    /// or `RPT_CJK_LEADING` when that is set. This is wider than English leading.
+    pub cjk_leading: f32,
+}
+
+/// How Chinese body text is sized relative to the English it replaces.
+///
+/// CJK glyphs fill the em square, so the same point size looks heavier than
+/// Latin, and the English baseline gap then feels cramped. Body text starts
+/// smaller and uses a Chinese academic leading; the fit loop may shrink the
+/// size further, but it keeps that leading ratio.
+#[derive(Clone, Copy, Debug)]
+struct CjkMeasure {
+    body_scale: f32,
+    heading_scale: f32,
+    leading_ratio: f32,
+    min_leading_ratio: f32,
+}
+
+impl CjkMeasure {
+    fn resolve(size_scale: f32, leading: f32) -> Self {
+        let body = positive_or_env(size_scale, "RPT_CJK_SIZE_SCALE", 0.90).clamp(0.65, 1.05);
+        let leading = positive_or_env(leading, "RPT_CJK_LEADING", 1.60).clamp(1.25, 2.20);
+        Self {
+            body_scale: body,
+            heading_scale: (body + 0.06).min(1.0),
+            leading_ratio: leading,
+            min_leading_ratio: (leading * 0.88).max(1.40).min(leading),
+        }
+    }
+}
+
+fn positive_or_env(explicit: f32, key: &str, builtin: f32) -> f32 {
+    if explicit > 0.0 {
+        return explicit;
+    }
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| *value > 0.0)
+        .unwrap_or(builtin)
 }
 
 struct Span {
@@ -158,6 +202,7 @@ pub fn rewrite_translation(
         rewrite_ids.extend(segment.glyph_ids.iter().copied());
     }
 
+    let metrics = CjkMeasure::resolve(opts.cjk_size_scale, opts.cjk_leading);
     let mut drawn = Vec::new();
     let mut succeeded: HashSet<u32> = HashSet::new();
     let mut embedded: Vec<(String, SubsetFont)> = Vec::new();
@@ -172,6 +217,7 @@ pub fn rewrite_translation(
                 &font,
                 "RPTF",
                 0.0,
+                metrics,
                 report,
                 extraction,
                 &by_id,
@@ -233,6 +279,7 @@ pub fn rewrite_translation(
                 &font,
                 &resource,
                 skew,
+                metrics,
                 report,
                 extraction,
                 &by_id,
@@ -774,6 +821,7 @@ fn place_segments(
     font: &SubsetFont,
     resource: &str,
     skew: f32,
+    metrics: CjkMeasure,
     report: &TranslateReport,
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
@@ -789,7 +837,9 @@ fn place_segments(
             .iter()
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
             .collect();
-        match layout_segment(&glyphs, text, font, extraction, bilingual, resource, skew) {
+        match layout_segment(
+            &glyphs, text, font, extraction, bilingual, resource, skew, metrics,
+        ) {
             Some(lines) => {
                 succeeded.extend(segment.glyph_ids.iter().copied());
                 drawn.extend(lines);
@@ -846,6 +896,7 @@ fn layout_segment(
     bilingual: bool,
     resource: &str,
     skew: f32,
+    metrics: CjkMeasure,
 ) -> Option<Vec<Drawn>> {
     if glyphs.is_empty() || text.trim().is_empty() {
         return None;
@@ -914,38 +965,22 @@ fn layout_segment(
     block_left = block_left.max(media[0]);
     let width = (block_right - block_left).max(source_size);
     let first_width = (width - indent).max(source_size * 0.5);
-    let deltas: Vec<f32> = ink
-        .windows(2)
-        .map(|pair| pair[0].y - pair[1].y)
-        .filter(|dy| *dy > 0.0)
-        .collect();
-    let source_leading = if deltas.is_empty() {
-        source_size * 1.15
+    let available = (top_y - bottom_y).max(0.0);
+    let scale = if ink.len() < 2 && source_size >= 12.5 {
+        metrics.heading_scale
     } else {
-        let mut ordered = deltas;
-        ordered.sort_by(|a, b| a.total_cmp(b));
-        ordered[ordered.len() / 2]
+        metrics.body_scale
     };
-    let floor = source_size * 0.55;
-    let mut size = source_size;
-    let fitted = loop {
-        let leading = (source_leading * size / source_size).clamp(size * 1.0, size * 1.35);
-        let lines = wrap_text(text, size, first_width, width, font)?;
-        let available = (top_y - bottom_y).max(0.0);
-        let need = (lines.len().saturating_sub(1) as f32) * leading;
-        let within = lines.iter().enumerate().all(|(index, line)| {
-            let limit = if index == 0 { first_width } else { width };
-            measure(line, size, font) <= limit + 1.0
-        });
-        if within && need <= available + 0.8 {
-            break Some((lines, leading));
-        }
-        if size <= floor + 0.01 {
-            break None;
-        }
-        size = (size * 0.92).max(floor);
-    };
-    let (lines, leading) = fitted?;
+    let (lines, size, leading) = fit_cjk_block(
+        text,
+        source_size,
+        scale,
+        first_width,
+        width,
+        available,
+        font,
+        metrics,
+    )?;
     let mut origin_y = top_y;
     if bilingual {
         let above = top_y + size * 1.2;
@@ -984,6 +1019,63 @@ fn layout_segment(
             })
             .collect(),
     )
+}
+
+/// Fit Chinese into the source block.
+///
+/// Body text starts below the English point size. Leading stays near a
+/// Chinese academic ratio (about 1.6 em) and the size shrinks before that
+/// ratio collapses back to the English baseline gap.
+fn fit_cjk_block(
+    text: &str,
+    source_size: f32,
+    scale: f32,
+    first_width: f32,
+    width: f32,
+    available: f32,
+    font: &SubsetFont,
+    metrics: CjkMeasure,
+) -> Option<(Vec<String>, f32, f32)> {
+    let start = (source_size * scale).max(1.0);
+    let floor = (start * 0.78).max(source_size * 0.62).min(start);
+    let mut size = start;
+    loop {
+        let lines = wrap_text(text, size, first_width, width, font)?;
+        let gaps = lines.len().saturating_sub(1);
+        let within = lines.iter().enumerate().all(|(index, line)| {
+            let limit = if index == 0 { first_width } else { width };
+            fit_measure(line, size, font) <= limit + 1.0
+        });
+        let single_source = available <= 0.5;
+        if within && (!single_source || lines.len() == 1) {
+            if gaps == 0 {
+                return Some((lines, size, size * metrics.leading_ratio));
+            }
+            let room = available / gaps as f32;
+            let min_lead = size * metrics.min_leading_ratio;
+            let want = size * metrics.leading_ratio;
+            if room + 0.8 >= min_lead {
+                return Some((lines, size, want.min(room)));
+            }
+        }
+        if size <= floor + 0.01 {
+            if within && !single_source && gaps > 0 {
+                let room = available / gaps as f32;
+                if room >= size * 1.05 {
+                    return Some((lines, size, room));
+                }
+            }
+            if within && lines.len() == 1 {
+                return Some((lines, size, size * metrics.leading_ratio));
+            }
+            return None;
+        }
+        let next = (size * 0.94).max(floor);
+        if (next - size).abs() < 0.01 {
+            return None;
+        }
+        size = next;
+    }
 }
 
 fn ink_lines<'a>(glyphs: &[&'a Glyph]) -> Vec<InkLine<'a>> {
@@ -1076,19 +1168,32 @@ fn justify_gaps(text: &str, size: f32, width: f32, font: &SubsetFont, justify: b
     if slots.is_empty() {
         return gaps;
     }
-    let slack = width - measure(text, size, font);
+    if line_skips_justification(text) {
+        return gaps;
+    }
+    let slack = width - fit_measure(text, size, font);
     if !(0.4..width * 0.12).contains(&slack) {
         return gaps;
     }
     let extra = slack / slots.len() as f32;
     // A larger gap reads as letter-spacing. Leave the line ragged instead.
-    if extra > size * 0.04 {
+    if extra > size * 0.03 {
         return gaps;
     }
     for index in slots {
         gaps[index] = extra;
     }
     gaps
+}
+
+fn line_skips_justification(text: &str) -> bool {
+    if text.contains('@') || text.to_ascii_lowercase().contains("et al") {
+        return true;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut sticky = vec![false; chars.len().saturating_sub(1)];
+    mark_citations(&chars, &mut sticky);
+    sticky.into_iter().any(|gap| gap)
 }
 
 fn is_cjk_body(ch: char) -> bool {
@@ -1138,6 +1243,7 @@ fn wrap_text(
     font: &SubsetFont,
 ) -> Option<Vec<String>> {
     let chars: Vec<char> = text.chars().collect();
+    let sticky = sticky_after(&chars);
     let mut lines = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
@@ -1149,8 +1255,12 @@ fn wrap_text(
         let mut end = start;
         let mut width = 0.0f32;
         while end < chars.len() {
-            let advance = measure(&chars[end].to_string(), size, font);
+            let advance = char_advance(chars[end], size, font);
             if end > start && width + advance > limit {
+                // A closing comma or period may hang past the measure once.
+                if hanging_punct(chars[end]) && width <= limit + 0.01 {
+                    end += 1;
+                }
                 break;
             }
             width += advance;
@@ -1161,7 +1271,8 @@ fn wrap_text(
         } else if end < chars.len() {
             // Break at the rightmost legal point. Jumping back to the previous
             // ASCII space throws away CJK that already fit after a citation.
-            while end > start + 1 && !can_break(chars[end - 1], chars[end]) {
+            // A sticky span longer than the line falls through to one character.
+            while end > start + 1 && !can_break_at(&chars, &sticky, end) {
                 end -= 1;
             }
         }
@@ -1187,6 +1298,113 @@ fn wrap_text(
         }
     }
     Some(lines).filter(|lines| !lines.is_empty())
+}
+
+fn char_advance(ch: char, size: f32, font: &SubsetFont) -> f32 {
+    font.glyphs
+        .get(&(ch as u32))
+        .map(|(_, advance)| *advance as f32 * size / font.units_per_em as f32)
+        .unwrap_or(size)
+}
+
+fn fit_measure(text: &str, size: f32, font: &SubsetFont) -> f32 {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() > 1 && chars.last().is_some_and(|ch| hanging_punct(*ch)) {
+        let body: String = chars[..chars.len() - 1].iter().collect();
+        measure(&body, size, font)
+    } else {
+        measure(text, size, font)
+    }
+}
+
+fn hanging_punct(ch: char) -> bool {
+    matches!(
+        ch,
+        '，' | '。' | '、' | '；' | '：' | '！' | '？' | ',' | '.' | ';' | ':' | '!' | '?'
+    )
+}
+
+fn sticky_after(chars: &[char]) -> Vec<bool> {
+    let mut sticky = vec![false; chars.len().saturating_sub(1)];
+    mark_citations(chars, &mut sticky);
+    mark_emails(chars, &mut sticky);
+    sticky
+}
+
+fn mark_citations(chars: &[char], sticky: &mut [bool]) {
+    let mut index = 0;
+    while index < chars.len() {
+        let close = match chars[index] {
+            '(' => ')',
+            '（' => '）',
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        let Some(rel) = chars[index + 1..].iter().position(|ch| *ch == close) else {
+            index += 1;
+            continue;
+        };
+        let end = index + 1 + rel;
+        if end - index < 80 {
+            let inside: String = chars[index + 1..end].iter().collect();
+            let digits = inside.chars().filter(|ch| ch.is_ascii_digit()).count();
+            if inside.to_ascii_lowercase().contains("et al") || digits >= 4 {
+                for boundary in index..end {
+                    if let Some(flag) = sticky.get_mut(boundary) {
+                        *flag = true;
+                    }
+                }
+            }
+        }
+        index = end + 1;
+    }
+}
+
+fn mark_emails(chars: &[char], sticky: &mut [bool]) {
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '@' {
+            index += 1;
+            continue;
+        }
+        let mut left = index;
+        while left > 0 && index - left < 80 {
+            let prev = chars[left - 1];
+            if is_addr_char(prev) || matches!(prev, '{' | '}' | ',' | ' ') {
+                left -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut right = index;
+        while right + 1 < chars.len() && right - index < 80 && is_addr_char(chars[right + 1]) {
+            right += 1;
+        }
+        if right > index && left < index {
+            for boundary in left..right {
+                if let Some(flag) = sticky.get_mut(boundary) {
+                    *flag = true;
+                }
+            }
+        }
+        index = right + 1;
+    }
+}
+
+fn is_addr_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+' | '%')
+}
+
+fn can_break_at(chars: &[char], sticky: &[bool], end: usize) -> bool {
+    if end == 0 || end >= chars.len() {
+        return true;
+    }
+    if sticky.get(end - 1).copied().unwrap_or(false) {
+        return false;
+    }
+    can_break(chars[end - 1], chars[end])
 }
 
 fn can_break(prev: char, next: char) -> bool {
@@ -2235,6 +2453,152 @@ mod tests {
         );
     }
 
+    fn uniform_font(text: &str) -> SubsetFont {
+        let mut glyphs = HashMap::new();
+        for (id, ch) in (1u16..).zip(text.chars()) {
+            glyphs.insert(ch as u32, (id, 1000));
+        }
+        SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        }
+    }
+
+    #[test]
+    fn chinese_body_is_smaller_with_more_open_leading() {
+        let metrics = CjkMeasure::resolve(0.90, 1.60);
+        assert!((metrics.body_scale - 0.90).abs() < 1e-4);
+        assert!((metrics.leading_ratio - 1.60).abs() < 1e-4);
+        assert!(metrics.min_leading_ratio >= 1.40);
+        assert!(metrics.heading_scale > metrics.body_scale && metrics.heading_scale <= 1.0);
+
+        let text = "中文正文应当使用更小的字号并且配上更舒适的行距才像论文";
+        let font = uniform_font(text);
+        // 22 ideographs. At 9pt a 90pt column holds 10, so this is three lines.
+        // Two English gaps of 20pt each leave room for a 1.6em Chinese leading.
+        let (lines, size, leading) = fit_cjk_block(
+            text,
+            10.0,
+            metrics.body_scale,
+            90.0,
+            90.0,
+            40.0,
+            &font,
+            metrics,
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            (size - 9.0).abs() < 0.05,
+            "body should start at 90% of 10pt, got {size}"
+        );
+        assert!(
+            (leading / size - 1.60).abs() < 0.02,
+            "leading {leading} / size {size}"
+        );
+
+        let (tight_lines, tight_size, tight_leading) = fit_cjk_block(
+            text,
+            10.0,
+            metrics.body_scale,
+            90.0,
+            90.0,
+            22.0,
+            &font,
+            metrics,
+        )
+        .unwrap();
+        assert!(tight_lines.len() >= 2, "{tight_lines:?}");
+        assert!(
+            tight_size < size - 0.4,
+            "a short block shrinks the size before crushing the leading: {tight_size}"
+        );
+        assert!(
+            tight_leading / tight_size >= metrics.min_leading_ratio - 0.05,
+            "leading {tight_leading} size {tight_size}"
+        );
+
+        let title = "论文标题";
+        let title_font = uniform_font(title);
+        let (_, title_size, _) = fit_cjk_block(
+            title,
+            16.0,
+            metrics.heading_scale,
+            200.0,
+            200.0,
+            0.0,
+            &title_font,
+            metrics,
+        )
+        .unwrap();
+        assert!(
+            (title_size - 16.0 * metrics.heading_scale).abs() < 0.05,
+            "{title_size}"
+        );
+
+        let author = "作者甲";
+        let author_font = uniform_font(author);
+        let (_, author_size, _) = fit_cjk_block(
+            author,
+            10.0,
+            metrics.body_scale,
+            200.0,
+            200.0,
+            0.0,
+            &author_font,
+            metrics,
+        )
+        .unwrap();
+        assert!((author_size - 9.0).abs() < 0.05, "{author_size}");
+    }
+
+    #[test]
+    fn citations_and_emails_are_not_split_or_letter_spaced() {
+        let text = "前文(Jimenez et al., 2024)后文继续";
+        let font = uniform_font(text);
+        let lines = wrap_text(text, 10.0, 220.0, 220.0, &font).unwrap();
+        assert_eq!(lines[0], "前文", "{lines:?}");
+        assert!(lines[1].starts_with("(Jimenez et al., 2024)"), "{lines:?}");
+        let email = "联系{xuanzhang826, ltzheng01}@gmail.com谢谢";
+        let email_font = uniform_font(email);
+        let email_lines = wrap_text(email, 10.0, 200.0, 360.0, &email_font).unwrap();
+        assert!(
+            email_lines
+                .iter()
+                .any(|line| line.contains("{xuanzhang826, ltzheng01}@gmail.com")),
+            "{email_lines:?}"
+        );
+        assert!(
+            !email_lines
+                .iter()
+                .any(|line| line.contains('@') && !line.contains("gmail.com")),
+            "{email_lines:?}"
+        );
+
+        let hung = "中文正文。后续";
+        let hung_font = uniform_font(hung);
+        let hung_lines = wrap_text(hung, 10.0, 45.0, 45.0, &hung_font).unwrap();
+        assert_eq!(hung_lines[0], "中文正文。", "{hung_lines:?}");
+
+        let cited = "评估(Rashid et al.,2025)结果很好";
+        let cited_font = uniform_font(cited);
+        let cited_width = measure(cited, 10.0, &cited_font) + 1.5;
+        let cited_gaps = justify_gaps(cited, 10.0, cited_width, &cited_font, true);
+        assert!(
+            cited_gaps.iter().all(|gap| *gap == 0.0),
+            "a citation line stays tight: {cited_gaps:?}"
+        );
+        let addr = "邮箱user@lab.org谢谢";
+        let addr_font = uniform_font(addr);
+        let addr_width = measure(addr, 10.0, &addr_font) + 1.5;
+        let addr_gaps = justify_gaps(addr, 10.0, addr_width, &addr_font, true);
+        assert!(
+            addr_gaps.iter().all(|gap| *gap == 0.0),
+            "an email line stays tight: {addr_gaps:?}"
+        );
+    }
+
     #[test]
     fn a_changed_line_is_drawn_in_a_cjk_face() {
         if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc")
@@ -2586,14 +2950,15 @@ mod tests {
             loaded.get_dictionary(id).unwrap().get(b"Rect").unwrap(),
         )
         .unwrap();
-        // Source citation sat near x=367. "参见" is two 7.2pt glyphs, so the
-        // citation now starts just after the paragraph origin at 72.
+        // Source citation sat near x=367. Body text is 90% of the 12pt source,
+        // and the box font advance matches the 600-unit source widths, so
+        // "参见" is two 6.48pt glyphs and the citation ends near x=210.
         assert!(
             rect[0] > 80.0 && rect[0] < 95.0,
             "link should sit on the citation, not the old English x: {rect:?}"
         );
         assert!(
-            rect[2] > 220.0 && rect[2] < 245.0,
+            rect[2] > 205.0 && rect[2] < 230.0,
             "link should cover the citation and not the following Chinese: {rect:?}"
         );
         let text = PdfDocument::open_bytes(&saved)

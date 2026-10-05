@@ -79,6 +79,12 @@ enum Command {
         /// Sans CJK font for regular sans text. Bold text still uses Noto Sans CJK Bold.
         #[arg(long)]
         cjk_sans: Option<PathBuf>,
+        /// Chinese body size as a fraction of the English size. Default 0.90.
+        #[arg(long)]
+        cjk_size_scale: Option<f32>,
+        /// Chinese baseline distance in ems of that size. Default 1.60.
+        #[arg(long)]
+        cjk_leading: Option<f32>,
         /// Segments per model call.
         #[arg(long, default_value_t = 8)]
         batch_size: usize,
@@ -115,6 +121,8 @@ fn main() -> ExitCode {
             translate_tables,
             cjk_font,
             cjk_sans,
+            cjk_size_scale,
+            cjk_leading,
             batch_size,
             json: _,
             compact,
@@ -156,6 +164,8 @@ fn main() -> ExitCode {
                     skip_tables: !translate_tables,
                     cjk_font: cjk_font.as_ref().map(|path| path.display().to_string()),
                     cjk_sans: cjk_sans.as_ref().map(|path| path.display().to_string()),
+                    cjk_size_scale: cjk_size_scale.unwrap_or(0.0),
+                    cjk_leading: cjk_leading.unwrap_or(0.0),
                     batch_size,
                     output_mode,
                     ..TranslateOptions::default()
@@ -224,6 +234,8 @@ fn run_translate(
                 mode: opts.output_mode,
                 cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
                 cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+                cjk_size_scale: opts.cjk_size_scale,
+                cjk_leading: opts.cjk_leading,
                 ..RewriteOptions::default()
             },
         ) {
@@ -255,6 +267,8 @@ fn run_translate(
                 mode,
                 cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
                 cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+                cjk_size_scale: opts.cjk_size_scale,
+                cjk_leading: opts.cjk_leading,
                 ..RewriteOptions::default()
             },
         ) {

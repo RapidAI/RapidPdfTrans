@@ -115,15 +115,43 @@ fn env_font(name: &str) -> Option<std::path::PathBuf> {
 }
 
 fn noto_subset(serif: bool, bold: bool, codepoints: &[u32]) -> Option<SubsetFont> {
-    let path = match (serif, bold) {
-        (_, true) => "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        (true, false) => "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-        (false, false) => "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    if serif && !bold {
+        if let Some(font) = light_song_subset(codepoints) {
+            return Some(font);
+        }
+    }
+    let (path, face) = match (serif, bold) {
+        (_, true) => ("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 2),
+        (true, false) => ("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc", 2),
+        (false, false) => ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
     };
     std::path::Path::new(path)
         .is_file()
-        .then(|| subset_cff(path, 2, codepoints))
+        .then(|| subset_cff(path, face, codepoints))
         .flatten()
+}
+
+/// Source Han Serif / Noto Serif CJK SC Light, when it is installed.
+/// Regular is the fallback. A dedicated SC OTF is face 0.
+fn light_song_subset(codepoints: &[u32]) -> Option<SubsetFont> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(
+            std::path::PathBuf::from(home).join(".local/share/fonts/NotoSerifCJKsc-Light.otf"),
+        );
+    }
+    paths.push("/usr/local/share/fonts/NotoSerifCJKsc-Light.otf".into());
+    paths.push("/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf".into());
+    for path in paths {
+        if !path.is_file() {
+            continue;
+        }
+        let path = path.to_str()?;
+        if let Some(font) = subset_cff(path, 0, codepoints) {
+            return Some(font);
+        }
+    }
+    None
 }
 
 fn subset_user_font(path: &std::path::Path, codepoints: &[u32]) -> Option<SubsetFont> {

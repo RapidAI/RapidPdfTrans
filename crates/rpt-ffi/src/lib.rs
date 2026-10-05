@@ -246,6 +246,8 @@ pub unsafe extern "C" fn rpt_save(
                         .cjk_sans
                         .as_ref()
                         .map(std::path::PathBuf::from),
+                    cjk_size_scale: translate_opts.cjk_size_scale,
+                    cjk_leading: translate_opts.cjk_leading,
                     ..RewriteOptions::default()
                 },
             )
