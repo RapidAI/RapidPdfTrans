@@ -142,7 +142,7 @@ impl Default for TranslateOptions {
             context_window: 2,
             batch_size: 8,
             temperature: 0.0,
-            timeout_secs: 180,
+            timeout_secs: 300,
             max_tokens: None,
             translator: None,
             skip_references: true,
@@ -427,6 +427,41 @@ pub fn translate_extraction(
 }
 
 fn translate_batch(
+    segments: &[Segment],
+    shielded: &[protect::Shielded],
+    indexes: &[usize],
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+) -> Result<Vec<(usize, String)>> {
+    match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
+        Ok(restored) => Ok(restored),
+        Err(err) if is_timeout(&err) && indexes.len() > 1 => {
+            let mid = indexes.len() / 2;
+            let mut left =
+                translate_batch(segments, shielded, &indexes[..mid], opts, translator, calls)?;
+            left.extend(translate_batch(
+                segments,
+                shielded,
+                &indexes[mid..],
+                opts,
+                translator,
+                calls,
+            )?);
+            Ok(left)
+        }
+        Err(err) if is_timeout(&err) => {
+            translate_batch_once(segments, shielded, indexes, opts, translator, calls)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn is_timeout(err: &Error) -> bool {
+    err.to_string().to_ascii_lowercase().contains("timeout")
+}
+
+fn translate_batch_once(
     segments: &[Segment],
     shielded: &[protect::Shielded],
     indexes: &[usize],
@@ -735,6 +770,35 @@ mod tests {
             glyph.disposition,
             Disposition::TranslatedPendingRewrite { .. }
         )));
+    }
+
+    #[test]
+    fn a_timeout_splits_the_batch_and_still_translates() {
+        let mut ex = extraction_from_lines(&["Alpha one", "Beta two"]);
+        let translator = SplitOnTimeout;
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &translator).unwrap();
+        let texts: Vec<_> = report
+            .segments
+            .iter()
+            .map(|seg| seg.translated.as_str())
+            .collect();
+        assert!(texts.iter().any(|text| text.contains("Alpha")), "{texts:?}");
+        assert!(texts.iter().any(|text| text.contains("Beta")), "{texts:?}");
+        assert!(report.calls >= 3, "calls={}", report.calls);
+    }
+
+    struct SplitOnTimeout;
+    impl Translator for SplitOnTimeout {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            if user.matches("\"id\":").count() > 1 {
+                return Err(Error::Translate("timeout: global".into()));
+            }
+            let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+            let seg = &payload["segments"][0];
+            let text = seg["text"].as_str().unwrap_or("");
+            Ok(serde_json::json!({"translations":[{"id": seg["id"], "text": text}]}).to_string())
+        }
     }
 
     #[test]
