@@ -55,21 +55,18 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
             _ => !current.is_empty(),
         };
         if new_line && !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
+            lines.extend(split_columns(std::mem::take(&mut current)));
         }
-        // A wide gap on one baseline is a column gutter, not a missing space.
         // A jump back to the left is the other column on a nearby baseline.
+        // Same-baseline columns are split after the line is collected: a fixed
+        // gap would also cut justified word spaces.
         let left = glyph.bbox[0].min(glyph.bbox[2]);
-        let column_gap = current.last().is_some_and(|prev| {
-            let right = prev.bbox[0].max(prev.bbox[2]);
-            left - right > 24.0
-        });
         let jumped_back = current.last().is_some_and(|prev| {
             let prev_left = prev.bbox[0].min(prev.bbox[2]);
             prev_left - left > 24.0
         });
-        if (column_gap || jumped_back) && !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
+        if jumped_back && !current.is_empty() {
+            lines.extend(split_columns(std::mem::take(&mut current)));
         }
         last_page = Some(glyph.page_index);
         last_y = Some(glyph.matrix[5]);
@@ -77,7 +74,7 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
         current.push(glyph);
     }
     if !current.is_empty() {
-        lines.push(current);
+        lines.extend(split_columns(current));
     }
 
     let mut segments = Vec::new();
@@ -115,6 +112,47 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
         flush(&mut segments, &mut buf_ids, &mut buf);
     }
     join_line_break_hyphens(glyphs, segments)
+}
+
+/// Split one baseline where a gap is a column gutter rather than a word space.
+fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
+    if line.len() < 2 {
+        return vec![line];
+    }
+    let mut gaps = Vec::with_capacity(line.len() - 1);
+    for pair in line.windows(2) {
+        let right = pair[0].bbox[0].max(pair[0].bbox[2]);
+        let left = pair[1].bbox[0].min(pair[1].bbox[2]);
+        gaps.push(left - right);
+    }
+    let size = line
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    // Wider than a justified word space. A fixed 18pt floor misses a column
+    // whose left line runs close to the right column (the remaining gutter is
+    // ~17pt). Short lines still split only on the hard gap.
+    let hard = (size * 2.0).max(24.0);
+    let trigger = if line.len() >= 4 {
+        let mut ordered = gaps.clone();
+        ordered.sort_by(|a, b| a.total_cmp(b));
+        let median = ordered[ordered.len() / 2].max(0.0);
+        (median * 3.5).max(size * 1.25).min(hard)
+    } else {
+        hard
+    };
+    let mut parts = Vec::new();
+    let mut current = vec![line[0]];
+    for (index, glyph) in line.iter().copied().enumerate().skip(1) {
+        if gaps[index - 1] > trigger && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+        }
+        current.push(glyph);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 /// LaTeX line-break hyphens (`tra-` / `jectories`) are separate lines. Join them
@@ -290,6 +328,32 @@ mod tests {
     }
 
     #[test]
+    fn a_same_baseline_column_gutter_is_its_own_segment() {
+        let mut glyphs = Vec::new();
+        for (index, ch) in ["L", "e", "f", "t"].iter().enumerate() {
+            glyphs.push(glyph(
+                index as u32,
+                72.0 + index as f32 * 8.0,
+                500.0,
+                ch,
+                false,
+            ));
+        }
+        for (index, ch) in ["R", "i", "g", "h", "t"].iter().enumerate() {
+            glyphs.push(glyph(
+                10 + index as u32,
+                340.0 + index as f32 * 8.0,
+                500.0,
+                ch,
+                false,
+            ));
+        }
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert_eq!(texts, ["Left", "Right"]);
+    }
+
+    #[test]
     fn a_nearby_baseline_in_the_other_column_is_its_own_line() {
         let glyphs = vec![
             glyph(0, 320.0, 648.0, "I", false),
@@ -320,6 +384,59 @@ mod tests {
         cjk[1].bbox = [14.0, 700.0, 26.0, 710.0];
         let segs = segment_glyphs(&cjk);
         assert_eq!(segs[0].text, "中文");
+    }
+
+    #[test]
+    fn a_staggered_column_with_a_17pt_gutter_is_split() {
+        // The left line sits 2.5pt above the right line, inside the same-line
+        // tolerance, and the gutter left between them is only 17pt.
+        let mut glyphs = Vec::new();
+        for index in 0..12 {
+            let x = 70.0 + index as f32 * 18.0;
+            let mut item = glyph(index, x, 304.0, "a", false);
+            item.font_size = 10.0;
+            item.bbox = [x, 304.0, x + 16.0, 314.0];
+            glyphs.push(item);
+        }
+        for index in 0..12 {
+            let x = 301.0 + index as f32 * 18.0;
+            let mut item = glyph(20 + index, x, 301.5, "b", false);
+            item.font_size = 10.0;
+            item.bbox = [x, 301.5, x + 16.0, 311.5];
+            glyphs.push(item);
+        }
+        let segs = segment_glyphs(&glyphs);
+        assert_eq!(
+            segs.len(),
+            2,
+            "{:?}",
+            segs.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+        assert!(segs
+            .iter()
+            .any(|seg| seg.text.chars().all(|ch| ch == 'a' || ch == ' ')));
+        assert!(segs
+            .iter()
+            .any(|seg| seg.text.chars().all(|ch| ch == 'b' || ch == ' ')));
+    }
+
+    #[test]
+    fn a_justified_word_gap_stays_one_segment() {
+        let mut glyphs = Vec::new();
+        for index in 0..12 {
+            let x = 72.0 + index as f32 * 14.0;
+            let mut item = glyph(index, x, 500.0, "w", false);
+            item.font_size = 10.0;
+            item.bbox = [x, 500.0, x + 6.0, 510.0];
+            glyphs.push(item);
+        }
+        let segs = segment_glyphs(&glyphs);
+        assert_eq!(
+            segs.len(),
+            1,
+            "{:?}",
+            segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

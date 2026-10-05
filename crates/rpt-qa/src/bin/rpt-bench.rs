@@ -75,7 +75,20 @@ fn main() -> ExitCode {
                         "{}",
                         serde_json::to_string_pretty(&score).unwrap_or_else(|_| "{}".into())
                     );
-                    ExitCode::SUCCESS
+                    if !score.paint_font_ok
+                        || score.horizontal_containment < 0.9
+                        || score.cjk_extract_ratio < 0.9
+                    {
+                        eprintln!(
+                            "rpt-bench: paint check failed (font_ok={} containment={:.3} cjk_extract={:.3})",
+                            score.paint_font_ok,
+                            score.horizontal_containment,
+                            score.cjk_extract_ratio
+                        );
+                        ExitCode::from(1)
+                    } else {
+                        ExitCode::SUCCESS
+                    }
                 }
                 Err(err) => {
                     eprintln!("rpt-bench: {err}");

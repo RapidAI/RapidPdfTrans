@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::AtomicU64;
 
 static WORK_TICK: AtomicU64 = AtomicU64::new(0);
@@ -94,6 +95,16 @@ pub struct PairScore {
     pub mean_nontext_ssim: Option<f32>,
     pub render_note: String,
     pub unmapped_fonts: Vec<FontCount>,
+    /// False when an embedded translation font is an OpenType wrapper declared
+    /// as CIDFontType0. Poppler then paints the wrong outlines while ToUnicode
+    /// still extracts the translation, so drop/style scores stay high.
+    pub paint_font_ok: bool,
+    /// Output lines whose horizontal span sits inside a nearby source line.
+    /// A translation drawn past the source column scores below 1.
+    pub horizontal_containment: f32,
+    /// CJK characters in our extraction that `pdftotext` also returns.
+    /// Vacuous (1) when the output has no CJK.
+    pub cjk_extract_ratio: f32,
 }
 
 struct Line {
@@ -211,6 +222,10 @@ pub fn score_extractions(
     let out_doc = PdfDocument::open(output).map_err(|err| err.to_string())?;
     let (reference_operators_identical, reference_operators) =
         identical_reference_operators(&src_doc, &out_doc, &source_ex.glyphs);
+    let output_lines = lines_of(output_ex);
+    let horizontal_containment = horizontal_containment(&lines, &output_lines);
+    let paint_font_ok = embedded_translation_font_ok(output);
+    let cjk_extract_ratio = cjk_extract_ratio(output, output_ex);
     Ok(PairScore {
         source_pages: source_ex.pages.len(),
         output_pages: output_ex.pages.len(),
@@ -253,7 +268,103 @@ pub fn score_extractions(
         mean_nontext_ssim,
         render_note,
         unmapped_fonts: unmapped_fonts(source_ex),
+        paint_font_ok,
+        horizontal_containment,
+        cjk_extract_ratio,
     })
+}
+
+fn horizontal_containment(source: &[Line], output: &[Line]) -> f32 {
+    if output.is_empty() {
+        return 1.0;
+    }
+    let mut inside = 0usize;
+    for line in output {
+        let x0 = line.bbox[0].min(line.bbox[2]);
+        let x1 = line.bbox[0].max(line.bbox[2]);
+        let y = line_baseline(line);
+        let size = line
+            .glyphs
+            .first()
+            .map(|glyph| glyph.font_size)
+            .unwrap_or(10.0)
+            .max(1.0);
+        let tol = 3.0f32;
+        let mut spans: Vec<(f32, f32)> = source
+            .iter()
+            .filter(|src| src.page == line.page && (line_baseline(src) - y).abs() <= size * 2.4)
+            .map(|src| (src.bbox[0].min(src.bbox[2]), src.bbox[0].max(src.bbox[2])))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut merged: Vec<(f32, f32)> = Vec::new();
+        for (left, right) in spans {
+            if let Some(last) = merged.last_mut() {
+                // Word gaps on one baseline join. A column gutter stays split.
+                if left <= last.1 + 20.0 {
+                    last.1 = last.1.max(right);
+                    continue;
+                }
+            }
+            merged.push((left, right));
+        }
+        if merged
+            .iter()
+            .any(|(left, right)| x0 >= left - tol && x1 <= right + tol)
+        {
+            inside += 1;
+        }
+    }
+    ratio(inside, output.len())
+}
+
+fn embedded_translation_font_ok(pdf: &Path) -> bool {
+    let output = match Command::new("pdffonts").arg(pdf).output() {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+    let listing = String::from_utf8_lossy(&output.stdout);
+    for line in listing.lines() {
+        if line.contains("RPTCJK") && line.contains("(OT)") {
+            return false;
+        }
+    }
+    true
+}
+
+fn cjk_extract_ratio(pdf: &Path, extraction: &Extraction) -> f32 {
+    let mut expected: HashMap<char, u32> = HashMap::new();
+    for glyph in &extraction.glyphs {
+        for ch in glyph.unicode.chars().filter(|ch| is_cjk_char(*ch)) {
+            *expected.entry(ch).or_insert(0) += 1;
+        }
+    }
+    let total: u32 = expected.values().sum();
+    if total == 0 {
+        return 1.0;
+    }
+    let output = match Command::new("pdftotext")
+        .args(["-enc", "UTF-8", "-q"])
+        .arg(pdf)
+        .arg("-")
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return 0.0,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut found: HashMap<char, u32> = HashMap::new();
+    for ch in text.chars().filter(|ch| is_cjk_char(*ch)) {
+        *found.entry(ch).or_insert(0) += 1;
+    }
+    let mut hit = 0u32;
+    for (ch, count) in &expected {
+        hit += (*count).min(*found.get(ch).unwrap_or(&0));
+    }
+    hit as f32 / total as f32
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    ('\u{3400}'..='\u{9FFF}').contains(&ch) || ('\u{F900}'..='\u{FAFF}').contains(&ch)
 }
 
 fn lines_of(extraction: &Extraction) -> Vec<Line> {
@@ -271,11 +382,21 @@ fn lines_of(extraction: &Extraction) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
     for glyph in glyphs {
         let attach = lines.last().is_some_and(|line| {
-            let left = glyph.bbox[0].min(glyph.bbox[2]);
-            let right = line.bbox[0].max(line.bbox[2]);
+            let line_right = line.bbox[0].max(line.bbox[2]);
+            let glyph_left = glyph.bbox[0].min(glyph.bbox[2]);
+            let gap = glyph_left - line_right;
+            let size = line
+                .glyphs
+                .last()
+                .map(|last| last.font_size)
+                .unwrap_or(10.0)
+                .max(1.0);
+            // Only extend a line to the right. A glyph in the other column has
+            // a close baseline but sits far to the left; `left <= right + 24`
+            // used to absorb it and score the union as one overflowing line.
             line.page == glyph.page_index
                 && (line_baseline(line) - glyph.matrix[5]).abs() <= 2.0
-                && left <= right + 24.0
+                && (-size..=24.0).contains(&gap)
         });
         if attach {
             let line = lines.last_mut().unwrap();
@@ -704,6 +825,9 @@ mod tests {
         assert_eq!(same.overflow_glyphs, 0);
         assert_eq!(same.style_retention, 1.0);
         assert!(same.identity_char_retention > 0.99);
+        assert!(same.paint_font_ok);
+        assert!(same.horizontal_containment > 0.99);
+        assert!(same.cjk_extract_ratio > 0.99);
         if let Some(ssim) = same.mean_nontext_ssim {
             assert!(ssim > 0.99);
         }

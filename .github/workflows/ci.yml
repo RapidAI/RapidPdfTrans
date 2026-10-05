@@ -15,7 +15,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Install Python headers and Poppler
-        run: sudo apt-get update && sudo apt-get install -y python3-dev g++ poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y python3-dev python3-fonttools python3-pil g++ poppler-utils fonts-noto-cjk tesseract-ocr tesseract-ocr-chi-sim
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

@@ -750,6 +750,26 @@ fn place_segments(
     }
 }
 
+fn segment_crosses_column(glyphs: &[&Glyph], size: f32) -> bool {
+    if glyphs.len() < 4 {
+        return false;
+    }
+    let mut ordered: Vec<&Glyph> = glyphs.to_vec();
+    ordered.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+    let mut gaps = Vec::with_capacity(ordered.len() - 1);
+    for pair in ordered.windows(2) {
+        let right = pair[0].bbox[0].max(pair[0].bbox[2]);
+        let left = pair[1].bbox[0].min(pair[1].bbox[2]);
+        gaps.push(left - right);
+    }
+    let mut sorted = gaps.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let median = sorted[sorted.len() / 2].max(0.0);
+    let hard = (size * 2.0).max(24.0);
+    let trigger = (median * 3.5).max(size * 1.25).min(hard);
+    gaps.iter().any(|gap| *gap > trigger)
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -785,15 +805,24 @@ fn layout_segment(
         .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
         .fold(x, f32::max);
     let from_advance: f32 = glyphs.iter().map(|glyph| glyph.advance[0].abs()).sum();
-    let measured = (right - x).max(from_advance);
-    // Standard-14 fonts often omit /Widths. A zero span would wrap every
-    // translation onto one glyph per line, so estimate a Latin run instead.
+    // The line box is the visual span of the source glyphs. Summing advances
+    // is wrong once a segment holds more than one source line (a joined
+    // hyphen): that sum is two columns wide, so the translation is drawn as
+    // one line that runs through the margin. Advances are only a fallback for
+    // fonts that omit /Widths and therefore have an empty bbox.
     let size0 = glyphs[0].font_size.max(1.0);
-    let line_width = if measured < size0 * 0.25 {
-        (glyphs.len() as f32 * size0 * 0.5).max(size0)
+    let visual = (right - x).max(0.0);
+    if segment_crosses_column(glyphs, size0) {
+        return None;
+    }
+    let line_width = if visual >= size0 * 0.25 {
+        visual
+    } else if from_advance >= size0 * 0.25 {
+        from_advance
     } else {
-        measured
+        (glyphs.len() as f32 * size0 * 0.5).max(size0)
     };
+    let line_width = line_width.min((media[2] - x - 1.0).max(size0));
     let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
     sizes.sort_by(|a, b| a.total_cmp(b));
     let mut size = sizes[sizes.len() / 2].max(1.0);
@@ -807,6 +836,12 @@ fn layout_segment(
         wrap_text(text, size, line_width, font)?
     };
     if lines.len() > 6 {
+        return None;
+    }
+    if lines
+        .iter()
+        .any(|line| measure(line, size, font) > line_width + 1.0)
+    {
         return None;
     }
     let leading = size * 1.15;
@@ -964,7 +999,9 @@ fn embed_and_draw(
         let Some(page_id) = parse_id(&page.object_id) else {
             continue;
         };
-        let mut stream = String::from("BT\n");
+        // Concatenated content streams keep the previous text state. A leftover
+        // Tc/Tz from the page would move every new glyph off the line box.
+        let mut stream = String::from("BT\n0 Tc 0 Tw 100 Tz 0 TL 0 Ts\n");
         for line in lines {
             stream.push_str(&format!(
                 "/{} {} Tf {} 1 0 {} 1 {} {} Tm <{}> Tj\n",
@@ -985,14 +1022,52 @@ fn embed_and_draw(
     Ok(())
 }
 
+/// Bare CFF for CIDFontType0, otherwise the original glyf font bytes.
+fn cff_or_glyf(bytes: &[u8]) -> (Vec<u8>, bool) {
+    if bytes.len() >= 12 && &bytes[0..4] == b"OTTO" {
+        if let Some(cff) = sfnt_table(bytes, b"CFF ") {
+            if cff.len() >= 4 && cff[0] == 1 {
+                return (cff, true);
+            }
+        }
+    }
+    if bytes.len() >= 4 && bytes[0] == 1 && bytes[1] == 0 {
+        return (bytes.to_vec(), true);
+    }
+    (bytes.to_vec(), false)
+}
+
+fn sfnt_table(font: &[u8], tag: &[u8; 4]) -> Option<Vec<u8>> {
+    if font.len() < 12 {
+        return None;
+    }
+    let n = u16::from_be_bytes(font.get(4..6)?.try_into().ok()?) as usize;
+    for index in 0..n {
+        let rec = 12 + index * 16;
+        let header = font.get(rec..rec + 16)?;
+        if &header[0..4] != tag {
+            continue;
+        }
+        let offset = u32::from_be_bytes(header[8..12].try_into().ok()?) as usize;
+        let len = u32::from_be_bytes(header[12..16].try_into().ok()?) as usize;
+        return Some(font.get(offset..offset + len)?.to_vec());
+    }
+    None
+}
+
 fn embed_font(doc: &mut Document, font: &SubsetFont) -> ObjectId {
-    let cff = font.bytes.len() >= 4 && &font.bytes[0..4] == b"OTTO";
+    // A CIDFontType0 FontFile3 must be a bare CFF program. Noto's subset is an
+    // OpenType (OTTO) wrapper around that CFF. Embedding the wrapper makes
+    // Poppler report "Mismatch between font type and embedded font file" and
+    // paint the Identity-H CID bytes through the Unicode cmap, so the page
+    // shows Latin garbage while ToUnicode still extracts the translation.
+    let (file_bytes, cff) = cff_or_glyf(&font.bytes);
     let file_id = if cff {
         let mut file = Dictionary::new();
         file.set("Subtype", "CIDFontType0C");
-        doc.add_object(Stream::new(file, font.bytes.clone()))
+        doc.add_object(Stream::new(file, file_bytes))
     } else {
-        doc.add_object(Stream::new(Dictionary::new(), font.bytes.clone()))
+        doc.add_object(Stream::new(Dictionary::new(), file_bytes))
     };
     let mut descriptor = Dictionary::new();
     descriptor.set("Type", "FontDescriptor");
@@ -1408,6 +1483,96 @@ mod tests {
         assert!(
             text.lines().any(|line| line.contains("你好")),
             "CJK replacement should stay on one line: {text}"
+        );
+        let font_program = embedded_cff(&saved).expect("CIDFontType0C font program");
+        assert_ne!(&font_program[0..4], b"OTTO", "FontFile3 must be bare CFF");
+        assert_eq!(font_program[0], 1, "CFF major version");
+        assert_painted_nihao(&saved);
+    }
+
+    fn embedded_cff(pdf: &[u8]) -> Option<Vec<u8>> {
+        let doc = Document::load_mem(pdf).ok()?;
+        for object in doc.objects.values() {
+            let Ok(stream) = object.as_stream() else {
+                continue;
+            };
+            let subtype = stream
+                .dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|obj| obj.as_name().ok());
+            if subtype != Some(b"CIDFontType0C".as_slice()) {
+                continue;
+            }
+            let bytes = stream
+                .decompressed_content()
+                .unwrap_or_else(|_| stream.content.clone());
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+
+    fn assert_painted_nihao(pdf: &[u8]) {
+        let path = std::env::temp_dir().join("rpt-nihao-paint.pdf");
+        std::fs::write(&path, pdf).unwrap();
+        let text = std::process::Command::new("pdftotext")
+            .args(["-enc", "UTF-8", "-q"])
+            .arg(&path)
+            .arg("-")
+            .output()
+            .expect("pdftotext");
+        let extracted = String::from_utf8_lossy(&text.stdout);
+        assert!(
+            extracted.contains("你好"),
+            "pdftotext missed the translation: {extracted}"
+        );
+        let fonts = std::process::Command::new("pdffonts")
+            .arg(&path)
+            .output()
+            .expect("pdffonts");
+        let listing = String::from_utf8_lossy(&fonts.stdout);
+        let stderr = String::from_utf8_lossy(&fonts.stderr);
+        assert!(
+            listing.contains("RPTCJK") && listing.contains("CID Type 0C"),
+            "{listing}"
+        );
+        assert!(
+            !listing.contains("CID Type 0C (OT)"),
+            "OpenType wrapper is not a CIDFontType0 program:\n{listing}"
+        );
+        assert!(!stderr.contains("Mismatch between font type"), "{stderr}");
+        let dir = std::env::temp_dir().join("rpt-nihao-paint");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rendered = std::process::Command::new("pdftoppm")
+            .args(["-png", "-r", "144", "-f", "1", "-l", "1"])
+            .arg(&path)
+            .arg(dir.join("page"))
+            .status()
+            .expect("pdftoppm");
+        assert!(rendered.success(), "pdftoppm failed");
+        let png = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
+            .expect("pdftoppm wrote no png");
+        let ocr = std::process::Command::new("tesseract")
+            .args([
+                png.to_str().unwrap(),
+                "stdout",
+                "-l",
+                "chi_sim+eng",
+                "--psm",
+                "6",
+            ])
+            .output()
+            .expect("tesseract");
+        let seen = String::from_utf8_lossy(&ocr.stdout);
+        assert!(
+            seen.contains("你好"),
+            "rendered page is not 你好 (ToUnicode is not used): {seen}"
         );
     }
 

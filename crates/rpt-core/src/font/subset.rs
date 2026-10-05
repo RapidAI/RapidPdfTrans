@@ -1,9 +1,10 @@
-//! Subset a TrueType glyf font down to the characters a translation uses.
+//! Subset a CJK font down to the characters a translation uses.
 //!
-//! The result is a CIDFontType2 payload: Identity glyph ids, advances in font
-//! units, and a Unicode cmap. Shaping is one glyph per character from `hmtx`.
-//! OpenType GSUB is not applied. A CFF font is refused so the caller can keep
-//! the original text instead of embedding a font this subsetter cannot rebuild.
+//! Glyf faces become a CIDFontType2 payload with Identity glyph ids. CFF faces
+//! (Noto CJK) are subset with fontTools; the saved bytes are an OpenType file
+//! whose `CFF ` table is what a CIDFontType0 FontFile3 must embed. Glyph ids in
+//! `glyphs` are the charset CIDs (`cidNNNNN`), which is what Identity-H writes.
+//! Shaping is one glyph per character. OpenType GSUB is not applied.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
