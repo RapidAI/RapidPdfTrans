@@ -291,6 +291,37 @@ fn font_key(name: &str) -> String {
     name.rsplit('+').next().unwrap_or(name).to_string()
 }
 
+fn same_font_family(a: &str, b: &str) -> bool {
+    font_family(a) == font_family(b)
+}
+
+fn font_family(name: &str) -> String {
+    let base = name.rsplit('+').next().unwrap_or(name).to_ascii_lowercase();
+    for suffix in [
+        "-bolditalic",
+        "-boldital",
+        "-reguital",
+        "-semibold",
+        "-demibold",
+        "-italic",
+        "-regular",
+        "-medium",
+        "-roman",
+        "-light",
+        "-black",
+        "-bold",
+        "-ital",
+        "-medi",
+        "-regu",
+        "-book",
+    ] {
+        if let Some(stripped) = base.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    base
+}
+
 fn attach_markers(lines: &mut Vec<VisualLine<'_>>) {
     let mut drop = vec![false; lines.len()];
     let hosts: Vec<Option<usize>> = (0..lines.len())
@@ -789,7 +820,8 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if (upper.size - lower.size).abs() > size * 0.2 {
         return false;
     }
-    if upper.font != lower.font {
+    // A bold or italic run-in is the same paragraph as the regular line under it.
+    if !same_font_family(&upper.font, &lower.font) {
         return false;
     }
     let hyphen = soft_hyphen_stem(&upper.text).is_some()
@@ -1080,6 +1112,51 @@ mod tests {
             .iter()
             .any(|(id, reason)| *id == 1 && reason == "margin"));
         assert!(!seg.segments.iter().any(|item| item.glyph_ids.contains(&1)));
+    }
+
+    #[test]
+    fn a_bold_run_in_stays_with_the_following_regular_line() {
+        let mut lead = wide(
+            0,
+            72.0,
+            500.0,
+            "Proactive compaction outperforms full-history execution. Under the setting, all evaluated",
+            360.0,
+            10.0,
+        );
+        lead.font_name = "NimbusRomNo9L-Medi".into();
+        let mut rest = wide(
+            1,
+            72.0,
+            489.0,
+            "proactive methods continue the same paragraph.",
+            360.0,
+            10.0,
+        );
+        rest.font_name = "NimbusRomNo9L-Regu".into();
+        let mut other = wide(
+            2,
+            72.0,
+            478.0,
+            "A mono label is not the same family.",
+            360.0,
+            10.0,
+        );
+        other.font_name = "IBMPlexMono-SemiBold".into();
+        let segs = segment_glyphs(&[lead, rest, other]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("all evaluated proactive methods")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("mono label") && !text.contains("Proactive")),
+            "{texts:?}"
+        );
     }
 
     #[test]
