@@ -100,18 +100,38 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
             _ => !current.is_empty(),
         };
         if new_line && !current.is_empty() {
-            lines.extend(split_columns(std::mem::take(&mut current)));
+            lines.extend(finish_line(std::mem::take(&mut current)));
         }
-        // A jump back to the left is the other column on a nearby baseline.
-        // Same-baseline columns are split after the line is collected: a fixed
-        // gap would also cut justified word spaces.
+        // A jump back to the left margin is the other column on a nearby
+        // baseline. A subscript under the middle of this line is also left
+        // of the last glyph, and it stays on the line. Same-baseline columns
+        // are split after the line is collected: a fixed gap would also cut
+        // justified word spaces.
         let left = glyph.bbox[0].min(glyph.bbox[2]);
+        let line_left = current
+            .iter()
+            .map(|item| item.bbox[0].min(item.bbox[2]))
+            .fold(f32::MAX, f32::min);
+        let line_right = current
+            .iter()
+            .map(|item| item.bbox[0].max(item.bbox[2]))
+            .fold(line_left, f32::max);
+        let line_size = current
+            .iter()
+            .map(|item| item.font_size)
+            .fold(last_size, f32::max)
+            .max(1.0);
+        // A line number in the gutter is lower and smaller than this line,
+        // but still inside the baseline tolerance. Gluing it to the hyphen
+        // makes the line look like a contents entry, so the word never joins.
+        let gutter_mark =
+            glyph.font_size <= line_size * 0.8 && left > line_right + line_size * 0.35;
         let jumped_back = current.last().is_some_and(|prev| {
             let prev_left = prev.bbox[0].min(prev.bbox[2]);
-            prev_left - left > 24.0
+            prev_left - left > 24.0 && left <= line_left + 8.0
         });
-        if jumped_back && !current.is_empty() {
-            lines.extend(split_columns(std::mem::take(&mut current)));
+        if (jumped_back || gutter_mark) && !current.is_empty() {
+            lines.extend(finish_line(std::mem::take(&mut current)));
         }
         last_page = Some(glyph.page_index);
         last_y = Some(glyph.matrix[5]);
@@ -119,9 +139,20 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
         current.push(glyph);
     }
     if !current.is_empty() {
-        lines.extend(split_columns(current));
+        lines.extend(finish_line(current));
     }
     lines
+}
+
+/// Reading order reaches a lower subscript after the rest of the line.
+/// Put the line back in x order before measuring gaps or building text.
+fn finish_line(mut line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
+    line.sort_by(|a, b| {
+        a.bbox[0]
+            .min(a.bbox[2])
+            .total_cmp(&b.bbox[0].min(b.bbox[2]))
+    });
+    split_columns(line)
 }
 
 /// Split one baseline where a gap is a column gutter rather than a word space.
@@ -160,7 +191,18 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // (`client 83`). A real column is much wider, and a short last line
         // that does not end in a page number still splits.
         let crumb = gap <= hard && narrow_page_crumb(&current);
-        if gap > trigger && !current.is_empty() && !crumb {
+        let prev_size = current
+            .iter()
+            .map(|item| item.font_size)
+            .fold(1.0f32, f32::max);
+        // A smaller line number just past the hyphen is inside the column
+        // trigger. Leaving it here glues the digit to the word, and the line
+        // is then read as a contents entry. A small index such as `(i)` has
+        // body text tight on its right, so it stays in the sentence.
+        let gutter_digit = glyph.font_size <= prev_size * 0.8
+            && gap > prev_size * 0.5
+            && trailing_gutter_mark(&line[index..], prev_size);
+        if (gap > trigger || gutter_digit) && !current.is_empty() && !crumb {
             parts.push(std::mem::take(&mut current));
         }
         current.push(glyph);
@@ -169,6 +211,23 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         parts.push(current);
     }
     parts
+}
+
+/// The next body-sized glyph is another column, or nothing follows.
+/// A parenthetical index has the sentence continuing immediately.
+fn trailing_gutter_mark(rest: &[&Glyph], body_size: f32) -> bool {
+    let Some(first) = rest.first() else {
+        return false;
+    };
+    let mut prev_right = glyph_right(first);
+    for glyph in rest.iter().skip(1) {
+        let gap = glyph_left(glyph) - prev_right;
+        if glyph.font_size > body_size * 0.8 {
+            return gap > body_size * 0.8;
+        }
+        prev_right = prev_right.max(glyph_right(glyph));
+    }
+    true
 }
 
 /// Left side of a contents bullet: a short title ending in its page number.
@@ -2931,6 +2990,94 @@ mod tests {
     }
 
     #[test]
+    fn a_midline_subscript_does_not_block_a_line_break_hyphen() {
+        // The subscript sits 1.5pt under the middle of the line, so reading
+        // order reaches it after the closing hyphen. It is not the other
+        // column, and the hyphen still joins the next line.
+        let mut lead = block(0, 108.0, 171.0, 90.0, 10.0, "We use a learned d");
+        lead.font_name = "NimbusRomNo9L-Regu".into();
+        let mut tail = block(1, 250.0, 171.0, 240.0, 10.0, ". The usual linear transfor-");
+        tail.font_name = "NimbusRomNo9L-Regu".into();
+        let mut model = block(2, 200.0, 169.5, 36.0, 7.0, "model");
+        model.font_name = "NimbusRomNo9L-Regu".into();
+        let mut next = block(
+            3,
+            108.0,
+            160.0,
+            250.0,
+            10.0,
+            "mation and softmax over the sequence.",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let segs = segment_glyphs(&[lead, tail, model, next]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| {
+                let model_at = text.find("model");
+                let transfor_at = text.find("transfor");
+                text.contains("transformation")
+                    && model_at.is_some_and(|at| transfor_at.is_some_and(|word| at < word))
+            }),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_gutter_line_number_does_not_glue_to_a_hyphen() {
+        // The algorithm line is in the same baseline band. Its small line
+        // number sits in the gutter and would bridge the column split.
+        let mut prose = block(0, 55.0, 220.0, 220.0, 10.0, "We show how to per-");
+        prose.font_name = "NimbusRomNo9L-Regu".into();
+        let mut number = block(1, 286.0, 216.5, 4.0, 6.0, "3");
+        number.font_name = "NimbusRomNo9L-Medi".into();
+        let mut algo = block(2, 330.0, 217.0, 48.0, 10.0, "m := (i, j)");
+        algo.font_name = "CMR10".into();
+        let mut next = block(
+            3,
+            55.0,
+            208.0,
+            200.0,
+            10.0,
+            "form a more efficient contraction.",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let segs = segment_glyphs(&[prose, number, algo, next]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("perform")),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|text| text.contains("per-")), "{texts:?}");
+    }
+
+    #[test]
+    fn a_small_parenthetical_index_stays_on_the_hyphenated_line() {
+        // `(i)` is set smaller than the sentence, with a gap in front of it
+        // because a subscript occupies that space. It is not a line number.
+        let mut alg = block(0, 307.0, 594.0, 22.0, 10.0, "ALG");
+        alg.font_name = "CMR10".into();
+        let mut index = block(1, 339.0, 593.6, 12.0, 5.0, "(i)");
+        index.font_name = "CMR5".into();
+        let mut rest = block(2, 355.0, 594.0, 140.0, 10.0, ". Let Q be the perfor-");
+        rest.font_name = "NimbusRomNo9L-Regu".into();
+        let mut next = block(
+            3,
+            307.0,
+            582.0,
+            200.0,
+            10.0,
+            "mance of the algorithm stays whole.",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let segs = segment_glyphs(&[alg, index, rest, next]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("performance")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn clusterfug_prose_with_math_letters_stays_one_paragraph() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/ci/pmlr-v202-abbas23a.pdf");
@@ -2942,13 +3089,32 @@ mod tests {
         let segs = segment_glyphs(&extraction.glyphs);
         let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
         assert!(
-            !texts.iter().any(|text| text.ends_with("contrac-")),
+            !texts.iter().any(|text| {
+                let tail = text.trim_end();
+                tail.ends_with("contrac-") || tail.ends_with("per-") || tail.ends_with("oper-")
+            }),
             "hyphen split: {:?}",
-            texts.iter().find(|text| text.contains("contrac-"))
+            texts.iter().find(|text| {
+                let tail = text.trim_end();
+                tail.ends_with('-')
+                    && (tail.contains("contrac") || tail.contains(" per") || tail.contains("oper"))
+            })
         );
         assert!(
             texts.iter().any(|text| text.contains("contraction")),
             "contrac- was not joined"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("show how to perform")),
+            "per- was not joined"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("contraction by operating")),
+            "oper- was not joined"
         );
         assert!(
             !texts.contains(&"neighbours k is set to 1, a larger value does not benefit"),
@@ -2970,6 +3136,30 @@ mod tests {
         assert!(
             headers >= 11,
             "running headers were kept inside figures or tables: {headers}"
+        );
+    }
+
+    #[test]
+    fn attention_subscript_does_not_leave_a_line_break_hyphen() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/neurips-2017-attention.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let segs = segment_glyphs(&extraction.glyphs);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("transformation")),
+            "transfor- was not joined"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.trim_end().ends_with("transfor-")),
+            "{:?}",
+            texts.iter().find(|text| text.contains("transfor"))
         );
     }
 
