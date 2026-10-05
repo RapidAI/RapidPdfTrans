@@ -127,6 +127,14 @@ pub fn rewrite_translation(
         if segment.glyph_ids.is_empty() {
             continue;
         }
+        let segment_glyphs: Vec<&Glyph> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extraction.glyphs.get(by_id[id]))
+            .collect();
+        // `c_{ij} > 0` inside a sentence is still that sentence. A display
+        // equation has more math glyphs than words and stays original.
+        let prose_math = prose_carries_inline_math(&segment_glyphs);
         if segment.glyph_ids.iter().any(|id| {
             extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
                 if glyph.disposition.is_final() {
@@ -135,7 +143,10 @@ pub fn rewrite_translation(
                 match keep.get(id).map(String::as_str) {
                     // `$9.7\times$` is a prose line. Redraw the operator with
                     // the body font instead of leaving the English in place.
-                    Some("formula") if crate::translate::is_inline_math_symbol(&glyph.unicode) => {
+                    Some("formula")
+                        if prose_math
+                            || crate::translate::is_inline_math_symbol(&glyph.unicode) =>
+                    {
                         false
                     }
                     Some(_) => true,
@@ -188,10 +199,10 @@ pub fn rewrite_translation(
         }
         for id in &segment.glyph_ids {
             if keep.get(id).is_some_and(|reason| reason == "formula") {
-                let inline = extraction
-                    .glyphs
-                    .get(by_id[id])
-                    .is_some_and(|glyph| crate::translate::is_inline_math_symbol(&glyph.unicode));
+                let inline = prose_math
+                    || extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
+                        crate::translate::is_inline_math_symbol(&glyph.unicode)
+                    });
                 if inline {
                     keep.remove(id);
                 }
@@ -703,6 +714,27 @@ fn import_object(
     Ok(new_id)
 }
 
+/// A sentence that contains a symbol (`edge ij with c > 0`) is body text.
+/// A display equation has more math glyphs than words.
+fn prose_carries_inline_math(glyphs: &[&Glyph]) -> bool {
+    let mut letters = 0usize;
+    let mut formula = 0usize;
+    let mut other = 0usize;
+    for glyph in glyphs {
+        if inherent_keep(glyph) == Some("formula") {
+            formula += 1;
+        } else {
+            other += 1;
+            letters += glyph
+                .unicode
+                .chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .count();
+        }
+    }
+    letters >= 16 && other > formula
+}
+
 fn keep_contains(glyph: &Glyph) -> bool {
     matches!(glyph.disposition, Disposition::KeptOriginal { .. })
 }
@@ -1170,6 +1202,10 @@ fn cover_with_fallbacks(chars: impl Iterator<Item = char>) -> Vec<u32> {
 fn coverage_fallbacks(ch: char) -> &'static [char] {
     match ch {
         '\u{2217}' | '\u{204E}' | '\u{FE61}' | '\u{FF0A}' => &['*'],
+        // Inner products and a combining slash. The Song face has neither.
+        '\u{27E8}' => &['<'],
+        '\u{27E9}' => &['>'],
+        '\u{0338}' => &['/'],
         '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => &['-'],
         '\u{2018}' | '\u{2019}' | '\u{201A}' => &['\''],
         '\u{201C}' | '\u{201D}' | '\u{201E}' => &['"'],
@@ -3116,6 +3152,118 @@ mod tests {
         assert!(text.contains("AB"), "{text}");
         assert!(text.contains("References"), "{text}");
         assert!(!text.contains("Hello"), "{text}");
+    }
+
+    #[test]
+    fn a_sentence_with_one_math_glyph_is_still_translated() {
+        let Some(font) = crate::font::load_cjk_font() else {
+            return;
+        };
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let body = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let math = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "CMSY10",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", body);
+        fonts.set("F2", math);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let content = b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (The method is ) Tj /F2 12 Tf 1 0 0 1 156 700 Tm (x) Tj /F1 12 Tf 1 0 0 1 170 700 Tm (similar to our approach.) Tj /F2 12 Tf 1 0 0 1 72 640 Tm (xy) Tj ET".to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+
+        struct PaintSentence;
+        impl Translator for PaintSentence {
+            fn complete(&self, _system: &str, user: &str) -> Result<String> {
+                let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+                let translations: Vec<serde_json::Value> = payload["segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|seg| {
+                        let text = seg["text"].as_str().unwrap_or("");
+                        let translated = if text.contains("method") {
+                            "该方法与我们的做法相似。"
+                        } else {
+                            text
+                        };
+                        serde_json::json!({"id": seg["id"], "text": translated})
+                    })
+                    .collect();
+                Ok(serde_json::json!({"translations": translations}).to_string())
+            }
+        }
+
+        let mut opened = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = opened.extract();
+        let report = translate_extraction(
+            &mut extraction,
+            &TranslateOptions::default(),
+            &PaintSentence,
+        )
+        .unwrap();
+        opened
+            .rewrite(
+                &mut extraction,
+                &report,
+                &RewriteOptions {
+                    font_bytes: Some(font),
+                    ..RewriteOptions::default()
+                },
+            )
+            .unwrap();
+        let method = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "m")
+            .unwrap();
+        assert!(
+            matches!(method.disposition, Disposition::Rewritten { .. }),
+            "{:?}",
+            method.disposition
+        );
+        let display = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.matrix[5] < 660.0)
+            .unwrap();
+        assert!(
+            matches!(&display.disposition, Disposition::KeptOriginal { reason } if reason == "formula" || reason == "kept"),
+            "{:?}",
+            display.disposition
+        );
     }
 
     #[test]
