@@ -567,13 +567,16 @@ fn assemble(
                 buf = line_text(&rest);
                 buf_ids.extend(rest.iter().map(|glyph| glyph.id));
             } else {
-                let split_lead = styled_lead_line(first).is_some_and(|face| {
-                    lines.clone().next().is_some_and(|next| {
-                        majority_run(next) != Some(face)
-                            && !has_year(&first.text)
-                            && !has_year(&next.text)
-                    })
-                });
+                // A list item's italic lead (`Part 1: …—`) is the same paragraph
+                // as the roman lines under it. An obstacle sentence is not.
+                let split_lead = !starts_with_list_marker(&first.text)
+                    && styled_lead_line(first).is_some_and(|face| {
+                        lines.clone().next().is_some_and(|next| {
+                            majority_run(next) != Some(face)
+                                && !has_year(&first.text)
+                                && !has_year(&next.text)
+                        })
+                    });
                 buf = first.text.clone();
                 buf_ids.extend(first.glyphs.iter().map(|glyph| glyph.id));
                 // "Obstacle 1: … inconsistent." is its own italic line. The
@@ -2117,6 +2120,14 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     // A first-line indent, with the same leading and no extra gap, is a new
     // paragraph. A hyphenated word's continuation is indented the other way
     // and is handled above.
+    // A dash or dingbat item hangs: the marker is left of the wrapped lines.
+    // A new item starts with its own marker and stays a separate paragraph.
+    if !hyphen && starts_with_list_marker(&lower.text) {
+        return false;
+    }
+    if !hyphen && hanging_list_continuation(upper, lower) {
+        return true;
+    }
     if !hyphen && lower.left > upper.left + size * 0.55 {
         return false;
     }
@@ -2138,9 +2149,16 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     if upper.right + size * 2.2 < lower.right {
         return false;
     }
+    // A short tail that does not finish a sentence is a new item (`20 Baldwin`).
+    // A lowercase tail is the rest of the sentence (`you bridge any gaps:`).
+    let lower_starts_lower = lower
+        .text
+        .trim_start()
+        .starts_with(|ch: char| ch.is_ascii_lowercase());
     if lower_w < upper_w * 0.5
         && lower.text.chars().count() < 32
         && !lower.text.trim_end().ends_with('.')
+        && !lower_starts_lower
     {
         return false;
     }
@@ -2192,6 +2210,42 @@ fn toc_same_indent_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool 
 
 /// Both lines are well under the page's column measure, and the next one
 /// starts a new item (`Manning Publications`, `20 Baldwin Road`).
+/// A bullet, dash, or dingbat at the start of a list item.
+pub(crate) fn starts_with_list_marker(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !is_list_marker(first) {
+        return false;
+    }
+    // `-and-applications` is a wrapped hyphen. `- Chapter` is a bullet.
+    // An en dash is a bullet even when the word follows immediately (`–Chapter`).
+    if first == '-' {
+        return chars.next().is_none_or(char::is_whitespace);
+    }
+    true
+}
+
+fn is_list_marker(ch: char) -> bool {
+    matches!(
+        ch,
+        '-' | '–' | '—' | '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧'
+    ) || ('\u{F020}'..='\u{F0FF}').contains(&ch)
+}
+
+/// The marker sits left of the wrapped lines (` Part 1` / `exploring…`,
+/// `– Chapter 1` / `semantic search`). A new item has its own marker.
+fn hanging_list_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if !starts_with_list_marker(&upper.text) || starts_with_list_marker(&lower.text) {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    let shift = lower.left - upper.left;
+    (size * 0.45..=size * 2.8).contains(&shift)
+}
+
 fn stacked_short_items(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: f32) -> bool {
     let size = upper.size.max(lower.size).max(1.0);
     if measure < size * 18.0 {
@@ -5949,6 +6003,116 @@ mod tests {
             texts
                 .iter()
                 .any(|text| text.contains("opening") && text.contains("explore")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_lowercase_sentence_tail_stays_with_the_line_above() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            102.0,
+            400.0,
+            "cross-references throughout the text will help",
+            "Times-Roman",
+        );
+        glyphs.extend(paint_word(
+            &mut id,
+            102.0,
+            386.0,
+            "you bridge any gaps:",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("cross-references") && text.contains("bridge any gaps")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_hanging_dash_item_is_one_paragraph_and_the_next_item_is_not() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            117.8,
+            400.0,
+            "– Chapter 1 maps the landscape from summarization and",
+            "Times-Roman",
+        );
+        glyphs.extend(paint_word(
+            &mut id,
+            129.8,
+            386.0,
+            "semantic search to chatbots and agents across the book.",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            117.8,
+            370.0,
+            "– Chapter 2 offers a separate introduction here.",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("Chapter 1")
+                    && text.contains("semantic")
+                    && !text.contains("Chapter 2")
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Chapter 2") && !text.contains("semantic")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_italic_part_bullet_joins_its_roman_continuation() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(&mut id, 117.8, 400.0, "\u{f0a1}", "Wingdings2");
+        glyphs.extend(paint_word(
+            &mut id,
+            129.8,
+            400.0,
+            "Part 1: Getting started with LLMs (chapters 1-2)",
+            "Times-Italic",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            360.0,
+            400.0,
+            "—This part lays the foundation by",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            129.8,
+            386.0,
+            "exploring where LLMs excel and where they struggle today.",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("Part 1") && text.contains("exploring") && text.contains("foundation")
+            }),
             "{texts:?}"
         );
     }

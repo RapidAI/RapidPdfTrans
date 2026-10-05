@@ -42,6 +42,7 @@ pub fn face_style(font_name: &str) -> FaceStyle {
         "GEORGIA",
         "PLEXSERIF",
         "NOTOSERIF",
+        "BASKERVILLE",
     ]
     .iter()
     .any(|needle| upper.contains(needle));
@@ -893,5 +894,9 @@ mod tests {
         assert!(italic.serif && italic.italic && !italic.bold);
         let cm_bold = face_style("CMBX10");
         assert!(cm_bold.bold);
+        let baskerville = face_style("NewBaskerville-Roman");
+        assert!(baskerville.serif && !baskerville.bold && !baskerville.italic);
+        let baskerville_italic = face_style("NewBaskerville-Italic");
+        assert!(baskerville_italic.serif && baskerville_italic.italic && !baskerville_italic.bold);
     }
 }
