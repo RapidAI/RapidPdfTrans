@@ -104,9 +104,9 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
         }
         // A jump back to the left margin is the other column on a nearby
         // baseline. A subscript under the middle of this line is also left
-        // of the last glyph, and it stays on the line. Same-baseline columns
-        // are split after the line is collected: a fixed gap would also cut
-        // justified word spaces.
+        // of the last glyph, and it stays. Same-baseline columns are split
+        // after the line is collected: a fixed gap would also cut justified
+        // word spaces.
         let left = glyph.bbox[0].min(glyph.bbox[2]);
         let line_left = current
             .iter()
@@ -126,9 +126,15 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
         // makes the line look like a contents entry, so the word never joins.
         let gutter_mark =
             glyph.font_size <= line_size * 0.8 && left > line_right + line_size * 0.35;
+        // A subscript a few points inside the left edge is not the other
+        // column. A body-sized glyph that returns to this margin is: the
+        // line walked onto the other column through a mark in between.
         let jumped_back = current.last().is_some_and(|prev| {
             let prev_left = prev.bbox[0].min(prev.bbox[2]);
-            prev_left - left > 24.0 && left <= line_left + 8.0
+            let back = prev_left - left > 24.0;
+            let at_margin = left <= line_left + 1.0;
+            let body_return = left <= line_left + 8.0 && glyph.font_size > line_size * 0.85;
+            back && (at_margin || body_return)
         });
         if (jumped_back || gutter_mark) && !current.is_empty() {
             lines.extend(finish_line(std::mem::take(&mut current)));
@@ -1625,7 +1631,16 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
     if lower.page != upper.page + 1 {
         return false;
     }
-    if (upper.left - lower.left).abs() > 36.0 {
+    // The right column ends on this page and the sentence continues at the
+    // top of the next page's left column. A new paragraph, or a centered
+    // running title, does not: the continuation has to finish the hyphen
+    // in lowercase.
+    let finishes_hyphen = soft_hyphen_stem(&upper.text).is_some()
+        && lower
+            .text
+            .trim_start()
+            .starts_with(|ch: char| ch.is_ascii_lowercase());
+    if (upper.left - lower.left).abs() > 36.0 && !finishes_hyphen {
         return false;
     }
     prose_continues(upper, lower)
@@ -3197,6 +3212,153 @@ mod tests {
     }
 
     #[test]
+    fn a_subscript_near_the_left_edge_stays_on_the_hyphen_line() {
+        // The subscript is 6pt inside the line's left edge and 1.5pt lower.
+        // Reading order reaches it after the hyphen. It is not the other column.
+        let mut lead = block(0, 108.0, 363.0, 6.0, 10.0, "s");
+        lead.font_name = "NimbusRomNo9L-Regu".into();
+        let mut sub = block(1, 114.0, 361.5, 4.0, 7.0, "0");
+        sub.font_name = "CMMI7".into();
+        let mut tail = block(2, 116.0, 363.0, 200.0, 10.0, "olution ac-");
+        tail.font_name = "NimbusRomNo9L-Regu".into();
+        let mut next = block(
+            3,
+            108.0,
+            352.0,
+            220.0,
+            10.0,
+            "curacy. As shown in Fig. 3a today.",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let texts: Vec<_> = segment_glyphs(&[lead, sub, tail, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("accuracy")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.trim_end().ends_with("ac-")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_right_column_hyphen_continues_on_the_next_page() {
+        let mut upper = glyph(0, 307.0, 76.0, "Any non-", false);
+        upper.page_index = 0;
+        upper.font_size = 10.0;
+        let mut title = glyph(
+            1,
+            148.0,
+            740.0,
+            "Expertise Trees Resolve Knowledge Limitations",
+            false,
+        );
+        title.page_index = 1;
+        title.font_size = 10.0;
+        let mut lower = glyph(
+            2,
+            55.0,
+            710.0,
+            "specialized algorithm must incur linear regret.",
+            false,
+        );
+        lower.page_index = 1;
+        lower.font_size = 10.0;
+        let texts: Vec<_> = segment_glyphs(&[upper, title, lower])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("non-specialized")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Expertise Trees Resolve")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("non-Expertise") || text.contains("nonExpertise")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_right_column_does_not_jump_to_the_next_page() {
+        let mut upper = glyph(0, 307.0, 76.0, "This paragraph is finished.", false);
+        upper.page_index = 0;
+        upper.font_size = 10.0;
+        let mut lower = glyph(
+            1,
+            55.0,
+            710.0,
+            "the next page starts its own paragraph here.",
+            false,
+        );
+        lower.page_index = 1;
+        lower.font_size = 10.0;
+        let texts: Vec<_> = segment_glyphs(&[upper, lower])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts.iter().any(|text| text.ends_with("finished.")));
+        assert!(texts.iter().any(|text| text.starts_with("the next page")));
+    }
+
+    #[test]
+    fn a_body_glyph_returning_to_the_margin_starts_a_new_line() {
+        // A mark just under the left line bridges the right column onto it.
+        // The next left line comes back to the same margin and stays its own line.
+        let mut left = block(
+            0,
+            55.0,
+            259.0,
+            220.0,
+            10.0,
+            "ficial. We develop a model adapted",
+        );
+        left.font_name = "NimbusRomNo9L-Regu".into();
+        let mut arrow = block(1, 371.0, 254.5, 12.0, 10.0, "#");
+        arrow.font_name = "CMSY10".into();
+        let mut right = block(
+            2,
+            307.0,
+            250.5,
+            220.0,
+            10.0,
+            "the features of this vector stay apart",
+        );
+        right.font_name = "NimbusRomNo9L-Regu".into();
+        let mut next = block(
+            3,
+            55.0,
+            246.8,
+            220.0,
+            10.0,
+            "the setting of the next line stays whole.",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let texts: Vec<_> = segment_glyphs(&[left, arrow, right, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("the setting of the next line")
+                    && !text.contains("features")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn clusterfug_prose_with_math_letters_stays_one_paragraph() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/ci/pmlr-v202-abbas23a.pdf");
@@ -3279,6 +3441,74 @@ mod tests {
                 .any(|text| text.trim_end().ends_with("transfor-")),
             "{:?}",
             texts.iter().find(|text| text.contains("transfor"))
+        );
+    }
+
+    #[test]
+    fn hc_dlm_subscript_does_not_leave_a_line_break_hyphen() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/arxiv-2610.02193.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let segs = segment_glyphs(&extraction.glyphs);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("solution accuracy")),
+            "ac- was not joined"
+        );
+        assert!(
+            !texts.iter().any(|text| text.trim_end().ends_with("ac-")),
+            "{:?}",
+            texts.iter().find(|text| text.contains("ac-"))
+        );
+    }
+
+    #[test]
+    fn abels_hyphens_join_across_a_symbol_and_a_page_break() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/pmlr-v202-abels23a.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let segs = segment_glyphs(&extraction.glyphs);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("detecting")),
+            "de- was not joined across the page"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("partition the space")),
+            "parti- was not joined across the page"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("non-specialized")),
+            "non- was not joined across the page"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("beneficial")),
+            "bene- was split off the next line"
+        );
+        assert!(
+            !texts.iter().any(|text| text.trim_end().ends_with("bene-")),
+            "bene- was not joined"
+        );
+        assert!(
+            !texts.iter().any(|text| {
+                let tail = text.trim_end();
+                tail.ends_with("de-") || tail.ends_with("parti-") || tail.ends_with("non-")
+            }),
+            "{:?}",
+            texts.iter().find(|text| {
+                let tail = text.trim_end();
+                tail.ends_with("de-") || tail.ends_with("parti-") || tail.ends_with("non-")
+            })
         );
     }
 
