@@ -356,7 +356,7 @@ fn assemble(
                 format!("{}{}", buf.trim_end(), line.text.trim_start())
             } else if let Some(stem) = soft_hyphen_stem(&buf) {
                 let rest = line.text.trim_start();
-                if rest.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
+                if rest.starts_with(|ch: char| ch.is_ascii_alphanumeric()) {
                     join_hyphenated_word(stem, rest)
                 } else {
                     format!("{} {}", buf.trim_end(), line.text.trim_start())
@@ -505,10 +505,12 @@ fn toc_leader_suffix(glyphs: &[&Glyph]) -> Vec<u32> {
         }
         break;
     }
-    if dot_chars < 4 {
+    // Dots alone are an ellipsis (`tion.......`). A contents row also has
+    // its page number on this edge.
+    if dot_chars < 4 || !page_ok {
         return Vec::new();
     }
-    let end = if page_ok { page_end } else { dots_end };
+    let end = page_end;
     ordered[dots_start..end]
         .iter()
         .filter(|glyph| !glyph.unicode.trim().is_empty())
@@ -1332,9 +1334,13 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
     let mut columns: Vec<Vec<VisualLine>> = Vec::new();
     for line in lines {
         let slot = columns.iter().position(|column| {
-            column_anchor(column, line.page)
-                .is_some_and(|anchor| (anchor - line.left).abs() <= 28.0)
-                || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
+            column_anchor(column, line.page).is_some_and(|anchor| {
+                let distance = (anchor - line.left).abs();
+                // A wrapped word can start a list-indented line and finish
+                // back on the column margin. The margin and the indent are
+                // still one column; the other column is much farther away.
+                distance <= 28.0 || (distance <= 64.0 && soft_hyphen_stem(&line.text).is_some())
+            }) || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
         });
         if let Some(slot) = slot {
             columns[slot].push(line);
@@ -1679,7 +1685,7 @@ fn prose_continues(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     }
     let start = lower.text.trim_start();
     if hyphen {
-        return start.starts_with(|ch: char| ch.is_ascii_alphabetic());
+        return start.starts_with(|ch: char| ch.is_ascii_alphanumeric());
     }
     start.starts_with(|ch: char| ch.is_ascii_lowercase())
 }
@@ -1701,15 +1707,20 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if upper.page != lower.page || upper.toc || lower.toc {
         return false;
     }
+    let next = lower.text.trim_start();
+    // `GPT-` / `2` and `MetaMath-` / `7B` are one token. A contents row is
+    // `83 Generating` only when the line above is not finishing that token.
+    let hyphen = soft_hyphen_stem(&upper.text).is_some()
+        && next.starts_with(|ch: char| ch.is_ascii_alphanumeric());
     // A detailed-contents line already holds several entries (`83 Generating`).
     // Joining the wrap makes one block the Chinese leading cannot fit.
-    if inline_contents_entry(&upper.text) || inline_contents_entry(&lower.text) {
+    if !hyphen && (inline_contents_entry(&upper.text) || inline_contents_entry(&lower.text)) {
         return false;
     }
     // A display equation keeps its own segment. Joining it onto the prose
     // around it would leave that prose untranslated. A calligraphic letter
     // or a subscript inside a sentence does not.
-    if line_has_formula(upper) || line_has_formula(lower) {
+    if !hyphen && (line_has_formula(upper) || line_has_formula(lower)) {
         return false;
     }
     let size = upper.size.max(lower.size).max(1.0);
@@ -1722,11 +1733,6 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     }
     // A bold or italic run-in is the same paragraph as the regular line under it.
     // A monospace phrase at the start of a line is not a new paragraph.
-    let hyphen = soft_hyphen_stem(&upper.text).is_some()
-        && lower
-            .text
-            .trim_start()
-            .starts_with(|ch: char| ch.is_ascii_alphabetic());
     if !hyphen && !fonts_can_join(upper, lower) {
         return false;
     }
@@ -1980,7 +1986,13 @@ fn url_continues(buf: &str, next: &str) -> bool {
 }
 
 fn join_hyphenated_word(stem: &str, rest: &str) -> String {
-    if line_ends_with_url(stem) {
+    // `GPT-2` and `https://...` keep the hyphen. An ordinary break
+    // (`transfor-` / `mation`) does not.
+    if line_ends_with_url(stem)
+        || rest
+            .trim_start()
+            .starts_with(|ch: char| ch.is_ascii_digit())
+    {
         return format!("{stem}-{rest}");
     }
     let stem_word = stem.split_whitespace().last().unwrap_or(stem);
@@ -2034,14 +2046,16 @@ fn is_hyphen_suffix(word: &str) -> bool {
 /// A hanging indent that finishes `multi-` / `per-` belongs to that column
 /// even when the column's median left edge is the body margin.
 fn hyphen_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
+    let shift = line.left - prev.left;
     prev.page == line.page
         && soft_hyphen_stem(&prev.text).is_some()
         && line
             .text
             .trim_start()
             .starts_with(|ch: char| ch.is_ascii_alphabetic())
-        && line.left + 1.0 >= prev.left
-        && line.left - prev.left <= 36.0
+        // The continuation may hang a little to the right, or step back
+        // from an indented hyphen line onto the column margin.
+        && (-64.0..=36.0).contains(&shift)
         && prev.y > line.y
         && prev.y - line.y < prev.size.max(line.size).max(1.0) * 1.6
 }
@@ -3073,6 +3087,111 @@ mod tests {
         let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
         assert!(
             texts.iter().any(|text| text.contains("performance")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_indented_hyphen_returns_to_the_column_margin() {
+        let mut margin = block(
+            0,
+            46.0,
+            320.0,
+            220.0,
+            10.0,
+            "The lines above already use this column margin.",
+        );
+        margin.font_name = "NimbusRomNo9L-Regu".into();
+        let mut head = block(
+            1,
+            105.0,
+            300.0,
+            200.0,
+            10.0,
+            "Combining those ideas, Soundarara-",
+        );
+        head.font_name = "NimbusRomNo9L-Regu".into();
+        let mut next = block(
+            2,
+            46.0,
+            288.0,
+            220.0,
+            10.0,
+            "jan and Young proved the bound.",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let texts: Vec<_> = segment_glyphs(&[margin, head, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Soundararajan")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_version_number_keeps_the_hyphen_and_is_not_a_contents_row() {
+        let mut head = block(
+            0,
+            108.0,
+            400.0,
+            240.0,
+            10.0,
+            "the baseline published by Ye et al. (2025): GPT-",
+        );
+        head.font_name = "NimbusRomNo9L-Regu".into();
+        let mut next = block(
+            1,
+            108.0,
+            388.0,
+            240.0,
+            10.0,
+            "2 Scratch, Stream-of-Search, LLaMA",
+        );
+        next.font_name = "NimbusRomNo9L-Regu".into();
+        let texts: Vec<_> = segment_glyphs(&[head, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("GPT-2 Scratch")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.trim_end().ends_with("GPT-")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_ellipsis_does_not_make_the_next_line_a_contents_row() {
+        let mut head = block(
+            0,
+            72.0,
+            200.0,
+            200.0,
+            10.0,
+            "isolate it on one side of the equa-",
+        );
+        head.font_name = "NimbusRomNo9L-Regu".into();
+        let mut tion = block(1, 72.0, 188.0, 24.0, 10.0, "tion");
+        tion.font_name = "NimbusRomNo9L-Regu".into();
+        let mut dots = Vec::new();
+        for index in 0..6 {
+            let x = 100.0 + index as f32 * 6.0;
+            let mut dot = block(2 + index, x, 188.0, 4.0, 10.0, ".");
+            dot.font_name = "NimbusRomNo9L-Regu".into();
+            dots.push(dot);
+        }
+        let mut glyphs = vec![head, tion];
+        glyphs.extend(dots);
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("equation")),
             "{texts:?}"
         );
     }
