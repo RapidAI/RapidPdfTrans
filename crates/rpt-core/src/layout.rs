@@ -345,17 +345,6 @@ pub(crate) fn fit_cjk_block(
             fit_measure(line, size, font) <= limit + 1.0
         });
         let single_source = available <= 0.5;
-        if within
-            && single_source
-            && width <= source_size * 16.0
-            && lines.len() == 2
-            && size + 0.01 >= source_size * 0.80
-        {
-            // The English title is one line and the Chinese is longer. A
-            // second line at 1.15 em stays in the contents leading. A third
-            // line would land on the next entry.
-            return Some((lines, size, size * 1.15, indent));
-        }
         if within && (!single_source || lines.len() == 1) {
             if gaps == 0 {
                 return Some((lines, size, size * metrics.leading_ratio, indent));
@@ -368,6 +357,16 @@ pub(crate) fn fit_cjk_block(
             }
         }
         if size <= floor + 0.01 {
+            // A one-line title that still does not fit at 0.80 wraps once.
+            // Shrinking it to half the source size is too small to read.
+            if within
+                && single_source
+                && width <= source_size * 16.0
+                && lines.len() == 2
+                && size + 0.01 >= source_size * 0.80
+            {
+                return Some((lines, size, size * 1.15, indent));
+            }
             if within && !single_source && gaps > 0 {
                 let room = available / gaps as f32;
                 if room >= size * 1.05 {
@@ -804,6 +803,50 @@ pub(crate) fn pack_into_slots(
     Some(packed)
 }
 
+/// A contents title whose last source line is only the wrapped tail
+/// (`engines`, about three ems) must not receive half of the Chinese.
+/// Pack one piece per source line, using that line's own width. A short
+/// last line of a body paragraph is wider than this and stays on the
+/// normal wrap.
+pub(crate) fn pack_narrow_tail(
+    text: &str,
+    size: f32,
+    indent: f32,
+    spans: &[(f32, f32)],
+    font: &SubsetFont,
+) -> Option<Vec<String>> {
+    if spans.len() < 2 || size <= 0.0 {
+        return None;
+    }
+    let widths: Vec<f32> = spans
+        .iter()
+        .map(|(left, right)| (*right - *left).max(0.0))
+        .collect();
+    let widest = widths.iter().copied().fold(0.0f32, f32::max);
+    let crumb = widths
+        .iter()
+        .any(|width| *width + 0.5 < size * 4.0 && *width < widest * 0.5);
+    if !crumb {
+        return None;
+    }
+    let boxes: Vec<LineSlots> = widths
+        .iter()
+        .map(|width| LineSlots {
+            width: (*width).max(size),
+            slots: 1,
+        })
+        .collect();
+    let packed = pack_into_slots(text, size, indent, &boxes, font)?;
+    let lines: Vec<String> = packed
+        .into_iter()
+        .map(|slot| slot.into_iter().next().unwrap_or_default())
+        .collect();
+    if lines.iter().all(|line| line.trim().is_empty()) {
+        return None;
+    }
+    Some(lines)
+}
+
 fn consumed_chars(src: &[char], lines: &[String]) -> usize {
     let mut index = 0usize;
     for line in lines {
@@ -1064,6 +1107,33 @@ mod tests {
         assert_eq!(
             spread_to_lines(vec!["112".into()], 3),
             vec!["112".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_narrow_contents_tail_does_not_take_half_the_title() {
+        let text = "基于LLM的应用：摘要生成与问答引擎";
+        let font = uniform_font(text);
+        // The English wrap `engines` is ~28pt. The title above it is ~200pt.
+        let packed = pack_narrow_tail(text, 9.0, 0.0, &[(177.0, 381.0), (177.0, 206.0)], &font)
+            .expect("narrow tail packs");
+        assert_eq!(packed.len(), 2, "{packed:?}");
+        assert!(
+            packed[1].trim().is_empty(),
+            "引擎 should stay on the wide line, got {packed:?}"
+        );
+        assert_eq!(packed[0], text);
+        let body = "我们提出了一种基于完全图的聚类公式并且保留每一行的来源。第二行仍然比较宽。";
+        assert!(
+            pack_narrow_tail(
+                body,
+                10.0,
+                0.0,
+                &[(72.0, 280.0), (72.0, 160.0)],
+                &uniform_font(body)
+            )
+            .is_none(),
+            "a normal short last line is not a contents crumb"
         );
     }
 

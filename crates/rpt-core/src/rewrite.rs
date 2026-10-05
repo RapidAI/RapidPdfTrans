@@ -26,7 +26,8 @@ use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSourc
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
     char_widths, cids_of, cjk_indent_ems, fit_cjk_block, heading_level, justify_gaps, measure,
-    pack_into_slots, scale_for_heading, spread_to_lines, CjkMeasure, HeadingLevel, LineSlots,
+    pack_into_slots, pack_narrow_tail, scale_for_heading, spread_to_lines, CjkMeasure,
+    HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
@@ -1015,15 +1016,43 @@ fn commit_toc_operators(
             .or_insert(right);
     }
     let mut placed = HashSet::new();
+    // A detailed-contents page mixes several numbers on one row (`4`, `7`, `8`
+    // and `20`, `22`). Those rows are not a right-hand column. Sliding every
+    // sole number on that page stacks the inline ones and pulls `15` off `model`.
+    let mut inline_pages = HashSet::new();
+    for run in &runs {
+        if shares_baseline_with_another_number(run, &runs) || title_follows_number(run, extraction)
+        {
+            inline_pages.insert(run[0].page_index);
+        }
+    }
     for run in &runs {
         // Leader dots already end at this number. Sliding it would open a hole.
-        // Several numbers on one baseline (`engines 4`, `chatbots 7`, `agents 8`)
-        // stay next to their titles. Sliding every one of them stacks them
-        // on the column edge.
-        if run.iter().any(|glyph| !toc_redraw.contains(&glyph.id))
-            || run_follows_leaders(run, extraction, toc_redraw)
+        // Inline sub-entries (`engines 4`, `model 15`, `architecture 12` with
+        // another title to the right) stay next to their titles. The digit
+        // often shares the title's TJ, so it is drawn again at the source edge
+        // once that operator is blanked.
+        let keep_put = run_follows_leaders(run, extraction, toc_redraw)
+            || inline_pages.contains(&run[0].page_index)
             || shares_baseline_with_another_number(run, &runs)
-        {
+            || title_follows_number(run, extraction);
+        if keep_put {
+            let source_right = run
+                .iter()
+                .map(|glyph| glyph_ink_right(glyph))
+                .fold(0.0f32, f32::max);
+            if let Some((resource, font)) =
+                font_for_page(run[0].page_index, run[0], embedded, drawn)
+            {
+                if let Some(item) = draw_toc_run(run, source_right, font, resource) {
+                    placed.extend(run.iter().map(|glyph| glyph.id));
+                    succeeded.extend(item.glyph_ids.iter().copied());
+                    restored.push(item);
+                }
+            }
+            continue;
+        }
+        if run.iter().any(|glyph| !toc_redraw.contains(&glyph.id)) {
             continue;
         }
         let glyph = run[0];
@@ -1041,6 +1070,7 @@ fn commit_toc_operators(
         let target = column_right[&glyph.page_index];
         if let Some(item) = draw_toc_run(run, target, font, resource) {
             placed.extend(run.iter().map(|glyph| glyph.id));
+            succeeded.extend(item.glyph_ids.iter().copied());
             restored.push(item);
         }
     }
@@ -1067,6 +1097,7 @@ fn commit_toc_operators(
             continue;
         };
         if let Some(item) = draw_toc_glyph(glyph, font, resource) {
+            succeeded.extend(item.glyph_ids.iter().copied());
             restored.push(item);
         }
     }
@@ -1099,16 +1130,52 @@ fn commit_toc_operators(
             continue;
         };
         if let Some(item) = place_leader_run(group, drawn, extraction, toc_redraw, font, resource) {
+            succeeded.extend(item.glyph_ids.iter().copied());
             restored.push(item);
         } else {
             for glyph in group {
                 if let Some(item) = draw_toc_glyph(glyph, font, resource) {
+                    succeeded.extend(item.glyph_ids.iter().copied());
                     restored.push(item);
                 }
             }
         }
     }
     drawn.extend(restored);
+}
+
+/// `12` in `architecture 12  core object`. A title (or the bullet before it)
+/// sits to the right, so the digit is not the row's column edge.
+fn title_follows_number(run: &[&Glyph], extraction: &Extraction) -> bool {
+    let Some(first) = run.first() else {
+        return false;
+    };
+    let size = first.font_size.max(1.0);
+    let right = run
+        .iter()
+        .map(|glyph| glyph_ink_right(glyph))
+        .fold(0.0f32, f32::max);
+    extraction.glyphs.iter().any(|glyph| {
+        if glyph.page_index != first.page_index || run.iter().any(|item| item.id == glyph.id) {
+            return false;
+        }
+        if (glyph.matrix[5] - first.matrix[5]).abs() > size * 0.45 {
+            return false;
+        }
+        let left = glyph_ink_left(glyph);
+        if left < right + size * 0.15 {
+            return false;
+        }
+        let text = glyph.unicode.trim();
+        if text.is_empty() || is_toc_leader_glyph(glyph) {
+            return false;
+        }
+        // The next digit on this row is another page number, not a title.
+        if toc_page_char(text) && left - right < size * 1.2 {
+            return false;
+        }
+        true
+    })
 }
 
 /// `4`, `7`, and `8` on one contents row. Moving them to one x stacks the digits.
@@ -1874,8 +1941,22 @@ fn layout_segment(
     // A short Chinese paragraph used to sit on the first baselines and leave
     // the rest of the English lines empty. Those empty lines are dropped text.
     // Spread the translation so each source baseline still receives ink.
+    let mut absorbed: Vec<u32> = Vec::new();
     let lines = if bilingual {
         lines
+    } else if let Some(packed) = pack_narrow_tail(text, size, indent, &spans, font) {
+        // The English tail (`engines`) is only a few ems. Once the Chinese
+        // fits on the wide line, that tail is not a second title. Leaving it
+        // empty keeps `引擎` from sitting on the page number.
+        for (index, line) in packed.iter().enumerate() {
+            if line.trim().is_empty() {
+                absorbed.extend(ink[index].glyphs.iter().map(|glyph| glyph.id));
+            }
+        }
+        packed
+            .into_iter()
+            .filter(|line| !line.trim().is_empty())
+            .collect()
     } else {
         spread_to_lines(lines, ink.len())
     };
@@ -1936,7 +2017,9 @@ fn layout_segment(
         })
         .collect();
     if !bilingual {
-        cover_unhit_clusters(&mut drawn, glyphs, font, resource, skew, &color, &glyph_ids);
+        cover_unhit_clusters(
+            &mut drawn, glyphs, font, resource, skew, &color, &glyph_ids, &absorbed,
+        );
     }
     Some(drawn)
 }
@@ -1997,11 +2080,15 @@ fn cover_unhit_clusters(
     skew: f32,
     color: &crate::color::Color,
     glyph_ids: &[u32],
+    skip: &[u32],
 ) {
     if glyphs.is_empty() {
         return;
     }
     for cluster in marker_clusters(glyphs) {
+        if cluster.iter().all(|glyph| skip.contains(&glyph.id)) {
+            continue;
+        }
         let page = cluster[0].page_index;
         let bbox = cluster_bbox(&cluster);
         if drawn_hits(drawn, font, page, bbox) {
@@ -2449,6 +2536,7 @@ fn layout_across_pages(
         skew,
         &color,
         &glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>(),
+        &[],
     );
     Some(drawn)
 }
@@ -4656,6 +4744,7 @@ mod tests {
             0.0,
             &Color::black(),
             &[0, 1],
+            &[],
         );
         let marks: Vec<_> = drawn
             .iter()
