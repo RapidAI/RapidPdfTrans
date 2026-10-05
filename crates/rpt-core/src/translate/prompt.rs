@@ -59,19 +59,11 @@ pub fn parse_translations(raw: &str) -> Result<Vec<(u32, String)>> {
     let json_text = extract_json(raw).ok_or_else(|| {
         Error::Translate("model response did not contain a JSON translation object".into())
     })?;
-    let value: Value = serde_json::from_str(json_text)
-        .map_err(|e| Error::Translate(format!("invalid translation JSON: {e}")))?;
-    let array = if let Some(arr) = value.get("translations").and_then(|v| v.as_array()) {
-        arr
-    } else if let Some(arr) = value.as_array() {
-        arr
-    } else {
-        return Err(Error::Translate(
-            "translation JSON has no translations array".into(),
-        ));
-    };
+    let values = json_values(json_text)?;
+    let array = translation_items(&values)
+        .ok_or_else(|| Error::Translate("translation JSON has no translations array".into()))?;
     let mut out = Vec::with_capacity(array.len());
-    for item in array {
+    for item in array.iter() {
         let id = item
             .get("id")
             .and_then(|v| v.as_u64())
@@ -84,6 +76,42 @@ pub fn parse_translations(raw: &str) -> Result<Vec<(u32, String)>> {
         out.push((id as u32, text.to_string()));
     }
     Ok(out)
+}
+
+/// One or more JSON values. A model often appends a note, or emits one object per line.
+fn json_values(text: &str) -> Result<Vec<Value>> {
+    let mut values = Vec::new();
+    let stream = serde_json::Deserializer::from_str(text).into_iter::<Value>();
+    for item in stream {
+        match item {
+            Ok(value) => values.push(value),
+            Err(err) if values.is_empty() => {
+                return Err(Error::Translate(format!("invalid translation JSON: {err}")));
+            }
+            Err(_) => break,
+        }
+    }
+    if values.is_empty() {
+        return Err(Error::Translate(
+            "model response did not contain a JSON translation object".into(),
+        ));
+    }
+    Ok(values)
+}
+
+fn translation_items(values: &[Value]) -> Option<std::borrow::Cow<'_, [Value]>> {
+    for value in values {
+        if let Some(arr) = value.get("translations").and_then(|v| v.as_array()) {
+            return Some(std::borrow::Cow::Borrowed(arr.as_slice()));
+        }
+        if let Some(arr) = value.as_array() {
+            return Some(std::borrow::Cow::Borrowed(arr.as_slice()));
+        }
+    }
+    if !values.is_empty() && values.iter().all(|value| value.get("id").is_some()) {
+        return Some(std::borrow::Cow::Borrowed(values));
+    }
+    None
 }
 
 fn extract_json(raw: &str) -> Option<&str> {
@@ -146,5 +174,20 @@ mod tests {
     fn parses_fenced_json_and_translation_alias() {
         let raw = "```json\n{\"translations\":[{\"id\":2,\"translation\":\"你好\"}]}\n```";
         assert_eq!(parse_translations(raw).unwrap(), vec![(2, "你好".into())]);
+    }
+
+    #[test]
+    fn ignores_text_after_the_json_object() {
+        let raw = "{\"translations\":[{\"id\":1,\"text\":\"你好\"}]}\nNote: done.";
+        assert_eq!(parse_translations(raw).unwrap(), vec![(1, "你好".into())]);
+    }
+
+    #[test]
+    fn reads_one_object_per_line() {
+        let raw = "{\"id\":1,\"text\":\"你好\"}\n{\"id\":2,\"text\":\"世界\"}\n";
+        assert_eq!(
+            parse_translations(raw).unwrap(),
+            vec![(1, "你好".into()), (2, "世界".into())]
+        );
     }
 }
