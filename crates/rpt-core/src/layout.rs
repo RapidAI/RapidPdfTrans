@@ -68,8 +68,10 @@ pub fn heading_level(line_count: usize, source_size: f32, bold: bool, text: &str
     if source_size >= 14.0 && line_count <= 3 && chars < 160 {
         return HeadingLevel::Title;
     }
+    // "1新加坡管理大学2南洋理工大学" is an affiliation line, not section 1.
+    let affiliation = affiliation_marks(trimmed) >= 2;
     match numbered_depth(trimmed) {
-        Some(1) if line_count <= 2 && chars < 80 && !sentence => {
+        Some(1) if !affiliation && line_count <= 2 && chars < 80 && !sentence => {
             return HeadingLevel::Section;
         }
         Some(depth) if depth >= 2 && line_count <= 2 && chars < 100 && !sentence => {
@@ -110,6 +112,33 @@ pub(crate) fn scale_for_heading(level: HeadingLevel, source_size: f32, metrics: 
         HeadingLevel::Title => source_size * metrics.heading_scale,
     };
     (target / source_size).clamp(metrics.body_scale, 1.35)
+}
+
+/// Digit runs glued to a name: `1新加坡` or `张轩1`. Two or more means an
+/// affiliation line rather than a numbered heading.
+fn affiliation_marks(text: &str) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut marks = 0usize;
+    let mut index = 0;
+    while index < chars.len() {
+        if !chars[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index - start > 2 {
+            continue;
+        }
+        let before = start > 0 && chars[start - 1].is_alphabetic();
+        let after = index < chars.len() && chars[index].is_alphabetic();
+        if before || after {
+            marks += 1;
+        }
+    }
+    marks
 }
 
 /// `1` for `1 Introduction`, `2` for `2.2 Methods`.
@@ -815,6 +844,29 @@ mod tests {
             body.size
         );
         assert_eq!(lifted.indent, 0.0);
+
+        let affil = "1新加坡管理大学2南洋理工大学3哈佛大学";
+        assert_eq!(
+            heading_level(1, 9.96, false, affil),
+            HeadingLevel::Body,
+            "affiliation marks are not a section heading"
+        );
+        let affil_fit = fit_paragraph(
+            affil,
+            9.96,
+            420.0,
+            0.0,
+            1,
+            false,
+            &uniform_font(affil),
+            metrics,
+        )
+        .expect("affiliation");
+        assert!(
+            (affil_fit.size - 9.96 * 0.90).abs() < 0.15,
+            "affiliation should stay body size, got {}",
+            affil_fit.size
+        );
     }
 
     #[test]

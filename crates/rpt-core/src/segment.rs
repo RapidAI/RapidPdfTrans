@@ -962,35 +962,29 @@ fn find_page_continuation(
     used: &[bool],
 ) -> Option<usize> {
     let upper = current.last()?;
-    let mut skipped_bridge = false;
+    // Vector order follows column reading order, so a later paragraph in the
+    // next page can appear first. The continuation is the top of the left column.
+    let mut best: Option<(usize, f32, f32)> = None;
     for (index, para) in paragraphs.iter().enumerate() {
-        if used[index] || para.is_empty() {
+        if used[index] || para.is_empty() || is_page_bridge(para) {
             continue;
         }
         let lower = &para[0];
-        if lower.page < upper.page || (lower.page == upper.page && lower.y >= upper.y - 0.5) {
+        if lower.page != upper.page + 1 {
             continue;
         }
-        if lower.page > upper.page + 1 {
-            break;
-        }
-        if is_page_bridge(para) {
-            skipped_bridge = true;
-            continue;
-        }
-        if page_continuation(current, para) {
-            return Some(index);
-        }
-        // A real paragraph that does not continue the sentence stops the search,
-        // unless we have only stepped over headers and captions.
-        if !skipped_bridge && lower.page == upper.page {
-            continue;
-        }
-        if lower.page == upper.page + 1 {
-            return None;
+        let replace = match best {
+            None => true,
+            Some((_, left, y)) => {
+                lower.left < left - 28.0 || ((lower.left - left).abs() <= 28.0 && lower.y > y)
+            }
+        };
+        if replace {
+            best = Some((index, lower.left, lower.y));
         }
     }
-    None
+    let index = best?.0;
+    page_continuation(current, &paragraphs[index]).then_some(index)
 }
 
 /// True when nothing but a footer, caption, or header sits below this paragraph.

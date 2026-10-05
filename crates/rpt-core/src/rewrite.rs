@@ -1722,12 +1722,30 @@ fn superscript_mask(text: &str) -> Vec<bool> {
     let mut mask = vec![false; chars.len()];
     let mut index = 0;
     while index < chars.len() {
-        if !sup_char(chars[index]) {
+        // A star and the digit after it are separate marks: `Zhang∗1`.
+        if is_mark_star(chars[index]) {
+            let prev = index.checked_sub(1).map(|slot| chars[slot]);
+            let word = chars
+                .iter()
+                .skip(index + 1)
+                .take_while(|ch| ch.is_alphabetic())
+                .count();
+            let after_name = prev.is_some_and(char::is_alphabetic);
+            let before_name = word >= 2
+                && prev
+                    .is_none_or(|ch| ch.is_whitespace() || matches!(ch, ',' | '，' | ';' | '；'));
+            if after_name || before_name {
+                mask[index] = true;
+            }
+            index += 1;
+            continue;
+        }
+        if !chars[index].is_ascii_digit() {
             index += 1;
             continue;
         }
         let start = index;
-        while index < chars.len() && sup_char(chars[index]) && index - start < 2 {
+        while index < chars.len() && chars[index].is_ascii_digit() && index - start < 2 {
             index += 1;
         }
         if index < chars.len() && chars[index].is_ascii_digit() {
@@ -1745,7 +1763,10 @@ fn superscript_mask(text: &str) -> Vec<bool> {
             .skip(index)
             .take_while(|ch| ch.is_alphabetic())
             .count();
-        let after_name = run == 1 && prev.is_some_and(char::is_alphabetic);
+        let after_name = run == 1
+            && prev.is_some_and(|ch| {
+                ch.is_alphabetic() || (is_mark_star(ch) && start > 0 && mask[start - 1])
+            });
         let before_name = run == 1
             && word >= 2
             && prev.is_none_or(|ch| {
@@ -1797,8 +1818,8 @@ fn superscript_mask(text: &str) -> Vec<bool> {
     mask
 }
 
-fn sup_char(ch: char) -> bool {
-    ch.is_ascii_digit() || matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆')
+fn is_mark_star(ch: char) -> bool {
+    matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆')
 }
 
 fn split_superscripts(text: &str, lines: &[String], mask: &[bool]) -> Vec<Vec<bool>> {
@@ -2360,6 +2381,11 @@ mod tests {
         let star = superscript_mask("*Equal Contribution");
         assert!(star[0], "{star:?}");
         assert!(star.iter().skip(1).all(|flag| !flag));
+        let raised = superscript_mask("Zhang∗1,2 Lee");
+        assert!(raised[5] && raised[6] && raised[8], "{raised:?}");
+        assert_eq!(raised.iter().filter(|flag| **flag).count(), 3);
+        let cjk_star = superscript_mask("张轩∗1");
+        assert!(cjk_star[2] && cjk_star[3], "{cjk_star:?}");
     }
 
     #[test]
