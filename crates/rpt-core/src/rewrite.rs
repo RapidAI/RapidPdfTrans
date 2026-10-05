@@ -176,10 +176,7 @@ pub fn rewrite_translation(
     let mut succeeded: HashSet<u32> = HashSet::new();
     let mut embedded: Vec<(String, SubsetFont)> = Vec::new();
     if let Some(font_bytes) = opts.font_bytes.clone() {
-        let chars = planned
-            .iter()
-            .flat_map(|(_, text)| text.chars().map(|ch| ch as u32))
-            .collect::<Vec<_>>();
+        let chars = cover_with_fallbacks(planned.iter().flat_map(|(_, text)| text.chars()));
         if let Some(font) = subset_ttf(&font_bytes, &chars) {
             place_segments(
                 &planned,
@@ -221,10 +218,7 @@ pub fn rewrite_translation(
         }
         let mut slot = 0u32;
         for (style, group) in groups {
-            let chars = group
-                .iter()
-                .flat_map(|(_, text)| text.chars().map(|ch| ch as u32))
-                .collect::<Vec<_>>();
+            let chars = cover_with_fallbacks(group.iter().flat_map(|(_, text)| text.chars()));
             let Some(font) = subset_for_style(
                 style,
                 &chars,
@@ -857,6 +851,51 @@ struct InkLine<'a> {
     right: f32,
 }
 
+/// Extra codepoints to embed so a missing symbol can be drawn as a covered one.
+fn cover_with_fallbacks(chars: impl Iterator<Item = char>) -> Vec<u32> {
+    let mut codes = Vec::new();
+    for ch in chars {
+        codes.push(ch as u32);
+        for alt in coverage_fallbacks(ch) {
+            codes.push(*alt as u32);
+        }
+    }
+    codes
+}
+
+/// Symbols academic PDFs use that a CJK face often lacks. The original is kept
+/// when none of these stand-ins are in the subset, so a mark is never dropped.
+fn coverage_fallbacks(ch: char) -> &'static [char] {
+    match ch {
+        '\u{2217}' | '\u{204E}' | '\u{FE61}' | '\u{FF0A}' => &['*'],
+        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => &['-'],
+        '\u{2018}' | '\u{2019}' | '\u{201A}' => &['\''],
+        '\u{201C}' | '\u{201D}' | '\u{201E}' => &['"'],
+        '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2009}' => &[' '],
+        _ => &[],
+    }
+}
+
+fn substitute_covered(text: &str, font: &SubsetFont) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if font.glyphs.contains_key(&(ch as u32)) {
+            out.push(ch);
+            continue;
+        }
+        if let Some(alt) = coverage_fallbacks(ch)
+            .iter()
+            .copied()
+            .find(|alt| font.glyphs.contains_key(&(*alt as u32)))
+        {
+            out.push(alt);
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -870,6 +909,8 @@ fn layout_segment(
     if glyphs.is_empty() || text.trim().is_empty() {
         return None;
     }
+    let covered = substitute_covered(text, font);
+    let text = covered.as_str();
     if text
         .chars()
         .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
@@ -1873,6 +1914,15 @@ mod tests {
         TranslatedSegment, Translator,
     };
     use lopdf::dictionary;
+
+    #[test]
+    fn a_star_operator_uses_an_ascii_asterisk_when_the_face_lacks_it() {
+        let font = box_ttf(&[0x4E2D, b'*' as u32]);
+        let subset = subset_ttf(&font, &cover_with_fallbacks("中∗".chars())).unwrap();
+        assert_eq!(substitute_covered("中∗", &subset), "中*");
+        assert_eq!(substitute_covered("中†", &subset), "中†");
+        assert!(cover_with_fallbacks("∗".chars()).contains(&('*' as u32)));
+    }
 
     struct MapHello;
     impl Translator for MapHello {
