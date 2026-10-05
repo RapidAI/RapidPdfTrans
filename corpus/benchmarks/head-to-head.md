@@ -1,6 +1,6 @@
 # Head-to-head translation benchmark
 
-Recorded 2026-10-05T08:44:02Z on commit `6d80a49`.
+Recorded 2026-10-05T19:26:11Z on commit `32f8f77`.
 
 Each engine translated the same CI pages through the identity server (`identity http://127.0.0.1:8765/v1`), limited to the first 1 page(s). The translator returns the source text, so these numbers measure layout damage rather than translation quality. `identity_char_retention` near 1.0 means the source characters survived.
 
@@ -11,8 +11,8 @@ BabelDOC is 0.6.x (`babeldoc`). PDFMathTranslate is pdf2zh_next 2.9.0. Both use 
 | engine | docs | drop | coverage | protected | formula | overflow | style | identity | containment | non-text SSIM |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `rapidpdftrans` | 9 | 0.0000 | 1.0000 | 1.0000 | 1.0000 | 0.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| `babeldoc` | 9 | 0.0346 | 0.9654 | 0.9232 | 1.0000 | 0.0000 | 0.9702 | 0.9998 | 0.9750 | 0.9843 |
-| `pdf2zh_next` | 9 | 0.1655 | 0.8345 | 0.8957 | 1.0000 | 0.0000 | 0.1032 | 0.9998 | 0.8344 | 0.9516 |
+| `babeldoc` | 9 | 0.0346 | 0.9654 | 0.9238 | 1.0000 | 0.0000 | 0.9740 | 0.9998 | 0.9750 | 0.9843 |
+| `pdf2zh_next` | 9 | 0.1651 | 0.8349 | 0.8969 | 1.0000 | 0.0000 | 0.1137 | 0.9998 | 0.8345 | 0.9516 |
 
 ## Per file
 
@@ -37,8 +37,8 @@ BabelDOC is 0.6.x (`babeldoc`). PDFMathTranslate is pdf2zh_next 2.9.0. Both use 
 | `neurips-2017-attention` | `babeldoc` | ok | 0.0938 | 1.0000 | 0.0000 | 0.9492 | 0.9984 | 0.9242 |
 | `neurips-2017-attention` | `pdf2zh_next` | ok | 0.2969 | 1.0000 | 0.0000 | 0.0031 | 0.9984 | 0.4286 |
 | `2024-acl-long-7` | `rapidpdftrans` | ok | 0.0000 | 1.0000 | 0.0000 | 1.0000 | 1.0000 | 1.0000 |
-| `2024-acl-long-7` | `babeldoc` | ok | 0.0183 | 1.0000 | 0.0000 | 0.9636 | 1.0000 | 0.9725 |
-| `2024-acl-long-7` | `pdf2zh_next` | ok | 0.2018 | 1.0000 | 0.0000 | 0.0073 | 1.0000 | 0.8980 |
+| `2024-acl-long-7` | `babeldoc` | ok | 0.0180 | 1.0000 | 0.0000 | 0.9975 | 1.0000 | 0.9727 |
+| `2024-acl-long-7` | `pdf2zh_next` | ok | 0.1982 | 1.0000 | 0.0000 | 0.1017 | 1.0000 | 0.8986 |
 | `arxiv-2610.02193` | `rapidpdftrans` | ok | 0.0000 | 1.0000 | 0.0000 | 1.0000 | 1.0000 | 1.0000 |
 | `arxiv-2610.02193` | `babeldoc` | ok | 0.0526 | 1.0000 | 0.0000 | 1.0000 | 1.0000 | 1.0000 |
 | `arxiv-2610.02193` | `pdf2zh_next` | ok | 0.1474 | 1.0000 | 0.0000 | 0.0871 | 1.0000 | 0.9802 |
