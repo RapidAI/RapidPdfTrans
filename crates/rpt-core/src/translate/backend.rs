@@ -13,6 +13,7 @@ use crate::translate::{TranslateOptions, Translator, DEFAULT_LLM_BASE_URL};
 pub const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
 
+#[allow(clippy::large_enum_variant)]
 pub enum TranslatorBackend {
     OpenAi(LlmTranslator),
     Google(GoogleTranslator),

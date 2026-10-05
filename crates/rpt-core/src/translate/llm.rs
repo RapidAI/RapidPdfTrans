@@ -17,7 +17,6 @@ use crate::error::{Error, Result};
 use crate::translate::{TranslateOptions, Translator};
 
 pub struct LlmTranslator {
-    agent: ureq::Agent,
     base_url: String,
     model: String,
     api_key: String,
@@ -54,13 +53,7 @@ impl LlmTranslator {
     pub fn with_key(opts: &TranslateOptions, api_key: impl Into<String>) -> Result<Self> {
         let api_key = api_key.into();
         let timeout = Duration::from_secs(opts.timeout_secs.max(1));
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .proxy(None)
-            .build();
-        let agent: ureq::Agent = config.into();
         Ok(Self {
-            agent,
             base_url: opts.resolved_base_url(),
             model: opts.resolved_model(),
             api_key,
@@ -114,11 +107,17 @@ impl LlmTranslator {
         }
         // ureq's socket timeout does not always interrupt a stalled TLS read.
         // A thread deadline makes `timeout: global` real so a batch can split.
-        let agent = self.agent.clone();
+        // The stalled thread keeps its socket, so the next call uses a new
+        // agent and does not wait on that connection.
         let api_key = self.api_key.clone();
         let timeout = self.timeout;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let config = ureq::Agent::config_builder()
+                .timeout_global(Some(timeout))
+                .proxy(None)
+                .build();
+            let agent: ureq::Agent = config.into();
             let _ = tx.send(post_chat(&agent, &url, &api_key, body));
         });
         match rx.recv_timeout(timeout) {
