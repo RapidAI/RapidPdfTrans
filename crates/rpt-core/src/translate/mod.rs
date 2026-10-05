@@ -30,6 +30,7 @@ pub use backend::TranslatorBackend;
 pub use google::GoogleTranslator;
 pub use llm::LlmTranslator;
 pub use protect::citation_end;
+pub(crate) use protect::verbatim_spans;
 pub use references::{identical_reference_operators, reference_glyph_ids, reference_stream_spans};
 
 use crate::error::{Error, Result};

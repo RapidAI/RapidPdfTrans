@@ -10,6 +10,7 @@
 //! callable when no model is configured.
 
 use crate::font::SubsetFont;
+use crate::translate::verbatim_spans;
 
 /// How Chinese body text is sized relative to the English it replaces.
 ///
@@ -454,6 +455,59 @@ pub(crate) fn cids_of(text: &str, font: &SubsetFont) -> Vec<u16> {
     text.chars()
         .filter_map(|ch| font.glyphs.get(&(ch as u32)).map(|(gid, _)| *gid))
         .collect()
+}
+
+/// A short translation still has to meet every source line. Split the longest
+/// wrapped lines until there is one piece per source baseline. Pieces only get
+/// shorter, so a line that already fit the measure still does.
+pub(crate) fn spread_to_lines(mut lines: Vec<String>, count: usize) -> Vec<String> {
+    if count <= lines.len() || lines.is_empty() {
+        return lines;
+    }
+    while lines.len() < count {
+        let Some(index) = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| safe_split(line).is_some())
+            .max_by_key(|(_, line)| line.chars().count())
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        let (left, right) = safe_split(&lines[index]).expect("filtered");
+        lines.splice(index..=index, [left, right]);
+    }
+    lines
+}
+
+/// Split near the middle, but never inside a citation, number, URL, or email.
+fn safe_split(line: &str) -> Option<(String, String)> {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    if chars.len() < 2 {
+        return None;
+    }
+    let spans = verbatim_spans(line);
+    let mid = chars.len() / 2;
+    let mut best: Option<(usize, usize)> = None;
+    for (index, (byte, _)) in chars.iter().enumerate().skip(1) {
+        if spans
+            .iter()
+            .any(|&(start, end)| *byte > start && *byte < end)
+        {
+            continue;
+        }
+        let dist = index.abs_diff(mid);
+        if best.is_none_or(|(best_dist, _)| dist < best_dist) {
+            best = Some((dist, *byte));
+        }
+    }
+    let at = best?.1;
+    let (left, right) = line.split_at(at);
+    if left.is_empty() || right.is_empty() {
+        None
+    } else {
+        Some((left.to_string(), right.to_string()))
+    }
 }
 
 pub(crate) fn wrap_text(
@@ -917,6 +971,36 @@ mod tests {
             (affil_fit.size - 9.96 * 0.90).abs() < 0.15,
             "affiliation should stay body size, got {}",
             affil_fit.size
+        );
+    }
+
+    #[test]
+    fn a_short_translation_spreads_onto_every_source_line() {
+        let lines = spread_to_lines(
+            vec!["我们提出了一种基于完全图的聚类公式并且保留每一行。".into()],
+            4,
+        );
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert!(lines.iter().all(|line| !line.is_empty()));
+        let joined: String = lines.concat();
+        assert_eq!(joined, "我们提出了一种基于完全图的聚类公式并且保留每一行。");
+    }
+
+    #[test]
+    fn spreading_keeps_a_citation_on_one_line() {
+        let line = "特征向量内积的因子化(Kazi et al., 2022)，但这会显著增加复杂性。";
+        let lines = spread_to_lines(vec![line.into()], 6);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|piece| piece.contains("(Kazi et al., 2022)")),
+            "{lines:?}"
+        );
+        assert_eq!(lines.concat(), line);
+        assert_eq!(
+            spread_to_lines(vec!["112".into()], 3),
+            vec!["112".to_string()]
         );
     }
 

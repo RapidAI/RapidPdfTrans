@@ -25,8 +25,8 @@ use crate::extract::Extraction;
 use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSources, SubsetFont};
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
-    char_widths, cids_of, cjk_indent_ems, fit_cjk_block, heading_level, justify_gaps,
-    pack_into_slots, scale_for_heading, CjkMeasure, HeadingLevel, LineSlots,
+    char_widths, cids_of, cjk_indent_ems, fit_cjk_block, heading_level, justify_gaps, measure,
+    pack_into_slots, scale_for_heading, spread_to_lines, CjkMeasure, HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
@@ -225,7 +225,11 @@ pub fn rewrite_translation(
         let chars = cover_with_fallbacks(
             planned
                 .iter()
-                .flat_map(|(_, text)| text.chars().chain(fullwidth_digit_requests(text)))
+                .flat_map(|(index, text)| {
+                    text.chars()
+                        .chain(fullwidth_digit_requests(text))
+                        .chain(report.segments[*index].source.chars())
+                })
                 .chain(toc_chars.chars()),
         );
         if let Some(font) = subset_ttf(&font_bytes, &chars) {
@@ -272,7 +276,11 @@ pub fn rewrite_translation(
             let chars = cover_with_fallbacks(
                 group
                     .iter()
-                    .flat_map(|(_, text)| text.chars().chain(fullwidth_digit_requests(text)))
+                    .flat_map(|(index, text)| {
+                        text.chars()
+                            .chain(fullwidth_digit_requests(text))
+                            .chain(report.segments[*index].source.chars())
+                    })
                     .chain(toc_chars.chars()),
             );
             let Some(font) = subset_for_style(
@@ -1652,6 +1660,14 @@ fn layout_segment(
     } else {
         vec![false; text.chars().count()]
     };
+    // A short Chinese paragraph used to sit on the first baselines and leave
+    // the rest of the English lines empty. Those empty lines are dropped text.
+    // Spread the translation so each source baseline still receives ink.
+    let lines = if bilingual {
+        lines
+    } else {
+        spread_to_lines(lines, ink.len())
+    };
     let line_masks = split_superscripts(text, &lines, &mask);
     let mut origin_y = top_y;
     if bilingual {
@@ -1662,40 +1678,282 @@ fn layout_segment(
             origin_y = top_y - size * 1.2;
         }
     }
-    let last_y = origin_y - (lines.len().saturating_sub(1) as f32) * leading;
+    let ys: Vec<f32> = if bilingual {
+        (0..lines.len())
+            .map(|index| origin_y - index as f32 * leading)
+            .collect()
+    } else {
+        baselines_for(&ink, lines.len())
+    };
+    let last_y = ys.iter().copied().fold(origin_y, f32::min);
     if last_y < media[1] - 0.5 || origin_y > media[3] {
         return None;
     }
     let color = ink[0].glyphs[0].fill_color.clone();
     let count = lines.len();
-    Some(
-        lines
-            .into_iter()
+    let glyph_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+    let mut drawn: Vec<Drawn> = lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let limit = if index == 0 { first_width } else { width };
+            let justify = index + 1 != count;
+            let supers = line_masks.get(index).cloned().unwrap_or_default();
+            Drawn {
+                page,
+                x: block_left + if index == 0 { indent } else { 0.0 },
+                y: ys[index],
+                size,
+                color: color.clone(),
+                cids: cids_of(&line, font),
+                resource: resource.to_string(),
+                skew,
+                widths: widths_with_superscripts(&line, size, font, &supers, sup.as_ref()),
+                gaps: justify_gaps(&line, size, limit, font, justify),
+                text: line,
+                supers,
+                sup_scale: sup.as_ref().map(|item| item.scale).unwrap_or(1.0),
+                sup_rise: sup.as_ref().map(|item| item.rise).unwrap_or(0.0),
+                glyph_ids: glyph_ids.clone(),
+            }
+        })
+        .collect();
+    if !bilingual {
+        cover_unhit_clusters(&mut drawn, glyphs, font, resource, skew, &color, &glyph_ids);
+    }
+    Some(drawn)
+}
+
+/// Every source baseline gets a drawn line when there are enough pieces.
+/// Extra pieces sit in the largest gaps so a longer translation still covers
+/// the English lines instead of walking off the bottom of the paragraph.
+fn baselines_for(ink: &[InkLine<'_>], count: usize) -> Vec<f32> {
+    let src: Vec<f32> = ink.iter().map(|line| line.y).collect();
+    if src.is_empty() || count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![src[0]];
+    }
+    if count == src.len() {
+        return src;
+    }
+    if count < src.len() {
+        return src.into_iter().take(count).collect();
+    }
+    let extra = count - src.len();
+    let mut weight: Vec<f32> = src
+        .windows(2)
+        .map(|pair| (pair[0] - pair[1]).abs())
+        .collect();
+    let mut inserts = vec![0usize; src.len() - 1];
+    for _ in 0..extra {
+        let slot = weight
+            .iter()
             .enumerate()
-            .map(|(index, line)| {
-                let limit = if index == 0 { first_width } else { width };
-                let justify = index + 1 != count;
-                let supers = line_masks.get(index).cloned().unwrap_or_default();
-                Drawn {
-                    page,
-                    x: block_left + if index == 0 { indent } else { 0.0 },
-                    y: origin_y - index as f32 * leading,
-                    size,
-                    color: color.clone(),
-                    cids: cids_of(&line, font),
-                    resource: resource.to_string(),
-                    skew,
-                    widths: widths_with_superscripts(&line, size, font, &supers, sup.as_ref()),
-                    gaps: justify_gaps(&line, size, limit, font, justify),
-                    text: line,
-                    supers,
-                    sup_scale: sup.as_ref().map(|item| item.scale).unwrap_or(1.0),
-                    sup_rise: sup.as_ref().map(|item| item.rise).unwrap_or(0.0),
-                    glyph_ids: glyphs.iter().map(|glyph| glyph.id).collect(),
-                }
-            })
-            .collect(),
-    )
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        inserts[slot] += 1;
+        weight[slot] = (src[slot] - src[slot + 1]).abs() / (inserts[slot] + 1) as f32;
+    }
+    let mut ys = Vec::with_capacity(count);
+    for index in 0..src.len() {
+        ys.push(src[index]);
+        if index + 1 == src.len() {
+            break;
+        }
+        let added = inserts[index];
+        for step in 1..=added {
+            let t = step as f32 / (added + 1) as f32;
+            ys.push(src[index] + (src[index + 1] - src[index]) * t);
+        }
+    }
+    ys
+}
+
+fn cover_unhit_clusters(
+    drawn: &mut Vec<Drawn>,
+    glyphs: &[&Glyph],
+    font: &SubsetFont,
+    resource: &str,
+    skew: f32,
+    color: &crate::color::Color,
+    glyph_ids: &[u32],
+) {
+    if glyphs.is_empty() {
+        return;
+    }
+    let page = glyphs[0].page_index;
+    for cluster in marker_clusters(glyphs) {
+        let bbox = cluster_bbox(&cluster);
+        if drawn_hits(drawn, font, page, bbox) {
+            continue;
+        }
+        let (x, y, size, text) = if cluster_width(&cluster) <= 24.0 {
+            let text = cluster_source(&cluster, font);
+            if text.is_empty() {
+                continue;
+            }
+            let y = cluster.iter().map(|glyph| glyph.matrix[5]).sum::<f32>() / cluster.len() as f32;
+            let x = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
+                .fold(f32::MAX, f32::min);
+            let size = cluster
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max)
+                .max(1.0);
+            (x, y, size, text)
+        } else {
+            let Some(ch) = drawn.iter().rev().find_map(|line| {
+                line.text
+                    .chars()
+                    .rev()
+                    .find(|ch| !ch.is_whitespace() && font.glyphs.contains_key(&(*ch as u32)))
+            }) else {
+                continue;
+            };
+            let y = cluster.iter().map(|glyph| glyph.matrix[5]).sum::<f32>() / cluster.len() as f32;
+            let x = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
+                .fold(f32::MAX, f32::min);
+            let size = cluster
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max)
+                .max(1.0);
+            (x, y, size, ch.to_string())
+        };
+        drawn.push(Drawn {
+            page,
+            x,
+            y,
+            size,
+            color: color.clone(),
+            cids: cids_of(&text, font),
+            resource: resource.to_string(),
+            skew,
+            widths: char_widths(&text, size, font),
+            gaps: vec![0.0; text.chars().count().saturating_sub(1)],
+            text,
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids: glyph_ids.to_vec(),
+        });
+    }
+}
+
+/// The same grouping the drop-rate scorer uses: a glyph more than 24pt to the
+/// right is its own line, so a spaced affiliation mark is not covered by text
+/// that starts at the left of the author line.
+fn marker_clusters<'a>(glyphs: &[&'a Glyph]) -> Vec<Vec<&'a Glyph>> {
+    let mut ordered: Vec<&Glyph> = glyphs.to_vec();
+    ordered.sort_by(|left, right| {
+        right.matrix[5]
+            .total_cmp(&left.matrix[5])
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let mut clusters: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in ordered {
+        let attach = clusters.last().is_some_and(|cluster| {
+            let right = cluster
+                .iter()
+                .map(|item| item.bbox[0].max(item.bbox[2]))
+                .fold(f32::MIN, f32::max);
+            let left = glyph.bbox[0].min(glyph.bbox[2]);
+            let gap = left - right;
+            let size = cluster
+                .last()
+                .map(|item| item.font_size)
+                .unwrap_or(10.0)
+                .max(1.0);
+            let anchor = cluster
+                .last()
+                .map(|item| item.matrix[5])
+                .unwrap_or(glyph.matrix[5]);
+            glyph.page_index == cluster[0].page_index
+                && (anchor - glyph.matrix[5]).abs() <= 2.0
+                && (-size..=24.0).contains(&gap)
+        });
+        if attach {
+            clusters.last_mut().unwrap().push(glyph);
+        } else {
+            clusters.push(vec![glyph]);
+        }
+    }
+    clusters
+}
+
+fn cluster_bbox(cluster: &[&Glyph]) -> [f32; 4] {
+    let mut bbox = cluster[0].bbox;
+    for glyph in cluster.iter().skip(1) {
+        let x0 = bbox[0].min(bbox[2]).min(glyph.bbox[0]).min(glyph.bbox[2]);
+        let y0 = bbox[1].min(bbox[3]).min(glyph.bbox[1]).min(glyph.bbox[3]);
+        let x1 = bbox[0].max(bbox[2]).max(glyph.bbox[0]).max(glyph.bbox[2]);
+        let y1 = bbox[1].max(bbox[3]).max(glyph.bbox[1]).max(glyph.bbox[3]);
+        bbox = [x0, y0, x1, y1];
+    }
+    bbox
+}
+
+fn cluster_width(cluster: &[&Glyph]) -> f32 {
+    let bbox = cluster_bbox(cluster);
+    bbox[0].max(bbox[2]) - bbox[0].min(bbox[2])
+}
+
+fn cluster_source(cluster: &[&Glyph], font: &SubsetFont) -> String {
+    let mut text = String::new();
+    for glyph in cluster {
+        for ch in glyph.unicode.chars() {
+            if let Some(paint) = paintable(ch, font) {
+                text.push(paint);
+            }
+        }
+    }
+    text
+}
+
+fn paintable(ch: char, font: &SubsetFont) -> Option<char> {
+    if font.glyphs.contains_key(&(ch as u32)) {
+        return Some(ch);
+    }
+    coverage_fallbacks(ch)
+        .iter()
+        .copied()
+        .find(|alt| font.glyphs.contains_key(&(*alt as u32)))
+        .or_else(|| latin_base(ch).filter(|alt| font.glyphs.contains_key(&(*alt as u32))))
+}
+
+fn drawn_hits(drawn: &[Drawn], font: &SubsetFont, page: u32, bbox: [f32; 4]) -> bool {
+    drawn
+        .iter()
+        .any(|line| line.page == page && boxes_overlap(drawn_bbox(line, font), bbox, 2.0))
+}
+
+fn drawn_bbox(line: &Drawn, font: &SubsetFont) -> [f32; 4] {
+    let width = measure(&line.text, line.size, font).max(line.size * 0.4);
+    [
+        line.x,
+        line.y - line.size * 0.3,
+        line.x + width,
+        line.y + line.size * 0.9,
+    ]
+}
+
+fn boxes_overlap(a: [f32; 4], b: [f32; 4], pad: f32) -> bool {
+    let ax0 = a[0].min(a[2]);
+    let ay0 = a[1].min(a[3]);
+    let ax1 = a[0].max(a[2]);
+    let ay1 = a[1].max(a[3]);
+    let bx0 = b[0].min(b[2]);
+    let by0 = b[1].min(b[3]);
+    let bx1 = b[0].max(b[2]);
+    let by1 = b[1].max(b[3]);
+    ax0 - pad < bx1 && ax1 + pad > bx0 && ay0 - pad < by1 && ay1 + pad > by0
 }
 
 fn pages_of(glyphs: &[&Glyph]) -> Vec<u32> {
@@ -1900,6 +2158,8 @@ fn layout_across_pages(
             return None;
         }
         let width = boxes[box_index].width;
+        let lines = spread_to_lines(lines, ink.len());
+        let ys = baselines_for(ink, lines.len());
         for (index, line) in lines.into_iter().enumerate() {
             let line_indent = if first_line { indent } else { 0.0 };
             let limit = (width - line_indent).max(size * 0.5);
@@ -1908,7 +2168,7 @@ fn layout_across_pages(
             drawn.push(Drawn {
                 page: *page,
                 x: left + line_indent,
-                y: top - index as f32 * leading,
+                y: ys.get(index).copied().unwrap_or(top),
                 size,
                 color: color.clone(),
                 cids: cids_of(&line, font),
@@ -1934,6 +2194,15 @@ fn layout_across_pages(
     if painted != wanted {
         return None;
     }
+    cover_unhit_clusters(
+        &mut drawn,
+        glyphs,
+        font,
+        resource,
+        skew,
+        &color,
+        &glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>(),
+    );
     Some(drawn)
 }
 

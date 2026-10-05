@@ -105,6 +105,37 @@ pub fn citation_end(text: &str, i: usize) -> Option<usize> {
     match_citation(text, i)
 }
 
+/// Byte ranges that must stay on one drawn line.
+///
+/// The drop-rate fix spreads a short translation onto every source baseline.
+/// A split inside a citation, number, URL, or email lets the other column’s
+/// line land between the pieces, so the token is no longer in the page text.
+pub(crate) fn verbatim_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        if let Some(end) = match_existing_placeholder(text, i)
+            .or_else(|| match_url(text, i))
+            .or_else(|| match_email(text, i))
+            .or_else(|| match_braces(text, i))
+            .or_else(|| match_citation(text, i))
+            .or_else(|| match_number(text, i))
+        {
+            if end > i {
+                spans.push((i, end));
+                i = end;
+                continue;
+            }
+        }
+        i += text[i..]
+            .chars()
+            .next()
+            .map(|ch| ch.len_utf8())
+            .unwrap_or(1);
+    }
+    spans
+}
+
 fn match_citation(input: &str, i: usize) -> Option<usize> {
     let rest = input.get(i..)?;
     if let Some(end) = match_numeric_brackets(rest) {
