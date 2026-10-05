@@ -88,6 +88,7 @@ pub fn rewrite_translation(
     }
 
     let mut planned: Vec<(usize, String)> = Vec::new();
+    let owners = operator_owners(&extraction.glyphs);
     for (index, segment) in report.segments.iter().enumerate() {
         if segment.glyph_ids.is_empty() {
             continue;
@@ -116,7 +117,7 @@ pub fn rewrite_translation(
             .iter()
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
             .collect();
-        if !operators_are_private(&glyphs, &extraction.glyphs) {
+        if !operators_are_private(&glyphs, &owners) {
             for id in &segment.glyph_ids {
                 keep.insert(*id, "shared-operator".into());
             }
@@ -649,21 +650,34 @@ fn is_math_font(name: &str) -> bool {
         || upper.contains("MATH")
 }
 
-fn operators_are_private(segment: &[&Glyph], all: &[Glyph]) -> bool {
+fn operator_owners(glyphs: &[Glyph]) -> HashMap<(u32, u16, usize, usize), Vec<u32>> {
+    let mut owners: HashMap<(u32, u16, usize, usize), Vec<u32>> = HashMap::new();
+    for glyph in glyphs {
+        let Some(span) = span_of(&glyph.source) else {
+            continue;
+        };
+        owners
+            .entry((span.object_id.0, span.object_id.1, span.start, span.end))
+            .or_default()
+            .push(glyph.id);
+    }
+    owners
+}
+
+fn operators_are_private(
+    segment: &[&Glyph],
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+) -> bool {
+    let inside: HashSet<u32> = segment.iter().map(|glyph| glyph.id).collect();
     for glyph in segment {
         let Some(span) = span_of(&glyph.source) else {
             return false;
         };
-        let foreign = all.iter().any(|other| {
-            other.id != glyph.id
-                && span_of(&other.source).is_some_and(|other_span| {
-                    other_span.object_id == span.object_id
-                        && other_span.start == span.start
-                        && other_span.end == span.end
-                })
-                && !segment.iter().any(|inside| inside.id == other.id)
-        });
-        if foreign {
+        let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+        let Some(ids) = owners.get(&key) else {
+            return false;
+        };
+        if ids.iter().any(|id| !inside.contains(id)) {
             return false;
         }
     }
