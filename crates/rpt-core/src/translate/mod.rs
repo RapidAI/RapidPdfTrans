@@ -869,7 +869,141 @@ fn echo_fix(
             slot.1 = text;
         }
     }
+    // A long paragraph is often copied whole when the neighboring lines are
+    // still English. Ask again for each sentence, with that context removed.
+    for slot in &mut restored {
+        if !needs_english_retry(&segments[slot.0].text, &slot.1) {
+            continue;
+        }
+        if let Some(joined) = translate_sentences(&segments[slot.0].text, opts, translator, calls) {
+            slot.1 = joined;
+        }
+    }
     restored
+}
+
+/// Split on sentence ends, keeping each piece's trailing space so the pieces
+/// concatenate back to `text`. Abbreviations (`et al.`, `Fig.`) stay put.
+fn split_sentences(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut pieces = Vec::new();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    while index < chars.len() {
+        if is_sentence_end(&chars, index) {
+            let mut stop = index + 1;
+            while stop < chars.len() && chars[stop].is_whitespace() {
+                stop += 1;
+            }
+            pieces.push(chars[start..stop].iter().collect());
+            start = stop;
+            index = stop;
+            continue;
+        }
+        index += 1;
+    }
+    if start < chars.len() {
+        pieces.push(chars[start..].iter().collect());
+    }
+    pieces
+}
+
+fn is_sentence_end(chars: &[char], index: usize) -> bool {
+    if !matches!(chars[index], '.' | '?' | '!') {
+        return false;
+    }
+    let mut next = index + 1;
+    while next < chars.len() && chars[next].is_whitespace() {
+        next += 1;
+    }
+    if next >= chars.len() || !chars[next].is_ascii_uppercase() {
+        return false;
+    }
+    let mut word_start = index;
+    while word_start > 0 && chars[word_start - 1].is_ascii_alphabetic() {
+        word_start -= 1;
+    }
+    let word: String = chars[word_start..index].iter().collect();
+    if word.chars().count() <= 1 {
+        return false;
+    }
+    !matches!(
+        word.to_ascii_lowercase().as_str(),
+        "al" | "etc"
+            | "eg"
+            | "ie"
+            | "fig"
+            | "eq"
+            | "dr"
+            | "mr"
+            | "mrs"
+            | "ms"
+            | "vs"
+            | "cf"
+            | "vol"
+            | "pp"
+            | "no"
+            | "approx"
+            | "st"
+            | "jr"
+            | "sr"
+            | "prof"
+            | "inc"
+            | "ltd"
+    )
+}
+
+/// Translate one echoed paragraph as separate sentences and with no neighbor
+/// context. Returns nothing when a long sentence is still English, so a mixed
+/// paragraph is not painted as if it were done.
+fn translate_sentences(
+    source: &str,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+) -> Option<String> {
+    let split = split_sentences(source);
+    // One sentence has no boundary to split on. Ask once more anyway, without
+    // the neighboring English lines that the paragraph call was showing.
+    let pieces = if split.len() >= 2 {
+        split
+    } else {
+        vec![source.to_string()]
+    };
+    let mut translated = Vec::with_capacity(pieces.len());
+    for piece in &pieces {
+        if piece.trim().is_empty() {
+            translated.push(piece.clone());
+            continue;
+        }
+        let shielded = shield(piece, &opts.glossary);
+        let prompt = PromptSegment {
+            id: 0,
+            text: shielded.text,
+            context_before: Vec::new(),
+            context_after: Vec::new(),
+        };
+        let user = user_payload(std::slice::from_ref(&prompt)).ok()?;
+        let system = system_prompt(&opts.source_lang, &opts.target_lang, false, true);
+        *calls += 1;
+        let raw = translator.complete(&system, &user).ok()?;
+        let parsed = parse_translations(&raw).ok()?;
+        let text = parsed
+            .iter()
+            .find(|(id, _)| *id == 0)
+            .map(|(_, text)| text.clone())?;
+        let restored = restore(&text, &shielded.slots).ok()?;
+        if needs_english_retry(piece, &restored) {
+            return None;
+        }
+        translated.push(restored);
+    }
+    let joined = translated.concat();
+    if joined.trim() == source.trim() {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 fn polish(items: Vec<(usize, String)>) -> Vec<(usize, String)> {
@@ -1448,6 +1582,117 @@ mod tests {
         let header = "Clustering Fully connected Graphs by Multicut";
         assert!(needs_english_retry(header, header), "{header}");
         assert!(!needs_english_retry("Introduction", "Introduction"));
+    }
+
+    #[test]
+    fn sentence_splits_keep_abbreviations_and_rejoin() {
+        let text = "See Smith et al. The method is shown in Fig. 1 and then continues. Efficient solvers scale well.";
+        let parts = split_sentences(text);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert_eq!(parts.concat(), text);
+        assert!(parts[0].contains("et al."));
+        assert!(parts[0].contains("Fig. 1"));
+    }
+
+    #[test]
+    fn an_echoed_paragraph_is_translated_sentence_by_sentence() {
+        let source = "Graph-based clustering approaches are theoretically appealing and infer the number of clusters during optimization. Efficient solvers scale well and give high quality solutions on large graphs.";
+        let mut ex = extraction_from_lines(&[source, "A short note beside it."]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &EchoWholeParagraph)
+                .unwrap();
+        let intro = report
+            .segments
+            .iter()
+            .find(|seg| seg.source.contains("Graph-based"))
+            .unwrap();
+        assert!(
+            intro.translated.chars().any(is_cjk_char),
+            "{}",
+            intro.translated
+        );
+        assert!(!intro.translated.contains("theoretically appealing"));
+        assert!(intro.translated.contains("求解器") || intro.translated.contains("簇"));
+        assert!(report.calls >= 4, "calls={}", report.calls);
+    }
+
+    #[test]
+    fn an_echoed_sentence_is_translated_without_its_neighbors() {
+        let source = "Efficient solvers scale well and give high quality solutions on large graphs in practice.";
+        let mut ex = extraction_from_lines(&[source, "Another nearby heading for context."]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &EchoWhenContext).unwrap();
+        let line = &report.segments[0];
+        assert!(line.translated.contains("求解器"), "{}", line.translated);
+        assert_ne!(line.translated, source);
+    }
+
+    struct EchoWhenContext;
+    impl Translator for EchoWhenContext {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap();
+                    let neighbors = seg["context_before"]
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+                        || seg["context_after"]
+                            .as_array()
+                            .is_some_and(|items| !items.is_empty());
+                    let translated = if neighbors {
+                        text.to_string()
+                    } else if text.contains("solvers") {
+                        "高效求解器能够扩展到大图并给出高质量的解。".into()
+                    } else {
+                        text.to_string()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": translated})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    fn sentence_continues(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        chars.iter().enumerate().any(|(index, ch)| {
+            if *ch != '.' {
+                return false;
+            }
+            let mut next = index + 1;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            next < chars.len() && chars[next].is_ascii_uppercase()
+        })
+    }
+
+    struct EchoWholeParagraph;
+    impl Translator for EchoWholeParagraph {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap();
+                    let translated = if sentence_continues(text) {
+                        text.to_string()
+                    } else if text.contains("solvers") {
+                        "高效求解器能够扩展到大图并给出高质量的解。".into()
+                    } else if text.contains("clustering") {
+                        "基于图的聚类方法会在优化过程中推断簇的数量。".into()
+                    } else {
+                        text.to_string()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": translated})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
     }
 
     struct EchoThenChinese;
