@@ -68,13 +68,19 @@ The default backend is an OpenAI-compatible chat endpoint:
 
 An `api_key` field in options JSON is ignored. Explicit options win over environment variables, which win over the built-in defaults. Tests talk to an in-process mock server. The live test runs only when `RPT_LLM_API_KEY` is set.
 
+`RPT_TRANSLATOR` selects the backend: `maclaw` (default), `openai`, `google` / `google-v2` (`RPT_GOOGLE_API_KEY`), `google-v3` (a service account in `RPT_GOOGLE_CREDENTIALS` or a bearer token in `RPT_GOOGLE_ACCESS_TOKEN`), or `google-unofficial`. The unofficial client is opt-in only. It is never used as a silent fallback.
+
 ```bash
 export RPT_LLM_API_KEY=...
 ./target/release/rpt translate paper.pdf --from en --to zh \
   --glossary transformer=Transformer
 ```
 
-Before the call, URLs, email addresses, `{brace}` groups, numbers, and glossary terms are replaced with `⟦N⟧` placeholders and restored afterwards. Glossary terms are substituted locally (longest match, ASCII word boundaries), so the model does not have to obey a glossary table. A dropped placeholder is retried once and then reported as an error. Translated glyphs are marked `translated_pending_rewrite`, which is not a final coverage state, because the PDF has not been rewritten.
+Before the call, URLs, email addresses, `{brace}` groups, numbers, in-text citations (`[12]`, `[1-3]`, `(Smith et al., 2020)`, `Smith (2019)`), and glossary terms are replaced with `⟦N⟧` placeholders and restored afterwards. Glossary terms are substituted locally (longest match, ASCII word boundaries), so the model does not have to obey a glossary table. A dropped placeholder is retried once and then reported as an error.
+
+The References / Bibliography section is not translated. Headings such as `References`, `Bibliography`, `Works Cited`, `参考文献`, `Literatur`, and `Références` start the section; numbered and author-year entries do too. It continues across columns and pages and stops at the next section (`Appendix`, `附录`, `A. Proofs`, …). Those glyphs are `kept_original` with reason `references`. `skip_references` defaults to true; set it to false in options JSON, or pass `--translate-references` on the CLI, to translate the section.
+
+Translated glyphs outside that section are marked `translated_pending_rewrite`, which is not a final coverage state, because the PDF has not been rewritten.
 
 ## Coverage
 

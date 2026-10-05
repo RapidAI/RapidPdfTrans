@@ -90,10 +90,361 @@ fn match_one(input: &str, i: usize, glossary: &[(String, String)]) -> Option<(us
     if let Some(end) = match_braces(input, i) {
         return Some((end, input[i..end].to_string()));
     }
+    if let Some(end) = match_citation(input, i) {
+        return Some((end, input[i..end].to_string()));
+    }
     if let Some(end) = match_number(input, i) {
         return Some((end, input[i..end].to_string()));
     }
     match_glossary(input, i, glossary)
+}
+
+/// End byte of an in-text citation starting at `i`, if any.
+/// Numeric `[12]` / `[1-3]` and author-year `(Smith et al., 2020)` / `Smith (2020)`.
+pub fn citation_end(text: &str, i: usize) -> Option<usize> {
+    match_citation(text, i)
+}
+
+fn match_citation(input: &str, i: usize) -> Option<usize> {
+    let rest = input.get(i..)?;
+    if let Some(end) = match_numeric_brackets(rest) {
+        return Some(i + end);
+    }
+    if let Some(end) = match_wrapped_citation(rest) {
+        return Some(i + end);
+    }
+    match_narrative_citation(input, i)
+}
+
+fn match_numeric_brackets(rest: &str) -> Option<usize> {
+    let (open_len, close) = if rest.starts_with('[') {
+        (1, "]")
+    } else if rest.starts_with('［') {
+        ('［'.len_utf8(), "］")
+    } else {
+        return None;
+    };
+    let bytes = rest.as_bytes();
+    let mut p = open_len;
+    if !consume_citation_number(bytes, &mut p) {
+        return None;
+    }
+    loop {
+        let saved = p;
+        p = skip_ascii_space(bytes, p);
+        if rest[p..].starts_with(close) {
+            break;
+        }
+        let sep = if p < bytes.len() && matches!(bytes[p], b',' | b';' | b'-') {
+            1
+        } else if rest[p..].starts_with('–') || rest[p..].starts_with('—') {
+            '–'.len_utf8()
+        } else {
+            p = saved;
+            break;
+        };
+        p += sep;
+        p = skip_ascii_space(bytes, p);
+        if !consume_citation_number(bytes, &mut p) {
+            p = saved;
+            break;
+        }
+    }
+    p = skip_ascii_space(bytes, p);
+    rest[p..].starts_with(close).then_some(p + close.len())
+}
+
+fn consume_citation_number(bytes: &[u8], p: &mut usize) -> bool {
+    let start = *p;
+    while *p < bytes.len() && bytes[*p].is_ascii_digit() {
+        *p += 1;
+    }
+    let n = *p - start;
+    (1..=4).contains(&n)
+}
+
+fn skip_ascii_space(bytes: &[u8], mut p: usize) -> usize {
+    while p < bytes.len() && bytes[p] == b' ' {
+        p += 1;
+    }
+    p
+}
+
+fn match_wrapped_citation(rest: &str) -> Option<usize> {
+    let (open, close) = if rest.starts_with('(') {
+        ('(', ')')
+    } else if rest.starts_with('[') {
+        ('[', ']')
+    } else if rest.starts_with('［') {
+        ('［', '］')
+    } else {
+        return None;
+    };
+    if open == '[' || open == '［' {
+        let after = &rest[open.len_utf8()..];
+        if after.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+    }
+    let mut depth = 1usize;
+    let mut i = open.len_utf8();
+    while i < rest.len() && i < 220 {
+        let ch = rest[i..].chars().next()?;
+        if ch == '\n' {
+            return None;
+        }
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                let body = &rest[open.len_utf8()..i];
+                if is_citation_body(body) {
+                    return Some(i + ch.len_utf8());
+                }
+                return None;
+            }
+        }
+        i += ch.len_utf8();
+    }
+    None
+}
+
+fn match_narrative_citation(input: &str, i: usize) -> Option<usize> {
+    if !left_boundary(input, i) {
+        return None;
+    }
+    let rest = input.get(i..)?;
+    let (name, mut p) = take_name(rest)?;
+    if is_stop_surname(name) || name.eq_ignore_ascii_case("the") {
+        return None;
+    }
+    let saved = p;
+    p = skip_space_str(rest, p);
+    if rest[p..].starts_with("et al.") {
+        p += "et al.".len();
+    } else if rest[p..].starts_with("et al") {
+        p += "et al".len();
+    } else if let Some(q) = take_and_name(rest, p) {
+        p = q;
+    } else {
+        p = saved;
+    }
+    p = skip_space_str(rest, p);
+    if !rest[p..].starts_with('(') {
+        return None;
+    }
+    let inside = &rest[p + 1..];
+    let year_len = year_token_len(inside)?;
+    let mut q = year_len;
+    q = skip_space_str(inside, q);
+    if inside[q..].starts_with(',') {
+        let tail = skip_space_str(inside, q + 1);
+        if inside[tail..].starts_with("p.") || inside[tail..].starts_with("pp.") {
+            let mut t = tail;
+            while t < inside.len() && !inside[t..].starts_with(')') {
+                let ch = inside[t..].chars().next()?;
+                if ch == '\n' || ch == '(' {
+                    return None;
+                }
+                t += ch.len_utf8();
+            }
+            q = t;
+        }
+    }
+    if !inside[q..].starts_with(')') {
+        return None;
+    }
+    Some(i + p + 1 + q + 1)
+}
+
+fn take_and_name(rest: &str, p: usize) -> Option<usize> {
+    let p = skip_space_str(rest, p);
+    let p = if rest[p..].starts_with("and ") {
+        p + 4
+    } else if rest[p..].starts_with("& ") {
+        p + 2
+    } else {
+        return None;
+    };
+    let (_, len) = take_name(&rest[p..])?;
+    Some(p + len)
+}
+
+fn take_name(text: &str) -> Option<(&str, usize)> {
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    if !first.is_uppercase() {
+        return None;
+    }
+    let mut len = first.len_utf8();
+    for ch in chars {
+        if ch.is_alphabetic() || matches!(ch, '\'' | '’' | '-' | '‐') {
+            len += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if len == first.len_utf8() {
+        return None;
+    }
+    Some((&text[..len], len))
+}
+
+fn is_stop_surname(name: &str) -> bool {
+    matches!(
+        name,
+        "Figure"
+            | "Fig"
+            | "Table"
+            | "Tab"
+            | "Section"
+            | "Equation"
+            | "Eq"
+            | "Chapter"
+            | "Appendix"
+            | "Algorithm"
+            | "Theorem"
+            | "Lemma"
+            | "Page"
+            | "Volume"
+            | "Vol"
+            | "The"
+            | "This"
+            | "That"
+            | "For"
+            | "With"
+            | "From"
+            | "Using"
+            | "See"
+    )
+}
+
+fn skip_space_str(text: &str, mut p: usize) -> usize {
+    while text[p..].starts_with(' ') {
+        p += 1;
+    }
+    p
+}
+
+fn year_token_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 4 || !bytes[..4].iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year: u32 = text[..4].parse().ok()?;
+    if !(1900..2100).contains(&year) {
+        return None;
+    }
+    if bytes.len() > 4 && bytes[4].is_ascii_digit() {
+        return None;
+    }
+    let mut n = 4;
+    if bytes.get(n).is_some_and(|b| b.is_ascii_alphabetic()) {
+        n += 1;
+    }
+    Some(n)
+}
+
+fn is_citation_body(body: &str) -> bool {
+    let body = body.trim();
+    if body.is_empty() || body.chars().count() > 180 || body.contains('\n') {
+        return false;
+    }
+    let parts = split_semicolons(body);
+    !parts.is_empty() && parts.iter().all(|part| citation_chunk(part.trim()))
+}
+
+fn split_semicolons(body: &str) -> Vec<&str> {
+    body.split(';')
+        .filter(|part| !part.trim().is_empty())
+        .collect()
+}
+
+fn citation_chunk(part: &str) -> bool {
+    let part = strip_citation_prefix(part.trim());
+    let Some(year_at) = find_year_in(part) else {
+        return false;
+    };
+    let prefix = part[..year_at].trim().trim_end_matches([',', '，']).trim();
+    if prefix.is_empty() || has_disallowed_word(prefix) {
+        return false;
+    }
+    has_surname(prefix)
+}
+
+fn strip_citation_prefix(mut part: &str) -> &str {
+    loop {
+        let lower = part.to_ascii_lowercase();
+        let next = if lower.starts_with("e.g. ") {
+            Some(&part["e.g. ".len()..])
+        } else if lower.starts_with("e.g ") {
+            Some(&part["e.g ".len()..])
+        } else if lower.starts_with("cf. ") {
+            Some(&part["cf. ".len()..])
+        } else if lower.starts_with("cf ") {
+            Some(&part["cf ".len()..])
+        } else if lower.starts_with("see ") {
+            Some(&part["see ".len()..])
+        } else if lower.starts_with("ibid. ") {
+            Some(&part["ibid. ".len()..])
+        } else if lower.starts_with("ibid ") {
+            Some(&part["ibid ".len()..])
+        } else {
+            None
+        };
+        match next {
+            Some(rest) => part = rest.trim_start(),
+            None => return part,
+        }
+    }
+}
+
+fn find_year_in(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        if bytes[i].is_ascii_digit() && (i == 0 || !bytes[i - 1].is_ascii_digit()) {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j - i == 4 {
+                if let Ok(year) = text[i..j].parse::<u32>() {
+                    if (1900..2100).contains(&year) {
+                        return Some(i);
+                    }
+                }
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn has_disallowed_word(prefix: &str) -> bool {
+    const ALLOWED: &[&str] = &[
+        "and", "with", "from", "und", "von", "van", "de", "del", "der", "di", "la", "le", "da",
+        "dos", "das", "et", "al", "al.",
+    ];
+    prefix.split_whitespace().any(|word| {
+        let bare = word.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' | '(' | ')'));
+        bare.len() >= 4
+            && bare.chars().all(|ch| ch.is_ascii_lowercase())
+            && !ALLOWED.contains(&bare)
+    })
+}
+
+fn has_surname(prefix: &str) -> bool {
+    prefix.split_whitespace().any(|word| {
+        let bare = word.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';'));
+        let Some((name, len)) = take_name(bare) else {
+            return false;
+        };
+        len == bare.len() && !is_stop_surname(name)
+    })
 }
 
 fn match_existing_placeholder(input: &str, i: usize) -> Option<usize> {
@@ -294,6 +645,29 @@ mod tests {
         assert!(shielded.slots.contains(&"Transformer".to_string()));
         assert!(shielded.slots.contains(&"SELF-ATT".to_string()));
         assert!(!shielded.slots.iter().any(|s| s == "ATT"));
+    }
+
+    #[test]
+    fn shields_numeric_and_author_year_citations() {
+        let src = "See [12], [1, 3-5], and [1–3] plus (Smith et al., 2020) and Smith (2019).";
+        let shielded = shield(src, &[]);
+        assert!(!shielded.text.contains("[12]"), "{}", shielded.text);
+        assert!(!shielded.text.contains("Smith"), "{}", shielded.text);
+        assert!(!shielded.text.contains("2019"), "{}", shielded.text);
+        assert!(!shielded.text.contains("2020"), "{}", shielded.text);
+        assert_eq!(restore(&shielded.text, &shielded.slots).unwrap(), src);
+
+        let multi = "(Smith, 2020; Jones et al., 2021)";
+        let shielded = shield(multi, &[]);
+        assert!(!shielded.text.contains("Smith"), "{}", shielded.text);
+        assert_eq!(restore(&shielded.text, &shielded.slots).unwrap(), multi);
+
+        let prose = "established in 2020 and (the paper from 2020)";
+        let shielded = shield(prose, &[]);
+        assert!(shielded.text.contains("established"), "{}", shielded.text);
+        assert!(shielded.text.contains("paper"), "{}", shielded.text);
+        assert!(!shielded.text.contains("2020"), "{}", shielded.text);
+        assert_eq!(restore(&shielded.text, &shielded.slots).unwrap(), prose);
     }
 
     #[test]

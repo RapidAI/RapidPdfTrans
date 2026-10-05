@@ -3,7 +3,8 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rpt_core::{
-    translate_extraction, ExtractOptions, LlmTranslator, OpenOptions, PdfDocument, TranslateOptions,
+    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, TranslateOptions,
+    TranslatorBackend,
 };
 
 fn py_err(err: impl ToString) -> PyErr {
@@ -34,7 +35,7 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
     let options = options_json.unwrap_or("");
     let (opts, warnings) = TranslateOptions::from_json(options).map_err(py_err)?;
     let doc = PdfDocument::open(path).map_err(py_err)?;
-    let client = LlmTranslator::from_env(&opts).map_err(py_err)?;
+    let client = TranslatorBackend::from_env(&opts).map_err(py_err)?;
     let mut extraction = doc.extract();
     let report = translate_extraction(&mut extraction, &opts, &client).map_err(py_err)?;
     let mut value = extraction.to_json_value().map_err(py_err)?;
@@ -47,6 +48,7 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
             "translator".to_string(),
             serde_json::json!({
                 "model": client.model(),
+                "backend": client.label(),
                 "calls": report.calls,
                 "cache_hits": report.cache_hits,
             }),

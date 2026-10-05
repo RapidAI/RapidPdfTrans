@@ -16,6 +16,10 @@
 //! - `identity_char_retention`: source characters still present in the output.
 //!   This is the reference metric when the shared translator is identity.
 //!   A real zh translation lowers it on purpose; do not read it as dropped text.
+//! - `reference_byte_identity`: text-showing operators in the detected References
+//!   section whose bytes are unchanged in the output. Vacuous (1.0) when the
+//!   source has no bibliography. A rewrite that keeps that section original
+//!   scores 1.0; editing those operators lowers it.
 //! - non-text SSIM: figures and rules, with source glyph boxes masked.
 
 use std::collections::HashMap;
@@ -24,7 +28,10 @@ use std::sync::atomic::AtomicU64;
 
 static WORK_TICK: AtomicU64 = AtomicU64::new(0);
 
-use rpt_core::{ExtractOptions, Extraction, Glyph, PageInfo, PdfDocument};
+use rpt_core::{
+    citation_end, identical_reference_operators, ExtractOptions, Extraction, Glyph, PageInfo,
+    PdfDocument,
+};
 use serde::Serialize;
 
 use crate::render::compare_renders;
@@ -78,6 +85,11 @@ pub struct PairScore {
     pub style_retention: f32,
     pub identity_char_retention: f32,
     pub source_chars: usize,
+    pub reference_operators: usize,
+    pub reference_operators_identical: usize,
+    /// 1.0 when every reference-section text operator is byte-identical, or
+    /// when the source has no reference section.
+    pub reference_byte_identity: f32,
     pub mean_ssim: Option<f32>,
     pub mean_nontext_ssim: Option<f32>,
     pub render_note: String,
@@ -195,6 +207,10 @@ pub fn score_extractions(
         .count();
     let (identity_char_retention, source_chars) =
         char_retention(&source_ex.plain_text(), &output_ex.plain_text());
+    let src_doc = PdfDocument::open(source).map_err(|err| err.to_string())?;
+    let out_doc = PdfDocument::open(output).map_err(|err| err.to_string())?;
+    let (reference_operators_identical, reference_operators) =
+        identical_reference_operators(&src_doc, &out_doc, &source_ex.glyphs);
     Ok(PairScore {
         source_pages: source_ex.pages.len(),
         output_pages: output_ex.pages.len(),
@@ -230,6 +246,9 @@ pub fn score_extractions(
         style_retention: ratio_or_one(style_kept, style_compared),
         identity_char_retention,
         source_chars,
+        reference_operators,
+        reference_operators_identical,
+        reference_byte_identity: ratio_or_one(reference_operators_identical, reference_operators),
         mean_ssim,
         mean_nontext_ssim,
         render_note,
@@ -336,6 +355,7 @@ fn protected_tokens(text: &str) -> Vec<String> {
             .or_else(|| take_url(text, i))
             .or_else(|| take_email(text, i))
             .or_else(|| take_braces(text, i))
+            .or_else(|| citation_end(text, i))
             .or_else(|| take_number(text, i))
         {
             tokens.push(text[i..end].to_string());
@@ -708,5 +728,53 @@ mod tests {
         assert_eq!(score.drop_rate, 0.0);
         assert!(score.identity_char_retention > 0.99);
         assert_eq!(score.overflow_rate, 0.0);
+        assert_eq!(score.reference_operators, 0);
+        assert_eq!(score.reference_byte_identity, 1.0);
+    }
+
+    #[test]
+    fn reference_section_operators_are_byte_identical_until_edited() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/bench-fixtures");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("refs-source.pdf");
+        let body_edit = dir.join("refs-body-edit.pdf");
+        let ref_edit = dir.join("refs-section-edit.pdf");
+        let lines = [
+            ("HelloBodyText stays in the article.", 720),
+            ("References", 680),
+            ("[1] Smith, A. A paper about attention 2020.", 660),
+            ("Proceedings of the conference 2020.", 640),
+            ("Appendix", 600),
+            ("Proofs after the bibliography.", 580),
+        ];
+        write_pdf(&source, &lines);
+        std::fs::copy(&source, &body_edit).unwrap();
+        std::fs::copy(&source, &ref_edit).unwrap();
+        patch_same_len(&body_edit, b"HelloBody", b"HellaBodz");
+        patch_same_len(&ref_edit, b"References", b"Referenczz");
+        let opts = ScoreOptions {
+            render_pages: 0,
+            max_pages: Some(1),
+        };
+        let same = score_pair(&source, &source, &opts).unwrap();
+        assert!(same.reference_operators >= 2, "{same:?}");
+        assert_eq!(same.reference_operators_identical, same.reference_operators);
+        assert_eq!(same.reference_byte_identity, 1.0);
+        let body = score_pair(&source, &body_edit, &opts).unwrap();
+        assert_eq!(body.reference_byte_identity, 1.0, "{body:?}");
+        let edited = score_pair(&source, &ref_edit, &opts).unwrap();
+        assert!(edited.reference_byte_identity < 1.0, "{edited:?}");
+        assert!(edited.reference_operators_identical < edited.reference_operators);
+    }
+
+    fn patch_same_len(path: &std::path::Path, from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len());
+        let mut bytes = std::fs::read(path).unwrap();
+        let pos = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .unwrap_or_else(|| panic!("missing {}", String::from_utf8_lossy(from)));
+        bytes[pos..pos + from.len()].copy_from_slice(to);
+        std::fs::write(path, bytes).unwrap();
     }
 }

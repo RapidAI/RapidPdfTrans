@@ -66,13 +66,19 @@ go test ./...
 
 选项 JSON 里的 `api_key` 会被忽略。优先级是：显式选项、环境变量、内置默认值。普通测试走进程内的假 HTTP 服务。只有设置了 `RPT_LLM_API_KEY` 时才会打真实接口。
 
+`RPT_TRANSLATOR` 选择后端：`maclaw`（默认）、`openai`、`google` / `google-v2`（`RPT_GOOGLE_API_KEY`）、`google-v3`（`RPT_GOOGLE_CREDENTIALS` 服务账号或 `RPT_GOOGLE_ACCESS_TOKEN`），以及 `google-unofficial`。非官方客户端必须显式打开，不会作为静默回退。
+
 ```bash
 export RPT_LLM_API_KEY=...
 ./target/release/rpt translate paper.pdf --from en --to zh \
   --glossary transformer=Transformer
 ```
 
-调用前会把 URL、邮箱、`{花括号}`、数字和术语表替换成 `⟦N⟧` 占位符，译完再还原。术语在本地替换（更长的优先，ASCII 按词边界），不指望模型遵守一张术语表。占位符丢失会重试一次，仍然丢失就报错。译过的字形标记为 `translated_pending_rewrite`。这不是最终状态，因为 PDF 还没重写。
+调用前会把 URL、邮箱、`{花括号}`、数字、文内引用（`[12]`、`[1-3]`、`(Smith et al., 2020)`、`Smith (2019)`）和术语表替换成 `⟦N⟧` 占位符，译完再还原。术语在本地替换（更长的优先，ASCII 按词边界），不指望模型遵守一张术语表。占位符丢失会重试一次，仍然丢失就报错。
+
+参考文献整节不翻译。`References`、`Bibliography`、`Works Cited`、`参考文献`、`Literatur`、`Références` 这类标题，以及编号或作者-年份条目，都会进入这一节。它跨栏、跨页延续，直到下一节标题（`Appendix`、`附录`、`A. Proofs` 等）为止。这些字形记为 `kept_original`，原因是 `references`。默认 `skip_references` 为 true；在选项 JSON 里设为 false，或给 CLI 加上 `--translate-references`，才会翻译这一节。
+
+这一节之外译过的字形标记为 `translated_pending_rewrite`。这不是最终状态，因为 PDF 还没重写。
 
 ## 字形守恒
 

@@ -57,6 +57,20 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
         if new_line && !current.is_empty() {
             lines.push(std::mem::take(&mut current));
         }
+        // A wide gap on one baseline is a column gutter, not a missing space.
+        // A jump back to the left is the other column on a nearby baseline.
+        let left = glyph.bbox[0].min(glyph.bbox[2]);
+        let column_gap = current.last().is_some_and(|prev| {
+            let right = prev.bbox[0].max(prev.bbox[2]);
+            left - right > 24.0
+        });
+        let jumped_back = current.last().is_some_and(|prev| {
+            let prev_left = prev.bbox[0].min(prev.bbox[2]);
+            prev_left - left > 24.0
+        });
+        if (column_gap || jumped_back) && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
         last_page = Some(glyph.page_index);
         last_y = Some(glyph.matrix[5]);
         last_size = glyph.font_size.max(1.0);
@@ -156,5 +170,18 @@ mod tests {
         assert_eq!(texts, ["AB", "C", "D"]);
         assert_eq!(segs[0].glyph_ids, vec![0, 1]);
         assert!(!segs.iter().any(|s| s.glyph_ids.contains(&2)));
+    }
+
+    #[test]
+    fn a_nearby_baseline_in_the_other_column_is_its_own_line() {
+        let glyphs = vec![
+            glyph(0, 320.0, 648.0, "I", false),
+            glyph(1, 326.0, 648.0, "n", false),
+            glyph(2, 55.0, 643.0, "R", false),
+            glyph(3, 61.0, 643.0, "e", false),
+        ];
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["In", "Re"]);
     }
 }

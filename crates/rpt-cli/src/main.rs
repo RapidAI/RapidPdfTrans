@@ -6,7 +6,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use rpt_core::{
-    translate_extraction, ExtractOptions, LlmTranslator, OpenOptions, PdfDocument, TranslateOptions,
+    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, TranslateOptions,
+    TranslatorBackend,
 };
 
 #[derive(Parser)]
@@ -44,6 +45,9 @@ enum Command {
         /// Glossary entry `source=target`. Repeat the flag for more than one.
         #[arg(long = "glossary", value_name = "SOURCE=TARGET")]
         glossary: Vec<String>,
+        /// Translate the References section. By default that section is kept unchanged.
+        #[arg(long)]
+        translate_references: bool,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -66,17 +70,28 @@ fn main() -> ExitCode {
             model,
             base_url,
             glossary,
+            translate_references,
             json: _,
             compact,
-        } => run_translate(
-            &path,
-            source_lang,
-            target_lang,
-            model,
-            base_url,
-            glossary,
-            compact,
-        ),
+        } => {
+            let glossary = match parse_glossary(&glossary) {
+                Ok(pairs) => pairs,
+                Err(err) => return fail(err),
+            };
+            run_translate(
+                &path,
+                TranslateOptions {
+                    source_lang,
+                    target_lang,
+                    model,
+                    base_url,
+                    glossary,
+                    skip_references: !translate_references,
+                    ..TranslateOptions::default()
+                },
+                compact,
+            )
+        }
     }
 }
 
@@ -101,32 +116,12 @@ fn run_extract(path: &PathBuf, compact: bool, options: &str) -> ExitCode {
     emit(&value, compact)
 }
 
-fn run_translate(
-    path: &PathBuf,
-    source_lang: String,
-    target_lang: String,
-    model: Option<String>,
-    base_url: Option<String>,
-    glossary: Vec<String>,
-    compact: bool,
-) -> ExitCode {
-    let glossary = match parse_glossary(&glossary) {
-        Ok(pairs) => pairs,
-        Err(err) => return fail(err),
-    };
-    let opts = TranslateOptions {
-        source_lang,
-        target_lang,
-        model,
-        base_url,
-        glossary,
-        ..TranslateOptions::default()
-    };
+fn run_translate(path: &PathBuf, opts: TranslateOptions, compact: bool) -> ExitCode {
     let doc = match PdfDocument::open(path) {
         Ok(doc) => doc,
         Err(err) => return fail(err),
     };
-    let client = match LlmTranslator::from_env(&opts) {
+    let client = match TranslatorBackend::from_env(&opts) {
         Ok(client) => client,
         Err(err) => return fail(err),
     };
@@ -148,7 +143,8 @@ fn run_translate(
             "translator".into(),
             serde_json::json!({
                 "model": client.model(),
-                "base_url": client.base_url(),
+                "backend": client.label(),
+                "base_url": client.endpoint(),
                 "calls": report.calls,
                 "cache_hits": report.cache_hits,
             }),
@@ -188,9 +184,15 @@ fn emit(value: &serde_json::Value, compact: bool) -> ExitCode {
 
 fn fail(err: impl std::fmt::Display) -> ExitCode {
     let mut message = err.to_string();
-    if let Ok(key) = std::env::var("RPT_LLM_API_KEY") {
-        if !key.is_empty() {
-            message = message.replace(&key, "[redacted]");
+    for name in [
+        "RPT_LLM_API_KEY",
+        "RPT_GOOGLE_API_KEY",
+        "RPT_GOOGLE_ACCESS_TOKEN",
+    ] {
+        if let Ok(key) = std::env::var(name) {
+            if !key.is_empty() {
+                message = message.replace(&key, "[redacted]");
+            }
         }
     }
     eprintln!("rpt: {message}");

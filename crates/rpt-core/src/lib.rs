@@ -44,8 +44,9 @@ pub use font::minimal_ttf;
 pub use geom::{Matrix, Rect};
 pub use glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKind};
 pub use translate::{
-    translate_extraction, LlmTranslator, TranslateOptions, TranslateReport, TranslatedSegment,
-    Translator, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
+    citation_end, identical_reference_operators, reference_glyph_ids, translate_extraction,
+    LlmTranslator, TranslateOptions, TranslateReport, TranslatedSegment, Translator,
+    TranslatorBackend, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
 };
 
 #[cfg(test)]

@@ -1,4 +1,10 @@
-//! OpenAI-compatible chat client for the maclaw/LLM gateway.
+//! Generic OpenAI-compatible chat client.
+//!
+//! The maclaw preset is this client with base URL
+//! `https://hub.mypapers.top/api/llm/v1` and model `auto`. The official
+//! MaClawSrv REST API (RapidAI/MaClaw) is an agent control plane, not a
+//! document translator. Its own connectivity check reports `protocol: openai`
+//! and `wire_api: chat_completions`, so translation uses that wire.
 //!
 //! The API key is read only from `RPT_LLM_API_KEY`. It is never taken from
 //! options JSON, and [`Debug`] prints it as `redacted`.

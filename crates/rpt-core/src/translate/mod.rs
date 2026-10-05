@@ -3,24 +3,32 @@
 //! This does not rewrite the PDF. Each translated glyph is marked
 //! `translated_pending_rewrite`, which is intentionally not a final coverage
 //! state: rewriting the content stream is milestone M3.
+//! Bibliography glyphs are the exception: with `skip_references` (the default)
+//! they are `kept_original` and are not sent to the translator.
 //!
-//! The default backend is the maclaw/LLM gateway
-//! (`https://hub.mypapers.top/api/llm/v1`) with model `auto`. Override the
-//! base URL with `RPT_LLM_BASE_URL` or [`TranslateOptions::base_url`], and the
-//! model with `RPT_LLM_MODEL` or [`TranslateOptions::model`]. The API key is
-//! read only from `RPT_LLM_API_KEY`.
+//! The default backend is the maclaw preset: an OpenAI-compatible chat
+//! gateway at `https://hub.mypapers.top/api/llm/v1` with model `auto`.
+//! `RPT_TRANSLATOR` selects `maclaw`, `openai`, `google-v2`, `google-v3`,
+//! or `google-unofficial`. Keys come only from environment variables.
 
+mod backend;
+mod google;
 mod llm;
 mod prompt;
 mod protect;
+mod references;
 mod segment;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use backend::TranslatorBackend;
+pub use google::GoogleTranslator;
 pub use llm::LlmTranslator;
+pub use protect::citation_end;
+pub use references::{identical_reference_operators, reference_glyph_ids, reference_stream_spans};
 pub use segment::Segment;
 
 use crate::error::{Error, Result};
@@ -52,6 +60,11 @@ pub struct TranslateOptions {
     pub timeout_secs: u64,
     /// Sent only when set. Left unset so reasoning models can still emit content.
     pub max_tokens: Option<u32>,
+    /// `maclaw`, `openai`, `google`, `google-v2`, `google-v3`, or `google-unofficial`.
+    /// Empty falls through to `RPT_TRANSLATOR`, then `maclaw`.
+    pub translator: Option<String>,
+    /// Leave References / Bibliography as original text. Default is on.
+    pub skip_references: bool,
 }
 
 impl Default for TranslateOptions {
@@ -67,6 +80,8 @@ impl Default for TranslateOptions {
             temperature: 0.0,
             timeout_secs: 180,
             max_tokens: None,
+            translator: None,
+            skip_references: true,
         }
     }
 }
@@ -88,6 +103,14 @@ impl TranslateOptions {
         )
     }
 
+    pub fn resolved_translator(&self) -> String {
+        resolve_choice(
+            self.translator.as_deref(),
+            std::env::var("RPT_TRANSLATOR").ok().as_deref(),
+            "maclaw",
+        )
+    }
+
     /// Parse translator fields from an options JSON object.
     /// `api_key` is ignored; a warning is returned when it is present.
     pub fn from_json(text: &str) -> Result<(Self, Vec<String>)> {
@@ -97,9 +120,13 @@ impl TranslateOptions {
         let value: Value = serde_json::from_str(text).map_err(|e| Error::Options(e.to_string()))?;
         let mut opts = Self::default();
         let mut warnings = Vec::new();
-        if value.get("api_key").is_some() || value.get("apiKey").is_some() {
+        if value.get("api_key").is_some()
+            || value.get("apiKey").is_some()
+            || value.get("google_api_key").is_some()
+        {
             warnings.push(
-                "api_key in options JSON is ignored; set RPT_LLM_API_KEY in the environment".into(),
+                "api keys in options JSON are ignored; set RPT_LLM_API_KEY or RPT_GOOGLE_API_KEY in the environment"
+                    .into(),
             );
         }
         if let Some(v) = string_field(&value, &["source_lang", "from"]) {
@@ -113,6 +140,9 @@ impl TranslateOptions {
         }
         if let Some(v) = string_field(&value, &["base_url", "baseUrl"]) {
             opts.base_url = Some(v);
+        }
+        if let Some(v) = string_field(&value, &["translator", "backend"]) {
+            opts.translator = Some(v);
         }
         if let Some(n) = value.get("context_window").and_then(|v| v.as_u64()) {
             opts.context_window = n as usize;
@@ -128,6 +158,9 @@ impl TranslateOptions {
         }
         if let Some(t) = value.get("max_tokens").and_then(|v| v.as_u64()) {
             opts.max_tokens = Some(t as u32);
+        }
+        if let Some(skip) = value.get("skip_references").and_then(|v| v.as_bool()) {
+            opts.skip_references = skip;
         }
         opts.glossary = parse_glossary(value.get("glossary"));
         if opts.batch_size == 0 {
@@ -216,11 +249,27 @@ pub fn translate_extraction(
         return Err(Error::Options("batch_size must be at least 1".into()));
     }
     let segments = segment::segment_glyphs(&extraction.glyphs);
+    let reference_ids = if opts.skip_references {
+        references::reference_glyph_ids(&extraction.glyphs)
+    } else {
+        HashSet::new()
+    };
+    for id in &reference_ids {
+        extraction.mark_kept(*id, "references")?;
+    }
     let shielded: Vec<protect::Shielded> = segments
         .iter()
         .map(|seg| shield(&seg.text, &opts.glossary))
         .collect();
-    let mut translated: Vec<Option<String>> = vec![None; segments.len()];
+    let mut translated: Vec<Option<String>> = segments
+        .iter()
+        .map(|seg| {
+            seg.glyph_ids
+                .iter()
+                .any(|id| reference_ids.contains(id))
+                .then(|| seg.text.clone())
+        })
+        .collect();
     let mut cache: HashMap<String, String> = HashMap::new();
     let mut calls = 0usize;
     let mut cache_hits = 0usize;
@@ -231,6 +280,9 @@ pub fn translate_extraction(
         while cursor < segments.len() && batch.len() < opts.batch_size {
             let i = cursor;
             cursor += 1;
+            if translated[i].is_some() {
+                continue;
+            }
             if segments[i].text.trim().is_empty() {
                 translated[i] = Some(segments[i].text.clone());
                 continue;
@@ -280,8 +332,11 @@ pub fn translate_extraction(
         let text = translated[i]
             .clone()
             .ok_or_else(|| Error::Translate(format!("segment {} was not translated", seg.id)))?;
-        for id in &seg.glyph_ids {
-            extraction.mark_translated_pending(*id, text.clone())?;
+        let kept = seg.glyph_ids.iter().any(|id| reference_ids.contains(id));
+        if !kept {
+            for id in &seg.glyph_ids {
+                extraction.mark_translated_pending(*id, text.clone())?;
+            }
         }
         report_segments.push(TranslatedSegment {
             id: seg.id,
@@ -536,6 +591,80 @@ mod tests {
     }
 
     #[test]
+    fn references_stay_original_and_citations_are_protected() {
+        let mut ex = extraction_from_lines(&[
+            "The model uses attention [12] (Smith et al., 2020).",
+            "7. References",
+            "[12] Smith, A. (2020). Attention is all you need.",
+            "Proceedings of NeurIPS, 2020.",
+            "Appendix",
+            "A. Proofs of the main result.",
+        ]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &PrefixTranslator).unwrap();
+        let refs = report
+            .segments
+            .iter()
+            .find(|seg| seg.source.contains("References"))
+            .unwrap();
+        assert_eq!(refs.translated, refs.source);
+        assert!(report
+            .segments
+            .iter()
+            .any(|seg| { seg.source.contains("[12] Smith") && seg.translated == seg.source }));
+        let body = report
+            .segments
+            .iter()
+            .find(|seg| seg.source.contains("The model uses"))
+            .unwrap();
+        assert!(body.translated.contains("[12]"), "{}", body.translated);
+        assert!(
+            body.translated.contains("(Smith et al., 2020)"),
+            "{}",
+            body.translated
+        );
+        assert!(body.translated.contains('译'), "{}", body.translated);
+        assert!(body.translated.starts_with('译'));
+        let proofs = report
+            .segments
+            .iter()
+            .find(|seg| seg.source.contains("Proofs"))
+            .unwrap();
+        assert!(proofs.translated.contains('译'), "{}", proofs.translated);
+        assert!(ex.glyphs.iter().any(|glyph| {
+            matches!(
+                &glyph.disposition,
+                Disposition::KeptOriginal { reason } if reason == "references"
+            ) && glyph.unicode == "R"
+        }));
+        assert!(ex.glyphs.iter().any(|glyph| {
+            glyph.unicode == "P"
+                && matches!(
+                    glyph.disposition,
+                    Disposition::TranslatedPendingRewrite { .. }
+                )
+        }));
+
+        let mut ex = extraction_from_lines(&[
+            "7. References",
+            "[1] Smith, A. (2020). A paper title for the option.",
+        ]);
+        let opts = TranslateOptions {
+            skip_references: false,
+            ..TranslateOptions::default()
+        };
+        let report = translate_extraction(&mut ex, &opts, &PrefixTranslator).unwrap();
+        assert!(report
+            .segments
+            .iter()
+            .any(|seg| seg.source.contains("References") && seg.translated.contains('译')));
+        assert!(ex.glyphs.iter().all(|glyph| matches!(
+            glyph.disposition,
+            Disposition::TranslatedPendingRewrite { .. }
+        )));
+    }
+
+    #[test]
     fn retries_once_when_a_placeholder_is_dropped() {
         let mut ex = extraction_from_lines(&["Go to https://example.com/a."]);
         let opts = TranslateOptions::default();
@@ -563,7 +692,10 @@ mod tests {
             vec![("transformer".into(), "Transformer".into())]
         );
         assert_eq!(warnings.len(), 1);
+        assert!(opts.skip_references);
         assert!(!format!("{opts:?}").contains("nope"));
+        let (opts, _) = TranslateOptions::from_json(r#"{"skip_references":false}"#).unwrap();
+        assert!(!opts.skip_references);
     }
 
     #[test]

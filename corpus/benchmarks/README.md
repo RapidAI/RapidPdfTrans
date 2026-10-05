@@ -12,6 +12,7 @@
 | `identity_char_retention` | Source characters still present in the output. This is the reference metric when every engine uses `corpus/bench/identity_server.py`. A real translation into another language lowers it on purpose. |
 | non-text SSIM | Poppler render at 72 dpi. Blocks that are mostly source glyph boxes are excluded, so figures and rules are what remain. |
 | `source_unmapped_ratio` | Source glyphs with no Unicode. They cannot be translated faithfully. On an identity run this is an extraction score, not an engine-output score. |
+| `reference_byte_identity` | Text-showing operators in the detected References / Bibliography section that are still byte-identical in the output. 1.0 when that section is left untouched, and 1.0 when the source has no such section. Editing those operators lowers it. |
 
 An identity run compares each file with itself. Drop rate, style, overflow, and non-text SSIM should be ideal. Unmapped glyphs are the extraction gap.
 

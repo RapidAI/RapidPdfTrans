@@ -12,7 +12,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use rpt_core::{
-    translate_extraction, ExtractOptions, LlmTranslator, OpenOptions, PdfDocument, TranslateOptions,
+    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, TranslateOptions,
+    TranslatorBackend,
 };
 
 /// Opaque document. Do not dereference.
@@ -158,7 +159,7 @@ pub unsafe extern "C" fn rpt_translate(
         let (translate_opts, mut warnings) =
             TranslateOptions::from_json(options).map_err(|e| e.to_string())?;
         let extract_opts = ExtractOptions::from_json(options).map_err(|e| e.to_string())?;
-        let client = LlmTranslator::from_env(&translate_opts).map_err(|e| e.to_string())?;
+        let client = TranslatorBackend::from_env(&translate_opts).map_err(|e| e.to_string())?;
         let mut extraction = inner.pdf.extract_with(&extract_opts);
         let report = translate_extraction(&mut extraction, &translate_opts, &client)
             .map_err(|e| e.to_string())?;
@@ -172,6 +173,7 @@ pub unsafe extern "C" fn rpt_translate(
                 "translator".into(),
                 serde_json::json!({
                     "model": client.model(),
+                    "backend": client.label(),
                     "calls": report.calls,
                     "cache_hits": report.cache_hits,
                 }),

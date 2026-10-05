@@ -130,6 +130,19 @@ impl PdfDocument {
         self.extract_with(&ExtractOptions::default())
     }
 
+    /// Decompressed bytes of an indirect stream named `"number generation"`.
+    pub fn plain_stream(&self, object_id: &str) -> Option<Vec<u8>> {
+        let mut parts = object_id.split_whitespace();
+        let number: u32 = parts.next()?.parse().ok()?;
+        let generation: u16 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let obj = self.inner.get_object((number, generation)).ok()?;
+        let (_, bytes, _) = crate::pdfutil::stream_bytes(&self.inner, obj, 32 * 1024 * 1024)?;
+        Some(bytes)
+    }
+
     pub fn extract_with(&self, opts: &ExtractOptions) -> Extraction {
         let interpreted = interpret_document(
             &self.inner,
