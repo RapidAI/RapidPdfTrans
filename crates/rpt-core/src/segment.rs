@@ -590,6 +590,7 @@ fn walk_interior(
         if group.iter().any(|&index| {
             caption_line.get(index).copied().unwrap_or(false)
                 || stops_interior(&lines[index], body_font)
+                || is_running_header(&lines[index].text)
         }) {
             break;
         }
@@ -608,6 +609,16 @@ fn walk_interior(
             });
     }
     picked
+}
+
+/// A page running header sits above a figure on some pages. It is not a label
+/// inside the drawing, so the interior walk stops instead of keeping it.
+fn is_running_header(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower == "preprint"
+        || lower == "published"
+        || lower.starts_with("under review")
+        || lower.starts_with("proceedings of")
 }
 
 fn stops_interior(line: &VisualLine<'_>, body_font: &str) -> bool {
@@ -1269,6 +1280,37 @@ mod tests {
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
         assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
         assert!(seg.kept.iter().all(|(_, reason)| reason == "figure"));
+    }
+
+    #[test]
+    fn a_preprint_header_above_a_figure_is_still_translated() {
+        let glyphs = vec![
+            wide(0, 108.0, 756.0, "Preprint", 40.0, 9.0),
+            wide(1, 90.0, 640.0, "USER PROMPT", 55.0, 9.0),
+            wide(2, 230.0, 640.0, "REASONING", 50.0, 9.0),
+            wide(
+                3,
+                72.0,
+                520.0,
+                "Figure 1: A diagram of the system and its parts.",
+                360.0,
+                10.0,
+            ),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(texts.contains(&"Preprint"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|text| text.contains("USER PROMPT")),
+            "{texts:?}"
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
+        assert!(
+            !kept.contains(&0),
+            "header must not be figure interior: {:?}",
+            seg.kept
+        );
     }
 
     #[test]
