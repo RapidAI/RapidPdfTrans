@@ -436,7 +436,7 @@ fn translate_batch(
 ) -> Result<Vec<(usize, String)>> {
     match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
         Ok(restored) => Ok(restored),
-        Err(err) if is_timeout(&err) && indexes.len() > 1 => {
+        Err(err) if recoverable(&err) && indexes.len() > 1 => {
             let mid = indexes.len() / 2;
             let mut left =
                 translate_batch(segments, shielded, &indexes[..mid], opts, translator, calls)?;
@@ -450,15 +450,19 @@ fn translate_batch(
             )?);
             Ok(left)
         }
-        Err(err) if is_timeout(&err) => {
+        Err(err) if recoverable(&err) => {
             translate_batch_once(segments, shielded, indexes, opts, translator, calls)
         }
         Err(err) => Err(err),
     }
 }
 
-fn is_timeout(err: &Error) -> bool {
-    err.to_string().to_ascii_lowercase().contains("timeout")
+fn recoverable(err: &Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("timeout")
+        || msg.contains("omitted segment")
+        || msg.contains("invalid translation json")
+        || msg.contains("did not contain a json")
 }
 
 fn translate_batch_once(
@@ -786,6 +790,40 @@ mod tests {
         assert!(texts.iter().any(|text| text.contains("Alpha")), "{texts:?}");
         assert!(texts.iter().any(|text| text.contains("Beta")), "{texts:?}");
         assert!(report.calls >= 3, "calls={}", report.calls);
+    }
+
+    #[test]
+    fn an_omitted_id_splits_the_batch() {
+        let mut ex = extraction_from_lines(&["Alpha one", "Beta two"]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &OmitWhenBatched).unwrap();
+        let texts: Vec<_> = report
+            .segments
+            .iter()
+            .map(|seg| seg.translated.as_str())
+            .collect();
+        assert!(texts.iter().any(|text| text.contains("Alpha")), "{texts:?}");
+        assert!(texts.iter().any(|text| text.contains("Beta")), "{texts:?}");
+    }
+
+    struct OmitWhenBatched;
+    impl Translator for OmitWhenBatched {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            if segs.len() > 1 {
+                let only = &segs[0];
+                return Ok(
+                    serde_json::json!({"translations":[{"id": only["id"], "text": only["text"]}]})
+                        .to_string(),
+                );
+            }
+            let seg = &segs[0];
+            Ok(
+                serde_json::json!({"translations":[{"id": seg["id"], "text": seg["text"]}]})
+                    .to_string(),
+            )
+        }
     }
 
     struct SplitOnTimeout;
