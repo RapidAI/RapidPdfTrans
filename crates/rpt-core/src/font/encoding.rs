@@ -71,6 +71,17 @@ impl SimpleEncoding {
     pub fn map(&self, code: u8) -> Option<String> {
         self.codes.get(code as usize).and_then(|c| c.clone())
     }
+
+    /// Fill codes that are still unmapped from a base encoding.
+    /// Existing `/Differences` entries are left alone.
+    pub fn fill_missing_from_base(&mut self, base: BaseEncoding) {
+        let other = Self::from_base(base);
+        for (slot, filled) in self.codes.iter_mut().zip(other.codes) {
+            if slot.is_none() {
+                *slot = filled;
+            }
+        }
+    }
 }
 
 fn unicode_from_scalar(cp: u32) -> Option<String> {

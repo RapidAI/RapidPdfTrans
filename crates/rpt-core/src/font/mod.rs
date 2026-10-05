@@ -3,7 +3,8 @@
 //! Unicode fallback order, per character code:
 //! 1. ToUnicode CMap
 //! 2. predefined CJK CMap (when `/Encoding` names one)
-//! 3. simple encoding (Standard / WinAnsi / MacRoman / PDFDoc / Symbol + `/Differences`)
+//! 3. simple encoding (Standard / WinAnsi / MacRoman / PDFDoc / Symbol + `/Differences`),
+//!    then glyph names from a Type 1 `FontFile` cleartext encoding for codes still unmapped
 //! 4. embedded TrueType/OpenType `cmap` (GID → Unicode, then code → Unicode)
 //!
 //! A code that survives all four steps is returned with `unicode: None` and
@@ -14,6 +15,7 @@ mod encoding;
 mod encoding_tables;
 mod predefined;
 mod ttf;
+mod type1;
 mod widths;
 
 use std::collections::HashMap;
@@ -325,7 +327,15 @@ fn load_simple(
         .and_then(|o| as_f32(deref(doc, o)))
         .unwrap_or(0.0);
 
-    let (simple, differences_names) = load_simple_encoding(doc, dict, kind, symbolic, base_name);
+    let (mut simple, differences_names) =
+        load_simple_encoding(doc, dict, kind, symbolic, base_name);
+    if let Some(desc) = descriptor {
+        if let Ok(obj) = desc.get(b"FontFile") {
+            if let Some((_, bytes, _)) = stream_bytes(doc, obj, STREAM_LIMIT) {
+                type1::apply_type1_encoding(&mut simple, &bytes);
+            }
+        }
+    }
     let to_unicode = load_tounicode(doc, dict);
     let cmap = descriptor
         .map(|d| load_cmap_from_descriptor(doc, d))

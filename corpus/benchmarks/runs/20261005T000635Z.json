@@ -1,0 +1,441 @@
+{
+  "recorded_at": "2026-10-05T00:06:35Z",
+  "git": "fdfa03f",
+  "kind": "identity-ceiling",
+  "translator": "none (source compared with itself)",
+  "summary": {
+    "documents": 9,
+    "source_glyphs": 369426,
+    "source_unmapped": 483,
+    "source_unmapped_ratio": 0.001307433694434068,
+    "line_coverage": 1.0,
+    "drop_rate": 0.0,
+    "protected_recall": 1.0,
+    "formula_integrity": 1.0,
+    "overflow_rate": 0.0,
+    "style_retention": 1.0,
+    "identity_char_retention": 1.0,
+    "mean_nontext_ssim": 1.0
+  },
+  "engines": [
+    {
+      "engine": "rapidpdftrans",
+      "status": "no_translated_pdf",
+      "detail": "rpt_save still returns 'PDF rewriting is not implemented (milestone M3)'. Output metrics are not available."
+    },
+    {
+      "engine": "babeldoc",
+      "status": "not_installed",
+      "path": null
+    },
+    {
+      "engine": "pdf2zh",
+      "status": "not_installed",
+      "path": null
+    },
+    {
+      "engine": "pdf2zh_next",
+      "status": "not_installed",
+      "path": null
+    },
+    {
+      "engine": "llm-judge",
+      "status": "skipped_no_key",
+      "detail": "Reference metric for an identity translator is identity_char_retention. A live judge is not called from this script."
+    }
+  ],
+  "files": [
+    {
+      "id": "arxiv-2610.02163",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 0,
+        "formulas": 13,
+        "formulas_kept": 13,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 742,
+        "lines_covered": 742,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 35548,
+        "output_pages": 11,
+        "output_unmapped": 0,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 222,
+        "protected_recall": 1.0,
+        "protected_tokens": 222,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 35413,
+        "source_glyphs": 35548,
+        "source_pages": 11,
+        "source_unmapped": 0,
+        "source_unmapped_ratio": 0.0,
+        "style_compared": 35548,
+        "style_kept": 35548,
+        "style_retention": 1.0,
+        "unmapped_fonts": [],
+        "visible_output_glyphs": 35548
+      },
+      "status": "ok"
+    },
+    {
+      "id": "pmlr-v202-abbas23a",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 2,
+        "formulas": 601,
+        "formulas_kept": 601,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 1029,
+        "lines_covered": 1029,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 39351,
+        "output_pages": 12,
+        "output_unmapped": 3,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 455,
+        "protected_recall": 1.0,
+        "protected_tokens": 455,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 39417,
+        "source_glyphs": 39351,
+        "source_pages": 12,
+        "source_unmapped": 3,
+        "source_unmapped_ratio": 7.623694546055049e-05,
+        "style_compared": 39351,
+        "style_kept": 39351,
+        "style_retention": 1.0,
+        "unmapped_fonts": [
+          {
+            "count": 3,
+            "name": "JQFXPA+CMEX10"
+          }
+        ],
+        "visible_output_glyphs": 39351
+      },
+      "status": "ok"
+    },
+    {
+      "id": "neurips-2023-00296c0e",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 28,
+        "formulas": 980,
+        "formulas_kept": 980,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 800,
+        "lines_covered": 800,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 33417,
+        "output_pages": 11,
+        "output_unmapped": 38,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 475,
+        "protected_recall": 1.0,
+        "protected_tokens": 475,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 33409,
+        "source_glyphs": 33417,
+        "source_pages": 11,
+        "source_unmapped": 38,
+        "source_unmapped_ratio": 0.0011371457949280739,
+        "style_compared": 33417,
+        "style_kept": 33417,
+        "style_retention": 1.0,
+        "unmapped_fonts": [
+          {
+            "count": 38,
+            "name": "IYLVOE+CMEX10"
+          }
+        ],
+        "visible_output_glyphs": 33417
+      },
+      "status": "ok"
+    },
+    {
+      "id": "arxiv-2610.01998",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 87,
+        "formulas": 1735,
+        "formulas_kept": 1735,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 857,
+        "lines_covered": 857,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 19126,
+        "output_pages": 10,
+        "output_unmapped": 152,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 704,
+        "protected_recall": 1.0,
+        "protected_tokens": 704,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 19003,
+        "source_glyphs": 19126,
+        "source_pages": 10,
+        "source_unmapped": 152,
+        "source_unmapped_ratio": 0.00794729683548212,
+        "style_compared": 19126,
+        "style_kept": 19126,
+        "style_retention": 1.0,
+        "unmapped_fonts": [
+          {
+            "count": 141,
+            "name": "ABATJU+CMEX10"
+          },
+          {
+            "count": 4,
+            "name": "F84"
+          },
+          {
+            "count": 4,
+            "name": "HVIIAG+CMEX7"
+          },
+          {
+            "count": 3,
+            "name": "QFSMKZ+CMSY10"
+          }
+        ],
+        "visible_output_glyphs": 19126
+      },
+      "status": "ok"
+    },
+    {
+      "id": "pmlr-v202-abels23a",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 6,
+        "formulas": 478,
+        "formulas_kept": 478,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 1050,
+        "lines_covered": 1050,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 44038,
+        "output_pages": 12,
+        "output_unmapped": 7,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 259,
+        "protected_recall": 1.0,
+        "protected_tokens": 259,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 44040,
+        "source_glyphs": 44038,
+        "source_pages": 12,
+        "source_unmapped": 7,
+        "source_unmapped_ratio": 0.00015895362594164908,
+        "style_compared": 44038,
+        "style_kept": 44038,
+        "style_retention": 1.0,
+        "unmapped_fonts": [
+          {
+            "count": 7,
+            "name": "JLMTCO+CMEX10"
+          }
+        ],
+        "visible_output_glyphs": 44038
+      },
+      "status": "ok"
+    },
+    {
+      "id": "neurips-2017-attention",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 4,
+        "formulas": 262,
+        "formulas_kept": 262,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 610,
+        "lines_covered": 610,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 27708,
+        "output_pages": 11,
+        "output_unmapped": 4,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 301,
+        "protected_recall": 1.0,
+        "protected_tokens": 301,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 27704,
+        "source_glyphs": 27708,
+        "source_pages": 11,
+        "source_unmapped": 4,
+        "source_unmapped_ratio": 0.00014436263882089406,
+        "style_compared": 27708,
+        "style_kept": 27708,
+        "style_retention": 1.0,
+        "unmapped_fonts": [
+          {
+            "count": 3,
+            "name": "LICAEO+CMMI10"
+          },
+          {
+            "count": 1,
+            "name": "THPNLT+CMEX9"
+          }
+        ],
+        "visible_output_glyphs": 27708
+      },
+      "status": "ok"
+    },
+    {
+      "id": "2024-acl-long-7",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 4,
+        "formulas": 229,
+        "formulas_kept": 229,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 1308,
+        "lines_covered": 1308,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 45945,
+        "output_pages": 15,
+        "output_unmapped": 28,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 528,
+        "protected_recall": 1.0,
+        "protected_tokens": 528,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 45957,
+        "source_glyphs": 45945,
+        "source_pages": 15,
+        "source_unmapped": 28,
+        "source_unmapped_ratio": 0.0006094243144616485,
+        "style_compared": 45945,
+        "style_kept": 45945,
+        "style_retention": 1.0,
+        "unmapped_fonts": [
+          {
+            "count": 24,
+            "name": "SOVFQK+CMSY10"
+          },
+          {
+            "count": 2,
+            "name": "KDNMXI+CMEX9"
+          },
+          {
+            "count": 2,
+            "name": "LHRDPA+CMEX10"
+          }
+        ],
+        "visible_output_glyphs": 45945
+      },
+      "status": "ok"
+    },
+    {
+      "id": "arxiv-2610.02193",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 165,
+        "formulas": 1729,
+        "formulas_kept": 1729,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 1665,
+        "lines_covered": 1665,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 66492,
+        "output_pages": 24,
+        "output_unmapped": 227,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 621,
+        "protected_recall": 1.0,
+        "protected_tokens": 621,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 66300,
+        "source_glyphs": 66492,
+        "source_pages": 24,
+        "source_unmapped": 227,
+        "source_unmapped_ratio": 0.0034139445051550865,
+        "style_compared": 66492,
+        "style_kept": 66492,
+        "style_retention": 1.0,
+        "unmapped_fonts": [
+          {
+            "count": 227,
+            "name": "UTIXTD+CMEX10"
+          }
+        ],
+        "visible_output_glyphs": 66492
+      },
+      "status": "ok"
+    },
+    {
+      "id": "arxiv-2609.36965",
+      "score": {
+        "drop_rate": 0.0,
+        "formula_integrity": 1.0,
+        "formula_unreadable": 13,
+        "formulas": 271,
+        "formulas_kept": 271,
+        "identity_char_retention": 1.0,
+        "line_coverage": 1.0,
+        "lines": 1334,
+        "lines_covered": 1334,
+        "mean_nontext_ssim": 1.0,
+        "mean_ssim": 1.0,
+        "output_glyphs": 57801,
+        "output_pages": 20,
+        "output_unmapped": 24,
+        "overflow_glyphs": 0,
+        "overflow_rate": 0.0,
+        "protected_kept": 779,
+        "protected_recall": 1.0,
+        "protected_tokens": 779,
+        "render_note": "72 dpi grayscale; non-text SSIM drops blocks that are mostly glyph boxes",
+        "source_chars": 57896,
+        "source_glyphs": 57801,
+        "source_pages": 20,
+        "source_unmapped": 24,
+        "source_unmapped_ratio": 0.00041521774255670607,
+        "style_compared": 57801,
+        "style_kept": 57801,
+        "style_retention": 1.0,
+        "unmapped_fonts": [
+          {
+            "count": 21,
+            "name": "KRZJFY+CMEX10"
+          },
+          {
+            "count": 3,
+            "name": "NOGTKB+CMEX9"
+          }
+        ],
+        "visible_output_glyphs": 57801
+      },
+      "status": "ok"
+    }
+  ]
+}

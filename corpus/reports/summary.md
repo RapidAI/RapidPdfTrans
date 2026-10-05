@@ -7,15 +7,15 @@ Identity checks copy the original PDF bytes and compare extraction, per-glyph st
 - Open failures: 0
 - Panics: 0
 - Glyphs: 4269057
-- Unmapped glyphs: 45140
+- Unmapped glyphs: 16427
 - Page-capped documents: 10
 - Identity text matches: 89
 - Identity style/position clean: 89
 - lopdf rewrite text matches: 87 of 87 attempted
 - lopdf rewrite failures: 0
 - lopdf rewrite skipped above 25MB: 2
-- Mean fraction of our characters found by Poppler: 0.9939
-- Mean fraction of Poppler characters found by us: 0.9797
+- Mean fraction of our characters found by Poppler: 0.9938
+- Mean fraction of Poppler characters found by us: 0.9865
 - Mean identity-page SSIM: 1.0000
 
 ## By source
@@ -107,20 +107,20 @@ These come from the extracted glyphs (column gutters, font names, Unicode ranges
 | `2024-acl-long-5` | ok | 17 | 58052 | 1 | 0.996 | 1.0000 | match |
 | `2024-acl-long-6` | ok | 11 | 38116 | 3 | 0.995 | 1.0000 | match |
 | `2024-acl-long-7` | ok | 15 | 45945 | 28 | 0.995 | 1.0000 | match |
-| `arxiv-1312.6114` | ok | 14 | 34820 | 3767 | 0.997 | 1.0000 | match |
-| `arxiv-1406.2661` | ok | 9 | 24451 | 1196 | 0.996 | 1.0000 | match |
+| `arxiv-1312.6114` | ok | 14 | 34820 | 183 | 0.997 | 1.0000 | match |
+| `arxiv-1406.2661` | ok | 9 | 24451 | 39 | 0.997 | 1.0000 | match |
 | `arxiv-1409.1556` | ok | 14 | 45981 | 6 | 0.994 | 1.0000 | match |
 | `arxiv-1412.6980` | ok | 15 | 34811 | 350 | 0.997 | 1.0000 | match |
 | `arxiv-1502.03167` | ok | 11 | 38051 | 51 | 0.993 | 1.0000 | match |
-| `arxiv-1506.02640` | ok | 10 | 35243 | 389 | 0.994 | 1.0000 | match |
-| `arxiv-1512.03385` | ok | 12 | 49830 | 469 | 0.994 | 1.0000 | match |
-| `arxiv-1607.06450` | ok | 14 | 38815 | 2283 | 0.998 | 1.0000 | match |
-| `arxiv-1703.06870` | ok | 12 | 52222 | 258 | 0.994 | 1.0000 | match |
+| `arxiv-1506.02640` | ok | 10 | 35243 | 33 | 0.994 | 1.0000 | match |
+| `arxiv-1512.03385` | ok | 12 | 49830 | 18 | 0.994 | 1.0000 | match |
+| `arxiv-1607.06450` | ok | 14 | 38815 | 156 | 0.997 | 1.0000 | match |
+| `arxiv-1703.06870` | ok | 12 | 52222 | 6 | 0.994 | 1.0000 | match |
 | `arxiv-1706.03762` | ok | 15 | 33460 | 1 | 1.000 | 1.0000 | match |
-| `arxiv-1810.04805` | ok | 16 | 54003 | 223 | 0.990 | 1.0000 | match |
-| `arxiv-2006.11239` | ok | 25 | 47963 | 3447 | 0.997 | 1.0000 | match |
-| `arxiv-2010.11929` | ok | 22 | 56730 | 1021 | 0.996 | 1.0000 | match |
-| `arxiv-2103.14030` | ok | 14 | 57309 | 638 | 0.992 | 1.0000 | match |
+| `arxiv-1810.04805` | ok | 16 | 54003 | 3 | 0.990 | 1.0000 | match |
+| `arxiv-2006.11239` | ok | 25 | 47963 | 172 | 0.996 | 1.0000 | match |
+| `arxiv-2010.11929` | ok | 22 | 56730 | 15 | 0.996 | 1.0000 | match |
+| `arxiv-2103.14030` | ok | 14 | 57309 | 60 | 0.992 | 1.0000 | match |
 | `arxiv-2609.32770` | ok | 35 | 98159 | 1 | 0.998 | 1.0000 | match |
 | `arxiv-2609.33014` | ok | 16 | 33847 | 1 | 1.000 | 1.0000 | match |
 | `arxiv-2609.36804` | ok | 16 | 50103 | 24 | 0.995 | 1.0000 | match |
@@ -156,13 +156,13 @@ These come from the extracted glyphs (column gutters, font names, Unicode ranges
 | `2023-emnlp-main-5` | ok | 13 | 35181 | 14 | 0.996 | 1.0000 | match |
 | `iccv-2023-han-towards-attack-tolerant-federated-learning-v` | ok | 10 | 38129 | 12 | 0.997 | 1.0000 | match |
 | `iccv-2023-liu-birds-eye-view-scene-graph-for-vision-langua` | ok | 13 | 53992 | 119 | 0.984 | 1.0000 | match |
-| `iccv-2023-yi-diff-retinex-rethinking-low-light-image-enhan` | ok | 10 | 36859 | 1072 | 0.992 | 1.0000 | match |
+| `iccv-2023-yi-diff-retinex-rethinking-low-light-image-enhan` | ok | 10 | 36859 | 41 | 0.992 | 1.0000 | match |
 | `iccv-2023-zbinden-stochastic-segmentation-with-conditional` | ok | 11 | 41263 | 33 | 0.990 | 1.0000 | match |
 | `2024-naacl-long-0` | ok | 62 | 14399 | 0 | 0.999 | 1.0000 | match |
 | `2024-naacl-long-1` | ok | 21 | 74440 | 0 | 0.996 | 1.0000 | match |
 | `2024-naacl-long-2` | ok | 18 | 51532 | 74 | 0.992 | 1.0000 | match |
 | `2024-naacl-long-3` | ok | 19 | 69599 | 0 | 0.996 | 1.0000 | match |
-| `neurips-2017-attention` | ok | 11 | 27708 | 890 | 0.998 | 1.0000 | match |
+| `neurips-2017-attention` | ok | 11 | 27708 | 4 | 0.998 | 1.0000 | match |
 | `neurips-2023-0001ca33` | ok | 12 | 34157 | 0 | 0.996 | 1.0000 | match |
 | `neurips-2023-00160816` | ok | 22 | 65052 | 14 | 0.999 | 1.0000 | match |
 | `neurips-2023-0021c2cb` | ok | 22 | 51479 | 24 | 0.999 | 1.0000 | match |
@@ -179,8 +179,8 @@ These come from the extracted glyphs (column gutters, font names, Unicode ranges
 | `pmlr-v202-abels23a` | ok | 12 | 44038 | 7 | 0.997 | 1.0000 | match |
 | `pmlr-v202-acharki23a` | ok | 42 | 45785 | 125 | 0.996 | 1.0000 | match |
 | `pmlr-v202-adams23a` | ok | 19 | 54467 | 310 | 0.991 | 1.0000 | match |
-| `pmlr-v202-agarwala23a` | ok | 17 | 47590 | 4348 | 0.996 | 1.0000 | match |
-| `pmlr-v202-agarwala23b` | ok | 27 | 64412 | 10133 | 0.996 | 1.0000 | match |
+| `pmlr-v202-agarwala23a` | ok | 17 | 47590 | 155 | 0.996 | 1.0000 | match |
+| `pmlr-v202-agarwala23b` | ok | 27 | 64412 | 536 | 0.986 | 1.0000 | match |
 | `pmlr-v202-agazzi23a` | ok | 32 | 74309 | 646 | 0.996 | 1.0000 | match |
 | `usenix-sec24-gohil` | ok | 19 | 71498 | 293 | 0.996 | 1.0000 | match |
 | `usenix-sec24-mankali` | ok | 19 | 84574 | 97 | 0.995 | 1.0000 | match |
@@ -193,16 +193,8 @@ These come from the extracted glyphs (column gutters, font names, Unicode ranges
 
 A glyph is kept and flagged when no Unicode mapping is found. The large clusters are older pdfTeX files: Computer Modern Type 1 subsets with Builtin or Custom encodings and no ToUnicode CMap, so OT1/OML/OMS codes stay unmapped. The Word-produced NIST file is the other cluster (subsetted Times and Arial). Poppler still recovers most of those characters.
 
-- `arxiv-1312.6114`: 3767 / 34820 (10.8%) — PTTSAO+CMR10 (1160), ANCPWH+CMMI10 (477), UVUOJU+CMBX10 (464), RSAPAN+CMR7 (431)
-- `arxiv-1406.2661`: 1196 / 24451 (4.9%) — KZINBN+CMR10 (442), EINEDN+CMMI10 (299), FKSCQX+CMMI7 (93), ZYPRQG+CMMIB10 (64)
-- `arxiv-1607.06450`: 2283 / 38815 (5.9%) — WYHSSF+CMR10 (476), MJRMXB+CMMI10 (453), TSLWER+CMMI7 (372), OTIYPV+CMTT9 (235)
-- `arxiv-2006.11239`: 3447 / 47963 (7.2%) — VFFYMT+CMR10 (800), NLZWEU+CMMI7 (454), CQJYMI+CMR7 (450), XICDVQ+CMMI10 (408)
-- `iccv-2023-yi-diff-retinex-rethinking-low-light-image-enhan`: 1072 / 36859 (2.9%) — NAMWUE+CMMI10 (352), NSCXEH+CMMI7 (298), OBIDOX+CMR10 (204), DJTDZM+CMSY10 (99)
-- `neurips-2017-attention`: 890 / 27708 (3.2%) — FUIULY+CMR10 (318), LICAEO+CMMI10 (303), EDCQSD+CMMI7 (98), JQKXPN+CMR7 (66)
 - `nist-sp-800-63-3`: 7251 / 19283 (37.6%) — CVGOYE+TimesNewRomanPSMT (3628), WFZUSQ+ArialMT (2616), XWQAGO+Arial-BoldMT (565), RPTPHP+Calibri (165)
 - `openstax-university-physics-v2`: 1359 / 8613 (15.8%) — AAAAAK+NotoSans-Regular (1056), OIWKUU+HelveticaNeue-Bold (84), AAAAAJ+NotoSans-Bold (77), OIWKUU+HelveticaNeue (74)
-- `pmlr-v202-agarwala23a`: 4348 / 47590 (9.1%) — LRYYAT+CMR10 (1055), UVOIKI+CMMI10 (732), EUXJPC+CMMI7 (614), TYXLXL+CMBX10 (529)
-- `pmlr-v202-agarwala23b`: 10133 / 64412 (15.7%) — BBTCWP+CMR10 (3235), XTWTKF+CMMI10 (2552), TMACHH+CMMI7 (1547), OQZUZG+CMR7 (913)
 
 ## Diagnostics
 

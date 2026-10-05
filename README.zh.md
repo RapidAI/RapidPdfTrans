@@ -99,6 +99,8 @@ export RPT_LLM_API_KEY=...
 
 ## 保真语料
 
+`rpt-bench` 用掉字、占位符与公式保留、溢出、样式、非文字区域 SSIM 给译文 PDF 打分。`python3 corpus/bench/run.py` 把 CI 子集的恒等对照（每个 PDF 与自身比较）写到 `corpus/benchmarks/`。指标说明见 `corpus/benchmarks/README.md`。RapidPdfTrans 还不能写出译文 PDF（`rpt_save` 仍是 M3 占位）。
+
 `corpus/manifest.json` 记录真实论文和可再分发图书的直接下载 URL、来源、许可证、sha256、大小和特征标签。`python3 corpus/fetch.py` 把它们下载到被 git 忽略的缓存，这些文件不进仓库。例外是 `corpus/ci/`：九篇 CC BY 4.0 论文，每篇不到 700 KB，URL 和许可证写在 `corpus/ci/manifest.json`，CI 直接用它们。`testdata/hello.pdf` 由 `cargo run -p rpt-core --example hello_pdf` 生成，只用于单元测试，不是语料。`rpt-qa` 对每份文件做抽取和字形覆盖率检查，用 Poppler 对文字，并对一份逐字节相同的副本做渲染对比（整页 SSIM，以及去掉字形框之后的非文字区域 SSIM）。lopdf 另存是另一次结构往返，会改写文件，报告里单独列出。CI 只跑标记了 `ci: true` 的小子集。全量语料在夜间的 `Corpus fidelity` 工作流。说明见 `corpus/README.md`。
 
 ## 里程碑

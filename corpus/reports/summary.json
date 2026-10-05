@@ -46,15 +46,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -133,15 +124,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -228,15 +210,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -329,15 +302,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -418,15 +382,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -517,15 +472,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -610,15 +556,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -706,15 +643,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -810,15 +738,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -836,50 +755,46 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 31012,
-        "ours_in_reference": 0.9966787099838257,
+        "our_chars": 34596,
+        "ours_in_reference": 0.9970227479934692,
         "reference_chars": 34761,
-        "reference_in_ours": 0.8891861438751221,
+        "reference_in_ours": 0.992290198802948,
         "tool": "pdftotext"
       },
       "title": "Auto-Encoding Variational Bayes",
       "truncated": false,
-      "unmapped": 3767,
+      "unmapped": 183,
       "unmapped_fonts": [
         {
-          "count": 1160,
-          "name": "PTTSAO+CMR10"
+          "count": 90,
+          "name": "DYILGD+CMEX10"
         },
         {
-          "count": 477,
-          "name": "ANCPWH+CMMI10"
-        },
-        {
-          "count": 464,
-          "name": "UVUOJU+CMBX10"
-        },
-        {
-          "count": 431,
-          "name": "RSAPAN+CMR7"
-        },
-        {
-          "count": 316,
-          "name": "OBGRLQ+CMMI7"
-        },
-        {
-          "count": 272,
-          "name": "KFCAMB+CMSY10"
-        },
-        {
-          "count": 223,
+          "count": 62,
           "name": "RONREM+CMMIB10"
         },
         {
-          "count": 217,
+          "count": 18,
+          "name": "KFCAMB+CMSY10"
+        },
+        {
+          "count": 9,
+          "name": "ANCPWH+CMMI10"
+        },
+        {
+          "count": 2,
           "name": "UAUUQM+CMMIB7"
+        },
+        {
+          "count": 1,
+          "name": "EIKLQP+CMEX9"
+        },
+        {
+          "count": 1,
+          "name": "OBGRLQ+CMMI7"
         }
       ],
-      "unmapped_ratio": 0.10818494856357574,
+      "unmapped_ratio": 0.0052556004375219345,
       "url": "https://arxiv.org/pdf/1312.6114"
     },
     {
@@ -934,15 +849,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -959,50 +865,30 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 23249,
-        "ours_in_reference": 0.996429979801178,
+        "our_chars": 24406,
+        "ours_in_reference": 0.9965991973876953,
         "reference_chars": 24467,
-        "reference_in_ours": 0.9468263387680054,
+        "reference_in_ours": 0.9941145181655884,
         "tool": "pdftotext"
       },
       "title": "Generative Adversarial Nets",
       "truncated": false,
-      "unmapped": 1196,
+      "unmapped": 39,
       "unmapped_fonts": [
-        {
-          "count": 442,
-          "name": "KZINBN+CMR10"
-        },
-        {
-          "count": 299,
-          "name": "EINEDN+CMMI10"
-        },
-        {
-          "count": 93,
-          "name": "FKSCQX+CMMI7"
-        },
-        {
-          "count": 64,
-          "name": "ZYPRQG+CMMIB10"
-        },
-        {
-          "count": 54,
-          "name": "CAJVBQ+CMSY10"
-        },
-        {
-          "count": 41,
-          "name": "MJQWBA+CMR7"
-        },
         {
           "count": 37,
           "name": "QYOIUU+CMEX10"
         },
         {
-          "count": 31,
+          "count": 1,
+          "name": "CAJVBQ+CMSY10"
+        },
+        {
+          "count": 1,
           "name": "ZRBHNJ+CMSY7"
         }
       ],
-      "unmapped_ratio": 0.04891415312886238,
+      "unmapped_ratio": 0.0015950268134474754,
       "url": "https://arxiv.org/pdf/1406.2661"
     },
     {
@@ -1054,15 +940,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -1152,15 +1029,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -1263,15 +1131,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -1360,15 +1219,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -1386,50 +1236,34 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 34803,
-        "ours_in_reference": 0.9938511252403259,
+        "our_chars": 35159,
+        "ours_in_reference": 0.9937142729759216,
         "reference_chars": 35136,
-        "reference_in_ours": 0.9844319224357605,
+        "reference_in_ours": 0.9943647384643555,
         "tool": "pdftotext"
       },
       "title": "Faster R-CNN",
       "truncated": false,
-      "unmapped": 389,
+      "unmapped": 33,
       "unmapped_fonts": [
-        {
-          "count": 86,
-          "name": "CTUEHZ+CMR10"
-        },
-        {
-          "count": 53,
-          "name": "WXOKVP+CMMI10"
-        },
-        {
-          "count": 44,
-          "name": "GVUZCU+CMMI5"
-        },
-        {
-          "count": 42,
-          "name": "AXWEYE+CMR7"
-        },
-        {
-          "count": 30,
-          "name": "DNWHWF+CMR5"
-        },
         {
           "count": 25,
           "name": "IAUEGT+CMEX7"
         },
         {
-          "count": 23,
-          "name": "AWVADH+CMMI7"
+          "count": 5,
+          "name": "F88"
         },
         {
-          "count": 18,
-          "name": "HEBMOP+CMR9"
+          "count": 2,
+          "name": "F92"
+        },
+        {
+          "count": 1,
+          "name": "LHRDPA+CMEX10"
         }
       ],
-      "unmapped_ratio": 0.011037653312087059,
+      "unmapped_ratio": 0.0009363561403006315,
       "url": "https://arxiv.org/pdf/1506.02640"
     },
     {
@@ -1484,15 +1318,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -1511,50 +1336,26 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 49105,
-        "ours_in_reference": 0.9941146373748779,
+        "our_chars": 49556,
+        "ours_in_reference": 0.994168221950531,
         "reference_chars": 49506,
-        "reference_in_ours": 0.9860622882843018,
+        "reference_in_ours": 0.9951723217964172,
         "tool": "pdftotext"
       },
       "title": "Deep Residual Learning",
       "truncated": false,
-      "unmapped": 469,
+      "unmapped": 18,
       "unmapped_fonts": [
         {
-          "count": 153,
-          "name": "MJNQMS+CMSY10"
-        },
-        {
-          "count": 133,
-          "name": "LJXNUA+CMR10"
-        },
-        {
-          "count": 64,
+          "count": 16,
           "name": "JWRQMS+CMEX10"
         },
         {
-          "count": 47,
-          "name": "YYBXCM+CMMI10"
-        },
-        {
-          "count": 35,
-          "name": "WMCLTX+CMBX10"
-        },
-        {
-          "count": 10,
-          "name": "JGKPJP+CMR7"
-        },
-        {
-          "count": 8,
-          "name": "HHEZNL+CMMI7"
-        },
-        {
-          "count": 8,
-          "name": "MJKLIV+CMSY9"
+          "count": 2,
+          "name": "LJDGFJ+MinionPro-Regular"
         }
       ],
-      "unmapped_ratio": 0.009412000887095928,
+      "unmapped_ratio": 0.00036122818710282445,
       "url": "https://arxiv.org/pdf/1512.03385"
     },
     {
@@ -1610,15 +1411,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -1635,50 +1427,30 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 36446,
-        "ours_in_reference": 0.9978873133659363,
+        "our_chars": 38573,
+        "ours_in_reference": 0.9974852800369263,
         "reference_chars": 38704,
-        "reference_in_ours": 0.9396703243255615,
+        "reference_in_ours": 0.9941091537475586,
         "tool": "pdftotext"
       },
       "title": "Layer Normalization",
       "truncated": false,
-      "unmapped": 2283,
+      "unmapped": 156,
       "unmapped_fonts": [
         {
-          "count": 476,
-          "name": "WYHSSF+CMR10"
+          "count": 71,
+          "name": "GFMHEK+CMSY7"
         },
         {
-          "count": 453,
-          "name": "MJRMXB+CMMI10"
-        },
-        {
-          "count": 372,
-          "name": "TSLWER+CMMI7"
-        },
-        {
-          "count": 235,
-          "name": "OTIYPV+CMTT9"
-        },
-        {
-          "count": 157,
-          "name": "LKPBFH+CMBX10"
-        },
-        {
-          "count": 126,
-          "name": "XWWQMC+CMR7"
-        },
-        {
-          "count": 116,
+          "count": 56,
           "name": "XQLNTA+CMEX10"
         },
         {
-          "count": 108,
-          "name": "GFMHEK+CMSY7"
+          "count": 29,
+          "name": "XEBNUF+CMSY10"
         }
       ],
-      "unmapped_ratio": 0.05881746858358383,
+      "unmapped_ratio": 0.004019064828753471,
       "url": "https://arxiv.org/pdf/1607.06450"
     },
     {
@@ -1732,15 +1504,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -1758,50 +1521,22 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 51913,
-        "ours_in_reference": 0.9936046600341797,
+        "our_chars": 52165,
+        "ours_in_reference": 0.9935588836669922,
         "reference_chars": 52039,
-        "reference_in_ours": 0.9911988973617554,
+        "reference_in_ours": 0.9959645867347717,
         "tool": "pdftotext"
       },
       "title": "Mask R-CNN",
       "truncated": false,
-      "unmapped": 258,
+      "unmapped": 6,
       "unmapped_fonts": [
         {
-          "count": 58,
-          "name": "THSPVK+CMR6"
-        },
-        {
-          "count": 47,
-          "name": "MYYYWT+CMMI10"
-        },
-        {
-          "count": 35,
-          "name": "XCPORQ+CMMI7"
-        },
-        {
-          "count": 20,
-          "name": "BMNHUR+CMSY10"
-        },
-        {
-          "count": 20,
-          "name": "VSWYOI+CMR8"
-        },
-        {
-          "count": 16,
-          "name": "YZJSMU+CMR10"
-        },
-        {
-          "count": 13,
-          "name": "QLIYHQ+CMSY8"
-        },
-        {
-          "count": 12,
-          "name": "GKLLOF+CMMI6"
+          "count": 6,
+          "name": "RXNEKG+MSAM10"
         }
       ],
-      "unmapped_ratio": 0.004940446466207504,
+      "unmapped_ratio": 0.00011489410826470703,
       "url": "https://arxiv.org/pdf/1703.06870"
     },
     {
@@ -1854,15 +1589,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -1953,15 +1679,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -1979,50 +1696,26 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 53698,
-        "ours_in_reference": 0.9904093146324158,
+        "our_chars": 53918,
+        "ours_in_reference": 0.9903186559677124,
         "reference_chars": 53716,
-        "reference_in_ours": 0.9900774359703064,
+        "reference_in_ours": 0.9940427541732788,
         "tool": "pdftotext"
       },
       "title": "BERT",
       "truncated": false,
-      "unmapped": 223,
+      "unmapped": 3,
       "unmapped_fonts": [
         {
-          "count": 60,
-          "name": "VWQKZV+CMMI10"
-        },
-        {
-          "count": 37,
-          "name": "XHYEWS+CMR10"
-        },
-        {
-          "count": 27,
-          "name": "FRERWI+CMMI8"
-        },
-        {
-          "count": 26,
-          "name": "JGEFRW+CMR7"
-        },
-        {
-          "count": 18,
+          "count": 2,
           "name": "IJPVAX+CMSY10"
         },
         {
-          "count": 10,
-          "name": "WLXZAD+CMR9"
-        },
-        {
-          "count": 8,
-          "name": "OLQIXF+CMTT8"
-        },
-        {
-          "count": 7,
-          "name": "MRWCKP+CMMI6"
+          "count": 1,
+          "name": "CRPSRL+CMEX8"
         }
       ],
-      "unmapped_ratio": 0.004129400011152029,
+      "unmapped_ratio": 0.00005555246752919629,
       "url": "https://arxiv.org/pdf/1810.04805"
     },
     {
@@ -2078,15 +1771,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -2104,50 +1788,46 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 44497,
-        "ours_in_reference": 0.9974380135536194,
+        "our_chars": 47772,
+        "ours_in_reference": 0.996462345123291,
         "reference_chars": 47973,
-        "reference_in_ours": 0.9251662492752075,
+        "reference_in_ours": 0.9922873377799988,
         "tool": "pdftotext"
       },
       "title": "Denoising Diffusion Probabilistic Models",
       "truncated": false,
-      "unmapped": 3447,
+      "unmapped": 172,
       "unmapped_fonts": [
         {
-          "count": 800,
-          "name": "VFFYMT+CMR10"
+          "count": 100,
+          "name": "EGYCBQ+CMEX10"
         },
         {
-          "count": 454,
-          "name": "NLZWEU+CMMI7"
+          "count": 29,
+          "name": "OFCKFL+CMMIB10"
         },
         {
-          "count": 450,
-          "name": "CQJYMI+CMR7"
-        },
-        {
-          "count": 408,
-          "name": "XICDVQ+CMMI10"
-        },
-        {
-          "count": 305,
-          "name": "BNJEWM+CMBX10"
-        },
-        {
-          "count": 238,
+          "count": 17,
           "name": "LLGVZV+CMSY10"
         },
         {
-          "count": 131,
-          "name": "WSUOLH+CMR9"
+          "count": 8,
+          "name": "EDNKXH+CMSY7"
         },
         {
-          "count": 120,
-          "name": "EGYCBQ+CMEX10"
+          "count": 7,
+          "name": "YVLHXG+CMMIB7"
+        },
+        {
+          "count": 6,
+          "name": "CMZKQQ+CMEX9"
+        },
+        {
+          "count": 5,
+          "name": "TCTBYW+CMMIB9"
         }
       ],
-      "unmapped_ratio": 0.07186789810657501,
+      "unmapped_ratio": 0.0035860976204276085,
       "url": "https://arxiv.org/pdf/2006.11239"
     },
     {
@@ -2201,15 +1881,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -2228,50 +1899,34 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 55543,
-        "ours_in_reference": 0.9962911605834961,
+        "our_chars": 56549,
+        "ours_in_reference": 0.9963571429252625,
         "reference_chars": 56603,
-        "reference_in_ours": 0.9776337146759033,
+        "reference_in_ours": 0.9954066276550293,
         "tool": "pdftotext"
       },
       "title": "An Image is Worth 16x16 Words",
       "truncated": false,
-      "unmapped": 1021,
+      "unmapped": 15,
       "unmapped_fonts": [
         {
-          "count": 306,
-          "name": "BTLEBB+CMR10"
-        },
-        {
-          "count": 132,
-          "name": "ZNGCPC+CMR9"
-        },
-        {
-          "count": 112,
-          "name": "KMGDCO+CMMI10"
-        },
-        {
-          "count": 106,
-          "name": "KKBOLU+CMR7"
-        },
-        {
-          "count": 94,
+          "count": 6,
           "name": "XKTXRA+CMMI7"
         },
         {
-          "count": 75,
-          "name": "KIECUV+CMBX10"
-        },
-        {
-          "count": 58,
+          "count": 4,
           "name": "CRNFYO+CMSY7"
         },
         {
-          "count": 38,
-          "name": "NHSYAD+CMSY10"
+          "count": 3,
+          "name": "SHCDMI+CMEX10"
+        },
+        {
+          "count": 2,
+          "name": "KMGDCO+CMMI10"
         }
       ],
-      "unmapped_ratio": 0.017997533082962036,
+      "unmapped_ratio": 0.0002644103660713881,
       "url": "https://arxiv.org/pdf/2010.11929"
     },
     {
@@ -2326,15 +1981,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -2350,50 +1996,30 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 56646,
-        "ours_in_reference": 0.991649866104126,
+        "our_chars": 57224,
+        "ours_in_reference": 0.9915595054626465,
         "reference_chars": 57060,
-        "reference_in_ours": 0.9844549894332886,
+        "reference_in_ours": 0.9944093823432922,
         "tool": "pdftotext"
       },
       "title": "Highly accurate protein structure prediction",
       "truncated": false,
-      "unmapped": 638,
+      "unmapped": 60,
       "unmapped_fonts": [
-        {
-          "count": 169,
-          "name": "AJRJEA+CMR10"
-        },
-        {
-          "count": 98,
-          "name": "QJHCSO+CMMI10"
-        },
-        {
-          "count": 73,
-          "name": "BWUAAY+CMSY10"
-        },
-        {
-          "count": 61,
-          "name": "CPLZPH+CMSY9"
-        },
-        {
-          "count": 56,
-          "name": "GVPLRS+CMR7"
-        },
-        {
-          "count": 39,
-          "name": "QJGQGI+CMMI7"
-        },
-        {
-          "count": 37,
-          "name": "PJZRLC+CMR6"
-        },
         {
           "count": 32,
           "name": "LKTNDX+CMEX9"
+        },
+        {
+          "count": 16,
+          "name": "DXJXEP+CMEX10"
+        },
+        {
+          "count": 12,
+          "name": "BWUAAY+CMSY10"
         }
       ],
-      "unmapped_ratio": 0.011132631450891495,
+      "unmapped_ratio": 0.0010469559347257018,
       "url": "https://arxiv.org/pdf/2103.14030"
     },
     {
@@ -2446,15 +2072,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -2542,15 +2159,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -2635,15 +2243,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -2737,15 +2336,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -2835,15 +2425,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -2926,15 +2507,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -3022,15 +2594,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -3113,15 +2676,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -3207,15 +2761,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -3297,15 +2842,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -3401,15 +2937,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -3514,15 +3041,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -3615,15 +3133,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -3698,15 +3207,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -3809,15 +3309,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -3912,15 +3403,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -4009,15 +3491,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -4094,15 +3567,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -4186,15 +3650,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -4288,15 +3743,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -4382,15 +3828,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -4471,15 +3908,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -4567,15 +3995,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -4686,15 +4105,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -4781,15 +4191,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -4874,15 +4275,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -4999,15 +4391,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -5110,15 +4493,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -5199,15 +4573,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -5296,15 +4661,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -5384,15 +4740,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -5475,15 +4822,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -5569,15 +4907,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -5661,15 +4990,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -5770,15 +5090,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -5874,15 +5185,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -5900,50 +5202,38 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 35717,
-        "ours_in_reference": 0.991796612739563,
+        "our_chars": 36748,
+        "ours_in_reference": 0.9917818903923035,
         "reference_chars": 36683,
-        "reference_in_ours": 0.9656789302825928,
+        "reference_in_ours": 0.9935392141342163,
         "tool": "pdftotext"
       },
       "title": "Yi Diff-Retinex Rethinking Low-light Image Enhancement with A Generative Diffusion Model ICCV 2023",
       "truncated": false,
-      "unmapped": 1072,
+      "unmapped": 41,
       "unmapped_fonts": [
         {
-          "count": 352,
+          "count": 15,
           "name": "NAMWUE+CMMI10"
         },
         {
-          "count": 298,
-          "name": "NSCXEH+CMMI7"
-        },
-        {
-          "count": 204,
-          "name": "OBIDOX+CMR10"
-        },
-        {
-          "count": 99,
+          "count": 14,
           "name": "DJTDZM+CMSY10"
-        },
-        {
-          "count": 45,
-          "name": "HKYWVG+CMR7"
-        },
-        {
-          "count": 38,
-          "name": "WUQRQK+CMSY7"
-        },
-        {
-          "count": 9,
-          "name": "QDTWCG+MSBM10"
         },
         {
           "count": 6,
           "name": "XVBPDP+CMEX10"
+        },
+        {
+          "count": 4,
+          "name": "VXJGAC+TimesNewRomanPS-ItalicMT"
+        },
+        {
+          "count": 2,
+          "name": "VXJGAC+TimesNewRomanPSMT"
         }
       ],
-      "unmapped_ratio": 0.02908380515873432,
+      "unmapped_ratio": 0.0011123470030725002,
       "url": "https://openaccess.thecvf.com/content/ICCV2023/papers/Yi_Diff-Retinex_Rethinking_Low-light_Image_Enhancement_with_A_Generative_Diffusion_Model_ICCV_2023_paper.pdf"
     },
     {
@@ -5996,15 +5286,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -6088,15 +5369,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -6175,15 +5447,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -6265,15 +5528,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 596
           }
@@ -6364,15 +5618,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 596
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 842,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 596
           }
         ],
         "tool": "pdftoppm"
@@ -6453,15 +5698,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -6479,50 +5715,26 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 26818,
-        "ours_in_reference": 0.9983220100402832,
+        "our_chars": 27704,
+        "ours_in_reference": 0.9983757138252258,
         "reference_chars": 27725,
-        "reference_in_ours": 0.9656627774238586,
+        "reference_in_ours": 0.9976194500923157,
         "tool": "pdftotext"
       },
       "title": "Attention Is All You Need (NeurIPS 2017)",
       "truncated": false,
-      "unmapped": 890,
+      "unmapped": 4,
       "unmapped_fonts": [
         {
-          "count": 318,
-          "name": "FUIULY+CMR10"
-        },
-        {
-          "count": 303,
+          "count": 3,
           "name": "LICAEO+CMMI10"
         },
         {
-          "count": 98,
-          "name": "EDCQSD+CMMI7"
-        },
-        {
-          "count": 66,
-          "name": "JQKXPN+CMR7"
-        },
-        {
-          "count": 39,
-          "name": "FVBODF+CMSY10"
-        },
-        {
-          "count": 21,
-          "name": "HPHIWG+CMSY7"
-        },
-        {
-          "count": 7,
-          "name": "GBMMEG+CMMI9"
-        },
-        {
-          "count": 7,
-          "name": "PTGNGY+CMMI5"
+          "count": 1,
+          "name": "THPNLT+CMEX9"
         }
       ],
-      "unmapped_ratio": 0.032120686024427414,
+      "unmapped_ratio": 0.00014436263882089406,
       "url": "https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf"
     },
     {
@@ -6573,15 +5785,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -6664,15 +5867,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -6765,15 +5959,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -6864,15 +6049,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -6951,15 +6127,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -7048,15 +6215,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -7141,15 +6299,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -7263,15 +6412,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -7342,15 +6482,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -7467,15 +6598,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -7563,15 +6685,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -7655,15 +6768,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -7757,15 +6861,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -7848,15 +6943,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -7944,15 +7030,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -8046,15 +7123,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -8145,15 +7213,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -8171,50 +7230,42 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 43205,
-        "ours_in_reference": 0.9962272644042969,
+        "our_chars": 47398,
+        "ours_in_reference": 0.9955483078956604,
         "reference_chars": 47544,
-        "reference_in_ours": 0.9053087830543518,
+        "reference_in_ours": 0.9924911856651306,
         "tool": "pdftotext"
       },
       "title": "agarwala23a",
       "truncated": false,
-      "unmapped": 4348,
+      "unmapped": 155,
       "unmapped_fonts": [
         {
-          "count": 1055,
-          "name": "LRYYAT+CMR10"
-        },
-        {
-          "count": 732,
-          "name": "UVOIKI+CMMI10"
-        },
-        {
-          "count": 614,
-          "name": "EUXJPC+CMMI7"
-        },
-        {
-          "count": 529,
-          "name": "TYXLXL+CMBX10"
-        },
-        {
-          "count": 504,
-          "name": "ZDKLGI+CMSY10"
-        },
-        {
-          "count": 342,
-          "name": "SCMCHX+CMR7"
-        },
-        {
-          "count": 167,
+          "count": 109,
           "name": "YOIQSZ+CMSY7"
         },
         {
-          "count": 155,
-          "name": "HVHVXR+CMMIB10"
+          "count": 27,
+          "name": "UVOIKI+CMMI10"
+        },
+        {
+          "count": 8,
+          "name": "EUXJPC+CMMI7"
+        },
+        {
+          "count": 7,
+          "name": "KERNNT+CMEX10"
+        },
+        {
+          "count": 3,
+          "name": "UACIUL+CMSY6"
+        },
+        {
+          "count": 1,
+          "name": "EXPITJ+CMSY5"
         }
       ],
-      "unmapped_ratio": 0.09136373549699783,
+      "unmapped_ratio": 0.0032569868490099907,
       "url": "https://proceedings.mlr.press/v202/agarwala23a/agarwala23a.pdf"
     },
     {
@@ -8268,15 +7319,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -8294,50 +7336,50 @@
       "text_cross_check": {
         "available": true,
         "note": "whitespace-insensitive character multiset; PDFium is not installed",
-        "our_chars": 54167,
-        "ours_in_reference": 0.9960123300552368,
+        "our_chars": 63764,
+        "ours_in_reference": 0.9859482049942017,
         "reference_chars": 64313,
-        "reference_in_ours": 0.8388817310333252,
+        "reference_in_ours": 0.9775317311286926,
         "tool": "pdftotext"
       },
       "title": "agarwala23b",
       "truncated": false,
-      "unmapped": 10133,
+      "unmapped": 536,
       "unmapped_fonts": [
         {
-          "count": 3235,
-          "name": "BBTCWP+CMR10"
-        },
-        {
-          "count": 2552,
+          "count": 253,
           "name": "XTWTKF+CMMI10"
         },
         {
-          "count": 1547,
+          "count": 108,
+          "name": "LBVLEQ+CMEX10"
+        },
+        {
+          "count": 96,
           "name": "TMACHH+CMMI7"
         },
         {
-          "count": 913,
-          "name": "OQZUZG+CMR7"
+          "count": 54,
+          "name": "CPFOWU+CMSY7"
         },
         {
-          "count": 604,
+          "count": 9,
+          "name": "Cmmi10"
+        },
+        {
+          "count": 5,
+          "name": "KFZZLS+CMMI9"
+        },
+        {
+          "count": 5,
           "name": "RIWMLX+CMSY10"
         },
         {
-          "count": 485,
-          "name": "LXECFH+CMBX10"
-        },
-        {
-          "count": 155,
-          "name": "NDMSNG+CMR9"
-        },
-        {
-          "count": 129,
-          "name": "CPFOWU+CMSY7"
+          "count": 3,
+          "name": "NOPBSI+CMSY5"
         }
       ],
-      "unmapped_ratio": 0.15731540322303772,
+      "unmapped_ratio": 0.008321430534124374,
       "url": "https://proceedings.mlr.press/v202/agarwala23b/agarwala23b.pdf"
     },
     {
@@ -8388,15 +7430,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -8501,15 +7534,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -8623,15 +7647,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -8731,15 +7746,6 @@
             "nontext_note": "glyph boxes masked",
             "nontext_ssim": 1.0,
             "page": 1,
-            "ssim": 1.0,
-            "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
             "ssim": 1.0,
             "width": 612
           }
@@ -8846,15 +7852,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -8958,15 +7955,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 612
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 792,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 612
           }
         ],
         "tool": "pdftoppm"
@@ -9057,15 +8045,6 @@
             "page": 1,
             "ssim": 1.0,
             "width": 318
-          },
-          {
-            "exact_ratio": 1.0,
-            "height": 541,
-            "nontext_note": "glyph boxes masked",
-            "nontext_ssim": 1.0,
-            "page": 2,
-            "ssim": 1.0,
-            "width": 304
           }
         ],
         "tool": "pdftoppm"
@@ -9378,11 +8357,11 @@
     "lopdf_skipped": 2,
     "lopdf_text_matches": 87,
     "mean_identity_ssim": 1.0,
-    "mean_ours_in_poppler": 0.9939344525337219,
-    "mean_poppler_in_ours": 0.9796598553657532,
+    "mean_ours_in_poppler": 0.9938019514083862,
+    "mean_poppler_in_ours": 0.9865486025810242,
     "open_failures": 0,
     "panics": 0,
     "truncated": 10,
-    "unmapped": 45140
+    "unmapped": 16427
   }
 }

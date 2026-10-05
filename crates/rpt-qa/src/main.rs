@@ -5,10 +5,6 @@
 //! rendered pages match. A separate lopdf save measures how much a structural
 //! rewrite perturbs glyphs. It is not a visual rewrite of translated text.
 
-mod check;
-mod render;
-mod ssim;
-
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -18,8 +14,8 @@ use clap::Parser;
 use rpt_core::{ExtractOptions, Extraction, PdfDocument};
 use serde::{Deserialize, Serialize};
 
-use check::{align, observed_tags, poppler_cross_check, AlignReport, TextCrossCheck};
-use render::{compare_renders, RenderReport};
+use rpt_qa::check::{align, observed_tags, poppler_cross_check, AlignReport, TextCrossCheck};
+use rpt_qa::render::{compare_renders, RenderReport};
 
 #[derive(Parser)]
 #[command(
