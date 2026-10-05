@@ -114,7 +114,89 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
         }
         flush(&mut segments, &mut buf_ids, &mut buf);
     }
-    segments
+    join_line_break_hyphens(glyphs, segments)
+}
+
+/// LaTeX line-break hyphens (`tra-` / `jectories`) are separate lines. Join them
+/// so the translator sees the whole word. A following capital, or a line in the
+/// other column, stays separate.
+fn join_line_break_hyphens(glyphs: &[Glyph], segments: Vec<Segment>) -> Vec<Segment> {
+    if segments.len() < 2 {
+        return segments;
+    }
+    let by_id: std::collections::HashMap<u32, &Glyph> =
+        glyphs.iter().map(|glyph| (glyph.id, glyph)).collect();
+    let mut consumed = vec![false; segments.len()];
+    let mut out = Vec::new();
+    for i in 0..segments.len() {
+        if consumed[i] {
+            continue;
+        }
+        consumed[i] = true;
+        let mut seg = segments[i].clone();
+        while let Some(next_index) = hyphen_continuation(&seg, &segments, &consumed, &by_id) {
+            let next = &segments[next_index];
+            let rest = next.text.trim_start();
+            let Some(stem) = soft_hyphen_stem(&seg.text) else {
+                break;
+            };
+            if !rest.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+                break;
+            }
+            consumed[next_index] = true;
+            seg.text = format!("{stem}{rest}");
+            seg.glyph_ids.extend(next.glyph_ids.iter().copied());
+        }
+        out.push(seg);
+    }
+    for (id, seg) in out.iter_mut().enumerate() {
+        seg.id = id as u32;
+    }
+    out
+}
+
+fn soft_hyphen_stem(text: &str) -> Option<&str> {
+    let trimmed = text.trim_end();
+    let mut chars = trimmed.chars();
+    let last = chars.next_back()?;
+    let prev = chars.next_back()?;
+    if last == '-' && prev.is_ascii_alphabetic() {
+        Some(&trimmed[..trimmed.len() - '-'.len_utf8()])
+    } else {
+        None
+    }
+}
+
+fn hyphen_continuation(
+    segment: &Segment,
+    segments: &[Segment],
+    consumed: &[bool],
+    by_id: &std::collections::HashMap<u32, &Glyph>,
+) -> Option<usize> {
+    let head_id = *segment.glyph_ids.first()?;
+    let tail_id = *segment.glyph_ids.last()?;
+    let head = by_id.get(&head_id)?;
+    let tail = by_id.get(&tail_id)?;
+    let mut best: Option<(usize, f32)> = None;
+    for (index, other) in segments.iter().enumerate() {
+        if consumed[index] || other.page_index != segment.page_index {
+            continue;
+        }
+        let first_id = *other.glyph_ids.first()?;
+        let first = by_id.get(&first_id)?;
+        let size = tail.font_size.max(1.0);
+        let dy = tail.matrix[5] - first.matrix[5];
+        if dy < size * 0.45 || dy > size * 2.4 {
+            continue;
+        }
+        if (first.matrix[4] - head.matrix[4]).abs() > 36.0 {
+            continue;
+        }
+        if best.is_none_or(|(_, best_dy)| dy < best_dy) {
+            best = Some((index, dy));
+        }
+    }
+    best.map(|(index, _)| index)
 }
 
 /// A gap that is a word space in the original drawing, not a character in the stream.
@@ -238,5 +320,27 @@ mod tests {
         cjk[1].bbox = [14.0, 700.0, 26.0, 710.0];
         let segs = segment_glyphs(&cjk);
         assert_eq!(segs[0].text, "中文");
+    }
+
+    #[test]
+    fn a_line_break_hyphen_joins_the_next_line_in_the_same_column() {
+        let glyphs = vec![
+            glyph(0, 72.0, 700.0, "through long tra-", false),
+            glyph(1, 72.0, 686.0, "jectories of code", false),
+            glyph(2, 320.0, 686.0, "other column", false),
+        ];
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("trajectories of code")),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"other column"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|text| text.ends_with("tra-")),
+            "{texts:?}"
+        );
     }
 }
