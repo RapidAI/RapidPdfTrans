@@ -300,6 +300,9 @@ struct VisualLine<'a> {
     /// A contents row. Its page number and leader dots stay in place, and it
     /// does not join the next row.
     toc: bool,
+    /// No other title sits to the right on this baseline. A lowercase word
+    /// under it is this title's wrap (`Q&A` / `engines`), not the next entry.
+    sole_on_baseline: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -627,6 +630,7 @@ fn visual_line(glyphs: Vec<&Glyph>) -> VisualLine<'_> {
         font,
         glyphs,
         toc: false,
+        sole_on_baseline: true,
     }
 }
 
@@ -1675,14 +1679,17 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
             columns.push(vec![line]);
         }
     }
-    let mut paragraphs = Vec::new();
-    for mut column in columns {
+    for column in &mut columns {
         column.sort_by(|a, b| {
             a.page
                 .cmp(&b.page)
                 .then(b.y.total_cmp(&a.y))
                 .then(a.left.total_cmp(&b.left))
         });
+    }
+    mark_sole_baselines(&mut columns);
+    let mut paragraphs = Vec::new();
+    for column in columns {
         let mut current: Vec<VisualLine> = Vec::new();
         for line in column {
             let measure = measures.get(&line.page).copied().unwrap_or(0.0);
@@ -2074,10 +2081,11 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     // `83 Generating` only when the line above is not finishing that token.
     let hyphen = soft_hyphen_stem(&upper.text).is_some()
         && next.starts_with(|ch: char| ch.is_ascii_alphanumeric());
-    // Two contents titles stay apart. Joining a right-hand title to the
-    // left indent under it paints one block across the whole row.
+    // Two contents titles stay apart. A lowercase wrap under a title that
+    // has the baseline to itself (`Q&A` / `engines`) is still that title.
+    // A right-hand title returning to the left indent is a different entry.
     if upper.toc || lower.toc {
-        return false;
+        return toc_same_indent_wrap(upper, lower);
     }
     // A detailed-contents line already holds several entries (`83 Generating`).
     // Joining the wrap makes one block the Chinese leading cannot fit.
@@ -2139,6 +2147,47 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     let overlap = (upper.right.min(lower.right) - upper.left.max(lower.left)).max(0.0);
     let narrow = upper_w.min(lower_w).max(1.0);
     overlap >= narrow * 0.35 || (upper.left - lower.left).abs() <= 8.0
+}
+
+fn mark_sole_baselines(columns: &mut [Vec<VisualLine<'_>>]) {
+    let mut flat: Vec<(u32, f32, f32, f32, f32, usize, usize)> = Vec::new();
+    for (ci, column) in columns.iter().enumerate() {
+        for (li, line) in column.iter().enumerate() {
+            flat.push((line.page, line.y, line.left, line.right, line.size, ci, li));
+        }
+    }
+    for (page, y, _left, right, size, ci, li) in &flat {
+        let limit = size.max(1.0) * 0.35;
+        let sibling = flat.iter().any(|(page2, y2, left2, _, _, ci2, li2)| {
+            (*ci2, *li2) != (*ci, *li)
+                && page2 == page
+                && (y2 - y).abs() <= limit
+                && *left2 > right + size.max(1.0) * 0.3
+        });
+        if sibling {
+            columns[*ci][*li].sole_on_baseline = false;
+        }
+    }
+}
+
+/// `engines` under `Summarization and Q&A` continues that title. The next
+/// entry on the same baseline (`chatbots`) does not.
+fn toc_same_indent_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    // A title that already has its page number is finished. `appendix A` must
+    // not absorb `appendix B` just because both start in lowercase.
+    if upper.toc || !upper.sole_on_baseline {
+        return false;
+    }
+    let next = lower.text.trim_start();
+    if !next.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+        return false;
+    }
+    if (upper.left - lower.left).abs() > 8.0 {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    let dy = upper.y - lower.y;
+    dy >= size * 0.7 && dy <= size * 1.5 && (upper.size - lower.size).abs() <= size * 0.2
 }
 
 /// Both lines are well under the page's column measure, and the next one
@@ -5268,6 +5317,41 @@ mod tests {
             .collect();
         assert!(
             texts.iter().any(|text| text.contains("Human-in-the-loop")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_lowercase_contents_wrap_stays_with_the_title_above_it() {
+        // `engines` is the rest of the title. `chatbots` is the next entry.
+        let glyphs = vec![
+            block(
+                0,
+                177.0,
+                400.0,
+                203.0,
+                10.0,
+                "LLM-based applications: Summarization and Q&A",
+            ),
+            block(1, 177.0, 388.0, 28.0, 10.0, "engines"),
+            block(2, 211.0, 388.0, 6.0, 10.0, "4"),
+            block(3, 230.0, 388.0, 78.0, 10.0, "LLM-based chatbots"),
+            block(4, 313.0, 388.0, 6.0, 10.0, "7"),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Summarization") && text.contains("engines")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("chatbots") && !text.contains("engines")),
             "{texts:?}"
         );
     }

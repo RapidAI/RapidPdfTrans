@@ -314,11 +314,10 @@ pub(crate) fn fit_cjk_block(
     let start = (source_size * scale).max(1.0);
     // A paragraph that already fits stays at `start`. A narrow column, or a
     // one-line source, may shrink to 0.62 of the English size before the
-    // English is left in place. A short one-line title (a contents entry)
-    // may go to 0.50: the Chinese is often longer than that ink, and leaving
-    // it English fails the page. A full column stays at 0.62.
+    // English is left in place. A short one-line title stays at least 0.80
+    // and may use a second line. Half the source size is too small to read.
     let floor_ratio = if available <= 0.5 && width <= source_size * 16.0 {
-        0.50
+        0.80
     } else {
         0.62
     };
@@ -346,6 +345,17 @@ pub(crate) fn fit_cjk_block(
             fit_measure(line, size, font) <= limit + 1.0
         });
         let single_source = available <= 0.5;
+        if within
+            && single_source
+            && width <= source_size * 16.0
+            && lines.len() == 2
+            && size + 0.01 >= source_size * 0.80
+        {
+            // The English title is one line and the Chinese is longer. A
+            // second line at 1.15 em stays in the contents leading. A third
+            // line would land on the next entry.
+            return Some((lines, size, size * 1.15, indent));
+        }
         if within && (!single_source || lines.len() == 1) {
             if gaps == 0 {
                 return Some((lines, size, size * metrics.leading_ratio, indent));
@@ -968,18 +978,25 @@ mod tests {
             &uniform_font(crumb),
             metrics,
         )
-        .expect("a short contents title still fits");
+        .expect("a short contents title wraps instead of shrinking to half");
         assert!(
-            fitted.size + 0.05 >= 5.0,
-            "contents title shrunk past 0.50: {}",
+            fitted.size + 0.05 >= 8.0,
+            "contents title shrunk below 0.80: {}",
             fitted.size
         );
-        assert!(
-            fitted.size < 6.2,
-            "contents title should be below the body floor, got {}",
-            fitted.size
-        );
-        assert_eq!(fitted.lines.len(), 1);
+        assert_eq!(fitted.lines.len(), 2, "{:?}", fitted.lines);
+        let short = fit_paragraph(
+            "代理",
+            10.0,
+            78.0,
+            0.0,
+            1,
+            false,
+            &uniform_font("代理"),
+            metrics,
+        )
+        .expect("a title that fits stays one line");
+        assert_eq!(short.lines.len(), 1, "{:?}", short.lines);
         let wide = "基于大语言模型的聊天机器人".repeat(3);
         assert!(
             fit_paragraph(

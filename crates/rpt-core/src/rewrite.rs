@@ -117,6 +117,21 @@ pub fn rewrite_translation(
     let mut planned: Vec<(usize, String)> = Vec::new();
     let owners = operator_owners(&extraction.glyphs);
     let mut toc_redraw: HashSet<u32> = HashSet::new();
+    // Two credit columns often share one text operator. Each column is its
+    // own segment. Blank the operator when every visible glyph in it belongs
+    // to a segment that will be drawn.
+    let translatable: HashSet<u32> = report
+        .segments
+        .iter()
+        .filter(|segment| {
+            let translated = crate::translate::localize_part_heading(&segment.translated);
+            !segment.glyph_ids.is_empty()
+                && !segment.source.trim().is_empty()
+                && !translated.trim().is_empty()
+                && translated != segment.source
+        })
+        .flat_map(|segment| segment.glyph_ids.iter().copied())
+        .collect();
     // An identity pass echoes every segment. Leftover English is a QA failure
     // only when this job actually produced Chinese for some other segment.
     let job_translates = report
@@ -178,7 +193,7 @@ pub fn rewrite_translation(
             // title box, and put the dots and page number back where they were.
             if let Some(companions) = toc_companion_ids(&glyphs, &owners, extraction, &by_id) {
                 toc_redraw.extend(companions);
-            } else {
+            } else if !co_translated_operator(&glyphs, &owners, &translatable, extraction, &by_id) {
                 for id in &segment.glyph_ids {
                     keep.insert(*id, "shared-operator".into());
                 }
@@ -887,6 +902,44 @@ fn toc_companion_ids(
     }
 }
 
+/// The other ink in this operator is text from a segment that will be drawn.
+/// A formula, a page number, or an untranslated column stays put.
+fn co_translated_operator(
+    segment: &[&Glyph],
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+    translatable: &HashSet<u32>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let inside: HashSet<u32> = segment.iter().map(|glyph| glyph.id).collect();
+    let mut foreign = false;
+    for glyph in segment {
+        let Some(span) = span_of(&glyph.source) else {
+            return false;
+        };
+        let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+        let Some(ids) = owners.get(&key) else {
+            return false;
+        };
+        for id in ids {
+            if inside.contains(id) {
+                continue;
+            }
+            let Some(other) = extraction.glyphs.get(by_id[id]) else {
+                return false;
+            };
+            if other.unicode.trim().is_empty() {
+                continue;
+            }
+            if !translatable.contains(id) {
+                return false;
+            }
+            foreign = true;
+        }
+    }
+    foreign
+}
+
 /// Drop draws whose operator still contains ink we are not redrawing, then
 /// paint kept contents marks back at their source positions.
 fn commit_toc_operators(
@@ -964,8 +1017,12 @@ fn commit_toc_operators(
     let mut placed = HashSet::new();
     for run in &runs {
         // Leader dots already end at this number. Sliding it would open a hole.
+        // Several numbers on one baseline (`engines 4`, `chatbots 7`, `agents 8`)
+        // stay next to their titles. Sliding every one of them stacks them
+        // on the column edge.
         if run.iter().any(|glyph| !toc_redraw.contains(&glyph.id))
             || run_follows_leaders(run, extraction, toc_redraw)
+            || shares_baseline_with_another_number(run, &runs)
         {
             continue;
         }
@@ -987,6 +1044,7 @@ fn commit_toc_operators(
             restored.push(item);
         }
     }
+    let mut leaders: Vec<&Glyph> = Vec::new();
     for id in toc_redraw {
         if placed.contains(id) {
             continue;
@@ -1001,6 +1059,10 @@ fn commit_toc_operators(
         if !live_ops.contains(&key) {
             continue;
         }
+        if is_toc_leader_glyph(glyph) {
+            leaders.push(glyph);
+            continue;
+        }
         let Some((resource, font)) = font_for_page(glyph.page_index, glyph, embedded, drawn) else {
             continue;
         };
@@ -1008,7 +1070,61 @@ fn commit_toc_operators(
             restored.push(item);
         }
     }
+    leaders.sort_by(|left, right| {
+        left.page_index.cmp(&right.page_index).then(
+            left.matrix[5]
+                .total_cmp(&right.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4])),
+        )
+    });
+    let mut leader_groups: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in leaders {
+        let start_new = match leader_groups.last().and_then(|group| group.last().copied()) {
+            Some(prev) => {
+                let size = prev.font_size.max(glyph.font_size).max(1.0);
+                glyph.page_index != prev.page_index
+                    || (glyph.matrix[5] - prev.matrix[5]).abs() > size * 0.45
+            }
+            None => true,
+        };
+        if start_new {
+            leader_groups.push(vec![glyph]);
+        } else if let Some(group) = leader_groups.last_mut() {
+            group.push(glyph);
+        }
+    }
+    for group in &leader_groups {
+        let Some((resource, font)) = font_for_page(group[0].page_index, group[0], embedded, drawn)
+        else {
+            continue;
+        };
+        if let Some(item) = place_leader_run(group, drawn, extraction, toc_redraw, font, resource) {
+            restored.push(item);
+        } else {
+            for glyph in group {
+                if let Some(item) = draw_toc_glyph(glyph, font, resource) {
+                    restored.push(item);
+                }
+            }
+        }
+    }
     drawn.extend(restored);
+}
+
+/// `4`, `7`, and `8` on one contents row. Moving them to one x stacks the digits.
+fn shares_baseline_with_another_number(run: &[&Glyph], runs: &[Vec<&Glyph>]) -> bool {
+    let Some(first) = run.first() else {
+        return false;
+    };
+    let size = first.font_size.max(1.0);
+    runs.iter().any(|other| {
+        let Some(head) = other.first() else {
+            return false;
+        };
+        head.id != first.id
+            && head.page_index == first.page_index
+            && (head.matrix[5] - first.matrix[5]).abs() <= size * 0.45
+    })
 }
 
 /// Page-number glyphs already kept as contents marks, grouped into one run
@@ -1183,6 +1299,106 @@ fn font_for_page<'a>(
         .iter()
         .find(|(_, font)| glyph_chars_covered(glyph, font))
         .map(|(resource, font)| (resource.as_str(), font))
+}
+
+/// A shorter Chinese title leaves a hole before leader dots that still start
+/// where the English title ended. Stretch the dots from just after the title
+/// to just before the page number.
+fn place_leader_run(
+    glyphs: &[&Glyph],
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    toc_redraw: &HashSet<u32>,
+    font: &SubsetFont,
+    resource: &str,
+) -> Option<Drawn> {
+    let first = *glyphs.first()?;
+    let size = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    let y = first.matrix[5];
+    let leader_left = glyphs
+        .iter()
+        .map(|glyph| glyph_ink_left(glyph))
+        .fold(f32::MAX, f32::min);
+    let title_right = drawn
+        .iter()
+        .filter(|item| {
+            item.page == first.page_index
+                && (item.y - y).abs() <= size * 0.7
+                && item.x < leader_left
+        })
+        .map(|item| item.x + item.widths.iter().sum::<f32>() + item.gaps.iter().sum::<f32>())
+        .fold(None, |best: Option<f32>, right| {
+            Some(best.map(|value| value.max(right)).unwrap_or(right))
+        })?;
+    let number_left = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == first.page_index
+                && is_toc_mark(glyph, toc_redraw)
+                && toc_page_char(&glyph.unicode)
+                && (glyph.matrix[5] - y).abs() <= size * 0.45
+                && glyph_ink_left(glyph) + 1.0 >= leader_left
+        })
+        .map(glyph_ink_left)
+        .fold(None, |best: Option<f32>, left| {
+            Some(best.map(|value| value.min(left)).unwrap_or(left))
+        })?;
+    let start = title_right + size * 0.75;
+    let end = number_left - size * 0.35;
+    // The title still ends where the dots began. Leave them.
+    if start + size >= leader_left || end - start < size * 2.0 {
+        return None;
+    }
+    let dot = glyphs.iter().find_map(|glyph| {
+        glyph
+            .unicode
+            .chars()
+            .find(|ch| matches!(*ch, '.' | '·' | '…' | '•' | '⋅' | '‧' | '․'))
+    })?;
+    if !font.glyphs.contains_key(&(dot as u32)) {
+        return None;
+    }
+    let sample = dot.to_string();
+    let one = widths_with_superscripts(&sample, size, font, &[false], None);
+    let dot_width = one.first().copied().unwrap_or(0.0);
+    if dot_width <= 0.2 {
+        return None;
+    }
+    let span = end - start;
+    let count = (span / dot_width).floor().max(1.0) as usize;
+    if count < 4 {
+        return None;
+    }
+    let text = sample.repeat(count);
+    let widths = widths_with_superscripts(&text, size, font, &vec![false; count], None);
+    let ink: f32 = widths.iter().sum();
+    let extra = (span - ink).max(0.0);
+    let gaps = if count > 1 {
+        vec![extra / (count - 1) as f32; count - 1]
+    } else {
+        Vec::new()
+    };
+    Some(Drawn {
+        page: first.page_index,
+        x: start,
+        y,
+        size,
+        color: first.fill_color.clone(),
+        cids: cids_of(&text, font),
+        resource: resource.to_string(),
+        skew: 0.0,
+        widths,
+        gaps,
+        text,
+        supers: vec![false; count],
+        sup_scale: 1.0,
+        sup_rise: 0.0,
+        glyph_ids: glyphs.iter().map(|glyph| glyph.id).collect(),
+    })
 }
 
 fn draw_toc_glyph(glyph: &Glyph, font: &SubsetFont, resource: &str) -> Option<Drawn> {
@@ -1676,6 +1892,12 @@ fn layout_segment(
     let ys: Vec<f32> = if bilingual {
         (0..lines.len())
             .map(|index| origin_y - index as f32 * leading)
+            .collect()
+    } else if ink.len() == 1 && lines.len() > 1 {
+        // A one-line contents title whose Chinese wraps. The second line
+        // uses the fitted leading; there is no second source baseline to share.
+        (0..lines.len())
+            .map(|index| top_y - index as f32 * leading)
             .collect()
     } else {
         baselines_for(&ink, lines.len())
@@ -5290,6 +5512,17 @@ mod tests {
         assert!(text.contains("简介"), "{text}");
         assert!(text.contains('3'), "{text}");
         assert!(!text.contains("Introduction"), "{text}");
+        let painted = PdfDocument::open_bytes(&saved).unwrap().extract();
+        let dot_x = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.contains('.'))
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            dot_x < 160.0,
+            "leader dots stayed out by the old English title at x={dot_x}"
+        );
     }
 
     #[test]
@@ -5395,6 +5628,150 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inline_contents_numbers_stay_next_to_their_titles() {
+        let bytes = inline_numbers_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("engines") {
+                    "引擎"
+                } else if seg.text.contains("chatbots") {
+                    "聊天机器人"
+                } else if seg.text.contains("agents") {
+                    "代理"
+                } else {
+                    "简介"
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"引擎聊天机器人代理简介478"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut xs: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| matches!(glyph.unicode.as_str(), "4" | "7" | "8"))
+            .map(|glyph| glyph.matrix[4])
+            .collect();
+        xs.sort_by(|left, right| left.total_cmp(right));
+        assert_eq!(xs.len(), 3, "inline numbers: {xs:?}");
+        assert!(
+            xs[1] - xs[0] > 12.0 && xs[2] - xs[1] > 12.0,
+            "inline page numbers stacked: {xs:?}"
+        );
+    }
+
+    #[test]
+    fn side_by_side_credits_that_share_an_operator_are_both_translated() {
+        let bytes = shared_credit_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let texts: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Manning"))
+                && texts.iter().any(|text| text.contains("Development")),
+            "credits should be two segments: {texts:?}"
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Manning") {
+                    "曼宁出版公司"
+                } else {
+                    "开发编辑：Ada"
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"曼宁出版公司开发编辑：Ada"
+                .chars()
+                .chain("Manning Publications Co. Development editor: Ada".chars())
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let text = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(text.contains("曼宁出版公司"), "{text}");
+        assert!(text.contains("开发编辑"), "{text}");
+        assert!(!text.contains("Manning"), "{text}");
+        assert!(!text.contains("Development"), "{text}");
+    }
+
     fn toc_column_pdf() -> Vec<u8> {
         let mut doc = Document::with_version("1.4");
         doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
@@ -5419,6 +5796,106 @@ mod tests {
         let content = b"BT /F1 12 Tf \
 1 0 0 1 72 700 Tm [(Agents) -1000 (27)] TJ \
 1 0 0 1 72 670 Tm [(Query generation, routing, and retrieval postprocessing) -1000 (228)] TJ \
+ET"
+        .to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn inline_numbers_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        // -700 is a tight page-number gap. -2200 separates the next entry.
+        // The second row's number is the only one on its baseline.
+        let content = b"BT /F1 12 Tf \
+1 0 0 1 72 700 Tm [(engines) -700 (4) -2200 (chatbots) -700 (7) -2200 (agents) -700 (8)] TJ \
+1 0 0 1 72 670 Tm [(Introduction) -2000 (3)] TJ \
+ET"
+        .to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn shared_credit_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        // One TJ, two columns. -8000 at 10pt is an 80pt gutter.
+        let content = b"BT /F1 10 Tf \
+1 0 0 1 72 400 Tm [(Manning Publications Co.) -8000 (Development editor: Ada)] TJ \
 ET"
         .to_vec();
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));
