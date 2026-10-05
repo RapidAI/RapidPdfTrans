@@ -167,7 +167,8 @@ struct VisualLine<'a> {
 fn assemble(raw: Vec<Vec<&Glyph>>, flags: &SegmentFlags) -> Segmentation {
     let mut lines: Vec<VisualLine> = raw.into_iter().map(visual_line).collect();
     attach_markers(&mut lines);
-    let kept = interior_glyphs(&lines, flags);
+    let mut kept = interior_glyphs(&lines, flags);
+    kept.extend(margin_stamps(&lines));
     let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     if !kept_ids.is_empty() {
         lines.retain(|line| {
@@ -663,31 +664,121 @@ fn reading_order(lines: &[VisualLine<'_>]) -> Vec<usize> {
     order
 }
 
-fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
-    let mut indexed: Vec<VisualLine> = lines;
-    indexed.sort_by(|a, b| {
-        a.page
-            .cmp(&b.page)
-            .then(b.y.total_cmp(&a.y))
-            .then(a.left.total_cmp(&b.left))
-    });
-    let mut paragraphs: Vec<Vec<VisualLine>> = Vec::new();
-    for line in indexed {
-        if paragraphs
-            .last()
-            .and_then(|para| para.last())
-            .is_some_and(|prev| continues_paragraph(prev, &line))
+fn margin_stamps(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
+    let mut kept = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in lines {
+        // A stamp that stayed on its own baseline: one or two large glyphs at the left edge.
+        if line.left <= 56.0
+            && line.glyphs.len() <= 2
+            && line.right - line.left <= 22.0
+            && line.size >= 14.0
         {
-            paragraphs.last_mut().unwrap().push(line);
+            for glyph in &line.glyphs {
+                if seen.insert(glyph.id) {
+                    kept.push((glyph.id, "margin".into()));
+                }
+            }
+        }
+    }
+    // The same stamp often shares a baseline with the body. The line is then too
+    // wide to match above, and the size-20 glyph raises the column-split gap so
+    // the letter stays inside the paragraph. A real margin is many large glyphs
+    // stacked on one x.
+    let mut by_page: std::collections::HashMap<u32, Vec<&Glyph>> = std::collections::HashMap::new();
+    for line in lines {
+        for glyph in &line.glyphs {
+            if stamp_glyph(glyph) {
+                by_page.entry(glyph.page_index).or_default().push(glyph);
+            }
+        }
+    }
+    for glyphs in by_page.values() {
+        if glyphs.len() < 8 {
+            continue;
+        }
+        let mut xs: Vec<f32> = glyphs.iter().map(|glyph| glyph.matrix[4]).collect();
+        xs.sort_by(|a, b| a.total_cmp(b));
+        let anchor = xs[xs.len() / 2];
+        for glyph in glyphs {
+            if (glyph.matrix[4] - anchor).abs() <= 4.0 && seen.insert(glyph.id) {
+                kept.push((glyph.id, "margin".into()));
+            }
+        }
+    }
+    kept
+}
+
+fn stamp_glyph(glyph: &Glyph) -> bool {
+    let left = glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]);
+    let right = glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]);
+    left <= 56.0 && right - left <= 24.0 && glyph.font_size >= 14.0
+}
+
+fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
+    // A left-edge stamp between two body baselines must not split the paragraph.
+    // Join each column on its own. The anchor is that column's median left edge,
+    // so a chain of small indents cannot pull the other column in.
+    let mut columns: Vec<Vec<VisualLine>> = Vec::new();
+    for line in lines {
+        if let Some(column) = columns.iter_mut().find(|column| {
+            column_anchor(column, line.page)
+                .is_some_and(|anchor| (anchor - line.left).abs() <= 28.0)
+        }) {
+            column.push(line);
         } else {
-            paragraphs.push(vec![line]);
+            columns.push(vec![line]);
+        }
+    }
+    let mut paragraphs = Vec::new();
+    for mut column in columns {
+        column.sort_by(|a, b| {
+            a.page
+                .cmp(&b.page)
+                .then(b.y.total_cmp(&a.y))
+                .then(a.left.total_cmp(&b.left))
+        });
+        let mut current: Vec<VisualLine> = Vec::new();
+        for line in column {
+            if current
+                .last()
+                .is_some_and(|prev| continues_paragraph(prev, &line))
+            {
+                current.push(line);
+            } else {
+                if !current.is_empty() {
+                    paragraphs.push(std::mem::take(&mut current));
+                }
+                current.push(line);
+            }
+        }
+        if !current.is_empty() {
+            paragraphs.push(current);
         }
     }
     paragraphs
 }
 
+fn column_anchor(column: &[VisualLine<'_>], page: u32) -> Option<f32> {
+    let mut xs: Vec<f32> = column
+        .iter()
+        .filter(|line| line.page == page)
+        .map(|line| line.left)
+        .collect();
+    if xs.is_empty() {
+        return None;
+    }
+    xs.sort_by(|a, b| a.total_cmp(b));
+    Some(xs[xs.len() / 2])
+}
+
 fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if upper.page != lower.page {
+        return false;
+    }
+    // An inline formula keeps its whole segment. Joining it onto the prose
+    // around it would leave that prose untranslated.
+    if line_has_formula(upper) || line_has_formula(lower) {
         return false;
     }
     let size = upper.size.max(lower.size).max(1.0);
@@ -726,6 +817,20 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     let overlap = (upper.right.min(lower.right) - upper.left.max(lower.left)).max(0.0);
     let narrow = upper_w.min(lower_w).max(1.0);
     overlap >= narrow * 0.35 || (upper.left - lower.left).abs() <= 8.0
+}
+
+fn line_has_formula(line: &VisualLine<'_>) -> bool {
+    line.glyphs.iter().any(|glyph| {
+        let upper = glyph.font_name.to_ascii_uppercase();
+        let math = ["CMMI", "CMSY", "CMEX", "MSAM", "MSBM", "STIX"]
+            .iter()
+            .any(|needle| upper.contains(needle))
+            || upper.contains("MATH");
+        math && !matches!(
+            glyph.unicode.trim(),
+            "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
+        )
+    })
 }
 
 fn soft_hyphen_stem(text: &str) -> Option<&str> {
@@ -952,6 +1057,32 @@ mod tests {
     }
 
     #[test]
+    fn a_margin_stamp_does_not_split_a_hyphenated_paragraph() {
+        let mut upper = wide(0, 144.0, 560.0, "through long tra-", 320.0, 10.0);
+        upper.font_name = "NimbusRomNo9L-Regu".into();
+        let mut stamp = wide(1, 38.0, 550.0, "6", 12.0, 20.0);
+        stamp.font_name = "NimbusRoman-Regular".into();
+        let mut lower = wide(2, 144.0, 549.0, "jectories of code", 320.0, 10.0);
+        lower.font_name = "NimbusRomNo9L-Regu".into();
+        let seg = segment_with(&[upper, stamp, lower], &SegmentFlags::default());
+        assert!(
+            seg.segments
+                .iter()
+                .any(|item| item.text.contains("trajectories")),
+            "{:?}",
+            seg.segments
+                .iter()
+                .map(|item| &item.text)
+                .collect::<Vec<_>>()
+        );
+        assert!(seg
+            .kept
+            .iter()
+            .any(|(id, reason)| *id == 1 && reason == "margin"));
+        assert!(!seg.segments.iter().any(|item| item.glyph_ids.contains(&1)));
+    }
+
+    #[test]
     fn a_paragraph_is_one_segment_and_a_short_heading_stays_apart() {
         let body =
             "Coding agents solve repository level tasks through long trajectories of inspection.";
@@ -975,10 +1106,7 @@ mod tests {
                 .any(|text| text.contains("next line continues")),
             "{texts:?}"
         );
-        assert!(
-            texts.contains(&"1 Introduction"),
-            "{texts:?}"
-        );
+        assert!(texts.contains(&"1 Introduction"), "{texts:?}");
         assert_eq!(
             segs.iter()
                 .filter(|seg| seg.text.contains("Coding"))
@@ -1175,12 +1303,106 @@ mod tests {
             "superscripts should travel with the author line: {}",
             author.text
         );
-        let abstract_parts = seg
+        let abstract_seg = seg
             .segments
             .iter()
-            .filter(|item| item.page_index == 0 && item.text.contains("Coding"))
-            .count();
-        assert_eq!(abstract_parts, 1, "the abstract should be one paragraph");
+            .find(|item| item.page_index == 0 && item.text.contains("Coding"))
+            .expect("abstract");
+        assert!(
+            abstract_seg.text.contains("trajectories"),
+            "abstract lines should join across the margin stamp: {}",
+            &abstract_seg.text[..abstract_seg.text.len().min(180)]
+        );
+        let margin_ids: std::collections::HashSet<u32> = seg
+            .kept
+            .iter()
+            .filter(|(_, reason)| reason == "margin")
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(margin_ids.len() >= 8, "margin stamp should be kept");
+        assert!(abstract_seg
+            .glyph_ids
+            .iter()
+            .all(|id| !margin_ids.contains(id)));
+    }
+
+    #[test]
+    fn a_stamp_on_the_body_baseline_is_removed_from_the_paragraph() {
+        let mut body = wide(
+            0,
+            72.0,
+            500.0,
+            "through long trajectories of code",
+            300.0,
+            10.0,
+        );
+        body.font_name = "CMR10".into();
+        let mut glyphs = vec![body];
+        // The gap to the body is under the size-20 column split, so the letter
+        // would otherwise sit inside the line. Eight stacked letters make a stamp.
+        for index in 0..8 {
+            let mut stamp = wide(
+                1 + index,
+                37.9,
+                500.0 - index as f32 * 14.0,
+                "6",
+                14.0,
+                20.0,
+            );
+            stamp.font_name = "NimbusRoman-Regular".into();
+            glyphs.push(stamp);
+        }
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let text = seg
+            .segments
+            .iter()
+            .find(|item| item.text.contains("trajectories"))
+            .expect("body");
+        assert!(!text.text.contains('6'), "{}", text.text);
+        assert!(!text.glyph_ids.contains(&1));
+        assert!(seg
+            .kept
+            .iter()
+            .any(|(id, reason)| *id == 1 && reason == "margin"));
+    }
+
+    #[test]
+    fn an_inline_formula_line_does_not_swallow_neighboring_prose() {
+        let prose = "This sentence is long enough to stand as its own prose line today.";
+        let mut above = wide(0, 72.0, 500.0, prose, 320.0, 10.0);
+        above.font_name = "CMR10".into();
+        let mut words = wide(
+            1,
+            72.0,
+            488.0,
+            "where the exponent stays inside the same sentence today.",
+            300.0,
+            10.0,
+        );
+        words.font_name = "CMR10".into();
+        let mut theta = wide(2, 380.0, 488.0, "θ", 8.0, 10.0);
+        theta.font_name = "CMMI10".into();
+        let mut below = wide(
+            3,
+            72.0,
+            476.0,
+            "The following sentence is also ordinary prose without symbols.",
+            320.0,
+            10.0,
+        );
+        below.font_name = "CMR10".into();
+        let seg = segment_with(&[above, words, theta, below], &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with("This sentence") && !text.contains("following")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.starts_with("The following")),
+            "{texts:?}"
+        );
     }
 
     #[test]
