@@ -79,6 +79,25 @@ impl LlmTranslator {
 
 impl Translator for LlmTranslator {
     fn complete(&self, system: &str, user: &str) -> Result<String> {
+        let mut delay = std::time::Duration::from_secs(2);
+        let mut last = None;
+        for attempt in 0..4 {
+            match self.complete_once(system, user) {
+                Ok(text) => return Ok(text),
+                Err(err) if http_status_retryable(&err) && attempt < 3 => {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                    last = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Translate("LLM request failed".into())))
+    }
+}
+
+impl LlmTranslator {
+    fn complete_once(&self, system: &str, user: &str) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut body = json!({
             "model": self.model,
@@ -114,9 +133,7 @@ impl Translator for LlmTranslator {
             })?;
         Ok(content.to_string())
     }
-}
 
-impl LlmTranslator {
     fn http_error(&self, err: ureq::Error) -> Error {
         let msg = match err {
             ureq::Error::StatusCode(code) => format!("LLM HTTP status {code}"),
@@ -128,6 +145,13 @@ impl LlmTranslator {
     fn scrub(&self, message: &str) -> String {
         scrub_secrets(message, &self.api_key)
     }
+}
+
+fn http_status_retryable(err: &Error) -> bool {
+    let msg = err.to_string();
+    ["500", "502", "503", "429"]
+        .iter()
+        .any(|code| msg.contains(&format!("HTTP status {code}")))
 }
 
 pub fn scrub_secrets(message: &str, secret: &str) -> String {

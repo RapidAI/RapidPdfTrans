@@ -468,6 +468,10 @@ fn recoverable(err: &Error) -> bool {
         || msg.contains("invalid translation json")
         || msg.contains("did not contain a json")
         || msg.contains("empty message.content")
+        || msg.contains("http status 500")
+        || msg.contains("http status 502")
+        || msg.contains("http status 503")
+        || msg.contains("http status 429")
 }
 
 fn translate_batch_once(
