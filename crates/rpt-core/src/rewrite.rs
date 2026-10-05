@@ -1099,7 +1099,7 @@ fn wrap_text(
                     end = space;
                 }
             }
-            while end > start + 1 && (!break_after(chars[end - 1]) || !break_before(chars[end])) {
+            while end > start + 1 && !can_break(chars[end - 1], chars[end]) {
                 end -= 1;
             }
         }
@@ -1117,6 +1117,18 @@ fn wrap_text(
         }
     }
     Some(lines).filter(|lines| !lines.is_empty())
+}
+
+fn can_break(prev: char, next: char) -> bool {
+    // Keep Latin words and hyphenated names on one line. CJK still breaks per character.
+    if prev.is_ascii_alphanumeric() && (next.is_ascii_alphanumeric() || next == '-' || next == '\'')
+    {
+        return false;
+    }
+    if (prev == '-' || prev == '\'') && next.is_ascii_alphanumeric() {
+        return false;
+    }
+    break_after(prev) && break_before(next)
 }
 
 fn break_before(ch: char) -> bool {
@@ -1613,6 +1625,38 @@ mod tests {
         assert!(text.contains("AB"), "{text}");
         assert!(text.contains("References"), "{text}");
         assert!(!text.contains("Hello"), "{text}");
+    }
+
+    #[test]
+    fn latin_words_are_not_split_across_lines() {
+        let mut glyphs = HashMap::new();
+        for (id, ch) in (1u16..).zip("包括SelfCompact、SWE-Compressor和变体".chars()) {
+            glyphs.insert(ch as u32, (id, 1000));
+        }
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        };
+        // 14em fits "包括SelfCompact、" (14 chars) but not the following name.
+        let lines = wrap_text(
+            "包括SelfCompact、SWE-Compressor和变体",
+            10.0,
+            145.0,
+            145.0,
+            &font,
+        )
+        .unwrap();
+        assert!(
+            lines.iter().any(|line| line.contains("SWE-Compressor")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("SWE-") && !line.contains("Compressor")),
+            "{lines:?}"
+        );
     }
 
     #[test]
