@@ -1383,9 +1383,11 @@ fn find_column_continuation(
         return None;
     }
     let upper = current.last()?;
-    let mut next_left = f32::MAX;
+    // A table cell sitting a little to the right of its header is not the
+    // next column. Only a real paragraph votes for that column's left edge.
+    let mut lefts = Vec::new();
     for (index, para) in paragraphs.iter().enumerate() {
-        if used[index] || para.is_empty() || is_page_bridge(para) {
+        if used[index] || para.is_empty() || is_page_bridge(para) || !votes_as_column(para) {
             continue;
         }
         let lower = &para[0];
@@ -1393,12 +1395,14 @@ fn find_column_continuation(
             && lower.left > upper.left + 36.0
             && lower.left < upper.left + 360.0
         {
-            next_left = next_left.min(lower.left);
+            lefts.push(lower.left);
         }
     }
-    if next_left == f32::MAX {
+    if lefts.is_empty() {
         return None;
     }
+    lefts.sort_by(|a, b| a.total_cmp(b));
+    let next_left = lefts[lefts.len() / 2];
     let mut best: Option<(usize, f32)> = None;
     for (index, para) in paragraphs.iter().enumerate() {
         if used[index] || para.is_empty() || is_page_bridge(para) {
@@ -1507,6 +1511,15 @@ fn closes_the_page(
         }
     }
     true
+}
+
+/// A real column, not a table cell such as `t [s]` or `Method`.
+fn votes_as_column(para: &[VisualLine<'_>]) -> bool {
+    let letters: usize = para
+        .iter()
+        .map(|line| line.text.chars().filter(|ch| ch.is_alphabetic()).count())
+        .sum();
+    letters >= 16 || para.len() >= 2
 }
 
 fn substantial_paragraph(para: &[VisualLine<'_>]) -> bool {
@@ -3112,6 +3125,36 @@ mod tests {
                 .any(|text| text.contains("another page should stay")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn a_table_cell_is_not_the_next_column() {
+        let body = glyph(
+            0,
+            55.0,
+            140.0,
+            "we evaluate the method on this task and then continue",
+            false,
+        );
+        let cell = glyph(1, 127.0, 638.0, "t [s]", false);
+        let right = glyph(
+            2,
+            310.0,
+            700.0,
+            "the right column continues the sentence from the left.",
+            false,
+        );
+        let segs = segment_glyphs(&[body, cell, right]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("we evaluate")
+                    && text.contains("right column")
+                    && !text.contains("[s]")
+            }),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|text| text.contains("[s]")), "{texts:?}");
     }
 
     #[test]
