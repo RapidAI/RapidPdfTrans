@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use crate::extract::PdfDocument;
 use crate::glyph::Glyph;
 
-use super::segment::{segment_glyphs, Segment};
+use crate::segment::{segment_glyphs, Segment};
 
 /// One text-showing operator that belongs to the reference section.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

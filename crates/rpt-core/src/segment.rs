@@ -1,9 +1,10 @@
-//! Group extracted glyphs into translation segments.
+//! Group extracted glyphs into paragraphs.
 //!
-//! A segment is one paragraph: visual lines in the same column, joined so the
-//! translator sees the whole block and the rewrite can reflow it inside that
-//! block. Superscripts and footnote marks are attached to the line they sit
-//! on. Figure interiors and table cells are not segments; only their captions
+//! Detection is a pure function of glyph positions and font names. It does
+//! not call a model. A segment is one paragraph: visual lines in the same
+//! column, joined so a later rewrite can reflow the block inside that box.
+//! Superscripts and footnote marks are attached to the line they sit on.
+//! Figure interiors and table cells are not segments; only their captions
 //! are. Unmapped glyphs stay out of every segment.
 
 use crate::glyph::Glyph;

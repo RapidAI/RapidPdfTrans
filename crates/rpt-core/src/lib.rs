@@ -10,13 +10,23 @@
 //! page's default user space and y increases upward. Page `/Rotate` is reported
 //! and is not baked into the matrices.
 //!
+//! Typesetting and translation are separate.
+//!
+//! [`segment`] groups glyphs into paragraphs. [`layout`] fits target-language
+//! text into those boxes: first-line indent, leading, wrapping, and
+//! justification. [`rewrite`] paints that result, including bilingual page
+//! layouts. Those steps are ordinary functions. They do not call a model and
+//! they do not read an API key. [`layout::fit_paragraph`] and
+//! [`segment::segment_glyphs`] run on their own.
+//!
+//! [`translate`] is the only path that sends text to a model. An optional
+//! judge, when one is added, belongs there too. [`rewrite`] takes a finished
+//! [`translate::TranslateReport`].
+//!
 //! [`rewrite`] deletes original text-showing operators by replacing them with
 //! the same number of spaces, then draws the translation with a subset CID
 //! font. Advances come from `hmtx` (not OpenType GSUB). Reference-section
 //! operators are left byte-identical.
-//!
-//! [`translate`] sends extracted text to a pluggable translator. The default
-//! model name is `auto`.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -24,6 +34,8 @@ pub mod coverage;
 pub mod error;
 pub mod extract;
 pub mod glyph;
+pub mod layout;
+pub mod segment;
 pub mod translate;
 
 mod color;
@@ -41,7 +53,9 @@ pub use extract::{ExtractOptions, Extraction, OpenOptions, PdfDocument, COORDINA
 pub use font::minimal_ttf;
 pub use geom::{Matrix, Rect};
 pub use glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKind};
+pub use layout::{fit_paragraph, CjkMeasure, FittedParagraph};
 pub use rewrite::{rewrite_translation, RewriteOptions};
+pub use segment::{segment_glyphs, segment_with, Segment, SegmentFlags, Segmentation};
 pub use translate::{
     citation_end, identical_reference_operators, reference_glyph_ids, translate_extraction,
     BilingualLayout, LlmTranslator, OutputMode, TranslateOptions, TranslateReport,

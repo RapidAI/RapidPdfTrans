@@ -1,7 +1,9 @@
 //! Pluggable translation of extracted text.
 //!
-//! Translation marks glyphs `translated_pending_rewrite`. [`crate::rewrite`]
-//! is what writes those strings back into the PDF.
+//! This module is the only place a model is called. Paragraph detection is
+//! [`crate::segment`] and fitting is [`crate::layout`]; both run without a
+//! translator. Translation marks glyphs `translated_pending_rewrite`.
+//! [`crate::rewrite`] writes those strings back into the PDF.
 //! Bibliography glyphs are the exception: with `skip_references` (the default)
 //! they are `kept_original` and are not sent to the translator.
 //!
@@ -16,23 +18,23 @@ mod llm;
 mod prompt;
 mod protect;
 mod references;
-mod segment;
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub(crate) use crate::segment::is_inline_math_symbol;
+pub use crate::segment::Segment;
 pub use backend::TranslatorBackend;
 pub use google::GoogleTranslator;
 pub use llm::LlmTranslator;
 pub use protect::citation_end;
 pub use references::{identical_reference_operators, reference_glyph_ids, reference_stream_spans};
-pub(crate) use segment::is_inline_math_symbol;
-pub use segment::Segment;
 
 use crate::error::{Error, Result};
 use crate::extract::Extraction;
+use crate::segment;
 use prompt::{parse_translations, system_prompt, user_payload, PromptSegment};
 use protect::{restore, shield};
 
@@ -1017,6 +1019,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "calls the live model; layout tests must run with no API key"]
     fn live_translation_preserves_placeholders() {
         if std::env::var("RPT_LLM_API_KEY")
             .ok()
