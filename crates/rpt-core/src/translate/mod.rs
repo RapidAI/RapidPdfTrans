@@ -1014,6 +1014,65 @@ fn polish(items: Vec<(usize, String)>) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// A credit line whose personal name was translated. Role words stay in
+/// Chinese; the name is the original Latin (`Copy editor: Julie McNamee`).
+pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
+    let Some(name) = credit_personal_name(source) else {
+        return translated.to_string();
+    };
+    if translated.contains(name.as_str()) {
+        return translated.to_string();
+    }
+    if let Some(index) = translated.rfind([':', '：']) {
+        let colon = translated[index..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(1);
+        let mut out = translated[..index + colon].to_string();
+        out.push_str(&name);
+        return out;
+    }
+    let trimmed = translated.trim_start();
+    if source.trim_start().starts_with("and ") && trimmed.starts_with('和') {
+        let lead = &translated[..translated.len() - trimmed.len()];
+        return format!("{lead}和 {name}");
+    }
+    translated.to_string()
+}
+
+fn credit_personal_name(source: &str) -> Option<String> {
+    let trimmed = source.trim();
+    let after = if let Some(index) = trimmed.rfind(':') {
+        trimmed[index + 1..].trim()
+    } else {
+        let rest = trimmed.strip_prefix("and ")?;
+        rest.trim()
+    };
+    is_personal_name(after).then(|| after.to_string())
+}
+
+fn is_personal_name(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    (2..=5).contains(&tokens.len()) && tokens.iter().all(|token| is_name_token(token))
+}
+
+fn is_name_token(token: &str) -> bool {
+    let token = token.trim_matches(|ch| matches!(ch, ',' | '.'));
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    if token.chars().count() == 1 {
+        return true;
+    }
+    chars.all(|ch| ch.is_ascii_alphabetic() || ch == '-' || ch == '\'')
+        && token.chars().any(|ch| ch.is_ascii_lowercase())
+}
+
 /// A contents heading the model left as `PART 4 高级 RAG`. The word is a
 /// structural label, so it becomes 部分 once the rest of the line is Chinese.
 /// A bare `PART 1` is the same heading. An English sentence that merely
@@ -1393,6 +1452,37 @@ mod tests {
         assert_eq!(TranslateOptions::default().resolved_model(), {
             resolve_choice(None, std::env::var("RPT_LLM_MODEL").ok().as_deref(), "auto")
         });
+    }
+
+    #[test]
+    fn credit_personal_names_stay_in_latin() {
+        assert_eq!(
+            restore_credit_names("Copy editor: Julie McNamee", "文字编辑：朱莉·麦克名"),
+            "文字编辑：Julie McNamee"
+        );
+        assert_eq!(
+            restore_credit_names("and Antowan Malik Batts", "和安托万·马利克·巴茨"),
+            "和 Antowan Malik Batts"
+        );
+        assert_eq!(
+            restore_credit_names(
+                "Development editor: Dustin Archibald",
+                "编辑开发: Dustin Archibald"
+            ),
+            "编辑开发: Dustin Archibald"
+        );
+        assert_eq!(
+            restore_credit_names("20 Baldwin Road", "20 鲍德温路"),
+            "20 鲍德温路"
+        );
+        assert_eq!(
+            restore_credit_names("Manning Publications Co.", "曼宁出版公司"),
+            "曼宁出版公司"
+        );
+        assert_eq!(
+            restore_credit_names("Shelter Island, NY 11964", "谢尔特岛，纽约 11964"),
+            "谢尔特岛，纽约 11964"
+        );
     }
 
     #[test]

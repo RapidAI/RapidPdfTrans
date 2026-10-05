@@ -125,7 +125,10 @@ pub fn rewrite_translation(
         .segments
         .iter()
         .filter(|segment| {
-            let translated = crate::translate::localize_part_heading(&segment.translated);
+            let translated = crate::translate::restore_credit_names(
+                &segment.source,
+                &crate::translate::localize_part_heading(&segment.translated),
+            );
             !segment.glyph_ids.is_empty()
                 && !segment.source.trim().is_empty()
                 && !translated.trim().is_empty()
@@ -201,7 +204,10 @@ pub fn rewrite_translation(
                 continue;
             }
         }
-        let translated = crate::translate::localize_part_heading(&segment.translated);
+        let translated = crate::translate::restore_credit_names(
+            &segment.source,
+            &crate::translate::localize_part_heading(&segment.translated),
+        );
         if translated == segment.source {
             let reason = if job_translates && english_body_source(&segment.source) {
                 "english-body"
@@ -232,6 +238,7 @@ pub fn rewrite_translation(
     let mut drawn = Vec::new();
     let mut succeeded: HashSet<u32> = HashSet::new();
     let mut embedded: Vec<(String, SubsetFont)> = Vec::new();
+    let mut font_styles: HashMap<String, FaceStyle> = HashMap::new();
     let toc_chars: String = toc_redraw
         .iter()
         .filter_map(|id| extraction.glyphs.get(by_id[id]))
@@ -262,6 +269,14 @@ pub fn rewrite_translation(
                 &mut succeeded,
                 &mut drawn,
                 &mut keep,
+            );
+            font_styles.insert(
+                "RPTF".into(),
+                FaceStyle {
+                    serif: true,
+                    bold: false,
+                    italic: false,
+                },
             );
             embedded.push(("RPTF".into(), font));
         } else {
@@ -331,6 +346,7 @@ pub fn rewrite_translation(
                 &mut drawn,
                 &mut keep,
             );
+            font_styles.insert(resource.clone(), style);
             embedded.push((resource, font));
         }
     }
@@ -344,6 +360,7 @@ pub fn rewrite_translation(
         extraction,
         &by_id,
         &embedded,
+        &font_styles,
     );
     let mut spans = Vec::new();
     if !overlay {
@@ -952,6 +969,7 @@ fn commit_toc_operators(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
     embedded: &[(String, SubsetFont)],
+    font_styles: &HashMap<String, FaceStyle>,
 ) {
     let mut blocked = HashSet::new();
     for ids in owners.values() {
@@ -1016,35 +1034,27 @@ fn commit_toc_operators(
             .or_insert(right);
     }
     let mut placed = HashSet::new();
-    // A detailed-contents page mixes several numbers on one row (`4`, `7`, `8`
-    // and `20`, `22`). Those rows are not a right-hand column. Sliding every
-    // sole number on that page stacks the inline ones and pulls `15` off `model`.
-    let mut inline_pages = HashSet::new();
-    for run in &runs {
-        if shares_baseline_with_another_number(run, &runs) || title_follows_number(run, extraction)
-        {
-            inline_pages.insert(run[0].page_index);
-        }
-    }
     for run in &runs {
         // Leader dots already end at this number. Sliding it would open a hole.
-        // Inline sub-entries (`engines 4`, `model 15`, `architecture 12` with
-        // another title to the right) stay next to their titles. The digit
-        // often shares the title's TJ, so it is drawn again at the source edge
-        // once that operator is blanked.
+        // Inline sub-entries (`engines 4` beside `7` and `8`, `architecture 12`
+        // with another title to the right, `model 15` tight against its word)
+        // stay next to their titles. A section number that the shorter Chinese
+        // title no longer reaches slides to the page's right edge. The digit
+        // often shares the title's TJ, so it is drawn again once that operator
+        // is blanked, in the source face rather than the page's first CJK font.
         let keep_put = run_follows_leaders(run, extraction, toc_redraw)
-            || inline_pages.contains(&run[0].page_index)
             || shares_baseline_with_another_number(run, &runs)
-            || title_follows_number(run, extraction);
+            || title_follows_number(run, extraction)
+            || tight_subentry_number(run, extraction);
         if keep_put {
             let source_right = run
                 .iter()
                 .map(|glyph| glyph_ink_right(glyph))
                 .fold(0.0f32, f32::max);
-            if let Some((resource, font)) =
-                font_for_page(run[0].page_index, run[0], embedded, drawn)
+            if let Some((resource, font, skew)) =
+                font_for_page(run[0].page_index, run[0], embedded, drawn, font_styles)
             {
-                if let Some(item) = draw_toc_run(run, source_right, font, resource) {
+                if let Some(item) = draw_toc_run(run, source_right, font, resource, skew) {
                     placed.extend(run.iter().map(|glyph| glyph.id));
                     succeeded.extend(item.glyph_ids.iter().copied());
                     restored.push(item);
@@ -1064,11 +1074,13 @@ fn commit_toc_operators(
         if !live {
             continue;
         }
-        let Some((resource, font)) = font_for_page(glyph.page_index, glyph, embedded, drawn) else {
+        let Some((resource, font, skew)) =
+            font_for_page(glyph.page_index, glyph, embedded, drawn, font_styles)
+        else {
             continue;
         };
         let target = column_right[&glyph.page_index];
-        if let Some(item) = draw_toc_run(run, target, font, resource) {
+        if let Some(item) = draw_toc_run(run, target, font, resource, skew) {
             placed.extend(run.iter().map(|glyph| glyph.id));
             succeeded.extend(item.glyph_ids.iter().copied());
             restored.push(item);
@@ -1093,10 +1105,12 @@ fn commit_toc_operators(
             leaders.push(glyph);
             continue;
         }
-        let Some((resource, font)) = font_for_page(glyph.page_index, glyph, embedded, drawn) else {
+        let Some((resource, font, skew)) =
+            font_for_page(glyph.page_index, glyph, embedded, drawn, font_styles)
+        else {
             continue;
         };
-        if let Some(item) = draw_toc_glyph(glyph, font, resource) {
+        if let Some(item) = draw_toc_glyph(glyph, font, resource, skew) {
             succeeded.extend(item.glyph_ids.iter().copied());
             restored.push(item);
         }
@@ -1125,7 +1139,8 @@ fn commit_toc_operators(
         }
     }
     for group in &leader_groups {
-        let Some((resource, font)) = font_for_page(group[0].page_index, group[0], embedded, drawn)
+        let Some((resource, font, _)) =
+            font_for_page(group[0].page_index, group[0], embedded, drawn, font_styles)
         else {
             continue;
         };
@@ -1134,7 +1149,7 @@ fn commit_toc_operators(
             restored.push(item);
         } else {
             for glyph in group {
-                if let Some(item) = draw_toc_glyph(glyph, font, resource) {
+                if let Some(item) = draw_toc_glyph(glyph, font, resource, 0.0) {
                     succeeded.extend(item.glyph_ids.iter().copied());
                     restored.push(item);
                 }
@@ -1303,6 +1318,7 @@ fn draw_toc_run(
     target_right: f32,
     font: &SubsetFont,
     resource: &str,
+    skew: f32,
 ) -> Option<Drawn> {
     let text: String = run.iter().map(|glyph| glyph.unicode.trim()).collect();
     if text.is_empty() || run.iter().any(|glyph| !glyph_chars_covered(glyph, font)) {
@@ -1331,7 +1347,7 @@ fn draw_toc_run(
         color: run[0].fill_color.clone(),
         cids: cids_of(&text, font),
         resource: resource.to_string(),
-        skew: 0.0,
+        skew,
         widths,
         gaps: vec![0.0; text.chars().count().saturating_sub(1)],
         text,
@@ -1355,7 +1371,47 @@ fn font_for_page<'a>(
     glyph: &Glyph,
     embedded: &'a [(String, SubsetFont)],
     drawn: &[Drawn],
-) -> Option<(&'a str, &'a SubsetFont)> {
+    styles: &HashMap<String, FaceStyle>,
+) -> Option<(&'a str, &'a SubsetFont, f32)> {
+    let want = face_style(&glyph.font_name);
+    let mut best: Option<(&str, &SubsetFont, i32, f32)> = None;
+    for (resource, font) in embedded {
+        if !glyph_chars_covered(glyph, font) {
+            continue;
+        }
+        let style = styles.get(resource).copied().unwrap_or(FaceStyle {
+            serif: true,
+            bold: false,
+            italic: false,
+        });
+        let mut score = 0;
+        if style.bold == want.bold {
+            score += 4;
+        }
+        if style.italic == want.italic {
+            score += 2;
+        }
+        if style.serif == want.serif {
+            score += 1;
+        }
+        // Italic page numbers shear the regular face when the page has no
+        // italic subset. A bold face is not sheared into an italic.
+        let skew = if style.italic || (want.italic && !style.bold) {
+            0.25
+        } else {
+            0.0
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(_, _, best_score, _)| score > *best_score)
+        {
+            best = Some((resource.as_str(), font, score, skew));
+        }
+    }
+    if best.is_some() {
+        return best.map(|(resource, font, _, skew)| (resource, font, skew));
+    }
+    // A single test font may not record a style. Use the page's drawn face.
     let preferred = drawn
         .iter()
         .find(|item| item.page == page)
@@ -1363,14 +1419,50 @@ fn font_for_page<'a>(
     if let Some(name) = preferred {
         if let Some((resource, font)) = embedded.iter().find(|(resource, _)| resource == name) {
             if glyph_chars_covered(glyph, font) {
-                return Some((resource.as_str(), font));
+                let skew = if styles.get(resource).is_some_and(|style| style.italic) {
+                    0.25
+                } else {
+                    0.0
+                };
+                return Some((resource.as_str(), font, skew));
             }
         }
     }
     embedded
         .iter()
         .find(|(_, font)| glyph_chars_covered(glyph, font))
-        .map(|(resource, font)| (resource.as_str(), font))
+        .map(|(resource, font)| (resource.as_str(), font, 0.0))
+}
+
+/// `model 15`: the digit sits against the word, in the left indent. Sliding it
+/// to the section column pulls it off the title. A section number left where
+/// the longer English title ended has a wider gap and is not this case.
+fn tight_subentry_number(run: &[&Glyph], extraction: &Extraction) -> bool {
+    let text: String = run.iter().map(|glyph| glyph.unicode.trim()).collect();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let first = run[0];
+    let size = first.font_size.max(1.0);
+    let left = glyph_ink_left(first);
+    extraction.glyphs.iter().any(|glyph| {
+        if glyph.page_index != first.page_index || run.iter().any(|item| item.id == glyph.id) {
+            return false;
+        }
+        if (glyph.matrix[5] - first.matrix[5]).abs() > size * 0.45 {
+            return false;
+        }
+        let right = glyph_ink_right(glyph);
+        if right > left + 0.5 {
+            return false;
+        }
+        let gap = left - right;
+        if !(0.0..=size * 0.8).contains(&gap) {
+            return false;
+        }
+        let neighbor = glyph.unicode.trim();
+        !neighbor.is_empty() && !is_toc_leader_glyph(glyph) && !toc_page_char(neighbor)
+    })
 }
 
 /// A shorter Chinese title leaves a hole before leader dots that still start
@@ -1473,7 +1565,7 @@ fn place_leader_run(
     })
 }
 
-fn draw_toc_glyph(glyph: &Glyph, font: &SubsetFont, resource: &str) -> Option<Drawn> {
+fn draw_toc_glyph(glyph: &Glyph, font: &SubsetFont, resource: &str, skew: f32) -> Option<Drawn> {
     let text: String = glyph
         .unicode
         .chars()
@@ -1492,7 +1584,7 @@ fn draw_toc_glyph(glyph: &Glyph, font: &SubsetFont, resource: &str) -> Option<Dr
         color: glyph.fill_color.clone(),
         cids: cids_of(&text, font),
         resource: resource.to_string(),
-        skew: 0.0,
+        skew,
         widths: widths_with_superscripts(&text, size, font, &supers, None),
         gaps: vec![0.0; text.chars().count().saturating_sub(1)],
         text,
@@ -1828,6 +1920,54 @@ fn centered_heading_span(
     Some((left, right))
 }
 
+fn ink_line_text(line: &InkLine<'_>) -> String {
+    let mut glyphs = line.glyphs.to_vec();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    glyphs.iter().map(|glyph| glyph.unicode.as_str()).collect()
+}
+
+/// How far a list's wrapped lines sit to the right of the marker.
+fn list_outdent(ink: &[InkLine<'_>], size: f32) -> Option<f32> {
+    if ink.len() < 2 || size <= 0.0 {
+        return None;
+    }
+    if !crate::segment::starts_with_list_marker(&ink_line_text(&ink[0])) {
+        return None;
+    }
+    let body = ink[1..]
+        .iter()
+        .map(|line| line.left)
+        .fold(f32::MAX, f32::min);
+    let shift = body - ink[0].left;
+    (size * 0.45..=size * 2.8).contains(&shift).then_some(shift)
+}
+
+fn next_baseline_below(
+    extraction: &Extraction,
+    page: u32,
+    y: f32,
+    size: f32,
+    own: &[&Glyph],
+) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page || own.iter().any(|item| item.id == glyph.id) {
+            continue;
+        }
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        let below = glyph.matrix[5];
+        if below > y - size * 0.35 {
+            continue;
+        }
+        if best.is_none_or(|current| below > current) {
+            best = Some(below);
+        }
+    }
+    best
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -1909,7 +2049,14 @@ fn layout_segment(
     let available = (top_y - bottom_y).max(0.0);
     let bold = paragraph_is_bold(&ink);
     let level = heading_level(ink.len(), source_size, bold, text);
-    let indent_ems = cjk_indent_ems(ink.len(), source_size, bold, text);
+    let hanging = list_outdent(&ink, source_size);
+    let mut indent_ems = cjk_indent_ems(ink.len(), source_size, bold, text);
+    // A list marker hangs left of the wrapped lines. Continuations share one
+    // indent; the marker line outdents by that same amount.
+    if let Some(shift) = hanging {
+        block_left = (block_left + shift).min(block_right - source_size.max(1.0));
+        indent_ems = -(shift / source_size.max(1.0));
+    }
     let scale = scale_for_heading(level, source_size, metrics);
     let fit_box = |left: f32, right: f32| {
         let width = (right - left).max(source_size);
@@ -1947,7 +2094,9 @@ fn layout_segment(
     // the rest of the English lines empty. Those empty lines are dropped text.
     // Spread the translation so each source baseline still receives ink.
     let mut absorbed: Vec<u32> = Vec::new();
-    let lines = if bilingual {
+    let lines = if bilingual || hanging.is_some() {
+        // A dash item is one paragraph. Spreading it onto the source line
+        // breaks leaves each continuation at a different indent.
         lines
     } else if let Some(packed) = pack_narrow_tail(text, size, indent, &spans, font) {
         // The English tail (`engines`) is only a few ems. Once the Chinese
@@ -1965,6 +2114,11 @@ fn layout_segment(
     } else {
         spread_to_lines(lines, ink.len())
     };
+    if hanging.is_some() {
+        // Reflow replaces the source lines. A stray cover glyph at the source
+        // size is the mixed-size glitch inside the paragraph.
+        absorbed.extend(glyphs.iter().map(|glyph| glyph.id));
+    }
     let line_masks = split_superscripts(text, &lines, &mask);
     let mut origin_y = top_y;
     if bilingual {
@@ -1980,10 +2134,18 @@ fn layout_segment(
             .map(|index| origin_y - index as f32 * leading)
             .collect()
     } else if ink.len() == 1 && lines.len() > 1 {
-        // A one-line contents title whose Chinese wraps. The second line
-        // uses the fitted leading; there is no second source baseline to share.
+        // A one-line contents title whose Chinese wraps. Keep the second line
+        // above the next heading; there is no second source baseline to share.
+        let mut lead = leading.max(size * 0.92);
+        if let Some(next) = next_baseline_below(extraction, page, top_y, size, glyphs) {
+            let room = top_y - next - size * 0.9;
+            if room > 0.0 {
+                let step = room / (lines.len() - 1) as f32;
+                lead = lead.min(step).max(size * 0.92);
+            }
+        }
         (0..lines.len())
-            .map(|index| top_y - index as f32 * leading)
+            .map(|index| top_y - index as f32 * lead)
             .collect()
     } else {
         baselines_for(&ink, lines.len())
@@ -3063,6 +3225,10 @@ fn superscript_mask(text: &str) -> Vec<bool> {
             }
             continue;
         }
+        // `第4章`, `第4 章`, and `第1–2章` are body text. `张轩1` has no Han after it.
+        if han_wraps_number(&chars, start, index) {
+            continue;
+        }
         let prev = start.checked_sub(1).map(|slot| chars[slot]);
         let run = index - start;
         // One digit after a name, or one digit before an institution word.
@@ -3129,6 +3295,41 @@ fn superscript_mask(text: &str) -> Vec<bool> {
     mask
 }
 
+fn is_dash_char(ch: char) -> bool {
+    matches!(ch, '-' | '–' | '—' | '−')
+}
+
+/// A chapter index sitting between Han characters, allowing a space or a
+/// range dash (`第4章`, `第 4 章`, `第1–2章`).
+fn han_wraps_number(chars: &[char], start: usize, end: usize) -> bool {
+    let before = (0..start).rev().find(|&slot| {
+        let ch = chars[slot];
+        !ch.is_whitespace() && !is_dash_char(ch)
+    });
+    if !before.is_some_and(|slot| is_han_char(chars[slot])) {
+        return false;
+    }
+    let mut index = end;
+    loop {
+        let mut across_dash = false;
+        while index < chars.len() && (chars[index].is_whitespace() || is_dash_char(chars[index])) {
+            if is_dash_char(chars[index]) {
+                across_dash = true;
+            }
+            index += 1;
+        }
+        // `1–2` is one chapter range. `1 1新加坡` is two affiliation marks.
+        if across_dash && index < chars.len() && chars[index].is_ascii_digit() {
+            while index < chars.len() && chars[index].is_ascii_digit() {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    index < chars.len() && is_han_char(chars[index])
+}
+
 fn is_mark_star(ch: char) -> bool {
     matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆')
 }
@@ -3157,7 +3358,13 @@ fn fullwidth_han_digits(text: &str, supers: &[bool], font: &SubsetFont) -> (Stri
     let mut mask = Vec::with_capacity(chars.len());
     for (index, ch) in chars.iter().enumerate() {
         let sup = supers.get(index).copied().unwrap_or(false);
-        if !sup && ch.is_ascii_digit() && digit_touches_han(&chars, index) {
+        // A multi-digit run stays ASCII. Converting only the digit that
+        // touches Han (`箱761` → `７61`) opens a gap inside the number.
+        if !sup
+            && ch.is_ascii_digit()
+            && !in_multidigit_run(&chars, index)
+            && digit_touches_han(&chars, index)
+        {
             if let Some(full) = char::from_u32(0xFF10 + (*ch as u32 - '0' as u32)) {
                 if font.glyphs.contains_key(&(full as u32)) {
                     out.push(full);
@@ -3177,7 +3384,10 @@ fn fullwidth_digit_requests(text: &str) -> Vec<char> {
     let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     for (index, ch) in chars.iter().enumerate() {
-        if !ch.is_ascii_digit() || !digit_touches_han(&chars, index) {
+        if !ch.is_ascii_digit()
+            || in_multidigit_run(&chars, index)
+            || !digit_touches_han(&chars, index)
+        {
             continue;
         }
         if let Some(full) = char::from_u32(0xFF10 + (*ch as u32 - '0' as u32)) {
@@ -3185,6 +3395,11 @@ fn fullwidth_digit_requests(text: &str) -> Vec<char> {
         }
     }
     out
+}
+
+fn in_multidigit_run(chars: &[char], index: usize) -> bool {
+    (index > 0 && chars[index - 1].is_ascii_digit())
+        || (index + 1 < chars.len() && chars[index + 1].is_ascii_digit())
 }
 
 fn digit_touches_han(chars: &[char], index: usize) -> bool {
@@ -3822,6 +4037,10 @@ mod tests {
         assert!(cjk[2] && cjk[4], "{cjk:?}");
         let chapter = superscript_mask("第4章从线性链过渡");
         assert!(chapter.iter().all(|flag| !flag), "{chapter:?}");
+        let spaced = superscript_mask("第4 章构建");
+        assert!(spaced.iter().all(|flag| !flag), "{spaced:?}");
+        let range = superscript_mask("第1–2章概述");
+        assert!(range.iter().all(|flag| !flag), "{range:?}");
         assert!(superscript_mask("Anno 2024").iter().all(|flag| !flag));
         assert!(superscript_mask("9.2% and 16K").iter().all(|flag| !flag));
         let star = superscript_mask("*Equal Contribution");
@@ -4033,6 +4252,24 @@ mod tests {
         let (text, flags) = fullwidth_han_digits("第4章构建", &mask, &font);
         assert_eq!(text, "第４章构建");
         assert!(flags.iter().all(|flag| !flag), "{flags:?}");
+        let wide = "邮政信箱761©2026至少15%第11–14章20 鲍德温路";
+        let mut digits = font.glyphs.clone();
+        for ch in ['０', '１', '２', '３', '４', '５', '６', '７', '８', '９'] {
+            digits.insert(ch as u32, (9, 1000));
+        }
+        for ch in wide.chars() {
+            digits.entry(ch as u32).or_insert((1, 500));
+        }
+        let wide_font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: digits,
+        };
+        let (kept, _) = fullwidth_han_digits(wide, &vec![false; wide.chars().count()], &wide_font);
+        assert_eq!(
+            kept, wide,
+            "a multi-digit run must not mix fullwidth digits"
+        );
         let author = superscript_mask("张轩1");
         let (name, name_flags) = fullwidth_han_digits("张轩1", &author, &font);
         assert_eq!(name, "张轩1");
@@ -5759,7 +5996,7 @@ mod tests {
             })
             .collect();
         let font = box_ttf(
-            &"引擎聊天机器人代理简介478"
+            &"引擎聊天机器人代理简介3478"
                 .chars()
                 .map(|ch| ch as u32)
                 .collect::<Vec<_>>(),
@@ -5791,6 +6028,18 @@ mod tests {
         assert!(
             xs[1] - xs[0] > 12.0 && xs[2] - xs[1] > 12.0,
             "inline page numbers stacked: {xs:?}"
+        );
+        let section: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "3")
+            .map(|glyph| glyph.matrix[4])
+            .collect();
+        assert_eq!(section.len(), 1, "section page number missing: {section:?}");
+        assert!(
+            section[0] > 220.0,
+            "section page number stayed beside the title at x={}, inline xs={xs:?}",
+            section[0]
         );
     }
 
@@ -5940,7 +6189,7 @@ ET"
         // The second row's number is the only one on its baseline.
         let content = b"BT /F1 12 Tf \
 1 0 0 1 72 700 Tm [(engines) -700 (4) -2200 (chatbots) -700 (7) -2200 (agents) -700 (8)] TJ \
-1 0 0 1 72 670 Tm [(Introduction) -2000 (3)] TJ \
+1 0 0 1 72 670 Tm [(Introduction) -1000 (3)] TJ \
 ET"
         .to_vec();
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));

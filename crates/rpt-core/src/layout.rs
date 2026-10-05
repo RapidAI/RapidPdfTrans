@@ -72,7 +72,15 @@ pub fn heading_level(line_count: usize, source_size: f32, bold: bool, text: &str
     // "1新加坡管理大学2南洋理工大学" is an affiliation line, not section 1.
     let affiliation = affiliation_marks(trimmed) >= 2;
     match numbered_depth(trimmed) {
-        Some(1) if !affiliation && line_count <= 2 && chars < 80 && !sentence => {
+        // `1 Introduction` is a section. `20 鲍德温路` is a street number at
+        // body size; lifting it makes the address larger than the body.
+        Some(1)
+            if !affiliation
+                && line_count <= 2
+                && chars < 80
+                && !sentence
+                && !(street_number(trimmed) && !bold && source_size < 12.0) =>
+        {
             return HeadingLevel::Section;
         }
         Some(depth) if depth >= 2 && line_count <= 2 && chars < 100 && !sentence => {
@@ -140,6 +148,17 @@ fn affiliation_marks(text: &str) -> usize {
         }
     }
     marks
+}
+
+/// `20 Baldwin Road` translated as `20 鲍德温路`. A one-digit outline index
+/// (`1 Introduction`) is not a street number.
+fn street_number(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    index >= 2 && bytes.get(index) == Some(&b' ')
 }
 
 /// `1` for `1 Introduction`, `2` for `2.2 Methods`.
@@ -365,7 +384,8 @@ pub(crate) fn fit_cjk_block(
                 && lines.len() == 2
                 && size + 0.01 >= source_size * 0.80
             {
-                return Some((lines, size, size * 1.15, indent));
+                // 1.15 em drops the second line into the next heading.
+                return Some((lines, size, size * 1.0, indent));
             }
             if within && !single_source && gaps > 0 {
                 let room = available / gaps as f32;
@@ -837,14 +857,74 @@ pub(crate) fn pack_narrow_tail(
         })
         .collect();
     let packed = pack_into_slots(text, size, indent, &boxes, font)?;
-    let lines: Vec<String> = packed
+    let mut lines: Vec<String> = packed
         .into_iter()
         .map(|slot| slot.into_iter().next().unwrap_or_default())
         .collect();
+    // The wide line can hold the whole title, which used to leave the crumb
+    // empty and the page number (`4`) as the first ink on that baseline.
+    // A wrapped English word is about two CJK characters; put those back.
+    donate_crumb_suffix(&mut lines, &widths, size, font);
     if lines.iter().all(|line| line.trim().is_empty()) {
         return None;
     }
     Some(lines)
+}
+
+fn donate_crumb_suffix(lines: &mut [String], widths: &[f32], size: f32, font: &SubsetFont) {
+    for index in 1..lines.len() {
+        if !lines[index].trim().is_empty() {
+            continue;
+        }
+        let width = widths[index];
+        if width + 0.5 >= size * 4.0 {
+            continue;
+        }
+        let Some(source) = (0..index)
+            .rev()
+            .find(|&slot| !lines[slot].trim().is_empty())
+        else {
+            continue;
+        };
+        let Some((prefix, suffix)) = peel_cjk_suffix(&lines[source], width, size, font) else {
+            continue;
+        };
+        lines[source] = prefix;
+        lines[index] = suffix;
+    }
+}
+
+/// Up to two trailing CJK characters, when they fit the crumb and leave a prefix.
+fn peel_cjk_suffix(
+    line: &str,
+    width: f32,
+    size: f32,
+    font: &SubsetFont,
+) -> Option<(String, String)> {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() < 3 || width <= 0.0 {
+        return None;
+    }
+    let mut count = 0usize;
+    while count < chars.len() && count < 2 && is_cjk_body(chars[chars.len() - 1 - count]) {
+        count += 1;
+    }
+    while count > 0 {
+        let suffix: String = chars[chars.len() - count..].iter().collect();
+        if measure(&suffix, size, font) <= width + 0.5 {
+            break;
+        }
+        count -= 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    let prefix: String = chars[..chars.len() - count].iter().collect();
+    if prefix.trim().is_empty() {
+        return None;
+    }
+    let suffix: String = chars[chars.len() - count..].iter().collect();
+    Some((prefix, suffix))
 }
 
 fn consumed_chars(src: &[char], lines: &[String]) -> usize {
@@ -1062,6 +1142,29 @@ mod tests {
             HeadingLevel::Body,
             "affiliation marks are not a section heading"
         );
+        let street = "20 鲍德温路";
+        assert_eq!(
+            heading_level(1, 9.0, false, street),
+            HeadingLevel::Body,
+            "a street number is not a section heading"
+        );
+        let street_fit = fit_paragraph(
+            street,
+            9.0,
+            200.0,
+            0.0,
+            1,
+            false,
+            &uniform_font(street),
+            metrics,
+        )
+        .expect("street");
+        assert!(
+            street_fit.size <= 9.0 * 0.95,
+            "street address grew past body size: {}",
+            street_fit.size
+        );
+        assert_eq!(street_fit.lines.len(), 1, "{:?}", street_fit.lines);
         let affil_fit = fit_paragraph(
             affil,
             9.96,
@@ -1118,11 +1221,15 @@ mod tests {
         let packed = pack_narrow_tail(text, 9.0, 0.0, &[(177.0, 381.0), (177.0, 206.0)], &font)
             .expect("narrow tail packs");
         assert_eq!(packed.len(), 2, "{packed:?}");
-        assert!(
-            packed[1].trim().is_empty(),
-            "引擎 should stay on the wide line, got {packed:?}"
+        assert_eq!(
+            packed[1], "引擎",
+            "the crumb should keep the wrapped word, got {packed:?}"
         );
-        assert_eq!(packed[0], text);
+        assert_eq!(packed[0], "基于LLM的应用：摘要生成与问答");
+        assert!(
+            measure(&packed[1], 9.0, &font) <= 29.0 + 0.5,
+            "crumb overflowed the engines box: {packed:?}"
+        );
         let body = "我们提出了一种基于完全图的聚类公式并且保留每一行的来源。第二行仍然比较宽。";
         assert!(
             pack_narrow_tail(
