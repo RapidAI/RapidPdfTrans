@@ -836,15 +836,44 @@ mod tests {
         let Some(bytes) = load_cjk_font() else {
             return;
         };
-        let subset = subset_ttf(&bytes, &[0x4E2D, 0x6587, b'A' as u32]);
+        let wanted = [0x4E2D, 0x6587, b'A' as u32];
+        let subset = subset_ttf(&bytes, &wanted);
         let Some(subset) = subset else {
             return;
         };
         assert!(subset.glyphs.contains_key(&0x4E2D), "missing U+4E2D");
-        assert!(subset.glyphs.contains_key(&0x41), "missing Latin A");
         let cmap = FontCmap::parse(&subset.bytes);
         assert!(cmap.unicode_to_gid.contains_key(&0x4E2D));
-        assert!(cmap.unicode_to_gid.contains_key(&0x41));
+        // Droid Sans Fallback and some CJK faces have no Latin. Require A
+        // only when the face `subset_ttf` would pick actually maps it.
+        if winning_face_maps(&bytes, &wanted, 0x41) {
+            assert!(subset.glyphs.contains_key(&0x41), "missing Latin A");
+            assert!(cmap.unicode_to_gid.contains_key(&0x41));
+        }
+    }
+
+    /// True when the face with the most requested mappings contains `code`.
+    fn winning_face_maps(bytes: &[u8], codepoints: &[u32], code: u32) -> bool {
+        let mut best_count = 0usize;
+        let mut best_has = false;
+        for directory in face_directories(bytes) {
+            let Some(tables) = read_tables(bytes, directory) else {
+                continue;
+            };
+            let Some(cmap_bytes) = tables.get(b"cmap".as_slice()) else {
+                continue;
+            };
+            let cmap = FontCmap::from_table(cmap_bytes);
+            let count = codepoints
+                .iter()
+                .filter(|cp| cmap.unicode_to_gid.contains_key(*cp))
+                .count();
+            if count > best_count {
+                best_count = count;
+                best_has = cmap.unicode_to_gid.contains_key(&code);
+            }
+        }
+        best_has
     }
 
     #[test]

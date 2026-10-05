@@ -2438,6 +2438,11 @@ mod tests {
             "OpenType wrapper is not a CIDFontType0 program:\n{listing}"
         );
         assert!(!stderr.contains("Mismatch between font type"), "{stderr}");
+        // Paint OCR needs poppler and a chi_sim tessdata. Hosts that only
+        // have the text tools still check ToUnicode and the CID font above.
+        if tool_missing("pdftoppm") || tool_missing("tesseract") {
+            return;
+        }
         let dir = std::env::temp_dir().join("rpt-nihao-paint");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2469,6 +2474,14 @@ mod tests {
             seen.contains("你好"),
             "rendered page is not 你好 (ToUnicode is not used): {seen}"
         );
+    }
+
+    fn tool_missing(name: &str) -> bool {
+        match std::process::Command::new(name).arg("--version").output() {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+            Ok(_) => false,
+        }
     }
 
     #[test]
