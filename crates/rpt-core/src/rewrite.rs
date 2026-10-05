@@ -927,7 +927,49 @@ fn commit_toc_operators(
         }
     }
     let mut restored = Vec::new();
+    let runs = toc_page_number_runs(extraction, toc_redraw);
+    let mut column_right: HashMap<u32, f32> = HashMap::new();
+    for run in &runs {
+        let page = run[0].page_index;
+        let right = run
+            .iter()
+            .map(|glyph| glyph_ink_right(glyph))
+            .fold(0.0f32, f32::max);
+        column_right
+            .entry(page)
+            .and_modify(|edge| *edge = edge.max(right))
+            .or_insert(right);
+    }
+    let mut placed = HashSet::new();
+    for run in &runs {
+        // Leader dots already end at this number. Sliding it would open a hole.
+        if run.iter().any(|glyph| !toc_redraw.contains(&glyph.id))
+            || run_follows_leaders(run, extraction, toc_redraw)
+        {
+            continue;
+        }
+        let glyph = run[0];
+        let live = run.iter().all(|glyph| {
+            span_of(&glyph.source).is_some_and(|span| {
+                live_ops.contains(&(span.object_id.0, span.object_id.1, span.start, span.end))
+            })
+        });
+        if !live {
+            continue;
+        }
+        let Some((resource, font)) = font_for_page(glyph.page_index, glyph, embedded, drawn) else {
+            continue;
+        };
+        let target = column_right[&glyph.page_index];
+        if let Some(item) = draw_toc_run(run, target, font, resource) {
+            placed.extend(run.iter().map(|glyph| glyph.id));
+            restored.push(item);
+        }
+    }
     for id in toc_redraw {
+        if placed.contains(id) {
+            continue;
+        }
         let Some(glyph) = extraction.glyphs.get(by_id[id]) else {
             continue;
         };
@@ -946,6 +988,149 @@ fn commit_toc_operators(
         }
     }
     drawn.extend(restored);
+}
+
+/// Page-number glyphs already kept as contents marks, grouped into one run
+/// per number (`27`, `103`). Leader dots are not part of a run.
+fn toc_page_number_runs<'a>(
+    extraction: &'a Extraction,
+    toc_redraw: &HashSet<u32>,
+) -> Vec<Vec<&'a Glyph>> {
+    let mut glyphs: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| toc_page_char(&glyph.unicode) && is_toc_mark(glyph, toc_redraw))
+        .collect();
+    glyphs.sort_by(|left, right| {
+        left.page_index.cmp(&right.page_index).then(
+            left.matrix[5]
+                .total_cmp(&right.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4])),
+        )
+    });
+    let mut runs: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in glyphs {
+        let start_new = match runs.last().and_then(|run| run.last().copied()) {
+            Some(prev) => {
+                let size = prev.font_size.max(glyph.font_size).max(1.0);
+                glyph.page_index != prev.page_index
+                    || (glyph.matrix[5] - prev.matrix[5]).abs() > size * 0.45
+                    || glyph_ink_left(glyph) - glyph_ink_right(prev) > size * 0.45
+            }
+            None => true,
+        };
+        if start_new {
+            runs.push(vec![glyph]);
+        } else if let Some(run) = runs.last_mut() {
+            run.push(glyph);
+        }
+    }
+    runs
+}
+
+fn is_toc_mark(glyph: &Glyph, toc_redraw: &HashSet<u32>) -> bool {
+    toc_redraw.contains(&glyph.id)
+        || matches!(&glyph.disposition, Disposition::KeptOriginal { reason } if reason == "toc")
+}
+
+fn toc_page_char(text: &str) -> bool {
+    let text = text.trim();
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => {
+            ch.is_ascii_digit()
+                || matches!(
+                    ch.to_ascii_lowercase(),
+                    'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
+                )
+        }
+        _ => false,
+    }
+}
+
+fn glyph_ink_left(glyph: &Glyph) -> f32 {
+    glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2])
+}
+
+fn glyph_ink_right(glyph: &Glyph) -> f32 {
+    glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4])
+}
+
+/// A contents page number that sits against leader dots is already at the
+/// row's right edge. Moving it would leave a gap in the dots.
+fn run_follows_leaders(run: &[&Glyph], extraction: &Extraction, toc_redraw: &HashSet<u32>) -> bool {
+    let Some(first) = run.first() else {
+        return false;
+    };
+    let size = first.font_size.max(1.0);
+    let left = glyph_ink_left(first);
+    extraction.glyphs.iter().any(|glyph| {
+        if glyph.page_index != first.page_index || !is_toc_leader_glyph(glyph) {
+            return false;
+        }
+        if !is_toc_mark(glyph, toc_redraw) {
+            return false;
+        }
+        if (glyph.matrix[5] - first.matrix[5]).abs() > size * 0.45 {
+            return false;
+        }
+        let right = glyph_ink_right(glyph);
+        left - right < size * 0.8 && right <= left + 1.0
+    })
+}
+
+fn is_toc_leader_glyph(glyph: &Glyph) -> bool {
+    let text = glyph.unicode.trim();
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|ch| matches!(ch, '.' | '·' | '…' | '•' | '⋅' | '‧' | '․'))
+}
+
+/// Draw one page number so its right edge meets the page's contents column.
+/// A shorter Chinese title used to leave the number where the English title ended.
+fn draw_toc_run(
+    run: &[&Glyph],
+    target_right: f32,
+    font: &SubsetFont,
+    resource: &str,
+) -> Option<Drawn> {
+    let text: String = run.iter().map(|glyph| glyph.unicode.trim()).collect();
+    if text.is_empty() || run.iter().any(|glyph| !glyph_chars_covered(glyph, font)) {
+        return None;
+    }
+    let size = run
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    let supers = vec![false; text.chars().count()];
+    let widths = widths_with_superscripts(&text, size, font, &supers, None);
+    let total: f32 = widths.iter().sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let source_right = run
+        .iter()
+        .map(|glyph| glyph_ink_right(glyph))
+        .fold(0.0f32, f32::max);
+    let x = source_right + (target_right - source_right).max(0.0) - total;
+    Some(Drawn {
+        page: run[0].page_index,
+        x,
+        y: run[0].matrix[5],
+        size,
+        color: run[0].fill_color.clone(),
+        cids: cids_of(&text, font),
+        resource: resource.to_string(),
+        skew: 0.0,
+        widths,
+        gaps: vec![0.0; text.chars().count().saturating_sub(1)],
+        text,
+        supers,
+        sup_scale: 1.0,
+        sup_rise: 0.0,
+        glyph_ids: run.iter().map(|glyph| glyph.id).collect(),
+    })
 }
 
 fn glyph_chars_covered(glyph: &Glyph, font: &SubsetFont) -> bool {
@@ -4377,6 +4562,161 @@ mod tests {
         assert!(text.contains("简介"), "{text}");
         assert!(text.contains('3'), "{text}");
         assert!(!text.contains("Introduction"), "{text}");
+    }
+
+    #[test]
+    fn contents_page_numbers_share_a_right_edge() {
+        let bytes = toc_column_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let texts: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Agents") && !text.contains('2')),
+            "short title should drop its page number: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("postprocessing") && !text.contains("228")),
+            "long title should drop its page number: {texts:?}"
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .filter(|seg| seg.text.contains("Agents") || seg.text.contains("postprocessing"))
+            .map(|seg| TranslatedSegment {
+                id: seg.id,
+                page_index: seg.page_index,
+                glyph_ids: seg.glyph_ids.clone(),
+                source: seg.text.clone(),
+                translated: if seg.text.contains("Agents") {
+                    "代理".into()
+                } else {
+                    "查询生成与检索后处理".into()
+                },
+            })
+            .collect();
+        let report = TranslateReport {
+            segments,
+            calls: 0,
+            cache_hits: 0,
+        };
+        let font = box_ttf(
+            &"代理查询生成与检索后处理27"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            extraction.assert_complete().is_ok(),
+            "{:?}",
+            extraction.coverage_report()
+        );
+        let saved = doc.save_bytes().unwrap();
+        let painted = PdfDocument::open_bytes(&saved).unwrap().extract();
+        let mut rows: Vec<(f32, f32, f32)> = Vec::new();
+        for glyph in painted.glyphs.iter().filter(|glyph| {
+            glyph.unicode.chars().all(|ch| ch.is_ascii_digit()) && !glyph.unicode.is_empty()
+        }) {
+            let y = glyph.matrix[5];
+            let left = glyph.matrix[4];
+            let right = left + glyph.advance[0].max(0.0);
+            if let Some(row) = rows.iter_mut().find(|row| (row.0 - y).abs() < 1.0) {
+                row.1 = row.1.min(left);
+                row.2 = row.2.max(right);
+            } else {
+                rows.push((y, left, right));
+            }
+        }
+        assert_eq!(rows.len(), 2, "page-number rows: {rows:?}");
+        rows.sort_by(|left, right| right.0.total_cmp(&left.0));
+        let short = rows[0];
+        let long = rows[1];
+        assert!(
+            short.1 > 300.0,
+            "short-title page number stayed mid-line at x={}: {rows:?}",
+            short.1
+        );
+        assert!(
+            (short.2 - long.2).abs() < 1.5,
+            "page numbers are not right-aligned: {rows:?}"
+        );
+    }
+
+    fn toc_column_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        // One TJ per row, matching a contents line whose page number shares the
+        // title's operator. -1000 is a 12pt gap at 12pt: wide enough to detach
+        // the number, narrow enough that it is not a second column.
+        let content = b"BT /F1 12 Tf \
+1 0 0 1 72 700 Tm [(Agents) -1000 (27)] TJ \
+1 0 0 1 72 670 Tm [(Query generation, routing, and retrieval postprocessing) -1000 (228)] TJ \
+ET"
+        .to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
     }
 
     fn toc_row_pdf() -> Vec<u8> {
