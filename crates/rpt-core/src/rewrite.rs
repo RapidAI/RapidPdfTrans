@@ -1060,7 +1060,8 @@ fn justify_gaps(text: &str, size: f32, width: f32, font: &SubsetFont, justify: b
         return gaps;
     }
     let extra = slack / slots.len() as f32;
-    if extra > size * 0.18 {
+    // A larger gap reads as letter-spacing. Leave the line ragged instead.
+    if extra > size * 0.04 {
         return gaps;
     }
     for index in slots {
@@ -1651,7 +1652,7 @@ fn place_cluster(
     let mut glyphs: Vec<&Glyph> = extraction
         .glyphs
         .iter()
-        .filter(|glyph| glyph.page_index == page && overlaps_rect(glyph.bbox, union, 1.5))
+        .filter(|glyph| glyph.page_index == page && glyph_under_link(glyph, union))
         .collect();
     if glyphs.is_empty() || !glyphs.iter().any(|glyph| rewritten.contains(&glyph.id)) {
         return ClusterPlace::Keep;
@@ -1858,11 +1859,17 @@ fn union_rect(links: &[LinkRef]) -> [f32; 4] {
     rect
 }
 
-fn overlaps_rect(bbox: [f32; 4], rect: [f32; 4], pad: f32) -> bool {
-    bbox[0] < rect[2] + pad
-        && bbox[2] > rect[0] - pad
-        && bbox[1] < rect[3] + pad
-        && bbox[3] > rect[1] - pad
+/// Link rectangles are about one em tall and nearly touch the line below.
+/// A raw bbox overlap mixes those lines and the citation no longer matches.
+fn glyph_under_link(glyph: &Glyph, rect: [f32; 4]) -> bool {
+    let size = glyph.font_size.max(1.0);
+    let y = glyph.matrix[5];
+    if y < rect[1] - size * 0.35 || y > rect[3] + size * 0.15 {
+        return false;
+    }
+    let left = glyph.bbox[0].min(glyph.matrix[4]);
+    let right = glyph.bbox[2].max(glyph.matrix[4]);
+    left < rect[2] + 1.0 && right > rect[0] - 1.0
 }
 
 fn link_ref(doc: &Document, obj: &Object) -> Option<LinkRef> {
@@ -2147,7 +2154,7 @@ mod tests {
             glyphs: cjk_glyphs,
         };
         let count = cjk.chars().count();
-        let width = count as f32 * 10.0 + 8.0;
+        let width = count as f32 * 10.0 + 2.0;
         let cjk_gaps = justify_gaps(cjk, 10.0, width, &cjk_font, true);
         assert!(
             cjk_gaps.iter().all(|gap| *gap > 0.0),
@@ -2163,7 +2170,7 @@ mod tests {
             units_per_em: 1000,
             glyphs: mixed_glyphs,
         };
-        let mixed_width = measure(mixed, 10.0, &mixed_font) + 2.0;
+        let mixed_width = measure(mixed, 10.0, &mixed_font) + 0.6;
         let mixed_gaps = justify_gaps(mixed, 10.0, mixed_width, &mixed_font, true);
         let chars: Vec<char> = mixed.chars().collect();
         for (index, gap) in mixed_gaps.iter().enumerate() {
