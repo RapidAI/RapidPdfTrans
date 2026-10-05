@@ -23,6 +23,7 @@ pub struct LlmTranslator {
     api_key: String,
     temperature: f32,
     max_tokens: Option<u32>,
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for LlmTranslator {
@@ -65,6 +66,7 @@ impl LlmTranslator {
             api_key,
             temperature: opts.temperature,
             max_tokens: opts.max_tokens,
+            timeout,
         })
     }
 
@@ -110,41 +112,57 @@ impl LlmTranslator {
         if let Some(max_tokens) = self.max_tokens {
             body["max_tokens"] = json!(max_tokens);
         }
-        let response = self
-            .agent
-            .post(&url)
-            .header("Authorization", &format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .send_json(&body)
-            .map_err(|err| self.http_error(err))?;
-        let parsed: Value = response
-            .into_body()
-            .read_json()
-            .map_err(|err| Error::Translate(self.scrub(&err.to_string())))?;
-        let content = parsed
-            .pointer("/choices/0/message/content")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                Error::Translate(
-                    "LLM response had empty message.content (reasoning tokens are ignored)".into(),
-                )
-            })?;
-        Ok(content.to_string())
+        // ureq's socket timeout does not always interrupt a stalled TLS read.
+        // A thread deadline makes `timeout: global` real so a batch can split.
+        let agent = self.agent.clone();
+        let api_key = self.api_key.clone();
+        let timeout = self.timeout;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(post_chat(&agent, &url, &api_key, body));
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(Error::Translate("timeout: global".into()))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(Error::Translate("LLM request failed".into()))
+            }
+        }
     }
+}
 
-    fn http_error(&self, err: ureq::Error) -> Error {
-        let msg = match err {
-            ureq::Error::StatusCode(code) => format!("LLM HTTP status {code}"),
-            other => other.to_string(),
-        };
-        Error::Translate(self.scrub(&msg))
-    }
+fn post_chat(agent: &ureq::Agent, url: &str, api_key: &str, body: Value) -> Result<String> {
+    let response = agent
+        .post(url)
+        .header("Authorization", &format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .send_json(&body)
+        .map_err(|err| http_error(err, api_key))?;
+    let parsed: Value = response
+        .into_body()
+        .read_json()
+        .map_err(|err| Error::Translate(scrub_secrets(&err.to_string(), api_key)))?;
+    parsed
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::Translate(
+                "LLM response had empty message.content (reasoning tokens are ignored)".into(),
+            )
+        })
+}
 
-    fn scrub(&self, message: &str) -> String {
-        scrub_secrets(message, &self.api_key)
-    }
+fn http_error(err: ureq::Error, api_key: &str) -> Error {
+    let msg = match err {
+        ureq::Error::StatusCode(code) => format!("LLM HTTP status {code}"),
+        other => other.to_string(),
+    };
+    Error::Translate(scrub_secrets(&msg, api_key))
 }
 
 fn http_status_retryable(err: &Error) -> bool {
