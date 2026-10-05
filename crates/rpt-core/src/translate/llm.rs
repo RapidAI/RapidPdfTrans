@@ -175,9 +175,13 @@ fn http_status_retryable(err: &Error) -> bool {
 /// A gateway that closes the socket mid-response.
 pub(crate) fn connection_dropped(msg: &str) -> bool {
     let msg = msg.to_ascii_lowercase();
-    msg.contains("unexpected end of file")
+    // ureq reports transport failures as "io: ...". The wording changes
+    // ("unexpected end of file", "Peer disconnected"), so the prefix is the check.
+    msg.contains("io:")
+        || msg.contains("unexpected end of file")
         || msg.contains("connection reset")
         || msg.contains("connection aborted")
+        || msg.contains("peer disconnected")
         || msg.contains("incomplete message")
 }
 
@@ -213,6 +217,13 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[test]
+    fn a_peer_disconnect_counts_as_a_dropped_connection() {
+        assert!(connection_dropped("io: Peer disconnected"));
+        assert!(connection_dropped("io: unexpected end of file"));
+        assert!(!connection_dropped("LLM HTTP status 401"));
+    }
 
     fn read_request(stream: &mut std::net::TcpStream) -> String {
         let mut buf = Vec::new();

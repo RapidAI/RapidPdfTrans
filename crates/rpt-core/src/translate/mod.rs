@@ -441,6 +441,7 @@ pub fn translate_extraction(
             translated[i] = Some(seg.text.clone());
         }
     }
+    cache_hits += load_checkpoint(&segments, &mut translated, &mut cache);
     // One owner per distinct source string. A repeated paragraph is filled
     // from that owner after the workers join, so two jobs never translate it.
     let batches = plan_unique_batches(&segments, &translated, opts.batch_size);
@@ -600,6 +601,80 @@ fn finish_report(
     })
 }
 
+/// `RPT_TRANSLATE_CHECKPOINT` is a JSONL file of `{source, translated}`.
+/// A resumed run skips those source strings and does not call the model again.
+fn load_checkpoint(
+    segments: &[Segment],
+    translated: &mut [Option<String>],
+    cache: &mut HashMap<String, String>,
+) -> usize {
+    let Ok(path) = std::env::var("RPT_TRANSLATE_CHECKPOINT") else {
+        return 0;
+    };
+    if path.is_empty() {
+        return 0;
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (Some(source), Some(done)) = (
+            value.get("source").and_then(|item| item.as_str()),
+            value.get("translated").and_then(|item| item.as_str()),
+        ) else {
+            continue;
+        };
+        cache.insert(source.to_string(), done.to_string());
+    }
+    let mut hits = 0usize;
+    for (index, seg) in segments.iter().enumerate() {
+        if translated[index].is_some() {
+            continue;
+        }
+        if let Some(done) = cache.get(&seg.text) {
+            translated[index] = Some(done.clone());
+            hits += 1;
+        }
+    }
+    hits
+}
+
+fn append_checkpoint(segments: &[Segment], part: &[(usize, String)]) {
+    let Ok(path) = std::env::var("RPT_TRANSLATE_CHECKPOINT") else {
+        return;
+    };
+    if path.is_empty() || part.is_empty() {
+        return;
+    }
+    let mut lines = String::new();
+    for (index, text) in part {
+        let line = serde_json::json!({
+            "source": segments[*index].text,
+            "translated": text,
+        });
+        lines.push_str(&line.to_string());
+        lines.push('\n');
+    }
+    let Ok(_guard) = checkpoint_lock().lock() else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = std::io::Write::write_all(&mut file, lines.as_bytes());
+    }
+}
+
+fn checkpoint_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Distinct segments, in reading order, packed into batches of `batch_size`.
 /// Indexes in different batches are disjoint. Repeated source text is omitted
 /// so it cannot be sent to a second worker.
@@ -675,6 +750,7 @@ fn dispatch_batches(
                 ) {
                     Ok(part) => {
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                        append_checkpoint(segments, &part);
                         match outputs.lock() {
                             Ok(mut slot) => slot.extend(part),
                             Err(_) => {
