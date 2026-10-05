@@ -685,7 +685,15 @@ fn toc_mark_glyphs(line: &VisualLine<'_>) -> Vec<u32> {
         let prev = &tokens[index - 1];
         let gap = token.left - prev.right;
         let leaders = is_leader_text(&prev.text);
-        if !leaders && gap < line.size * 0.8 {
+        // A detailed-contents row packs several entries on one baseline:
+        // `engines 4  LLM-based chatbots 7  AI agents 8`. The page number
+        // sits just past the title, closer than the usual leader gap, and
+        // the next entry starts about an em later. A trailing `model 15`
+        // has the same tight gap and no following entry.
+        let next_entry = separates_next_entry(&tokens, index, line.size);
+        let trailing =
+            index + 1 == tokens.len() && gap > line.size * 0.45 && gap <= line.size * 0.9;
+        if !leaders && gap < line.size * 0.8 && !next_entry && !trailing {
             continue;
         }
         if leaders {
@@ -841,6 +849,22 @@ fn is_leader_text(text: &str) -> bool {
 
 fn is_leader_dot(ch: char) -> bool {
     matches!(ch, '.' | '·' | '…' | '•' | '⋅' | '‧' | '․')
+}
+
+/// The next token is another contents title, not the next word of this one.
+fn separates_next_entry(tokens: &[LineToken], index: usize, size: f32) -> bool {
+    let Some(next) = tokens.get(index + 1) else {
+        return false;
+    };
+    let gap = next.left - tokens[index].right;
+    if gap < size * 1.15 || gap > size * 2.2 {
+        return false;
+    }
+    let text = next.text.trim();
+    let Some(ch) = text.chars().next() else {
+        return false;
+    };
+    ch.is_ascii_uppercase() || (ch.is_ascii_digit() && text.contains('.'))
 }
 
 fn is_toc_page_token(text: &str) -> bool {
@@ -2706,7 +2730,8 @@ mod tests {
     #[test]
     fn a_narrow_contents_crumb_stays_with_the_rest_of_its_line() {
         // The bullet between "83" and the next entry is a drawing, so the
-        // text gap is ~14pt. That must not peel "client 83" off the line.
+        // text gap is ~14pt. Each entry keeps its own title; the page number
+        // stays a contents mark instead of riding into the next title.
         let mut glyphs = Vec::new();
         let mut id = 0u32;
         let push =
@@ -2725,14 +2750,29 @@ mod tests {
         push(&mut glyphs, &mut id, 231.0, 488.0, "Scraping", 34.0);
         push(&mut glyphs, &mut id, 268.0, 488.0, "the", 16.0);
         push(&mut glyphs, &mut id, 287.0, 488.0, "web", 18.0);
-        let segs = segment_glyphs(&glyphs);
-        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|segment| segment.text.as_str()).collect();
         assert!(!texts.contains(&"client 83 results 83"), "{texts:?}");
         assert!(
-            texts.iter().any(|text| {
-                text.contains("client") && text.contains("Generating") && !text.contains("Scraping")
-            }),
+            texts
+                .iter()
+                .any(|text| text.contains("client") && !text.contains("Generating")),
             "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Generating") && !text.contains("client")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("Scraping")),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept.iter().any(|(_, reason)| reason == "toc"),
+            "{:?}",
+            seg.kept
         );
     }
 
@@ -5010,6 +5050,64 @@ mod tests {
         assert!(
             !texts.iter().any(|text| text.contains("76 4.5")),
             "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn several_contents_entries_on_one_baseline_keep_their_page_numbers() {
+        // `engines4 LLM-based chatbots7 AI agents8` and a wrapped `model15`.
+        let glyphs = vec![
+            block(0, 177.0, 248.0, 33.0, 10.0, "engines"),
+            block(1, 215.0, 248.0, 6.0, 10.0, "4"),
+            block(2, 235.0, 248.0, 78.0, 10.0, "LLM-based chatbots"),
+            block(3, 318.0, 248.0, 6.0, 10.0, "7"),
+            block(4, 338.0, 248.0, 36.0, 10.0, "AI agents"),
+            block(5, 379.0, 248.0, 6.0, 10.0, "8"),
+            block(6, 177.0, 203.0, 40.0, 10.0, "model"),
+            block(7, 222.0, 203.0, 12.0, 10.0, "15"),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.clone()).collect();
+        assert!(texts.iter().any(|text| text == "engines"), "{texts:?}");
+        assert!(
+            texts.iter().any(|text| text == "LLM-based chatbots"),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|text| text == "AI agents"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "model"), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.chars().any(|ch| ch.is_ascii_digit())),
+            "{texts:?}"
+        );
+        let kept: Vec<u32> = seg
+            .kept
+            .iter()
+            .filter(|(_, reason)| reason == "toc")
+            .map(|(id, _)| *id)
+            .collect();
+        assert!([1, 3, 5, 7].iter().all(|id| kept.contains(id)), "{kept:?}");
+    }
+
+    #[test]
+    fn a_normal_word_space_before_a_number_is_not_a_contents_mark() {
+        let glyphs = vec![
+            block(0, 72.0, 400.0, 70.0, 10.0, "the value is"),
+            block(1, 145.0, 400.0, 12.0, 10.0, "92"),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let text = seg
+            .segments
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("92"), "{text}");
+        assert!(
+            !seg.kept.iter().any(|(_, reason)| reason == "toc"),
+            "{:?}",
+            seg.kept
         );
     }
 

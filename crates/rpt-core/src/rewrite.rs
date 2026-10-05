@@ -1784,8 +1784,8 @@ fn cover_unhit_clusters(
     if glyphs.is_empty() {
         return;
     }
-    let page = glyphs[0].page_index;
     for cluster in marker_clusters(glyphs) {
+        let page = cluster[0].page_index;
         let bbox = cluster_bbox(&cluster);
         if drawn_hits(drawn, font, page, bbox) {
             continue;
@@ -2041,6 +2041,14 @@ fn heading_wants_bold(glyphs: &[&Glyph], text: &str) -> bool {
     )
 }
 
+struct PagePlan {
+    page: u32,
+    left: f32,
+    width: f32,
+    ys: Vec<f32>,
+    lines: Vec<String>,
+}
+
 /// Place one translated paragraph into the source boxes on each page it
 /// crosses. Shrinking is allowed. A tail that still does not fit keeps the
 /// original paragraph instead of painting a prefix.
@@ -2129,17 +2137,17 @@ fn layout_across_pages(
         .as_ref()
         .map(|_| superscript_mask(text))
         .unwrap_or_default();
-    let flat_lines: Vec<String> = packed.iter().flatten().cloned().collect();
-    let line_masks = split_superscripts(text, &flat_lines, &mask);
-    let mut mask_index = 0usize;
-    let mut drawn = Vec::new();
-    let mut first_line = true;
+    // Spread before assigning superscripts. A mask built on the packed lines
+    // would land on the wrong character once a line is split onto the next
+    // source baseline.
+    let mut plans: Vec<PagePlan> = Vec::new();
     for (box_index, ((page, ink, left, _), lines)) in ink_pages.iter().zip(packed).enumerate() {
         if lines.is_empty() {
             continue;
         }
         let top = ink[0].y;
         let bottom = ink[ink.len() - 1].y;
+        let lines = spread_to_lines(lines, ink.len());
         let gaps = lines.len().saturating_sub(1) as f32;
         let leading = if gaps == 0.0 {
             size * metrics.leading_ratio
@@ -2157,18 +2165,40 @@ fn layout_across_pages(
         if last_y < media[1] - 0.5 || top > media[3] {
             return None;
         }
-        let width = boxes[box_index].width;
-        let lines = spread_to_lines(lines, ink.len());
         let ys = baselines_for(ink, lines.len());
+        plans.push(PagePlan {
+            page: *page,
+            left: *left,
+            width: boxes[box_index].width,
+            ys,
+            lines,
+        });
+    }
+    let flat_lines: Vec<String> = plans
+        .iter()
+        .flat_map(|plan| plan.lines.iter().cloned())
+        .collect();
+    let line_masks = split_superscripts(text, &flat_lines, &mask);
+    let mut mask_index = 0usize;
+    let mut drawn = Vec::new();
+    let mut first_line = true;
+    for PagePlan {
+        page,
+        left,
+        width,
+        ys,
+        lines,
+    } in plans
+    {
         for (index, line) in lines.into_iter().enumerate() {
             let line_indent = if first_line { indent } else { 0.0 };
             let limit = (width - line_indent).max(size * 0.5);
             let supers = line_masks.get(mask_index).cloned().unwrap_or_default();
             mask_index += 1;
             drawn.push(Drawn {
-                page: *page,
+                page,
                 x: left + line_indent,
-                y: ys.get(index).copied().unwrap_or(top),
+                y: ys[index],
                 size,
                 color: color.clone(),
                 cids: cids_of(&line, font),
@@ -4305,6 +4335,49 @@ mod tests {
                 .any(|line| line.contains("SWE-") && !line.contains("Compressor")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn an_unhit_mark_on_the_next_page_stays_on_that_page() {
+        let font = uniform_font("中3");
+        let mut home = math_glyph(0, 80.0, 500.0, "A", false);
+        home.page_index = 0;
+        let mut mark = math_glyph(1, 80.0, 200.0, "3", false);
+        mark.page_index = 1;
+        mark.bbox = [80.0, 200.0, 86.0, 210.0];
+        let mut drawn = vec![Drawn {
+            page: 0,
+            x: 80.0,
+            y: 500.0,
+            size: 10.0,
+            color: Color::black(),
+            cids: vec![],
+            resource: "RPT0".into(),
+            skew: 0.0,
+            text: "中".into(),
+            glyph_ids: vec![0],
+            widths: vec![10.0],
+            gaps: vec![],
+            supers: vec![],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        }];
+        let glyphs = [&home, &mark];
+        cover_unhit_clusters(
+            &mut drawn,
+            &glyphs,
+            &font,
+            "RPT0",
+            0.0,
+            &Color::black(),
+            &[0, 1],
+        );
+        let marks: Vec<_> = drawn
+            .iter()
+            .filter(|line| line.text.contains('3'))
+            .map(|line| line.page)
+            .collect();
+        assert_eq!(marks, vec![1], "{marks:?}");
     }
 
     fn uniform_font(text: &str) -> SubsetFont {
