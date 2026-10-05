@@ -1,13 +1,13 @@
 //! `rpt extract file.pdf` prints per-glyph JSON and the coverage report.
-//! `rpt translate file.pdf` translates text and does not rewrite the PDF.
+//! `rpt translate file.pdf --output out.pdf` translates and writes a PDF.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use rpt_core::{
-    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, TranslateOptions,
-    TranslatorBackend,
+    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, RewriteOptions,
+    TranslateOptions, TranslatorBackend,
 };
 
 #[derive(Parser)]
@@ -31,9 +31,18 @@ enum Command {
         #[arg(long, default_value = "")]
         options: String,
     },
-    /// Translate extracted text. The PDF is not rewritten.
+    /// Translate extracted text. `--output` writes the translated PDF.
     Translate {
         path: PathBuf,
+        /// Write the translated PDF here.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Keep the original text and draw the translation as well.
+        #[arg(long)]
+        bilingual: bool,
+        /// Extract and translate only the first N pages.
+        #[arg(long)]
+        max_pages: Option<u32>,
         #[arg(long = "from", default_value = "en")]
         source_lang: String,
         #[arg(long = "to", default_value = "zh")]
@@ -65,6 +74,9 @@ fn main() -> ExitCode {
         } => run_extract(&path, compact, &options),
         Command::Translate {
             path,
+            output,
+            bilingual,
+            max_pages,
             source_lang,
             target_lang,
             model,
@@ -87,9 +99,12 @@ fn main() -> ExitCode {
                     base_url,
                     glossary,
                     skip_references: !translate_references,
+                    bilingual,
                     ..TranslateOptions::default()
                 },
                 compact,
+                output,
+                max_pages,
             )
         }
     }
@@ -116,8 +131,14 @@ fn run_extract(path: &PathBuf, compact: bool, options: &str) -> ExitCode {
     emit(&value, compact)
 }
 
-fn run_translate(path: &PathBuf, opts: TranslateOptions, compact: bool) -> ExitCode {
-    let doc = match PdfDocument::open(path) {
+fn run_translate(
+    path: &PathBuf,
+    opts: TranslateOptions,
+    compact: bool,
+    output: Option<PathBuf>,
+    max_pages: Option<u32>,
+) -> ExitCode {
+    let mut doc = match PdfDocument::open(path) {
         Ok(doc) => doc,
         Err(err) => return fail(err),
     };
@@ -125,11 +146,32 @@ fn run_translate(path: &PathBuf, opts: TranslateOptions, compact: bool) -> ExitC
         Ok(client) => client,
         Err(err) => return fail(err),
     };
-    let mut extraction = doc.extract();
+    let mut extraction = doc.extract_with(&ExtractOptions {
+        max_pages,
+        ..ExtractOptions::default()
+    });
     let report = match translate_extraction(&mut extraction, &opts, &client) {
         Ok(report) => report,
         Err(err) => return fail(err),
     };
+    if let Some(output) = output.as_ref() {
+        if let Err(err) = doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                bilingual: opts.bilingual,
+                font_bytes: None,
+            },
+        ) {
+            return fail(err);
+        }
+        if let Err(err) = extraction.assert_complete() {
+            return fail(err);
+        }
+        if let Err(err) = doc.save_file(output) {
+            return fail(err);
+        }
+    }
     let mut value = match extraction.to_json_value() {
         Ok(value) => value,
         Err(err) => return fail(err),

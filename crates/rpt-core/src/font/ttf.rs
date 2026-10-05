@@ -21,6 +21,11 @@ impl FontCmap {
         }
         parse_sfnt(data).unwrap_or_default()
     }
+
+    /// Parse a raw `cmap` table, not a whole font.
+    pub fn from_table(data: &[u8]) -> Self {
+        parse_cmap_table(data)
+    }
 }
 
 fn parse_ttc(data: &[u8]) -> FontCmap {
@@ -301,7 +306,7 @@ pub fn minimal_ttf(mappings: &[(u32, u32)]) -> Vec<u8> {
     wrap_sfnt(b"cmap", &table)
 }
 
-fn build_cmap_subtable(mappings: &[(u32, u32)]) -> Vec<u8> {
+pub(crate) fn build_cmap_subtable(mappings: &[(u32, u32)]) -> Vec<u8> {
     let mut pairs: Vec<(u16, u16)> = mappings
         .iter()
         .filter(|(u, _)| *u <= 0xFFFF)
@@ -369,7 +374,7 @@ fn wrap_sfnt(tag: &[u8; 4], table: &[u8]) -> Vec<u8> {
     out
 }
 
-fn checksum32(data: &[u8]) -> u32 {
+pub(crate) fn checksum32(data: &[u8]) -> u32 {
     let mut sum = 0u32;
     let mut i = 0;
     while i < data.len() {

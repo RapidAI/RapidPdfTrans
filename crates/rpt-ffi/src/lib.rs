@@ -12,8 +12,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use rpt_core::{
-    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, TranslateOptions,
-    TranslatorBackend,
+    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, RewriteOptions,
+    TranslateOptions, TranslatorBackend,
 };
 
 /// Opaque document. Do not dereference.
@@ -71,6 +71,16 @@ unsafe fn from_raw<'a>(doc: *mut RptDocument) -> Option<&'a DocumentInner> {
         None
     } else {
         Some(&*(doc as *const DocumentInner))
+    }
+}
+
+/// # Safety
+/// `doc` is null or a pointer returned by `rpt_open` that has not been freed.
+unsafe fn from_raw_mut<'a>(doc: *mut RptDocument) -> Option<&'a mut DocumentInner> {
+    if doc.is_null() {
+        None
+    } else {
+        Some(&mut *(doc as *mut DocumentInner))
     }
 }
 
@@ -192,19 +202,76 @@ pub unsafe extern "C" fn rpt_translate(
 
 /// # Safety
 /// `doc` was returned by `rpt_open` and has not been freed.
-/// Saving is not implemented; this always returns -1.
+/// `path` and `options_json` are null-terminated UTF-8 strings, or null.
+/// `RPT_LLM_API_KEY` must be set. An `api_key` field in JSON is ignored.
+/// Returns 0 after the translated PDF is written.
 #[no_mangle]
 pub unsafe extern "C" fn rpt_save(
     doc: *mut RptDocument,
-    _path: *const c_char,
-    _options_json: *const c_char,
+    path: *const c_char,
+    options_json: *const c_char,
 ) -> c_int {
-    if doc.is_null() {
-        set_error("document is null");
-        return -1;
+    let saved = guard(|| {
+        let inner = unsafe { from_raw_mut(doc) }.ok_or_else(|| "document is null".to_string())?;
+        if path.is_null() {
+            return Err("path is null".into());
+        }
+        let path = unsafe { CStr::from_ptr(path) }
+            .to_str()
+            .map_err(|_| "path is not utf-8".to_string())?;
+        if path.is_empty() {
+            return Err("path is empty".into());
+        }
+        let options = unsafe { cstr(options_json) };
+        let (translate_opts, _) =
+            TranslateOptions::from_json(options).map_err(|e| e.to_string())?;
+        let extract_opts = ExtractOptions::from_json(options).map_err(|e| e.to_string())?;
+        let client =
+            TranslatorBackend::from_env(&translate_opts).map_err(|e| scrub(&e.to_string()))?;
+        let mut extraction = inner.pdf.extract_with(&extract_opts);
+        let report = translate_extraction(&mut extraction, &translate_opts, &client)
+            .map_err(|e| scrub(&e.to_string()))?;
+        inner
+            .pdf
+            .rewrite(
+                &mut extraction,
+                &report,
+                &RewriteOptions {
+                    bilingual: translate_opts.bilingual,
+                    font_bytes: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        extraction.assert_complete().map_err(|e| e.to_string())?;
+        inner.pdf.save_file(path).map_err(|e| e.to_string())?;
+        Ok(())
+    });
+    match saved {
+        Ok(()) => {
+            clear_error();
+            0
+        }
+        Err(message) => {
+            set_error(&message);
+            -1
+        }
     }
-    set_error("PDF rewriting is not implemented (milestone M3)");
-    -1
+}
+
+fn scrub(message: &str) -> String {
+    let mut cleaned = message.to_string();
+    for key in [
+        "RPT_LLM_API_KEY",
+        "RPT_GOOGLE_API_KEY",
+        "RPT_GOOGLE_PRIVATE_KEY",
+    ] {
+        if let Ok(secret) = std::env::var(key) {
+            if secret.len() >= 6 {
+                cleaned = cleaned.replace(&secret, "[redacted]");
+            }
+        }
+    }
+    cleaned
 }
 
 /// # Safety
@@ -280,12 +347,21 @@ mod abi_tests {
         assert!(text.contains("Hello"), "{text}");
         assert!(text.contains("pending"), "{text}");
         unsafe { rpt_string_free(json) };
-        let rc = unsafe { rpt_save(doc, path.as_ptr(), ptr::null()) };
+        if std::env::var("RPT_LLM_API_KEY")
+            .ok()
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            unsafe { rpt_free(doc) };
+            return;
+        }
+        let out = CString::new("/tmp/rpt-ffi-should-not-write.pdf").unwrap();
+        let rc = unsafe { rpt_save(doc, out.as_ptr(), ptr::null()) };
         assert_eq!(rc, -1);
         let err = unsafe { CStr::from_ptr(rpt_last_error()) }
             .to_string_lossy()
             .into_owned();
-        assert!(err.contains("not implemented"), "{err}");
+        assert!(err.contains("RPT_LLM_API_KEY"), "{err}");
+        assert!(!std::path::Path::new("/tmp/rpt-ffi-should-not-write.pdf").exists());
         unsafe { rpt_free(doc) };
         unsafe { rpt_free(ptr::null_mut()) };
         unsafe { rpt_string_free(ptr::null_mut()) };

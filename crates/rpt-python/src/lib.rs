@@ -3,8 +3,8 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rpt_core::{
-    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, TranslateOptions,
-    TranslatorBackend,
+    translate_extraction, ExtractOptions, OpenOptions, PdfDocument, RewriteOptions,
+    TranslateOptions, TranslatorBackend,
 };
 
 fn py_err(err: impl ToString) -> PyErr {
@@ -28,7 +28,7 @@ fn extract(path: &str, options_json: Option<&str>) -> PyResult<String> {
     extraction.to_json_pretty().map_err(py_err)
 }
 
-/// Translate extracted text. Requires `RPT_LLM_API_KEY`. Does not rewrite the PDF.
+/// Translate extracted text. Requires `RPT_LLM_API_KEY`. Does not write a PDF.
 #[pyfunction]
 #[pyo3(signature = (path, options_json=None))]
 fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
@@ -60,10 +60,35 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
     serde_json::to_string_pretty(&value).map_err(py_err)
 }
 
+/// Translate and write a PDF. Requires `RPT_LLM_API_KEY`.
+#[pyfunction]
+#[pyo3(signature = (path, output, options_json=None))]
+fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
+    let options = options_json.unwrap_or("");
+    let (opts, _) = TranslateOptions::from_json(options).map_err(py_err)?;
+    let extract_opts = ExtractOptions::from_json(options).map_err(py_err)?;
+    let mut doc = PdfDocument::open(path).map_err(py_err)?;
+    let client = TranslatorBackend::from_env(&opts).map_err(py_err)?;
+    let mut extraction = doc.extract_with(&extract_opts);
+    let report = translate_extraction(&mut extraction, &opts, &client).map_err(py_err)?;
+    doc.rewrite(
+        &mut extraction,
+        &report,
+        &RewriteOptions {
+            bilingual: opts.bilingual,
+            font_bytes: None,
+        },
+    )
+    .map_err(py_err)?;
+    extraction.assert_complete().map_err(py_err)?;
+    doc.save_file(output).map_err(py_err)
+}
+
 #[pymodule]
 fn rapidpdftrans(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
     m.add_function(wrap_pyfunction!(translate, m)?)?;
+    m.add_function(wrap_pyfunction!(save, m)?)?;
     Ok(())
 }

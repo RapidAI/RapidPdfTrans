@@ -1,7 +1,7 @@
 #pragma once
 
 // Header-only RAII wrapper over include/rapidpdftrans.h.
-// PDF rewriting is not implemented; save() throws.
+// save() translates and writes a PDF. It throws if the translator is not configured.
 
 #include <stdexcept>
 #include <string>

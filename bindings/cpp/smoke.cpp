@@ -19,10 +19,10 @@ int main(int argc, char** argv) {
     try {
       doc.save("/tmp/rpt-should-not-write.pdf");
     } catch (const std::runtime_error& err) {
-      save_failed = std::string(err.what()).find("not implemented") != std::string::npos;
+      save_failed = std::string(err.what()).find("RPT_LLM_API_KEY") != std::string::npos;
     }
     if (!save_failed) {
-      std::cerr << "save was expected to fail until milestone M3\n";
+      std::cerr << "save without RPT_LLM_API_KEY should fail\n";
       return 1;
     }
   } catch (const std::exception& err) {

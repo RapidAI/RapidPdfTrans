@@ -1,8 +1,7 @@
 //! Pluggable translation of extracted text.
 //!
-//! This does not rewrite the PDF. Each translated glyph is marked
-//! `translated_pending_rewrite`, which is intentionally not a final coverage
-//! state: rewriting the content stream is milestone M3.
+//! Translation marks glyphs `translated_pending_rewrite`. [`crate::rewrite`]
+//! is what writes those strings back into the PDF.
 //! Bibliography glyphs are the exception: with `skip_references` (the default)
 //! they are `kept_original` and are not sent to the translator.
 //!
@@ -65,6 +64,8 @@ pub struct TranslateOptions {
     pub translator: Option<String>,
     /// Leave References / Bibliography as original text. Default is on.
     pub skip_references: bool,
+    /// Draw the translation as well as the original text.
+    pub bilingual: bool,
 }
 
 impl Default for TranslateOptions {
@@ -82,6 +83,7 @@ impl Default for TranslateOptions {
             max_tokens: None,
             translator: None,
             skip_references: true,
+            bilingual: false,
         }
     }
 }
@@ -161,6 +163,9 @@ impl TranslateOptions {
         }
         if let Some(skip) = value.get("skip_references").and_then(|v| v.as_bool()) {
             opts.skip_references = skip;
+        }
+        if let Some(bilingual) = value.get("bilingual").and_then(|v| v.as_bool()) {
+            opts.bilingual = bilingual;
         }
         opts.glossary = parse_glossary(value.get("glossary"));
         if opts.batch_size == 0 {

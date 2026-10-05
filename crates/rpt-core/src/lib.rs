@@ -10,16 +10,13 @@
 //! page's default user space and y increases upward. Page `/Rotate` is reported
 //! and is not baked into the matrices.
 //!
-//! # What is deliberately not here yet
-//!
-//! Rewriting content streams, shaping, font subsetting, and layout analysis
-//! belong to later milestones. The glyph source location (stream, operator
-//! index, byte range) is the hook those steps will use to delete the original
-//! text-showing operator instead of dropping text.
+//! [`rewrite`] deletes original text-showing operators by replacing them with
+//! the same number of spaces, then draws the translation with a subset CID
+//! font. Advances come from `hmtx` (not OpenType GSUB). Reference-section
+//! operators are left byte-identical.
 //!
 //! [`translate`] sends extracted text to a pluggable translator. The default
-//! model name is `auto`. Translation marks glyphs
-//! `translated_pending_rewrite` and does not rewrite PDF operators.
+//! model name is `auto`.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -35,6 +32,7 @@ mod font;
 mod geom;
 mod pdfutil;
 mod resources;
+mod rewrite;
 
 pub use color::Color;
 pub use coverage::{report as coverage_report, CoverageReport};
@@ -43,6 +41,7 @@ pub use extract::{ExtractOptions, Extraction, OpenOptions, PdfDocument, COORDINA
 pub use font::minimal_ttf;
 pub use geom::{Matrix, Rect};
 pub use glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKind};
+pub use rewrite::{rewrite_translation, RewriteOptions};
 pub use translate::{
     citation_end, identical_reference_operators, reference_glyph_ids, translate_extraction,
     LlmTranslator, TranslateOptions, TranslateReport, TranslatedSegment, Translator,

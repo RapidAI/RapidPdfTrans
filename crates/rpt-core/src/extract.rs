@@ -131,6 +131,30 @@ impl PdfDocument {
     }
 
     /// Decompressed bytes of an indirect stream named `"number generation"`.
+    pub fn rewrite(
+        &mut self,
+        extraction: &mut Extraction,
+        report: &crate::translate::TranslateReport,
+        opts: &crate::rewrite::RewriteOptions,
+    ) -> Result<()> {
+        crate::rewrite::rewrite_translation(&mut self.inner, extraction, report, opts)
+    }
+
+    pub fn save_bytes(&mut self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.inner
+            .save_to(&mut bytes)
+            .map_err(|err| Error::Pdf(err.to_string()))?;
+        Ok(bytes)
+    }
+
+    pub fn save_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        self.inner
+            .save(path)
+            .map(|_| ())
+            .map_err(|err| Error::Pdf(err.to_string()))
+    }
+
     pub fn plain_stream(&self, object_id: &str) -> Option<Vec<u8>> {
         let mut parts = object_id.split_whitespace();
         let number: u32 = parts.next()?.parse().ok()?;

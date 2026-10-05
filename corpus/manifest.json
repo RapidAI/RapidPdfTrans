@@ -1608,6 +1608,23 @@
         "scanned"
       ],
       "ci": false
+    },
+    {
+      "id": "arxiv-2609.15979",
+      "url": "https://arxiv.org/pdf/2609.15979.pdf",
+      "source": "arxiv",
+      "title": "The k-server conjecture is true",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "3de0a990456e6664ba77aaeee4e80be944c2c40b68d965f23cb46a138ad4d7ff",
+      "bytes": 366007,
+      "pages": 18,
+      "tags": [
+        "arxiv",
+        "latex",
+        "math",
+        "theory"
+      ],
+      "ci": false
     }
   ]
 }

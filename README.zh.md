@@ -54,7 +54,7 @@ Go（先打好 release 静态库，再在 `bindings/go` 里）：
 go test ./...
 ```
 
-`rpt_save` 已经留在 ABI 里，目前返回 -1，错误信息是 `PDF rewriting is not implemented (milestone M3)`。
+`rpt_save` 会翻译已打开的文档并写出 PDF。没有设置 `RPT_LLM_API_KEY` 时返回 -1，并且不会创建文件。
 
 ## 翻译器
 
@@ -70,21 +70,23 @@ go test ./...
 
 ```bash
 export RPT_LLM_API_KEY=...
-./target/release/rpt translate paper.pdf --from en --to zh \
+./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf \
   --glossary transformer=Transformer
 ```
+
+`--bilingual` 保留原文并额外画出译文。`--max-pages N` 只处理前 N 页。中文字体来自 `RPT_CJK_FONT`，否则使用已安装的 Droid Sans Fallback、文泉驿或 Noto Sans CJK。嵌入的是 glyf 子集（Identity-H 和 ToUnicode）。水平前进量来自 `hmtx`，没有做 OpenType GSUB。放不下、或与公式等保留字形共用操作符的段落，仍留原文。
 
 调用前会把 URL、邮箱、`{花括号}`、数字、文内引用（`[12]`、`[1-3]`、`(Smith et al., 2020)`、`Smith (2019)`）和术语表替换成 `⟦N⟧` 占位符，译完再还原。术语在本地替换（更长的优先，ASCII 按词边界），不指望模型遵守一张术语表。占位符丢失会重试一次，仍然丢失就报错。
 
 参考文献整节不翻译。`References`、`Bibliography`、`Works Cited`、`参考文献`、`Literatur`、`Références` 这类标题，以及编号或作者-年份条目，都会进入这一节。它跨栏、跨页延续，直到下一节标题（`Appendix`、`附录`、`A. Proofs` 等）为止。这些字形记为 `kept_original`，原因是 `references`。默认 `skip_references` 为 true；在选项 JSON 里设为 false，或给 CLI 加上 `--translate-references`，才会翻译这一节。
 
-这一节之外译过的字形标记为 `translated_pending_rewrite`。这不是最终状态，因为 PDF 还没重写。
+`rpt translate --output` 会把这些字形写回。不加 `--output` 时，它们仍是 `translated_pending_rewrite`。
 
 ## 字形守恒
 
 抽出的每个字形一开始都是 `pending`。只有每个字形都恰好有一个最终状态时，文档才算完成：
 
-- `rewritten`：译文已经写回（尚未实现）
+- `rewritten`：译文已经写回 PDF
 - `kept_original`：保留原绘制，并给出原因
 - `non_text`：判定为非文本，并给出原因
 
@@ -105,7 +107,7 @@ export RPT_LLM_API_KEY=...
 
 ## 保真语料
 
-`rpt-bench` 用掉字、占位符与公式保留、溢出、样式、非文字区域 SSIM 给译文 PDF 打分。`python3 corpus/bench/run.py` 把 CI 子集的恒等对照（每个 PDF 与自身比较）写到 `corpus/benchmarks/`。指标说明见 `corpus/benchmarks/README.md`。RapidPdfTrans 还不能写出译文 PDF（`rpt_save` 仍是 M3 占位）。
+`rpt-bench` 用掉字、占位符与公式保留、溢出、样式、非文字区域 SSIM，以及参考文献操作符是否逐字节相同来给译文 PDF 打分。`python3 corpus/bench/run.py` 把 CI 子集的恒等对照写到 `corpus/benchmarks/`。指标说明见 `corpus/benchmarks/README.md`。
 
 `corpus/manifest.json` 记录真实论文和可再分发图书的直接下载 URL、来源、许可证、sha256、大小和特征标签。`python3 corpus/fetch.py` 把它们下载到被 git 忽略的缓存，这些文件不进仓库。例外是 `corpus/ci/`：九篇 CC BY 4.0 论文，每篇不到 700 KB，URL 和许可证写在 `corpus/ci/manifest.json`，CI 直接用它们。`testdata/hello.pdf` 由 `cargo run -p rpt-core --example hello_pdf` 生成，只用于单元测试，不是语料。`rpt-qa` 对每份文件做抽取和字形覆盖率检查，用 Poppler 对文字，并对一份逐字节相同的副本做渲染对比（整页 SSIM，以及去掉字形框之后的非文字区域 SSIM）。lopdf 另存是另一次结构往返，会改写文件，报告里单独列出。CI 只跑标记了 `ci: true` 的小子集。全量语料在夜间的 `Corpus fidelity` 工作流。说明见 `corpus/README.md`。
 
@@ -113,7 +115,7 @@ export RPT_LLM_API_KEY=...
 
 1. **M1（当前）。** 内容流解释器、字形守恒、可替换翻译器、C / Python / Go / C++ 骨架、命令行。
 2. **M2.** 版面分析、在现有占位符之外保护更多结构、把缓存和术语表接进版面模型。
-3. **M3.** 用整形和字体子集做重排，精确删除原文本操作符，写回 PDF，以及双语模式。`rpt_save` 从这里开始真正写文件。
+3. **M3（已开始）。** 用 `hmtx` 前进量、中文断行和字体子集重排，精确删除原文本操作符，写出 PDF，并支持双语。`rpt_save` 会写文件。GSUB 整形和完整段落版面还没做。
 4. **M4.** 更完整的版面模型、对不是真文字的页面做 OCR、用 PDFium 做渲染对比。
 
 ## 需要取舍的决定

@@ -56,7 +56,7 @@ Go (from `bindings/go`, after the release static library exists):
 go test ./...
 ```
 
-`rpt_save` exists so the ABI is stable, and it returns -1 with the error `PDF rewriting is not implemented (milestone M3)`.
+`rpt_save` translates the open document and writes a PDF. It returns -1, and does not create the file, when `RPT_LLM_API_KEY` is unset.
 
 ## Translator
 
@@ -72,25 +72,27 @@ An `api_key` field in options JSON is ignored. Explicit options win over environ
 
 ```bash
 export RPT_LLM_API_KEY=...
-./target/release/rpt translate paper.pdf --from en --to zh \
+./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf \
   --glossary transformer=Transformer
 ```
+
+`--bilingual` keeps the original operators and draws the translation as well. `--max-pages N` limits extraction to the first N pages. The CJK face is `RPT_CJK_FONT`, or Droid Sans Fallback / WenQuanYi / Noto Sans CJK when one of those is installed. The embedded font is a glyf subset (Identity-H, ToUnicode). Horizontal advances come from `hmtx`; OpenType GSUB is not applied. A segment that does not fit, or that shares an operator with a formula or another kept glyph, stays original.
 
 Before the call, URLs, email addresses, `{brace}` groups, numbers, in-text citations (`[12]`, `[1-3]`, `(Smith et al., 2020)`, `Smith (2019)`), and glossary terms are replaced with `⟦N⟧` placeholders and restored afterwards. Glossary terms are substituted locally (longest match, ASCII word boundaries), so the model does not have to obey a glossary table. A dropped placeholder is retried once and then reported as an error.
 
 The References / Bibliography section is not translated. Headings such as `References`, `Bibliography`, `Works Cited`, `参考文献`, `Literatur`, and `Références` start the section; numbered and author-year entries do too. It continues across columns and pages and stops at the next section (`Appendix`, `附录`, `A. Proofs`, …). Those glyphs are `kept_original` with reason `references`. `skip_references` defaults to true; set it to false in options JSON, or pass `--translate-references` on the CLI, to translate the section.
 
-Translated glyphs outside that section are marked `translated_pending_rewrite`, which is not a final coverage state, because the PDF has not been rewritten.
+`rpt translate --output` then rewrites those glyphs. Without `--output` they stay `translated_pending_rewrite`.
 
 ## Coverage
 
 Every extracted glyph starts as `pending`. A document is complete only when each glyph has exactly one final disposition:
 
-- `rewritten` — translated text has been written back (not implemented yet)
+- `rewritten` — translated text has been written back into the PDF
 - `kept_original` — the original drawing is kept, with a reason
 - `non_text` — classified as non-text, with a reason
 
-`translated_pending_rewrite` records a translation and stays unresolved until rewrite exists. Extraction alone therefore reports every glyph as unresolved. A test fails if an extraction path skips a glyph and shrinks that list.
+`translated_pending_rewrite` records a translation and stays unresolved until rewrite. Extraction alone therefore reports every glyph as unresolved. A test fails if an extraction path skips a glyph and shrinks that list.
 
 Glyph records include the page, Unicode (which may be several characters, or empty when unmapped), character-code bytes, GID when known, font name and size, the text rendering matrix, an approximate bounding box, advance, colors, render mode, invisible and clip flags, and the source location (content stream, Form XObject, annotation appearance, or Type3 char proc, plus operator index and byte range). Later milestones use that location to delete exactly the original text-showing operator.
 
@@ -111,13 +113,13 @@ Glyph records include the page, Unicode (which may be several characters, or emp
 
 ## Translation benchmark
 
-`rpt-bench` scores a translated PDF on dropped lines, placeholder and formula retention, overflow, style, and non-text SSIM. `python3 corpus/bench/run.py` records the identity ceiling (each CI PDF compared with itself) in `corpus/benchmarks/`. BabelDOC and PDFMathTranslate, when installed, should share `corpus/bench/identity_server.py` so the translator is the same. RapidPdfTrans still has no translated PDF to score: `rpt_save` is the M3 stub. Metric definitions are in `corpus/benchmarks/README.md`.
+`rpt-bench` scores a translated PDF on dropped lines, placeholder and formula retention, overflow, style, non-text SSIM, and reference-operator byte identity. `python3 corpus/bench/run.py` records the identity ceiling (each CI PDF compared with itself) in `corpus/benchmarks/`. BabelDOC and PDFMathTranslate, when installed, should share `corpus/bench/identity_server.py` so the translator is the same. Metric definitions are in `corpus/benchmarks/README.md`.
 
 ## Roadmap
 
 1. **M1 (this tree).** Content-stream interpreter, glyph coverage, pluggable translator, C / Python / Go / C++ skeletons, CLI.
 2. **M2.** Layout analysis, placeholder protection beyond the current shield, translator caching and glossary integration in the layout model.
-3. **M3.** Re-layout with shaping and font subsetting, precise deletion of the original text operators, rewrite, bilingual modes. `rpt_save` starts working here.
+3. **M3 (started).** Re-layout with `hmtx` advances, CJK line breaking, font subsetting, deletion of the original text operators, bilingual mode, and a working `rpt_save`. GSUB shaping and full paragraph layout are still open.
 4. **M4.** Richer layout, OCR for pages that are not real text, render-diff checks against PDFium.
 
 ## Decisions worth weighing

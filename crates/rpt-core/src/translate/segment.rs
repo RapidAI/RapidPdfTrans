@@ -85,6 +85,7 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
         let page = line[0].page_index;
         let mut buf_ids: Vec<u32> = Vec::new();
         let mut buf = String::new();
+        let mut previous: Option<&Glyph> = None;
         let flush = |segments: &mut Vec<Segment>, buf_ids: &mut Vec<u32>, buf: &mut String| {
             if buf_ids.is_empty() {
                 return;
@@ -97,6 +98,12 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
             });
         };
         for glyph in line {
+            if let Some(prev) = previous {
+                if word_space(prev, glyph) {
+                    buf.push(' ');
+                }
+            }
+            previous = Some(glyph);
             let next_len = buf.len() + glyph.unicode.len();
             let boundary = next_len > LONG_LINE && sentence_end(&buf);
             if boundary {
@@ -108,6 +115,34 @@ pub fn segment_glyphs(glyphs: &[Glyph]) -> Vec<Segment> {
         flush(&mut segments, &mut buf_ids, &mut buf);
     }
     segments
+}
+
+/// A gap that is a word space in the original drawing, not a character in the stream.
+fn word_space(prev: &Glyph, next: &Glyph) -> bool {
+    if prev.unicode.chars().all(char::is_whitespace)
+        || next.unicode.chars().all(char::is_whitespace)
+    {
+        return false;
+    }
+    if prev.unicode.chars().any(is_cjk) && next.unicode.chars().any(is_cjk) {
+        return false;
+    }
+    let right = prev.bbox[0].max(prev.bbox[2]);
+    let left = next.bbox[0].min(next.bbox[2]);
+    let gap = left - right;
+    let size = prev.font_size.max(1.0);
+    gap > size * 0.18 && gap < 24.0
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3000}'..='\u{303F}'
+            | '\u{3040}'..='\u{30FF}'
+            | '\u{3400}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FF00}'..='\u{FFEF}'
+    )
 }
 
 fn sentence_end(text: &str) -> bool {
@@ -183,5 +218,25 @@ mod tests {
         let segs = segment_glyphs(&glyphs);
         let texts: Vec<_> = segs.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(texts, ["In", "Re"]);
+    }
+
+    #[test]
+    fn a_word_gap_becomes_a_space_and_cjk_does_not() {
+        let mut glyphs = vec![
+            glyph(0, 0.0, 700.0, "A", false),
+            glyph(1, 12.0, 700.0, "B", false),
+        ];
+        glyphs[1].bbox = [12.0, 700.0, 18.0, 710.0];
+        let segs = segment_glyphs(&glyphs);
+        assert_eq!(segs[0].text, "A B");
+        assert_eq!(segs[0].glyph_ids, vec![0, 1]);
+
+        let mut cjk = vec![
+            glyph(0, 0.0, 700.0, "中", false),
+            glyph(1, 14.0, 700.0, "文", false),
+        ];
+        cjk[1].bbox = [14.0, 700.0, 26.0, 710.0];
+        let segs = segment_glyphs(&cjk);
+        assert_eq!(segs[0].text, "中文");
     }
 }

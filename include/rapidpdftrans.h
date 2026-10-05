@@ -46,9 +46,11 @@ char *rpt_translate(struct RptDocument *doc, const char *options_json);
 /**
  * # Safety
  * `doc` was returned by `rpt_open` and has not been freed.
- * Saving is not implemented; this always returns -1.
+ * `path` and `options_json` are null-terminated UTF-8 strings, or null.
+ * `RPT_LLM_API_KEY` must be set. An `api_key` field in JSON is ignored.
+ * Returns 0 after the translated PDF is written.
  */
-int rpt_save(struct RptDocument *doc, const char *_path, const char *_options_json);
+int rpt_save(struct RptDocument *doc, const char *path, const char *options_json);
 
 /**
  * # Safety

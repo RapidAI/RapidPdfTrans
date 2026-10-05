@@ -14,6 +14,7 @@ mod cmap;
 mod encoding;
 mod encoding_tables;
 mod predefined;
+mod subset;
 mod texmath;
 mod ttf;
 mod type1;
@@ -29,6 +30,9 @@ use crate::resources::Resources;
 
 pub use cmap::CMap;
 pub use predefined::Predefined;
+#[cfg(test)]
+pub use subset::box_ttf;
+pub use subset::{load_cjk_font, subset_ttf, SubsetFont};
 pub use ttf::{minimal_ttf, FontCmap};
 
 use encoding::{glyph_name_to_unicode, BaseEncoding, SimpleEncoding};
