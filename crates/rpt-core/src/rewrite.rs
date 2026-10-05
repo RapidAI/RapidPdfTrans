@@ -213,7 +213,7 @@ pub fn rewrite_translation(
         let chars = cover_with_fallbacks(
             planned
                 .iter()
-                .flat_map(|(_, text)| text.chars())
+                .flat_map(|(_, text)| text.chars().chain(fullwidth_digit_requests(text)))
                 .chain(toc_chars.chars()),
         );
         if let Some(font) = subset_ttf(&font_bytes, &chars) {
@@ -267,7 +267,7 @@ pub fn rewrite_translation(
             let chars = cover_with_fallbacks(
                 group
                     .iter()
-                    .flat_map(|(_, text)| text.chars())
+                    .flat_map(|(_, text)| text.chars().chain(fullwidth_digit_requests(text)))
                     .chain(toc_chars.chars()),
             );
             let Some(font) = subset_for_style(
@@ -857,10 +857,16 @@ fn commit_toc_operators(
                     .any(|(_, font)| glyph_chars_covered(glyph, font))
             })
         });
-        let unsafe_ink = !toc_ok
-            || ids
-                .iter()
-                .any(|id| !live.contains(id) && !toc_redraw.contains(id));
+        // A space between the leader dots and the page number is not a segment.
+        // Blanking it with the operator does not drop visible text.
+        let ignorable = |id: &u32| {
+            toc_redraw.contains(id)
+                || extraction
+                    .glyphs
+                    .get(by_id[id])
+                    .is_some_and(|glyph| glyph.unicode.trim().is_empty())
+        };
+        let unsafe_ink = !toc_ok || ids.iter().any(|id| !live.contains(id) && !ignorable(id));
         if unsafe_ink {
             blocked.extend(live);
         }
@@ -2169,6 +2175,21 @@ fn fullwidth_han_digits(text: &str, supers: &[bool], font: &SubsetFont) -> (Stri
         mask.push(sup);
     }
     (out, mask)
+}
+
+/// Fullwidth digits to embed so `第4章` can be drawn at body size.
+fn fullwidth_digit_requests(text: &str) -> Vec<char> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    for (index, ch) in chars.iter().enumerate() {
+        if !ch.is_ascii_digit() || !digit_touches_han(&chars, index) {
+            continue;
+        }
+        if let Some(full) = char::from_u32(0xFF10 + (*ch as u32 - '0' as u32)) {
+            out.push(full);
+        }
+    }
+    out
 }
 
 fn digit_touches_han(chars: &[char], index: usize) -> bool {
