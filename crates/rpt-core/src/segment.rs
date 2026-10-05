@@ -1626,6 +1626,11 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if upper.page != lower.page || upper.toc || lower.toc {
         return false;
     }
+    // A detailed-contents line already holds several entries (`83 Generating`).
+    // Joining the wrap makes one block the Chinese leading cannot fit.
+    if inline_contents_entry(&upper.text) || inline_contents_entry(&lower.text) {
+        return false;
+    }
     // A display formula keeps its whole segment. Joining it onto the prose
     // around it would leave that prose untranslated. A times sign or a
     // decimal point in an otherwise ordinary sentence does not.
@@ -1873,6 +1878,18 @@ fn hyphen_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
         && line.left - prev.left <= 36.0
         && prev.y > line.y
         && prev.y - line.y < prev.size.max(line.size).max(1.0) * 1.6
+}
+
+/// `83 Generating` on one baseline is the next contents entry, not a sentence.
+/// A bare page number only: `1:` and `(3)` stay with the prose around them.
+fn inline_contents_entry(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        (1..=3).contains(&pair[0].len())
+            && pair[0].bytes().all(|byte| byte.is_ascii_digit())
+            && pair[1].chars().count() >= 3
+            && pair[1].starts_with(|ch: char| ch.is_ascii_uppercase())
+    })
 }
 
 fn toc_entry_boundary(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
@@ -2205,9 +2222,9 @@ mod tests {
         let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
         assert!(!texts.contains(&"client 83 results 83"), "{texts:?}");
         assert!(
-            texts
-                .iter()
-                .any(|text| text.contains("client") && text.contains("Generating")),
+            texts.iter().any(|text| {
+                text.contains("client") && text.contains("Generating") && !text.contains("Scraping")
+            }),
             "{texts:?}"
         );
     }
