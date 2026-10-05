@@ -232,8 +232,6 @@ impl TranslateOptions {
             opts.output_mode = OutputMode::parse(&mode, layout.as_deref())?;
         } else if value.get("bilingual").and_then(|v| v.as_bool()) == Some(true) {
             opts.output_mode = OutputMode::parse("bilingual", layout.as_deref())?;
-        } else if let Some(layout) = layout {
-            opts.output_mode = OutputMode::parse("bilingual", Some(&layout))?;
         }
         opts.glossary = parse_glossary(value.get("glossary"));
         if opts.batch_size == 0 {
@@ -917,6 +915,19 @@ mod tests {
             OutputMode::Bilingual(BilingualLayout::SideBySide)
         );
         assert!(TranslateOptions::from_json(r#"{"output_mode":"nope"}"#).is_err());
+        assert_eq!(TranslateOptions::default().output_mode, OutputMode::Replace);
+        assert_eq!(
+            TranslateOptions::from_json("{}").unwrap().0.output_mode,
+            OutputMode::Replace
+        );
+        assert_eq!(
+            TranslateOptions::from_json(r#"{"layout":"side-by-side"}"#)
+                .unwrap()
+                .0
+                .output_mode,
+            OutputMode::Replace,
+            "a layout without bilingual:true stays pure translation"
+        );
     }
 
     #[test]
