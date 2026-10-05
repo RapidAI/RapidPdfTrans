@@ -12,8 +12,14 @@ pub enum Error {
     MissingGlyph(u32),
     #[error("glyph {0} already has a final disposition ({1})")]
     AlreadyFinal(u32, String),
-    #[error("coverage incomplete: {unresolved} glyph(s) have no final state")]
-    CoverageIncomplete { unresolved: usize, ids: Vec<u32> },
+    #[error(
+        "coverage incomplete: {unresolved} glyphs unresolved, {english_body} left in an English body paragraph"
+    )]
+    CoverageIncomplete {
+        unresolved: usize,
+        english_body: usize,
+        ids: Vec<u32>,
+    },
     #[error("translation failed: {0}")]
     Translate(String),
     #[error("{0}")]

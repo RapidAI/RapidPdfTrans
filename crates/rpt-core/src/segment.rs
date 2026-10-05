@@ -174,6 +174,9 @@ struct VisualLine<'a> {
     right: f32,
     size: f32,
     font: String,
+    /// A contents row. Its page number and leader dots stay in place, and it
+    /// does not join the next row.
+    toc: bool,
 }
 
 fn assemble(
@@ -184,7 +187,8 @@ fn assemble(
 ) -> Segmentation {
     let mut lines: Vec<VisualLine> = raw.into_iter().map(visual_line).collect();
     attach_markers(&mut lines);
-    let mut kept = interior_glyphs(&lines, flags);
+    let mut kept = detach_toc_marks(&mut lines);
+    kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
     kept.extend(margin_stamps(&lines));
     let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
@@ -268,7 +272,160 @@ fn visual_line(glyphs: Vec<&Glyph>) -> VisualLine<'_> {
         size,
         font,
         glyphs,
+        toc: false,
     }
+}
+
+/// A contents row is `title | leaders | page`. The leaders and the page
+/// number stay on their original baselines. Each title between page numbers
+/// is its own line, so a later rewrite cannot pull the next entry across.
+fn detach_toc_marks(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
+    let mut kept = Vec::new();
+    let mut expanded = Vec::with_capacity(lines.len());
+    for line in lines.drain(..) {
+        let marks = toc_mark_glyphs(&line);
+        if marks.is_empty() {
+            expanded.push(line);
+            continue;
+        }
+        let mark_ids: std::collections::HashSet<u32> = marks.iter().copied().collect();
+        for id in &marks {
+            kept.push((*id, "toc".into()));
+        }
+        let mut ordered = line.glyphs.clone();
+        ordered.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
+        let mut title: Vec<&Glyph> = Vec::new();
+        for glyph in ordered {
+            if mark_ids.contains(&glyph.id) {
+                push_toc_title(&mut expanded, &mut title);
+            } else {
+                title.push(glyph);
+            }
+        }
+        push_toc_title(&mut expanded, &mut title);
+    }
+    *lines = expanded;
+    kept
+}
+
+fn push_toc_title<'a>(expanded: &mut Vec<VisualLine<'a>>, title: &mut Vec<&'a Glyph>) {
+    if title.is_empty() {
+        return;
+    }
+    let mut part = visual_line(std::mem::take(title));
+    part.toc = true;
+    expanded.push(part);
+}
+
+fn toc_mark_glyphs(line: &VisualLine<'_>) -> Vec<u32> {
+    let tokens = line_tokens(&line.glyphs, line.size);
+    let mut keep = Vec::new();
+    for (index, token) in tokens.iter().enumerate().skip(1) {
+        if !is_toc_page_token(&token.text) {
+            continue;
+        }
+        let prev = &tokens[index - 1];
+        let gap = token.left - prev.right;
+        let leaders = is_leader_text(&prev.text);
+        if !leaders && gap < line.size * 0.8 {
+            continue;
+        }
+        if leaders {
+            keep.extend(prev.ids.iter().copied());
+        }
+        keep.extend(token.ids.iter().copied());
+    }
+    keep
+}
+
+struct LineToken {
+    ids: Vec<u32>,
+    left: f32,
+    right: f32,
+    text: String,
+}
+
+fn line_tokens(glyphs: &[&Glyph], size: f32) -> Vec<LineToken> {
+    let mut ordered: Vec<&Glyph> = glyphs.to_vec();
+    ordered.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
+    let mut tokens = Vec::new();
+    let mut current: Vec<&Glyph> = Vec::new();
+    for glyph in ordered {
+        if let Some(prev) = current.last() {
+            if glyph_left(glyph) - glyph_right(prev) > size * 0.45 {
+                tokens.push(token_of(std::mem::take(&mut current)));
+            }
+        }
+        current.push(glyph);
+    }
+    if !current.is_empty() {
+        tokens.push(token_of(current));
+    }
+    merge_leader_tokens(tokens)
+}
+
+fn token_of(glyphs: Vec<&Glyph>) -> LineToken {
+    LineToken {
+        left: glyphs
+            .iter()
+            .map(|glyph| glyph_left(glyph))
+            .fold(f32::MAX, f32::min),
+        right: glyphs
+            .iter()
+            .map(|glyph| glyph_right(glyph))
+            .fold(0.0, f32::max),
+        text: glyphs.iter().map(|glyph| glyph.unicode.as_str()).collect(),
+        ids: glyphs.iter().map(|glyph| glyph.id).collect(),
+    }
+}
+
+fn merge_leader_tokens(tokens: Vec<LineToken>) -> Vec<LineToken> {
+    let mut merged: Vec<LineToken> = Vec::new();
+    for token in tokens {
+        if is_leader_text(&token.text) {
+            if let Some(prev) = merged.last_mut() {
+                if is_leader_text(&prev.text) && token.left - prev.right < 14.0 {
+                    prev.right = token.right;
+                    prev.text.push_str(&token.text);
+                    prev.ids.extend(token.ids);
+                    continue;
+                }
+            }
+        }
+        merged.push(token);
+    }
+    merged
+}
+
+fn is_leader_text(text: &str) -> bool {
+    let dots = text.chars().filter(|ch| is_leader_dot(*ch)).count();
+    dots >= 4
+        && text
+            .chars()
+            .all(|ch| is_leader_dot(ch) || ch.is_whitespace())
+}
+
+fn is_leader_dot(ch: char) -> bool {
+    matches!(ch, '.' | '·' | '…' | '•' | '⋅' | '‧' | '․')
+}
+
+fn is_toc_page_token(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if text.len() <= 3 && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return true;
+    }
+    text.chars().count() >= 2 && is_roman_numeral(text)
+}
+
+fn glyph_left(glyph: &Glyph) -> f32 {
+    glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2])
+}
+
+fn glyph_right(glyph: &Glyph) -> f32 {
+    glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4])
 }
 
 fn line_bounds(glyphs: &[&Glyph]) -> Option<(f32, f32, f32, f32)> {
@@ -1332,7 +1489,7 @@ fn column_anchor(column: &[VisualLine<'_>], page: u32) -> Option<f32> {
 }
 
 fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
-    if upper.page != lower.page {
+    if upper.page != lower.page || upper.toc || lower.toc {
         return false;
     }
     // A display formula keeps its whole segment. Joining it onto the prose
@@ -2774,6 +2931,97 @@ mod tests {
             .map(|seg| seg.text)
             .collect();
         assert_eq!(texts, ["Executing prompts programmatically 27"]);
+    }
+
+    #[test]
+    fn a_contents_row_keeps_its_leaders_and_page_number() {
+        let glyphs = vec![
+            block(
+                0,
+                90.0,
+                400.0,
+                170.0,
+                10.0,
+                "PART 1 GETTING STARTED WITH LLMS",
+            ),
+            block(1, 272.0, 400.0, 140.0, 10.0, "...................."),
+            block(2, 424.0, 400.0, 12.0, 10.0, "1"),
+            block(
+                3,
+                153.0,
+                370.0,
+                200.0,
+                10.0,
+                "Introduction to AI agents and applications",
+            ),
+            block(4, 365.0, 370.0, 12.0, 10.0, "3"),
+            block(
+                5,
+                153.0,
+                356.0,
+                190.0,
+                10.0,
+                "Executing prompts programmatically",
+            ),
+            block(6, 355.0, 356.0, 16.0, 10.0, "27"),
+            block(
+                7,
+                113.0,
+                200.0,
+                170.0,
+                10.0,
+                "appendix A Trying out LangChain",
+            ),
+            block(8, 295.0, 200.0, 18.0, 10.0, "351"),
+            block(
+                9,
+                113.0,
+                186.0,
+                200.0,
+                10.0,
+                "appendix B Setting up a Jupyter Notebook environment",
+            ),
+            block(10, 325.0, 186.0, 18.0, 10.0, "357"),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.clone()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("GETTING STARTED") && !text.contains('.')),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Introduction to AI") && !text.contains('3')),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("Executing prompts")
+                && !text.contains("Introduction")
+                && !text.contains("27")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("appendix A") && !text.contains("351")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("appendix B") && !text.contains("appendix A")),
+            "{texts:?}"
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        for id in [1, 2, 4, 6, 8, 10] {
+            assert!(
+                kept.contains(&id),
+                "page or leaders {id} stayed in a segment: {texts:?} {kept:?}"
+            );
+        }
     }
 
     #[test]

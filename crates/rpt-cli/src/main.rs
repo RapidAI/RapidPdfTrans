@@ -281,10 +281,11 @@ fn run_translate(
         ) {
             return fail(err);
         }
-        if let Err(err) = extraction.assert_complete() {
+        let coverage_err = extraction.assert_complete().err();
+        if let Err(err) = doc.save_file(output) {
             return fail(err);
         }
-        if let Err(err) = doc.save_file(output) {
+        if let Some(err) = coverage_err {
             return fail(err);
         }
     }
@@ -314,10 +315,11 @@ fn run_translate(
         ) {
             return fail(err);
         }
-        if let Err(err) = bilingual_extraction.assert_complete() {
+        let coverage_err = bilingual_extraction.assert_complete().err();
+        if let Err(err) = copy.save_file(bilingual_output) {
             return fail(err);
         }
-        if let Err(err) = copy.save_file(bilingual_output) {
+        if let Some(err) = coverage_err {
             return fail(err);
         }
     }

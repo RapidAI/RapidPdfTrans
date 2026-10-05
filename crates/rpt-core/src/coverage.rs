@@ -13,6 +13,10 @@ pub struct CoverageReport {
     pub rewritten: usize,
     pub kept_original: usize,
     pub non_text: usize,
+    /// Glyphs left in English because a body paragraph was not painted.
+    /// A report with any of these is not complete.
+    #[serde(default)]
+    pub english_body: usize,
     pub unresolved_ids: Vec<u32>,
     pub complete: bool,
 }
@@ -23,6 +27,7 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
     let mut rewritten = 0;
     let mut kept = 0;
     let mut non_text = 0;
+    let mut english_body = 0;
     let mut unresolved_ids = Vec::new();
     for g in glyphs {
         match &g.disposition {
@@ -35,7 +40,13 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
                 unresolved_ids.push(g.id);
             }
             Disposition::Rewritten { .. } => rewritten += 1,
-            Disposition::KeptOriginal { .. } => kept += 1,
+            Disposition::KeptOriginal { reason } => {
+                kept += 1;
+                if failed_body_reason(reason) && glyph_is_latin_letter(g) {
+                    english_body += 1;
+                    unresolved_ids.push(g.id);
+                }
+            }
             Disposition::NonText { .. } => non_text += 1,
         }
     }
@@ -47,9 +58,21 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
         rewritten,
         kept_original: kept,
         non_text,
+        english_body,
         unresolved_ids,
         complete,
     }
+}
+
+fn failed_body_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "missing-glyph" | "overflow" | "untranslated" | "no-font" | "no-stream" | "english-body"
+    )
+}
+
+fn glyph_is_latin_letter(glyph: &Glyph) -> bool {
+    glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
 pub fn assert_complete(glyphs: &[Glyph]) -> Result<()> {
@@ -59,6 +82,7 @@ pub fn assert_complete(glyphs: &[Glyph]) -> Result<()> {
     } else {
         Err(Error::CoverageIncomplete {
             unresolved: rep.unresolved_ids.len(),
+            english_body: rep.english_body,
             ids: rep.unresolved_ids,
         })
     }
@@ -134,6 +158,20 @@ mod tests {
         .unwrap();
         assert!(report(&glyphs).complete);
         assert!(assert_complete(&glyphs).is_ok());
+        let mut failed = vec![glyph(2)];
+        failed[0].unicode = "Part".into();
+        mark(
+            &mut failed,
+            2,
+            Disposition::KeptOriginal {
+                reason: "missing-glyph".into(),
+            },
+        )
+        .unwrap();
+        let failed_report = report(&failed);
+        assert!(!failed_report.complete);
+        assert_eq!(failed_report.english_body, 1);
+        assert!(assert_complete(&failed).is_err());
         let err = mark(
             &mut glyphs,
             0,

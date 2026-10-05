@@ -113,6 +113,12 @@ pub fn rewrite_translation(
 
     let mut planned: Vec<(usize, String)> = Vec::new();
     let owners = operator_owners(&extraction.glyphs);
+    // An identity pass echoes every segment. Leftover English is a QA failure
+    // only when this job actually produced Chinese for some other segment.
+    let job_translates = report
+        .segments
+        .iter()
+        .any(|segment| segment.translated.chars().any(is_han_char));
     for (index, segment) in report.segments.iter().enumerate() {
         if segment.glyph_ids.is_empty() {
             continue;
@@ -158,8 +164,13 @@ pub fn rewrite_translation(
             continue;
         }
         if segment.translated == segment.source {
+            let reason = if job_translates && english_body_source(&segment.source) {
+                "english-body"
+            } else {
+                "unchanged"
+            };
             for id in &segment.glyph_ids {
-                keep.insert(*id, "unchanged".into());
+                keep.insert(*id, reason.into());
             }
             continue;
         }
@@ -335,8 +346,13 @@ pub fn rewrite_translation(
         .filter(|glyph| !glyph.disposition.is_final())
         .map(|glyph| glyph.id)
         .collect();
+    let leftover_reason = if job_translates {
+        "untranslated"
+    } else {
+        "kept"
+    };
     for id in leftover {
-        extraction.mark_kept(id, "untranslated")?;
+        extraction.mark_kept(id, leftover_reason)?;
     }
     let _ = spans;
     if let (Some(layout), Some(original)) = (compose, original) {
@@ -967,7 +983,9 @@ fn layout_segment(
         return None;
     }
     let covered = substitute_covered(text, font);
-    let text = covered.as_str();
+    let raw_mask = superscript_mask(&covered);
+    let (normalized, body_mask) = fullwidth_han_digits(&covered, &raw_mask, font);
+    let text = normalized.as_str();
     if text
         .chars()
         .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
@@ -1052,10 +1070,11 @@ fn layout_segment(
     )?;
     let first_width = (width - indent).max(size * 0.5);
     let sup = superscript_metrics(glyphs);
-    let mask = sup
-        .as_ref()
-        .map(|_| superscript_mask(text))
-        .unwrap_or_default();
+    let mask = if sup.is_some() {
+        body_mask
+    } else {
+        vec![false; text.chars().count()]
+    };
     let line_masks = split_superscripts(text, &lines, &mask);
     let mut origin_y = top_y;
     if bilingual {
@@ -1815,7 +1834,9 @@ fn superscript_mask(text: &str) -> Vec<bool> {
             && prev.is_none_or(|ch| {
                 ch.is_whitespace() || matches!(ch, ',' | '，' | ';' | '；' | '*' | '∗')
             });
-        if after_name || before_name {
+        // `第4章` is a body phrase. `张轩1` is an author mark: nothing follows the digit.
+        let followed_by_han = chars.get(index).copied().is_some_and(is_han_char);
+        if (after_name && !followed_by_han) || before_name {
             for flag in mask.iter_mut().take(index).skip(start) {
                 *flag = true;
             }
@@ -1863,6 +1884,57 @@ fn superscript_mask(text: &str) -> Vec<bool> {
 
 fn is_mark_star(ch: char) -> bool {
     matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆')
+}
+
+fn english_body_source(text: &str) -> bool {
+    let latin = text.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    if latin < 40 || text.chars().any(is_han_char) {
+        return false;
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    !words.is_empty()
+        && !words.iter().all(|word| {
+            word.starts_with("http://") || word.starts_with("https://") || word.contains('@')
+        })
+}
+
+fn is_han_char(ch: char) -> bool {
+    matches!(ch, '\u{3400}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
+}
+
+/// A digit sitting against a Han character (`第4章`) uses the fullwidth digit
+/// so it matches the body size. Author marks (`张1`) stay ASCII and can rise.
+fn fullwidth_han_digits(text: &str, supers: &[bool], font: &SubsetFont) -> (String, Vec<bool>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut mask = Vec::with_capacity(chars.len());
+    for (index, ch) in chars.iter().enumerate() {
+        let sup = supers.get(index).copied().unwrap_or(false);
+        if !sup && ch.is_ascii_digit() && digit_touches_han(&chars, index) {
+            if let Some(full) = char::from_u32(0xFF10 + (*ch as u32 - '0' as u32)) {
+                if font.glyphs.contains_key(&(full as u32)) {
+                    out.push(full);
+                    mask.push(false);
+                    continue;
+                }
+            }
+        }
+        out.push(*ch);
+        mask.push(sup);
+    }
+    (out, mask)
+}
+
+fn digit_touches_han(chars: &[char], index: usize) -> bool {
+    let prev = (0..index)
+        .rev()
+        .map(|slot| chars[slot])
+        .find(|ch| !ch.is_whitespace());
+    let next = chars[index + 1..]
+        .iter()
+        .copied()
+        .find(|ch| !ch.is_whitespace());
+    prev.is_some_and(is_han_char) || next.is_some_and(is_han_char)
 }
 
 fn split_superscripts(text: &str, lines: &[String], mask: &[bool]) -> Vec<Vec<bool>> {
@@ -2419,6 +2491,8 @@ mod tests {
         assert!(both[0] && both[2], "{both:?}");
         let cjk = superscript_mask("张轩1 1新加坡");
         assert!(cjk[2] && cjk[4], "{cjk:?}");
+        let chapter = superscript_mask("第4章从线性链过渡");
+        assert!(chapter.iter().all(|flag| !flag), "{chapter:?}");
         assert!(superscript_mask("Anno 2024").iter().all(|flag| !flag));
         assert!(superscript_mask("9.2% and 16K").iter().all(|flag| !flag));
         let star = superscript_mask("*Equal Contribution");
@@ -2613,6 +2687,27 @@ mod tests {
         assert_eq!(substitute_covered("（\u{27a5}）", &font), "（→）");
     }
 
+    #[test]
+    fn a_chapter_number_between_han_is_fullwidth_and_not_a_superscript() {
+        let mut glyphs = HashMap::new();
+        for (index, ch) in "第４章".chars().enumerate() {
+            glyphs.insert(ch as u32, (index as u16, 1000));
+        }
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        };
+        let mask = superscript_mask("第4章构建");
+        let (text, flags) = fullwidth_han_digits("第4章构建", &mask, &font);
+        assert_eq!(text, "第４章构建");
+        assert!(flags.iter().all(|flag| !flag), "{flags:?}");
+        let author = superscript_mask("张轩1");
+        let (name, name_flags) = fullwidth_han_digits("张轩1", &author, &font);
+        assert_eq!(name, "张轩1");
+        assert!(name_flags[2], "{name_flags:?}");
+    }
+
     struct MapHello;
     impl Translator for MapHello {
         fn complete(&self, _system: &str, user: &str) -> Result<String> {
@@ -2776,6 +2871,140 @@ mod tests {
         assert!(text.contains("AB"), "{text}");
         assert!(!text.contains("Hello"), "{text}");
         assert!(text.contains("References"), "{text}");
+    }
+
+    fn prose_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let body = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", body);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let content = b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (Hello) Tj 1 0 0 1 72 660 Tm (RAG) Tj 1 0 0 1 72 600 Tm (This paragraph explains how agents plan work across tools and should become Chinese.) Tj ET".to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn prose_report(extraction: &Extraction, translate_hello: bool) -> TranslateReport {
+        let segments = crate::segment::segment_glyphs(&extraction.glyphs)
+            .into_iter()
+            .map(|seg| {
+                let translated = if translate_hello && seg.text.contains("Hello") {
+                    "甲".into()
+                } else {
+                    seg.text.clone()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids,
+                    source: seg.text,
+                    translated,
+                }
+            })
+            .collect();
+        TranslateReport {
+            segments,
+            calls: 0,
+            cache_hits: 0,
+        }
+    }
+
+    #[test]
+    fn an_echoed_english_body_fails_when_other_prose_was_translated() {
+        let bytes = prose_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let report = prose_report(&extraction, true);
+        let font = box_ttf(&[b'A' as u32, b'B' as u32]);
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let coverage = extraction.coverage_report();
+        assert!(!coverage.complete, "{coverage:?}");
+        assert!(coverage.english_body > 0, "{coverage:?}");
+        let echoed = extraction.glyphs.iter().any(|glyph| {
+            glyph.unicode == "T"
+                && matches!(
+                    &glyph.disposition,
+                    Disposition::KeptOriginal { reason } if reason == "english-body"
+                )
+        });
+        assert!(echoed, "the body paragraph should be flagged english-body");
+        let proper = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "G")
+            .expect("RAG");
+        assert!(
+            matches!(&proper.disposition, Disposition::KeptOriginal { reason } if reason == "unchanged"),
+            "a short proper noun stays unchanged: {:?}",
+            proper.disposition
+        );
+    }
+
+    #[test]
+    fn an_identity_echo_of_english_prose_stays_complete() {
+        let bytes = prose_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let report = prose_report(&extraction, false);
+        let font = box_ttf(&[b'A' as u32, b'B' as u32]);
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            extraction.assert_complete().is_ok(),
+            "{:?}",
+            extraction.coverage_report()
+        );
+        assert!(extraction.glyphs.iter().all(|glyph| {
+            !matches!(
+                &glyph.disposition,
+                Disposition::KeptOriginal { reason } if reason == "english-body"
+            )
+        }));
     }
 
     #[test]
