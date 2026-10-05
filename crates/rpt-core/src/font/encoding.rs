@@ -68,6 +68,12 @@ impl SimpleEncoding {
         self.codes[code as usize] = glyph_name_to_unicode(glyph_name);
     }
 
+    pub fn set_mapped(&mut self, code: u8, text: impl Into<String>) {
+        if let Some(slot) = self.codes.get_mut(code as usize) {
+            *slot = Some(text.into());
+        }
+    }
+
     pub fn map(&self, code: u8) -> Option<String> {
         self.codes.get(code as usize).and_then(|c| c.clone())
     }

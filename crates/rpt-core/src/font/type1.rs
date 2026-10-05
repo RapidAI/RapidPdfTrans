@@ -7,6 +7,7 @@
 //! unmapped and formula text never reaches the translator.
 
 use super::encoding::{glyph_name_to_unicode, BaseEncoding, SimpleEncoding};
+use super::texmath::tex_math_name;
 
 pub fn apply_type1_encoding(simple: &mut SimpleEncoding, font_program: &[u8]) {
     let text = cleartext(font_program);
@@ -18,8 +19,13 @@ pub fn apply_type1_encoding(simple: &mut SimpleEncoding, font_program: &[u8]) {
         return;
     }
     for (code, name) in pairs {
-        if simple.map(code).is_none() && glyph_name_to_unicode(&name).is_some() {
+        if simple.map(code).is_some() {
+            continue;
+        }
+        if glyph_name_to_unicode(&name).is_some() {
             simple.apply_difference(code, &name);
+        } else if let Some(text) = tex_math_name(&name) {
+            simple.set_mapped(code, text);
         }
     }
 }

@@ -14,6 +14,7 @@ mod cmap;
 mod encoding;
 mod encoding_tables;
 mod predefined;
+mod texmath;
 mod ttf;
 mod type1;
 mod widths;
