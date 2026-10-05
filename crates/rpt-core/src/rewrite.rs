@@ -813,18 +813,23 @@ fn toc_companion_ids(
     if foreign.is_empty() {
         return None;
     }
-    let toc = foreign.iter().all(|id| {
-        extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
-            matches!(
-                &glyph.disposition,
-                Disposition::KeptOriginal { reason } if reason == "toc"
-            )
-        })
-    });
-    if toc {
-        Some(foreign)
-    } else {
+    let mut companions = Vec::new();
+    for id in &foreign {
+        let glyph = extraction.glyphs.get(by_id[id])?;
+        let toc = matches!(
+            &glyph.disposition,
+            Disposition::KeptOriginal { reason } if reason == "toc"
+        );
+        if toc {
+            companions.push(*id);
+        } else if !glyph.unicode.trim().is_empty() {
+            return None;
+        }
+    }
+    if companions.is_empty() {
         None
+    } else {
+        Some(companions)
     }
 }
 
@@ -1026,6 +1031,18 @@ fn blank_operators(doc: &mut Document, spans: &[Span]) -> std::result::Result<()
     Ok(())
 }
 
+fn glyph_span_width(glyphs: &[&Glyph]) -> f32 {
+    let left = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min);
+    let right = glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]))
+        .fold(left, f32::max);
+    right - left
+}
+
 fn is_folio_segment(glyphs: &[&Glyph]) -> bool {
     if glyphs.is_empty() {
         return false;
@@ -1093,6 +1110,10 @@ fn place_segments(
                     // `xvi` translated to 十六 does not fit the folio box.
                     // Leave the printed page number.
                     "folio"
+                } else if glyph_span_width(&glyphs) <= 44.0 {
+                    // A contents crumb narrower than the translation. Leaving
+                    // the English is not an unfinished body paragraph.
+                    "tight"
                 } else {
                     "overflow"
                 };
@@ -4220,7 +4241,7 @@ mod tests {
         let mut resources = lopdf::Dictionary::new();
         resources.set("Font", fonts);
         let content =
-            b"BT /F1 12 Tf 72 700 Td [(Introduction to AI agents) -4000 (........) -200 (3)] TJ ET"
+            b"BT /F1 12 Tf 72 700 Td [(Introduction to AI agents) -4000 (........) -80 ( ) -80 (3)] TJ ET"
                 .to_vec();
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));
         let page = doc.add_object(dictionary! {
