@@ -169,6 +169,16 @@ fn http_status_retryable(err: &Error) -> bool {
     ["500", "502", "503", "429"]
         .iter()
         .any(|code| msg.contains(&format!("HTTP status {code}")))
+        || connection_dropped(&msg)
+}
+
+/// A gateway that closes the socket mid-response.
+pub(crate) fn connection_dropped(msg: &str) -> bool {
+    let msg = msg.to_ascii_lowercase();
+    msg.contains("unexpected end of file")
+        || msg.contains("connection reset")
+        || msg.contains("connection aborted")
+        || msg.contains("incomplete message")
 }
 
 pub fn scrub_secrets(message: &str, secret: &str) -> String {

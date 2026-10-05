@@ -761,6 +761,7 @@ fn recoverable(err: &Error) -> bool {
         || msg.contains("http status 502")
         || msg.contains("http status 503")
         || msg.contains("http status 429")
+        || llm::connection_dropped(&msg)
 }
 
 fn translate_batch_once(
@@ -1088,6 +1089,22 @@ mod tests {
         assert!(texts.iter().any(|text| text.contains("Alpha")), "{texts:?}");
         assert!(texts.iter().any(|text| text.contains("Beta")), "{texts:?}");
         assert!(report.calls >= 3, "calls={}", report.calls);
+    }
+
+    #[test]
+    fn a_dropped_connection_keeps_the_source_and_does_not_abort() {
+        let mut ex = extraction_from_lines(&["Alpha one", "Beta two"]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &AlwaysEof).unwrap();
+        assert_eq!(report.segments[0].translated, "Alpha one");
+        assert_eq!(report.segments[1].translated, "Beta two");
+    }
+
+    struct AlwaysEof;
+    impl Translator for AlwaysEof {
+        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            Err(Error::Translate("io: unexpected end of file".into()))
+        }
     }
 
     #[test]
