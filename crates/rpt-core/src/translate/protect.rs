@@ -466,6 +466,8 @@ fn match_url(input: &str, i: usize) -> Option<usize> {
         8
     } else if rest.starts_with("http://") {
         7
+    } else if rest.starts_with("www.") {
+        4
     } else {
         return None;
     };
@@ -623,6 +625,10 @@ mod tests {
         assert!(!shielded.text.contains("{eq:1}"));
         assert!(shielded.text.contains('⟦'));
         assert_eq!(restore(&shielded.text, &shielded.slots).unwrap(), src);
+        let www = "See www.manning.com/books/ai-agents-and-applications.";
+        let shielded = shield(www, &[]);
+        assert!(!shielded.text.contains("www.manning"));
+        assert_eq!(restore(&shielded.text, &shielded.slots).unwrap(), www);
     }
 
     #[test]

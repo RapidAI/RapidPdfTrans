@@ -1488,15 +1488,16 @@ fn sentence_end(text: &str) -> bool {
     t.ends_with(['.', '!', '?', '。', '！', '？']) && t.len() > 1
 }
 
-/// A wrapped URL continues on the next line (`and` + `-applications`, or
-/// `manning` + `.com/...`). The join keeps the hyphen so the shield sees one token.
+/// A wrapped URL continues on the next line (`and` + `-applications`,
+/// `manning` + `.com/...`, or `www.../ai-agents` + `-and-applications`).
+/// The join keeps the hyphen so the shield sees one token.
 fn url_continues(buf: &str, next: &str) -> bool {
     let buf = buf.trim_end();
     let next = next.trim_start();
     let Some(token) = buf.split_whitespace().last() else {
         return false;
     };
-    if !(token.starts_with("https://") || token.starts_with("http://")) {
+    if !looks_like_url_token(token) {
         return false;
     }
     let mut chars = next.chars();
@@ -1545,7 +1546,14 @@ fn is_hard_prefix(word: &str) -> bool {
 fn line_ends_with_url(text: &str) -> bool {
     text.split_whitespace()
         .last()
-        .is_some_and(|token| token.starts_with("https://") || token.starts_with("http://"))
+        .is_some_and(looks_like_url_token)
+}
+
+fn looks_like_url_token(token: &str) -> bool {
+    if token.starts_with("https://") || token.starts_with("http://") || token.starts_with("www.") {
+        return true;
+    }
+    token.contains('.') && token.contains('/') && !token.contains('@')
 }
 
 fn is_hyphen_suffix(word: &str) -> bool {
@@ -2922,6 +2930,22 @@ mod tests {
                 10.0,
                 ".com/book/ai-agents-and-applications/discussion.",
             ),
+            block(
+                4,
+                72.0,
+                360.0,
+                340.0,
+                10.0,
+                "from Manning at www.manning.com/books/ai-agents",
+            ),
+            block(
+                5,
+                72.0,
+                347.0,
+                180.0,
+                10.0,
+                "-and-applications and mirrored",
+            ),
         ];
         let texts: Vec<_> = segment_glyphs(&glyphs)
             .iter()
@@ -2939,6 +2963,13 @@ mod tests {
                 text.contains(
                     "https://livebook.manning.com/book/ai-agents-and-applications/discussion",
                 )
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("www.manning.com/books/ai-agents-and-applications")
+                    && !text.contains("agents -")
             }),
             "{texts:?}"
         );

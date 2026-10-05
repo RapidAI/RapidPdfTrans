@@ -886,8 +886,45 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         '\u{2018}' | '\u{2019}' | '\u{201A}' => &['\''],
         '\u{201C}' | '\u{201D}' | '\u{201E}' => &['"'],
         '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2009}' => &[' '],
+        // FrameMaker dingbat bullets and the line-continuation arrow.
+        '\u{27A2}' | '\u{27A4}' | '\u{27A5}' | '\u{2794}' | '\u{279C}' | '\u{279E}' => &['→', '>'],
+        '\u{E000}'..='\u{F8FF}' => &['■', '•', '*'],
         _ => &[],
     }
+}
+
+/// Base letter for a precomposed Latin character the CJK face does not cover.
+/// `Jastrzębski` can then be drawn, instead of leaving the paragraph in English.
+fn latin_base(ch: char) -> Option<char> {
+    Some(match ch {
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' => 'A',
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => 'a',
+        'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => 'C',
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => 'c',
+        'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => 'E',
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
+        'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' | 'Ĭ' | 'Į' => 'I',
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' => 'i',
+        'Ñ' | 'Ń' | 'Ņ' | 'Ň' => 'N',
+        'ñ' | 'ń' | 'ņ' | 'ň' => 'n',
+        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ō' | 'Ŏ' | 'Ő' => 'O',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ō' | 'ŏ' | 'ő' => 'o',
+        'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' => 'U',
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
+        'Ý' | 'Ÿ' | 'Ŷ' => 'Y',
+        'ý' | 'ÿ' | 'ŷ' => 'y',
+        'Ś' | 'Ŝ' | 'Ş' | 'Š' => 'S',
+        'ś' | 'ŝ' | 'ş' | 'š' => 's',
+        'Ź' | 'Ż' | 'Ž' => 'Z',
+        'ź' | 'ż' | 'ž' => 'z',
+        'Ł' => 'L',
+        'ł' => 'l',
+        'Đ' => 'D',
+        'đ' => 'd',
+        'Ø' => 'O',
+        'ø' => 'o',
+        _ => return None,
+    })
 }
 
 fn substitute_covered(text: &str, font: &SubsetFont) -> String {
@@ -904,6 +941,12 @@ fn substitute_covered(text: &str, font: &SubsetFont) -> String {
         {
             out.push(alt);
             continue;
+        }
+        if let Some(base) = latin_base(ch) {
+            if font.glyphs.contains_key(&(base as u32)) {
+                out.push(base);
+                continue;
+            }
         }
         out.push(ch);
     }
@@ -2552,6 +2595,22 @@ mod tests {
         assert_eq!(substitute_covered("中∗", &subset), "中*");
         assert_eq!(substitute_covered("中†", &subset), "中†");
         assert!(cover_with_fallbacks("∗".chars()).contains(&('*' as u32)));
+    }
+
+    #[test]
+    fn a_missing_name_mark_or_bullet_uses_a_covered_stand_in() {
+        let mut glyphs = HashMap::new();
+        for (index, ch) in "中文e■→".chars().enumerate() {
+            glyphs.insert(ch as u32, (index as u16, 500));
+        }
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        };
+        assert_eq!(substitute_covered("中ę文", &font), "中e文");
+        assert_eq!(substitute_covered("\u{f0a1}中", &font), "■中");
+        assert_eq!(substitute_covered("（\u{27a5}）", &font), "（→）");
     }
 
     struct MapHello;
