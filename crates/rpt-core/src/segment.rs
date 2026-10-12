@@ -1674,7 +1674,9 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
                 let indented = line.left + 1.0 >= anchor;
                 distance <= 28.0
                     || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some())
-            }) || column.last().is_some_and(|prev| hyphen_pull(prev, &line))
+            }) || column
+                .last()
+                .is_some_and(|prev| hyphen_pull(prev, &line) || hanging_pull(prev, &line))
         });
         if let Some(slot) = slot {
             columns[slot].push(line);
@@ -1975,7 +1977,7 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
     if (upper.left - lower.left).abs() > 36.0 && !finishes_hyphen {
         return false;
     }
-    prose_continues(upper, lower)
+    prose_continues(upper, lower) || list_carries_over(prev, lower)
 }
 
 fn column_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
@@ -2040,6 +2042,34 @@ fn prose_continues(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
         return start.starts_with(|ch: char| ch.is_ascii_alphanumeric());
     }
     start.starts_with(|ch: char| ch.is_ascii_lowercase())
+}
+
+/// `construct LangChain` / `Expression Language` across a page. A new
+/// paragraph, or the next dash item, does not.
+fn list_carries_over(prev: &[VisualLine<'_>], lower: &VisualLine<'_>) -> bool {
+    let Some(upper) = prev.last() else {
+        return false;
+    };
+    if !prev.iter().any(|line| starts_with_list_marker(&line.text))
+        || starts_with_list_marker(&lower.text)
+    {
+        return false;
+    }
+    let tail = upper.text.trim_end();
+    if sentence_end(tail) || soft_hyphen_stem(tail).is_some() {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    if (upper.size - lower.size).abs() > size * 0.35 {
+        return false;
+    }
+    let body_left = prev.iter().map(|line| line.left).fold(f32::MAX, f32::min);
+    let shift = lower.left - body_left;
+    (-size..=size * 4.0).contains(&shift)
+        && lower
+            .text
+            .trim_start()
+            .starts_with(|ch: char| ch.is_ascii_alphabetic())
 }
 
 fn column_anchor(column: &[VisualLine<'_>], page: u32) -> Option<f32> {
@@ -2552,6 +2582,22 @@ fn is_hyphen_suffix(word: &str) -> bool {
         "red", "ies", "ability", "ibility", "ation", "ition", "ful", "less", "ship", "hood",
     ];
     SUFFIXES.contains(&word.as_str())
+}
+
+/// The body margin stays the column anchor, so a list continuation that
+/// sits one hanging step further right (`grounded systems.`) used to start
+/// a new column unless the line above ended in a hyphen.
+fn hanging_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
+    if prev.page != line.page {
+        return false;
+    }
+    let size = prev.size.max(line.size).max(1.0);
+    let dy = prev.y - line.y;
+    if dy < size * 0.7 || dy > size * 1.6 {
+        return false;
+    }
+    let shift = line.left - prev.left;
+    (-(size * 1.6)..=size * 2.8).contains(&shift)
 }
 
 /// A hanging indent that finishes `multi-` / `per-` belongs to that column
@@ -6113,6 +6159,152 @@ mod tests {
             texts.iter().any(|text| {
                 text.contains("Part 1") && text.contains("exploring") && text.contains("foundation")
             }),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_hanging_tail_stays_with_the_list_when_the_body_sets_the_margin() {
+        let mut id = 0u32;
+        let mut glyphs = Vec::new();
+        for (index, line) in [
+            "This book is divided into chapters and each part builds on the previous one.",
+            "You can read it from start to finish or focus on the sections you need most.",
+            "Cross references throughout the text will help you bridge any gaps today.",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            glyphs.extend(paint_word(
+                &mut id,
+                72.0,
+                520.0 - index as f32 * 14.0,
+                line,
+                "Times-Roman",
+            ));
+        }
+        glyphs.extend(paint_word(
+            &mut id,
+            100.0,
+            478.0,
+            "–Chapter 1 maps the landscape from summarization and",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            112.0,
+            464.0,
+            "semantic search to chatbots and then examines common chal-",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            112.0,
+            450.0,
+            "lenges. The pieces fit together and you will use the",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            112.0,
+            436.0,
+            "LangChain templates generate the prompts.",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            112.0,
+            422.0,
+            "grounded systems.",
+            "Times-Roman",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            100.0,
+            408.0,
+            "–Chapter 2 offers a separate introduction to prompting.",
+            "Times-Roman",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("Chapter 1")
+                    && text.contains("grounded systems")
+                    && text.contains("LangChain templates")
+                    && text.contains("challenges")
+                    && !text.contains("Chapter 2")
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Chapter 2") && !text.contains("grounded")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_list_item_continues_onto_the_next_page() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            100.0,
+            90.0,
+            "–Chapter 3 builds summarization chains and then you construct LangChain",
+            "Times-Roman",
+        );
+        glyphs.extend(paint_word(
+            &mut id,
+            112.0,
+            76.0,
+            "Expression Language pipelines that keep the key points",
+            "Times-Roman",
+        ));
+        for glyph in &mut glyphs {
+            glyph.page_index = 0;
+        }
+        let mut next = paint_word(
+            &mut id,
+            112.0,
+            700.0,
+            "Expression stays with the chapter that began on the previous page.",
+            "Times-Roman",
+        );
+        for glyph in &mut next {
+            glyph.page_index = 1;
+        }
+        glyphs.extend(next);
+        let mut chapter = paint_word(
+            &mut id,
+            100.0,
+            680.0,
+            "–Chapter 4 develops a research summarization engine for the web.",
+            "Times-Roman",
+        );
+        for glyph in &mut chapter {
+            glyph.page_index = 1;
+        }
+        glyphs.extend(chapter);
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("Chapter 3")
+                    && text.contains("previous page")
+                    && !text.contains("Chapter 4")
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Chapter 4") && !text.contains("Chapter 3")),
             "{texts:?}"
         );
     }

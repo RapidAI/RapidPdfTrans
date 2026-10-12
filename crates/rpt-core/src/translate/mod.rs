@@ -1014,6 +1014,28 @@ fn polish(items: Vec<(usize, String)>) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// The model sometimes drops a dingbat. The source marker stays in front.
+pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
+    if !crate::segment::starts_with_list_marker(source) {
+        return translated.to_string();
+    }
+    let translated_trim = translated.trim_start();
+    if translated_trim.starts_with('■')
+        || translated_trim.starts_with('●')
+        || crate::segment::starts_with_list_marker(translated_trim)
+    {
+        return translated.to_string();
+    }
+    let marker = source.trim_start().chars().next().unwrap_or('■');
+    let shown = if ('\u{F020}'..='\u{F0FF}').contains(&marker) {
+        '■'
+    } else {
+        marker
+    };
+    let lead = &translated[..translated.len() - translated_trim.len()];
+    format!("{lead}{shown} {translated_trim}")
+}
+
 /// A credit line whose personal name was translated. Role words stay in
 /// Chinese; the name is the original Latin (`Copy editor: Julie McNamee`).
 pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
@@ -1482,6 +1504,21 @@ mod tests {
         assert_eq!(
             restore_credit_names("Shelter Island, NY 11964", "谢尔特岛，纽约 11964"),
             "谢尔特岛，纽约 11964"
+        );
+    }
+
+    #[test]
+    fn a_dropped_list_marker_is_put_back() {
+        let source = "\u{f0a1}Part 3: Q&A chatbots (chapters 6-7)—This part shifts the focus";
+        let dropped = "第3部分：问答聊天机器人（第6–7章）——这一部分将重点转移";
+        assert_eq!(restore_list_marker(source, dropped), format!("■ {dropped}"));
+        assert_eq!(
+            restore_list_marker("–Chapter 1 maps the landscape", "第1章描绘了格局"),
+            "– 第1章描绘了格局"
+        );
+        assert_eq!(
+            restore_list_marker(source, "■ 第3部分：问答"),
+            "■ 第3部分：问答"
         );
     }
 

@@ -125,10 +125,11 @@ pub fn rewrite_translation(
         .segments
         .iter()
         .filter(|segment| {
-            let translated = crate::translate::restore_credit_names(
+            let translated = crate::translate::restore_list_marker(
                 &segment.source,
                 &crate::translate::localize_part_heading(&segment.translated),
             );
+            let translated = crate::translate::restore_credit_names(&segment.source, &translated);
             !segment.glyph_ids.is_empty()
                 && !segment.source.trim().is_empty()
                 && !translated.trim().is_empty()
@@ -204,10 +205,11 @@ pub fn rewrite_translation(
                 continue;
             }
         }
-        let translated = crate::translate::restore_credit_names(
+        let translated = crate::translate::restore_list_marker(
             &segment.source,
             &crate::translate::localize_part_heading(&segment.translated),
         );
+        let translated = crate::translate::restore_credit_names(&segment.source, &translated);
         if translated == segment.source {
             let reason = if job_translates && english_body_source(&segment.source) {
                 "english-body"
@@ -2573,7 +2575,18 @@ fn layout_across_pages(
     let line_count: usize = boxes.iter().map(|slot| slot.slots).sum();
     let bold = glyphs.iter().all(|glyph| face_style(&glyph.font_name).bold);
     let level = heading_level(line_count, source_size, bold, text);
-    let indent_ems = cjk_indent_ems(line_count, source_size, bold, text);
+    let hanging = ink_pages
+        .first()
+        .and_then(|(_, ink, _, _)| list_outdent(ink, source_size));
+    let mut indent_ems = cjk_indent_ems(line_count, source_size, bold, text);
+    // The marker hangs on the first page. Later pages are already at the
+    // continuation edge, so they do not take a body first-line indent.
+    if let Some(shift) = hanging {
+        indent_ems = -(shift / source_size);
+        if let Some(slot) = boxes.first_mut() {
+            slot.width = (slot.width - shift).max(source_size);
+        }
+    }
     let scale = scale_for_heading(level, source_size, metrics);
     let start = (source_size * scale).max(1.0);
     let floor = (start * 0.78).max(source_size * 0.62).min(start);
@@ -2618,7 +2631,11 @@ fn layout_across_pages(
         }
         let top = ink[0].y;
         let bottom = ink[ink.len() - 1].y;
-        let lines = spread_to_lines(lines, ink.len());
+        let lines = if hanging.is_some() {
+            lines
+        } else {
+            spread_to_lines(lines, ink.len())
+        };
         let gaps = lines.len().saturating_sub(1) as f32;
         let leading = if gaps == 0.0 {
             size * metrics.leading_ratio
@@ -2637,9 +2654,14 @@ fn layout_across_pages(
             return None;
         }
         let ys = baselines_for(ink, lines.len());
+        let draw_left = if box_index == 0 {
+            hanging.map(|shift| left + shift).unwrap_or(*left)
+        } else {
+            *left
+        };
         plans.push(PagePlan {
             page: *page,
-            left: *left,
+            left: draw_left,
             width: boxes[box_index].width,
             ys,
             lines,
@@ -2695,6 +2717,11 @@ fn layout_across_pages(
     if painted != wanted {
         return None;
     }
+    let skip: Vec<u32> = if hanging.is_some() {
+        glyphs.iter().map(|glyph| glyph.id).collect()
+    } else {
+        Vec::new()
+    };
     cover_unhit_clusters(
         &mut drawn,
         glyphs,
@@ -2703,7 +2730,7 @@ fn layout_across_pages(
         skew,
         &color,
         &glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>(),
-        &[],
+        &skip,
     );
     Some(drawn)
 }
@@ -3398,11 +3425,104 @@ fn fullwidth_digit_requests(text: &str) -> Vec<char> {
 }
 
 fn in_multidigit_run(chars: &[char], index: usize) -> bool {
-    (index > 0 && chars[index - 1].is_ascii_digit())
+    if (index > 0 && chars[index - 1].is_ascii_digit())
         || (index + 1 < chars.len() && chars[index + 1].is_ascii_digit())
+    {
+        return true;
+    }
+    // `第8–10章`: the single digit is one number with the multi-digit side.
+    dash_range(chars, index).is_some_and(|(start, end)| range_has_long_group(chars, start, end))
+}
+
+/// Digits joined by a dash (`3–5`, `8–10`), including spaces around the dash.
+fn dash_range(chars: &[char], index: usize) -> Option<(usize, usize)> {
+    if !chars.get(index).is_some_and(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let mut start = index;
+    while start > 0 && chars[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < chars.len() && chars[end].is_ascii_digit() {
+        end += 1;
+    }
+    let mut saw_dash = false;
+    loop {
+        let mut cursor = end;
+        let mut dash = false;
+        while cursor < chars.len() && (chars[cursor].is_whitespace() || is_dash_char(chars[cursor]))
+        {
+            if is_dash_char(chars[cursor]) {
+                dash = true;
+            }
+            cursor += 1;
+        }
+        if !dash || cursor >= chars.len() || !chars[cursor].is_ascii_digit() {
+            break;
+        }
+        saw_dash = true;
+        while cursor < chars.len() && chars[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        end = cursor;
+    }
+    loop {
+        let mut cursor = start;
+        let mut dash = false;
+        while cursor > 0 {
+            let ch = chars[cursor - 1];
+            if !(ch.is_whitespace() || is_dash_char(ch)) {
+                break;
+            }
+            if is_dash_char(ch) {
+                dash = true;
+            }
+            cursor -= 1;
+        }
+        if !dash || cursor == 0 || !chars[cursor - 1].is_ascii_digit() {
+            break;
+        }
+        saw_dash = true;
+        while cursor > 0 && chars[cursor - 1].is_ascii_digit() {
+            cursor -= 1;
+        }
+        start = cursor;
+    }
+    saw_dash.then_some((start, end))
+}
+
+fn range_has_long_group(chars: &[char], start: usize, end: usize) -> bool {
+    let mut run = 0usize;
+    for ch in chars.iter().take(end).skip(start) {
+        if ch.is_ascii_digit() {
+            run += 1;
+            if run >= 2 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
 }
 
 fn digit_touches_han(chars: &[char], index: usize) -> bool {
+    if han_beside_digit(chars, index) {
+        return true;
+    }
+    // `章节3–5）`: only one side sits on Han. Both digits stay the same width.
+    dash_range(chars, index).is_some_and(|(start, end)| {
+        let prev = (0..start)
+            .rev()
+            .map(|slot| chars[slot])
+            .find(|ch| !ch.is_whitespace());
+        let next = chars[end..].iter().copied().find(|ch| !ch.is_whitespace());
+        prev.is_some_and(is_han_char) || next.is_some_and(is_han_char)
+    })
+}
+
+fn han_beside_digit(chars: &[char], index: usize) -> bool {
     let prev = (0..index)
         .rev()
         .map(|slot| chars[slot])
@@ -4270,6 +4390,24 @@ mod tests {
             kept, wide,
             "a multi-digit run must not mix fullwidth digits"
         );
+        let (range, _) = fullwidth_han_digits(
+            "第8–10章",
+            &vec![false; "第8–10章".chars().count()],
+            &wide_font,
+        );
+        assert_eq!(range, "第8–10章", "a dash range stays one digit width");
+        let (both, _) = fullwidth_han_digits(
+            "章节3–5）",
+            &vec![false; "章节3–5）".chars().count()],
+            &wide_font,
+        );
+        assert_eq!(both, "章节３–５）");
+        let (pair, _) = fullwidth_han_digits(
+            "第1–2章",
+            &vec![false; "第1–2章".chars().count()],
+            &wide_font,
+        );
+        assert_eq!(pair, "第１–２章");
         let author = superscript_mask("张轩1");
         let (name, name_flags) = fullwidth_han_digits("张轩1", &author, &font);
         assert_eq!(name, "张轩1");
