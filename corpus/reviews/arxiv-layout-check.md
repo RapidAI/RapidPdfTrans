@@ -37,6 +37,7 @@ Side-by-side renders (source left, translation right):
 | `8a99948` | ORCID ids `[0000-0002-…]` matched the `[1]` bibliography rule and kept the introduction in English until the next heading. | OTSL pages 2–3 |
 | `7fbb5b1` | A margin stamp widened the baseline window, so two abstract lines were collected as one interleaved sentence. A caption label’s word space was treated as a column gap, and a dotted heading such as `5.3` did not stop the table walk. | Formula paper page 1; OTSL pages 9–10 |
 | `ab2e6c2` | A table left the page transform shifted, so text appended after it painted on top of the cells. | OTSL page 10 |
+| `b10b557` | A caption wrap was dropped when the other column sat between it and the first caption line. | LayoutLMv3 page 7, Figure 4 |
 
 ## arxiv-1908.07836 PubLayNet (two-column)
 
@@ -63,7 +64,7 @@ Letter, 612×792. Journal figures on pages 2–3 and the bibliography stay Engli
 | 4 | Objective II is Chinese (`目标 II：掩码图像建模（MIM）…`), including the note that used to sit past a 23.6pt gutter (`where α is 32.`). Equation (1) stays math. | was high (coverage failed, 442 glyphs) | column stub in `af58a31` |
 | 5 | Body Chinese. Display math stays Computer Modern. | — | — |
 | 6 | Body Chinese. | — | — |
-| 7 | Prose is Chinese. One results-table band still has English header words (`Image`, `Pre-training`, `FUNSD`) because those cells are kept. A short English fragment (`models of LayoutLMv3 on PubLayNet dataset`) remains in that band. | medium | not fixed; cells are kept by design, the fragment is a leftover label in the same band |
+| 7 | Prose is Chinese. Table 3 cells stay English (`Image`, `Pre-training`, `FUNSD`, the scores). Figure 4’s caption is the full Chinese sentence, including `LayoutLMv3 各消融模型在 PubLayNet 数据集上微调的损失收敛曲线` through `建议彩色查看`. The chart interior stays English. | was medium | caption wrap fixed in `b10b557` and the page retranslated |
 | 8 | Body Chinese. | — | — |
 | 9 | Appendix A is partly Chinese. The reference list that shares the page stays English. | low | — |
 | 10 | Bibliography only, English. | — | — |
@@ -73,7 +74,7 @@ Letter, 612×792. Journal figures on pages 2–3 and the bibliography stay Engli
 | page | findings | severity | fixed |
 | --- | --- | --- | --- |
 | 1 | Title, abstract, and the start of the introduction are Chinese. Author names, ORCID ids, and the email stay Latin. | low | ORCID no longer opens a bibliography (`8a99948`) |
-| 2 | Introduction under Figure 1 is Chinese. Figure 1’s HTML/OTSL drawing and its in-figure vocabulary labels stay English. The caption is still the English source line `Fig. 1. Comparison…` (kept with the figure). | medium (caption) | introduction fixed in `8a99948`; caption not fixed |
+| 2 | Introduction under Figure 1 is Chinese. Figure 1’s HTML/OTSL drawing and its in-figure vocabulary labels stay English. The caption is Chinese (`图 1. HTML 和 OTSL 表格结构表示之间的比较` through the fixed row length). | was medium (caption) | caption wrap fixed in `7fbb5b1`; drawing stays English by design |
 | 3 | The rest of the introduction and Related Work are Chinese. No long English body lines. | was high | fixed in `8a99948` |
 | 4 | Section prose is Chinese. | — | — |
 | 5 | Section prose is Chinese. | — | — |
@@ -108,7 +109,8 @@ Letter, 612×792. Journal figures on pages 2–3 and the bibliography stay Engli
 | 15 | Bibliography, English. URLs stay URLs. | — | — |
 | 16 | Last reference lines, English. | — | — |
 
-## Still open
+## Closed
 
-1. **LayoutLMv3 page 7 (medium).** A short English fragment remains in the results-table band next to kept header cells.
-2. **OTSL page 2 (medium).** The Figure 1 caption (`Fig. 1. Comparison…`) stays the English source line. The drawing and its in-figure labels stay English by design.
+LayoutLMv3 page 7 and the OTSL Figure 1 caption are Chinese. Table cells and the HTML/OTSL drawing stay English by design.
+
+Side-by-side of the refreshed LayoutLMv3 page: `/opt/cursor/artifacts/arxiv-layout/arxiv-2204.08387-p07.png`.

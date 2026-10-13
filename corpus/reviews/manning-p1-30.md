@@ -1,8 +1,8 @@
 # Manning pages 1–30 review
 
-Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Translation replayed from the v25 cache into `zh-v29.pdf` (no new model calls). Each page was checked against the source glyphs for alignment, line breaks, and paragraphs. Pages whose text changed since the v25 sample are rendered beside the source.
+Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). `zh-v31.pdf` replays the v30 translations (the three wording misses were sent to the model again; the rest stayed cached). Copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v31.pdf`. Each page was checked against the source glyphs for alignment, line breaks, and paragraphs.
 
-30/30 pass those three classes. Notes below that are wording only (a doubled character, an English echo) are not layout failures.
+30/30 pass those three classes. The wording notes from v29 were rechecked on v31.
 
 ## Root causes fixed
 
@@ -52,10 +52,8 @@ Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Translation 
 | 29 | Pass | Part opener stacks `第 1` / `部分` the way the source does. |
 | 30 | Pass | Running head `2` and `章节` are separate. Chapter 2 has not started its body yet. |
 
-## Wording left as translated
+## Wording rechecked on v31
 
-These are in the cached translation, not in the line breaker:
-
-- p8 / p13: `高级 检索增强生成` has a space the model inserted.
-- p16: `该 该 MCP` repeats a character, and `The Model Context Protocol` is still English.
-- p25: the two saved halves meet as `格式。以将其`, which is grammatical and one paragraph.
+- p8 / p13: `第 4 部分 高级 RAG`. The space inside `高级 检索` is gone. The heading keeps the acronym `RAG`.
+- p16: `该解决方案: 模型上下文协议`. The doubled `该` and the English title are gone. Page number `310` stays on that row.
+- p25: `以便与普通文本区分开来`. The old join `格式。以将其` is one sentence again.
