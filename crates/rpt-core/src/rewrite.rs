@@ -1255,7 +1255,10 @@ fn commit_toc_operators(
         }
     }
     let mut restored = Vec::new();
-    let runs = toc_page_number_runs(extraction, toc_redraw);
+    // A sub-entry row already drew its page numbers upright beside the titles.
+    // Those glyph ids are in `succeeded`. Drawing them again from the toc
+    // disposition stacks a second italic number on the line.
+    let runs = toc_page_number_runs(extraction, toc_redraw, succeeded);
     let mut column_right: HashMap<u32, f32> = HashMap::new();
     for run in &runs {
         let page = run[0].page_index;
@@ -1454,11 +1457,16 @@ fn shares_baseline_with_another_number(run: &[&Glyph], runs: &[Vec<&Glyph>]) -> 
 fn toc_page_number_runs<'a>(
     extraction: &'a Extraction,
     toc_redraw: &HashSet<u32>,
+    drawn_ids: &HashSet<u32>,
 ) -> Vec<Vec<&'a Glyph>> {
     let mut glyphs: Vec<&Glyph> = extraction
         .glyphs
         .iter()
-        .filter(|glyph| toc_page_char(&glyph.unicode) && is_toc_mark(glyph, toc_redraw))
+        .filter(|glyph| {
+            toc_page_char(&glyph.unicode)
+                && is_toc_mark(glyph, toc_redraw)
+                && !drawn_ids.contains(&glyph.id)
+        })
         .collect();
     glyphs.sort_by(|left, right| {
         left.page_index.cmp(&right.page_index).then(
@@ -7943,6 +7951,12 @@ mod tests {
             let chars = row.text.chars().filter(|ch| !ch.is_whitespace()).count();
             assert!(chars != 1, "orphan line: {}", row.text);
         }
+        let fours: Vec<&InkSpot> = rows
+            .iter()
+            .flat_map(|row| row.glyphs.iter())
+            .filter(|glyph| glyph.text == "4")
+            .collect();
+        assert_eq!(fours.len(), 1, "page number 4 was drawn more than once");
         let with_four = rows
             .iter()
             .find(|row| row.text.contains('4'))
