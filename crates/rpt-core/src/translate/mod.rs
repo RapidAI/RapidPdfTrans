@@ -1686,11 +1686,38 @@ pub(crate) fn whole_line_is_personal_name(text: &str) -> bool {
 /// organization. `Julie McNamee` is a person. `The Model Context Protocol`
 /// is a title, so the Chinese translation stays.
 fn is_personal_name(text: &str) -> bool {
-    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let trimmed = text.trim();
+    // `Overall Objective.` and `Mask Segmentation Loss.` are run-in headings.
+    // A byline (`Roberto Infante`) does not end in a period after a full word.
+    if heading_period(trimmed) {
+        return false;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
     (2..=5).contains(&tokens.len())
-        && tokens
-            .iter()
-            .all(|token| is_name_token(token) && !is_org_token(token) && !is_function_word(token))
+        && tokens.iter().all(|token| {
+            is_name_token(token)
+                && !is_org_token(token)
+                && !is_function_word(token)
+                && !compound_title_token(token)
+        })
+}
+
+/// `Prefix-Conditioned` is a section title. `Jean-Luc` is still a given name.
+fn compound_title_token(token: &str) -> bool {
+    let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.'));
+    let Some((left, right)) = token.split_once('-') else {
+        return false;
+    };
+    let letters = |part: &str| part.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    letters(left) >= 6 && letters(right) >= 6
+}
+
+/// `Objective.` is a heading terminator. `J.` is an initial.
+fn heading_period(text: &str) -> bool {
+    let Some(word) = text.trim().trim_end_matches('.').split_whitespace().last() else {
+        return false;
+    };
+    text.trim().ends_with('.') && word.chars().filter(|ch| ch.is_ascii_alphabetic()).count() > 2
 }
 
 fn is_org_token(token: &str) -> bool {
@@ -2294,6 +2321,20 @@ mod tests {
             "解决方案: 模型上下文协议"
         );
         assert!(!whole_line_is_personal_name("The Model Context Protocol"));
+        assert_eq!(
+            restore_credit_names("Overall Objective.", "总体目标。"),
+            "总体目标。"
+        );
+        assert_eq!(
+            restore_credit_names("Mask Segmentation Loss.", "掩码分割损失。"),
+            "掩码分割损失。"
+        );
+        assert!(!whole_line_is_personal_name("Overall Objective."));
+        assert_eq!(
+            restore_credit_names("Prefix-Conditioned Sufficiency", "前缀条件充分性"),
+            "前缀条件充分性"
+        );
+        assert!(whole_line_is_personal_name("Jean-Luc Picard"));
     }
 
     #[test]

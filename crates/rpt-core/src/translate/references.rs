@@ -517,7 +517,41 @@ fn is_section_break(text: &str) -> bool {
     if is_reference_heading(text) || is_reference_entry(text) {
         return false;
     }
-    is_end_heading(text) || looks_like_section_title(text)
+    is_end_heading(text) || looks_like_section_title(text) || appendix_letter_heading(text)
+}
+
+/// `A Derivations` and `A.1 From Region-Specific Sufficiency`. AAAI letters
+/// the appendix without the word Appendix. `A definition of…` is a sentence.
+fn appendix_letter_heading(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.chars().count() > 80 {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_uppercase() || bytes[1].is_ascii_alphabetic() {
+        return false;
+    }
+    let mut index = 1usize;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    if index >= bytes.len() || !bytes[index].is_ascii_whitespace() {
+        return false;
+    }
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    trimmed[index..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 fn looks_like_section_title(text: &str) -> bool {
@@ -877,6 +911,44 @@ mod tests {
         assert!(!kept.contains("The model uses attention"), "{kept}");
         assert!(!kept.contains("Appendix"), "{kept}");
         assert!(!kept.contains("Proofs"), "{kept}");
+    }
+
+    #[test]
+    fn a_lettered_appendix_stops_the_references() {
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(&mut glyphs, &mut id, 0, 72.0, 700.0, "References");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            680.0,
+            "Bai, S.; Cai, Y. 2025. Qwen technical report.",
+        );
+        line(&mut glyphs, &mut id, 1, 72.0, 760.0, "A Derivations");
+        line(
+            &mut glyphs,
+            &mut id,
+            1,
+            72.0,
+            740.0,
+            "A.1 From Region-Specific Sufficiency to",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            1,
+            72.0,
+            720.0,
+            "We provide a derivation of the implication used in the main text.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(kept.contains("Qwen"), "{kept}");
+        assert!(!kept.contains("Derivations"), "{kept}");
+        assert!(!kept.contains("Region-Specific"), "{kept}");
+        assert!(!kept.contains("derivation"), "{kept}");
     }
 
     #[test]

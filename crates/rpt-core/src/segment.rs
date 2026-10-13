@@ -1079,6 +1079,27 @@ fn same_font_family(a: &str, b: &str) -> bool {
     font_family(a) == font_family(b)
 }
 
+/// Computer Modern bold, `CMBX12`. A semibold diagram face is not a section.
+fn bold_face(name: &str) -> bool {
+    font_key(name).to_ascii_lowercase().contains("cmbx")
+}
+
+/// `Related Work` is a heading. `When the task reaches a point` is a sentence.
+fn title_case_heading(rest: &str) -> bool {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    if words.is_empty() || words.len() > 6 || rest.contains([',', ';', ':']) {
+        return false;
+    }
+    words.iter().all(|word| {
+        let word = word.trim_matches(|ch: char| !ch.is_ascii_alphabetic());
+        word.is_empty()
+            || word
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+    })
+}
+
 fn fonts_can_join(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if same_font_family(&upper.font, &lower.font) {
         return true;
@@ -1523,8 +1544,9 @@ fn caption_prefix(lower: &str, prefixes: &[&str]) -> bool {
         };
         let rest = rest.trim_start();
         // "Figure 1:" and "Table 2." are captions. A long "Figure 1 Overview of …"
-        // is too. "Fig 1" and "Table 1 shows" are ordinary sentences.
-        if rest.starts_with([':', '.']) {
+        // is too. "Figure 2 | The unified…" uses a bar. "Fig 1" and "Table 1 shows"
+        // are ordinary sentences.
+        if rest.starts_with([':', '.', '|']) {
             return true;
         }
         if rest.starts_with(|ch: char| ch.is_ascii_uppercase()) && lower.chars().count() >= 24 {
@@ -1724,12 +1746,15 @@ fn is_section_heading(line: &VisualLine<'_>, body_font: &str) -> bool {
     if rest.chars().filter(|ch| ch.is_alphabetic()).count() < 4 {
         return false;
     }
-    // A single "1 Introduction" drawn in another face is a figure label.
-    // A dotted heading is set in bold, not the body's optical size.
+    // A diagram token in a display face is not a section. A bold title is:
+    // LaTeX sets `1 Introduction` in CMBX under the caption while the body
+    // stays CMR. A sentence in that face (`1 When the task reaches…`) is a
+    // callout inside the drawing. A dotted heading is bold too.
     if !dotted
         && !body_font.is_empty()
         && line.font != body_font
         && !same_font_family(&line.font, body_font)
+        && !(bold_face(&line.font) && title_case_heading(rest))
     {
         return false;
     }
@@ -1873,6 +1898,7 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
             columns.push(vec![line]);
         }
     }
+    attach_caption_wraps(&mut columns);
     for column in &mut columns {
         column.sort_by(|a, b| {
             a.page
@@ -1921,6 +1947,7 @@ fn stitch_page_continuations<'a>(
             .then(left[0].left.total_cmp(&right[0].left))
             .then(right[0].y.total_cmp(&left[0].y))
     });
+    let floor = page_body_floor(&paragraphs);
     let mut used = vec![false; paragraphs.len()];
     let mut stitched = Vec::new();
     for index in 0..paragraphs.len() {
@@ -1931,7 +1958,7 @@ fn stitch_page_continuations<'a>(
         let mut current = std::mem::take(&mut paragraphs[index]);
         let mut joins = 0;
         while joins < 4 {
-            let Some(next) = find_reading_continuation(&current, &paragraphs, &used) else {
+            let Some(next) = find_reading_continuation(&current, &paragraphs, &used, &floor) else {
                 break;
             };
             used[next] = true;
@@ -1960,14 +1987,36 @@ fn find_reading_continuation(
     current: &[VisualLine<'_>],
     paragraphs: &[Vec<VisualLine<'_>>],
     used: &[bool],
+    floor: &std::collections::HashMap<u32, f32>,
 ) -> Option<usize> {
     if let Some(next) = find_column_continuation(current, paragraphs, used) {
         return Some(next);
     }
-    if closes_the_page(current, paragraphs, used) {
+    if closes_the_page(current, paragraphs, used, floor) {
         return find_page_continuation(current, paragraphs, used);
     }
     None
+}
+
+/// Lowest body baseline on each page. A line that still has body text under
+/// it is not the end of the page, even after that lower paragraph was already
+/// taken into an earlier column.
+fn page_body_floor(paragraphs: &[Vec<VisualLine<'_>>]) -> std::collections::HashMap<u32, f32> {
+    let mut floor = std::collections::HashMap::new();
+    for para in paragraphs {
+        if para.is_empty()
+            || is_page_bridge(para)
+            || is_margin_strip(para)
+            || !substantial_paragraph(para)
+        {
+            continue;
+        }
+        for line in para {
+            let slot = floor.entry(line.page).or_insert(line.y);
+            *slot = (*slot).min(line.y);
+        }
+    }
+    floor
 }
 
 fn find_column_continuation(
@@ -2078,10 +2127,17 @@ fn closes_the_page(
     current: &[VisualLine<'_>],
     paragraphs: &[Vec<VisualLine<'_>>],
     used: &[bool],
+    floor: &std::collections::HashMap<u32, f32>,
 ) -> bool {
     let Some(upper) = current.last() else {
         return false;
     };
+    if let Some(bottom) = floor.get(&upper.page) {
+        let size = upper.size.max(1.0);
+        if upper.y > bottom + size * 2.0 {
+            return false;
+        }
+    }
     for (index, para) in paragraphs.iter().enumerate() {
         if used[index] || para.is_empty() || is_page_bridge(para) {
             continue;
@@ -2094,12 +2150,19 @@ fn closes_the_page(
         // sits higher on the page. A centered heading or a margin stamp is not
         // that column, and must not block a page-break join.
         if lower.left > upper.left + 36.0 && lower.left < upper.left + 360.0 {
-            if substantial_paragraph(para) && !is_margin_strip(para) {
+            // A display equation sits in the middle of a single column. It is
+            // not the other column, and it must not keep the paragraph under
+            // it from continuing on the next page.
+            if column_blocks_page(para) {
                 return false;
             }
             continue;
         }
-        if (lower.left - upper.left).abs() > 36.0 || lower.y >= upper.y - 0.5 {
+        // A math gap can leave the hyphen 100pt to the right of the margin.
+        // The next line of that sentence is still on this page, so the next
+        // page's lowercase line is not the continuation.
+        let size = upper.size.max(1.0);
+        if (lower.left - upper.left).abs() > size * 12.0 || lower.y >= upper.y - 0.5 {
             continue;
         }
         if substantial_paragraph(para) {
@@ -2116,6 +2179,19 @@ fn votes_as_column(para: &[VisualLine<'_>]) -> bool {
         .map(|line| line.text.chars().filter(|ch| ch.is_alphabetic()).count())
         .sum();
     letters >= 16 || para.len() >= 2
+}
+
+/// A later column, not a centered equation. The column has a sentence and
+/// at least one line wide enough to be body text.
+fn column_blocks_page(para: &[VisualLine<'_>]) -> bool {
+    if is_margin_strip(para) {
+        return false;
+    }
+    let letters: usize = para
+        .iter()
+        .map(|line| line.text.chars().filter(|ch| ch.is_alphabetic()).count())
+        .sum();
+    letters >= 40
 }
 
 fn substantial_paragraph(para: &[VisualLine<'_>]) -> bool {
@@ -2305,9 +2381,77 @@ fn page_measures(lines: &[VisualLine<'_>]) -> std::collections::HashMap<u32, f32
         .collect()
 }
 
+/// A one-line column that only exists because a caption wrap is centered
+/// belongs on the caption, not in a column of its own.
+fn attach_caption_wraps(columns: &mut Vec<Vec<VisualLine<'_>>>) {
+    let mut host_of: Vec<Vec<Option<usize>>> = columns
+        .iter()
+        .map(|column| vec![None; column.len()])
+        .collect();
+    for (index, column) in columns.iter().enumerate() {
+        for (line_index, line) in column.iter().enumerate() {
+            if caption_kind(&line.text).is_some() {
+                continue;
+            }
+            for (host, other) in columns.iter().enumerate() {
+                if host == index {
+                    continue;
+                }
+                if other
+                    .iter()
+                    .any(|prev| caption_kind(&prev.text).is_some() && caption_line_wrap(prev, line))
+                {
+                    host_of[index][line_index] = Some(host);
+                    break;
+                }
+            }
+        }
+    }
+    if host_of
+        .iter()
+        .all(|column| column.iter().all(Option::is_none))
+    {
+        return;
+    }
+    let mut next: Vec<Vec<VisualLine<'_>>> = columns.iter().map(|_| Vec::new()).collect();
+    for (index, column) in columns.drain(..).enumerate() {
+        for (line_index, line) in column.into_iter().enumerate() {
+            let dest = host_of[index][line_index].unwrap_or(index);
+            next[dest].push(line);
+        }
+    }
+    next.retain(|column| !column.is_empty());
+    *columns = next;
+}
+
+/// The next line finishes a caption. It sits one leading below and starts
+/// in lowercase. A body sentence under the caption is further away.
+fn caption_line_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if upper.page != lower.page {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    let dy = upper.y - lower.y;
+    if dy < size * 0.6 || dy > size * 1.8 {
+        return false;
+    }
+    if (upper.size - lower.size).abs() > size * 0.35 {
+        return false;
+    }
+    let next = lower.text.trim_start();
+    !sentence_end(upper.text.trim_end())
+        && next.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && lower.text.chars().filter(|ch| ch.is_alphabetic()).count() >= 8
+}
+
 fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: f32) -> bool {
     if upper.page != lower.page {
         return false;
+    }
+    // `Figure 2 | … segmentation` / `and reading order prediction.` The wrap
+    // is centered, so it does not share the caption's left edge.
+    if caption_kind(&upper.text).is_some() && caption_line_wrap(upper, lower) {
+        return true;
     }
     let next = lower.text.trim_start();
     // `GPT-` / `2` and `MetaMath-` / `7B` are one token. A contents row is
@@ -4106,6 +4250,48 @@ mod tests {
         );
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
         assert!(kept.contains(&2) && kept.contains(&3), "{:?}", seg.kept);
+        assert!(!kept.contains(&4) && !kept.contains(&5), "{:?}", seg.kept);
+    }
+
+    #[test]
+    fn a_bold_section_under_the_caption_is_not_a_figure_label() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let mut body_top = wide(0, 72.0, 720.0, body, 360.0, 10.0);
+        body_top.font_name = "CMR10".into();
+        let mut heading = wide(4, 72.0, 520.0, "1 Introduction", 110.0, 12.0);
+        heading.font_name = "CMBX12".into();
+        let mut body_below = wide(5, 72.0, 490.0, body, 360.0, 10.0);
+        body_below.font_name = "CMR10".into();
+        let glyphs = vec![
+            body_top,
+            wide(1, 90.0, 640.0, "USER PROMPT", 55.0, 9.0),
+            wide(2, 230.0, 640.0, "REASONING", 50.0, 9.0),
+            wide(
+                3,
+                72.0,
+                560.0,
+                "Figure 1: A diagram of the system and its parts.",
+                360.0,
+                10.0,
+            ),
+            heading,
+            body_below,
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| *text == "1 Introduction"),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("long enough") && !text.contains("Figure 1")),
+            "{texts:?}"
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
         assert!(!kept.contains(&4) && !kept.contains(&5), "{:?}", seg.kept);
     }
 
@@ -7461,25 +7647,108 @@ mod tests {
             return;
         }
         let doc = crate::extract::PdfDocument::open(&path).unwrap();
-        let extraction = doc.extract_with(&crate::extract::ExtractOptions {
-            max_pages: Some(6),
-            ..crate::extract::ExtractOptions::default()
-        });
-        let seg = segment_with(&extraction.glyphs, &SegmentFlags::default());
-        let hit = seg.segments.iter().find(|item| {
-            item.text.contains("relational em") || item.text.contains("embedding space")
-        });
-        let hit = hit.map(|item| item.text.chars().take(100).collect::<String>());
+        let extraction = doc.extract_with(&crate::extract::ExtractOptions::default());
+        let seg = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let embedding = seg
+            .segments
+            .iter()
+            .find(|item| item.text.contains("embedding space"));
+        let embedding = embedding.expect("embedding sentence");
         assert!(
-            hit.as_deref()
-                .is_some_and(|text| text.contains("embedding")),
-            "{hit:?}"
+            !embedding.text.contains("operates"),
+            "next page joined over the rest of this page: {}",
+            embedding.text.chars().take(220).collect::<String>()
         );
         assert!(
             seg.segments
                 .iter()
-                .all(|item| !item.text.contains("emoperates")),
-            "still joined to the next page"
+                .any(|item| item.text.contains("inherently anti-symmetric")),
+            "the following line should stay on this page"
+        );
+        let caption = seg
+            .segments
+            .iter()
+            .find(|item| item.text.contains("Figure 2"))
+            .expect("figure caption");
+        assert!(
+            caption.text.contains("reading order prediction"),
+            "caption wrap missing: {}",
+            caption.text
+        );
+        assert!(
+            seg.segments.iter().any(|item| {
+                item.text.contains("order loss") && item.text.contains("operates on")
+            }),
+            "page break should finish the loss sentence"
+        );
+        assert!(
+            !seg.segments.iter().any(|item| item.text.contains("where K")
+                && item.text.contains("reading order prediction")),
+            "caption wrap joined the loss paragraph"
+        );
+    }
+
+    #[test]
+    fn a_centered_caption_wrap_does_not_finish_the_column() {
+        let caption = wide(
+            0,
+            71.0,
+            600.0,
+            "Figure 2 | The unified architecture of RT-DocLayout, featuring parallel heads for segmentation",
+            450.0,
+            10.0,
+        );
+        let wrap = wide(
+            1,
+            226.0,
+            586.0,
+            "and reading order prediction.",
+            180.0,
+            10.0,
+        );
+        let loss = wide(
+            2,
+            71.0,
+            120.0,
+            "the order loss receives a higher weight for two reasons",
+            450.0,
+            10.0,
+        );
+        let mut operates = wide(
+            3,
+            71.0,
+            760.0,
+            "operates on pairs after the page break and keeps going.",
+            420.0,
+            10.0,
+        );
+        operates.page_index = 1;
+        let texts: Vec<_> = segment_glyphs(&[caption, wrap, loss, operates])
+            .into_iter()
+            .map(|item| item.text)
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Figure 2") && text.contains("reading order prediction")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("order loss") && text.contains("operates on")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("where") && text.contains("reading order prediction")),
+            "{texts:?}"
         );
     }
 }

@@ -2145,6 +2145,9 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         '\u{27E9}' => &['>'],
         '\u{0338}' => &['/'],
         '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => &['-'],
+        '\u{00D7}' | '\u{2715}' | '\u{2A2F}' => &['x'],
+        // `67.4 ∼ 118%`. The Song face has no tilde operator.
+        '\u{223C}' | '\u{223D}' => &['~'],
         '\u{2018}' | '\u{2019}' | '\u{201A}' => &['\''],
         '\u{201C}' | '\u{201D}' | '\u{201E}' => &['"'],
         '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2009}' => &[' '],
@@ -2207,6 +2210,11 @@ fn math_plain(ch: char) -> Option<char> {
     match ch {
         '\u{2032}' | '\u{2035}' => Some('\''),
         '\u{2033}' => Some('"'),
+        // `𝑑ℎ` uses the Planck constant, not mathematical italic h.
+        '\u{210E}' | '\u{210F}' => Some('h'),
+        '\u{2113}' => Some('l'),
+        '\u{212F}' => Some('e'),
+        '\u{2134}' => Some('o'),
         _ => None,
     }
 }
@@ -7299,6 +7307,17 @@ mod tests {
         TranslatedSegment, Translator,
     };
     use lopdf::dictionary;
+
+    #[test]
+    fn a_planck_constant_stands_in_for_italic_h() {
+        assert_eq!(math_plain('\u{210E}'), Some('h'));
+        assert_eq!(math_plain('𝑑'), Some('d'));
+    }
+
+    #[test]
+    fn a_similar_to_tilde_has_an_ascii_stand_in() {
+        assert_eq!(coverage_fallbacks('\u{223C}'), &['~']);
+    }
 
     struct InkRow {
         y: f32,

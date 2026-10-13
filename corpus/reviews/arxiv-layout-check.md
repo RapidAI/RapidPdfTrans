@@ -114,3 +114,63 @@ Letter, 612×792. Journal figures on pages 2–3 and the bibliography stay Engli
 LayoutLMv3 page 7 and the OTSL Figure 1 caption are Chinese. Table cells and the HTML/OTSL drawing stay English by design.
 
 Side-by-side of the refreshed LayoutLMv3 page: `/opt/cursor/artifacts/arxiv-layout/arxiv-2204.08387-p07.png`.
+
+## Next three papers
+
+These three were already in `corpus/manifest.json`. Each was translated in full. Figure interiors, table cells, display equations, and bibliographies stay English.
+
+| id | pages | PDF |
+| --- | --- | --- |
+| arxiv-2606.23344 RT-DocLayout | 16, two-column, A4 | `/opt/cursor/artifacts/pdfs/arxiv-2606.23344-zh.pdf` |
+| arxiv-2607.01018 reading-order inference | 17, single-column | `/opt/cursor/artifacts/pdfs/arxiv-2607.01018-zh.pdf` |
+| arxiv-2608.06146 PaDoc | 17, two-column | `/opt/cursor/artifacts/pdfs/arxiv-2608.06146-zh.pdf` |
+
+All three reports have `coverage.complete: true` and `english_body: 0`.
+
+Side-by-side renders:
+
+- `/opt/cursor/artifacts/arxiv-layout/arxiv-2606.23344-p05.png`
+- `/opt/cursor/artifacts/arxiv-layout/arxiv-2606.23344-p06.png`
+- `/opt/cursor/artifacts/arxiv-layout/arxiv-2607.01018-p02.png`
+- `/opt/cursor/artifacts/arxiv-layout/arxiv-2607.01018-p06.png`
+- `/opt/cursor/artifacts/arxiv-layout/arxiv-2608.06146-p02.png`
+- `/opt/cursor/artifacts/arxiv-layout/arxiv-2608.06146-p10.png`
+
+### Fixes in this change
+
+| defect | where it showed |
+| --- | --- |
+| `Figure 2 \| …` was not a caption, and the centered wrap `and reading order prediction.` was glued onto the loss paragraph. | RT-DocLayout page 5 |
+| A display equation counted as the other column, so `the order loss` did not continue as `operates on` on the next page. | RT-DocLayout pages 5–6 |
+| A hyphen with body text still under it was treated as the end of the page, so `embedding space` joined the next page. | RT-DocLayout |
+| `Overall Objective.` and `Mask Segmentation Loss.` were restored as personal names. A run-in heading that ends in a period after a full word stays translated. `Jr.` still counts as a name. | RT-DocLayout |
+| `Prefix-Conditioned Sufficiency` was restored as a byline. A hyphenated compound with two long parts is a title. `Jean-Luc Picard` stays a name. | PaDoc appendix A |
+| `A Derivations` and `A.1 From Region-Specific…` did not end the bibliography, so appendices A–E stayed English. | PaDoc |
+| `1 Introduction` in CMBX under the caption was a figure label. A bold Computer Modern title is a section heading. A semibold diagram label is not. | Reading-order paper page 2 |
+| One missing `ℎ` (U+210E), `×`, or `∼` dropped the whole paragraph. Those stand in for `h`, `x`, and `~`. | RT-DocLayout embedding sentence; PaDoc throughput sentence |
+
+## arxiv-2606.23344 RT-DocLayout (two-column)
+
+| page | findings | severity | fixed |
+| --- | --- | --- | --- |
+| 5 | Figure 2’s caption is the full Chinese sentence, including the centered wrap about reading-order prediction. The formula lead-in `where Wq, Wk` stays math. The following prose is Chinese. The embedding sentence is Chinese; `dh` stands in for the Planck constant in `𝑑ℎ`. The line that wraps `得到` is a little tight. | was high | caption bar, caption wrap, page-floor hyphen, Planck stand-in |
+| 6 | `顺序损失` on page 5 continues as `作用于 O(N^2)` on this page. Run-in headings `总体目标。` and `掩码分割损失。` are Chinese. | was high | equation no longer blocks the page break; headings are not bylines |
+| 14–16 | Bibliography, English. Page 13 is still body (`4.4 定性分析`). | — | — |
+
+## arxiv-2607.01018 reading order (single-column)
+
+| page | findings | severity | fixed |
+| --- | --- | --- | --- |
+| 1 | Title, abstract, and keywords are Chinese. Author names and emails stay Latin. | low | — |
+| 2 | The section heading is `1 引言`. Body columns are Chinese. Figure 1’s caption is Chinese. The diagram interior stays English. | was medium | CMBX heading is not a figure label |
+| 6 | Run-in headings `上下文截断.` and `可选频率归一化.` are Chinese. Display formulas stay math. | was medium | heading period is not a byline |
+| 17 | Bibliography, English. Pages 15–16 are still body. | — | — |
+
+## arxiv-2608.06146 PaDoc (two-column)
+
+| page | findings | severity | fixed |
+| --- | --- | --- | --- |
+| 2 | Body is Chinese, including the OmniDocBench / throughput paragraph (`吞吐量提高了67.4–118%`). Figure labels (`ViT`, `Layout Analysis Model`, `<BOS>`) stay English. | was high (534 glyphs) | `∼` stand-in |
+| 8–9 | Bibliography, English. AAAI puts it before the appendix. | — | — |
+| 10 | Appendix A is Chinese (`A 推导`, `A.1 从区域特定充分性到`, `前缀条件充分性`). Two lead-in lines that share a baseline with subscripts stay with the formula: `Applying this with A = Yk…` and `Since the conditioning…`. | low | lettered appendix; compound title |
+| 11–17 | Appendices B–E are Chinese. Table cells and display formulas stay English. | was high | bibliography stops at `A Derivations` |
