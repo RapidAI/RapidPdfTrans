@@ -1107,10 +1107,9 @@ pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
     let Some(name) = credit_personal_name(source) else {
         return translated.to_string();
     };
-    if translated.contains(name.as_str()) {
-        return translated.to_string();
-    }
-    if let Some(index) = translated.rfind([':', '：']) {
+    let restored = if translated.contains(name.as_str()) {
+        translated.to_string()
+    } else if let Some(index) = translated.rfind([':', '：']) {
         let colon = translated[index..]
             .chars()
             .next()
@@ -1118,14 +1117,43 @@ pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
             .unwrap_or(1);
         let mut out = translated[..index + colon].to_string();
         out.push_str(&name);
-        return out;
+        out
+    } else {
+        let trimmed = translated.trim_start();
+        if source.trim_start().starts_with("and ") && trimmed.starts_with('和') {
+            let lead = &translated[..translated.len() - trimmed.len()];
+            format!("{lead}和 {name}")
+        } else {
+            translated.to_string()
+        }
+    };
+    // Role labels in one list must share one colon. A CJK role uses '：'.
+    cjk_label_colon(&restored)
+}
+
+/// `开发编辑: Ada` and `校对：Ann` are the same list. The label stays, and the
+/// colon after a CJK role is the fullwidth one.
+fn cjk_label_colon(text: &str) -> String {
+    let Some(index) = text.find([':', '：']) else {
+        return text.to_string();
+    };
+    let label = text[..index].trim();
+    if label.is_empty()
+        || label.chars().count() > 24
+        || !label.chars().any(is_cjk_char)
+        || label.ends_with(|ch: char| ch.is_ascii_digit())
+    {
+        return text.to_string();
     }
-    let trimmed = translated.trim_start();
-    if source.trim_start().starts_with("and ") && trimmed.starts_with('和') {
-        let lead = &translated[..translated.len() - trimmed.len()];
-        return format!("{lead}和 {name}");
+    let colon = text[index..].chars().next().unwrap_or(':');
+    if colon == '：' {
+        return text.to_string();
     }
-    translated.to_string()
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push_str(&text[..index]);
+    out.push('：');
+    out.push_str(&text[index + colon.len_utf8()..]);
+    out
 }
 
 fn credit_personal_name(source: &str) -> Option<String> {
@@ -1708,7 +1736,7 @@ mod tests {
                 "Development editor: Dustin Archibald",
                 "编辑开发: Dustin Archibald"
             ),
-            "编辑开发: Dustin Archibald"
+            "编辑开发： Dustin Archibald"
         );
         assert_eq!(
             restore_credit_names("20 Baldwin Road", "20 鲍德温路"),

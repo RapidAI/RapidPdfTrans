@@ -3658,6 +3658,429 @@ fn font_for_flow_piece<'a>(
     best.map(|(resource, font, _)| (resource, font))
 }
 
+struct TextPiece<'a> {
+    y: f32,
+    left: f32,
+    right: f32,
+    size: f32,
+    glyphs: Vec<&'a Glyph>,
+}
+
+struct ColonSplit {
+    y: f32,
+    left: f32,
+    size: f32,
+    colon_right: f32,
+    value_x: f32,
+}
+
+struct LabelAxis {
+    colon_right: f32,
+    value_x: f32,
+    continuation: bool,
+}
+
+fn page_text_pieces(extraction: &Extraction, page: u32) -> Vec<TextPiece<'_>> {
+    let mut glyphs: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| glyph.page_index == page && !glyph.invisible && !glyph.unicode.is_empty())
+        .collect();
+    glyphs.sort_by(|left, right| {
+        right.matrix[5]
+            .total_cmp(&left.matrix[5])
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let mut rows: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in glyphs {
+        let same = rows.last().is_some_and(|row: &Vec<&Glyph>| {
+            (row[0].matrix[5] - glyph.matrix[5]).abs() <= 0.8
+        });
+        if same {
+            rows.last_mut().unwrap().push(glyph);
+        } else {
+            rows.push(vec![glyph]);
+        }
+    }
+    let mut pieces = Vec::new();
+    for row in rows {
+        if row.is_empty() {
+            continue;
+        }
+        let size = crate::segment::representative_size(&row).max(1.0);
+        let hard = (size * 1.5).max(12.0);
+        let mut current = vec![row[0]];
+        for glyph in row.into_iter().skip(1) {
+            let prev = current[current.len() - 1];
+            let right = prev.bbox[2].max(prev.matrix[4]);
+            let left = glyph.matrix[4].min(glyph.bbox[0]);
+            if left - right > hard {
+                pieces.push(text_piece(current));
+                current = vec![glyph];
+            } else {
+                current.push(glyph);
+            }
+        }
+        pieces.push(text_piece(current));
+    }
+    pieces
+}
+
+fn text_piece(glyphs: Vec<&Glyph>) -> TextPiece<'_> {
+    let left = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[4])
+        .fold(f32::MAX, f32::min);
+    let right = glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[2].max(glyph.matrix[4]))
+        .fold(left, f32::max);
+    let size = crate::segment::representative_size(&glyphs).max(1.0);
+    let y = glyphs[0].matrix[5];
+    TextPiece {
+        y,
+        left,
+        right,
+        size,
+        glyphs,
+    }
+}
+
+/// A colon that introduces a name, not `https://` or `Email: orders@`.
+fn colon_split(piece: &TextPiece<'_>) -> Option<ColonSplit> {
+    let mut colon_at = None;
+    for (index, glyph) in piece.glyphs.iter().enumerate() {
+        let mark = glyph.unicode.trim();
+        if mark != ":" && mark != "：" {
+            continue;
+        }
+        let next = piece
+            .glyphs
+            .get(index + 1)
+            .map(|glyph| glyph.unicode.as_str())
+            .unwrap_or("");
+        if next.starts_with('/') {
+            continue;
+        }
+        colon_at = Some(index);
+    }
+    let index = colon_at?;
+    let colon = piece.glyphs[index];
+    let value = piece
+        .glyphs
+        .iter()
+        .skip(index + 1)
+        .find(|glyph| !glyph.unicode.trim().is_empty())?;
+    let value_text = glyphs_text(&piece.glyphs[index + 1..]);
+    let value_trim = value_text.trim();
+    if !value_trim
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+        || value_trim.chars().count() > 48
+    {
+        return None;
+    }
+    let label = glyphs_text(&piece.glyphs[..index]);
+    if label.trim().is_empty() || label.trim().chars().count() > 40 {
+        return None;
+    }
+    if piece.right - piece.left > piece.size * 36.0 {
+        return None;
+    }
+    Some(ColonSplit {
+        y: piece.y,
+        left: piece.left,
+        size: piece.size,
+        colon_right: colon.bbox[2].max(colon.matrix[4]),
+        value_x: value.matrix[4],
+    })
+}
+
+fn median_f32(values: impl Iterator<Item = f32>) -> f32 {
+    let mut values: Vec<f32> = values.collect();
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|left, right| left.total_cmp(right));
+    values[values.len() / 2]
+}
+
+/// Right-aligned role labels share a colon axis. Names, and a continuation
+/// such as `and Ada`, share the value's left edge.
+fn label_axis_for(extraction: &Extraction, line: &InkLine<'_>) -> Option<LabelAxis> {
+    let page = line.glyphs.first()?.page_index;
+    let pieces = page_text_pieces(extraction, page);
+    let mut colons: Vec<ColonSplit> = pieces.iter().filter_map(colon_split).collect();
+    colons.sort_by(|left, right| left.value_x.total_cmp(&right.value_x));
+    let mut groups: Vec<Vec<ColonSplit>> = Vec::new();
+    for item in colons {
+        let fits = groups.last().is_some_and(|group| {
+            (item.value_x - group[0].value_x).abs() <= 3.0
+                && (item.colon_right - group[0].colon_right).abs() <= 5.0
+                && (item.size - group[0].size).abs() <= item.size.max(group[0].size) * 0.25
+        });
+        if fits {
+            groups.last_mut().unwrap().push(item);
+        } else {
+            groups.push(vec![item]);
+        }
+    }
+    let mut clusters = Vec::new();
+    for mut group in groups {
+        group.sort_by(|left, right| right.y.total_cmp(&left.y));
+        let mut run: Vec<ColonSplit> = Vec::new();
+        for item in group {
+            if let Some(prev) = run.last() {
+                // One continuation (`and Ada`) sits between two role lines.
+                if prev.y - item.y > prev.size.max(item.size) * 3.4 {
+                    if run.len() >= 2 {
+                        clusters.push(std::mem::take(&mut run));
+                    } else {
+                        run.clear();
+                    }
+                }
+            }
+            run.push(item);
+        }
+        if run.len() >= 2 {
+            clusters.push(run);
+        }
+    }
+    let matched = clusters.iter().find(|cluster| {
+        cluster.iter().any(|item| {
+            (item.y - line.y).abs() <= 0.9 && (item.left - line.left).abs() <= 8.0
+        })
+    });
+    if let Some(cluster) = matched {
+        return Some(LabelAxis {
+            colon_right: median_f32(cluster.iter().map(|item| item.colon_right)),
+            value_x: median_f32(cluster.iter().map(|item| item.value_x)),
+            continuation: false,
+        });
+    }
+    let source = glyphs_text(&{
+        let mut ordered = line.glyphs.clone();
+        ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+        ordered
+    });
+    if !source.trim_start().starts_with("and ") {
+        return None;
+    }
+    let cluster = clusters.iter().find(|cluster| {
+        let value_x = median_f32(cluster.iter().map(|item| item.value_x));
+        let size = cluster[0].size.max(1.0);
+        (line.left - value_x).abs() <= 4.0
+            && line.right - line.left <= size * 36.0
+            && cluster
+                .iter()
+                .any(|item| (item.y - line.y).abs() <= size * 1.8)
+    })?;
+    Some(LabelAxis {
+        colon_right: median_f32(cluster.iter().map(|item| item.colon_right)),
+        value_x: median_f32(cluster.iter().map(|item| item.value_x)),
+        continuation: true,
+    })
+}
+
+fn split_translated_label(text: &str) -> Option<(String, String)> {
+    let index = text.find([':', '：'])?;
+    let label = text[..index].trim();
+    if label.is_empty() || label.chars().count() > 24 || !label.chars().any(is_han_char) {
+        return None;
+    }
+    let colon = text[index..].chars().next()?;
+    let value = text[index + colon.len_utf8()..].trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some((label.to_string(), value.to_string()))
+}
+
+fn plain_draw(
+    page: u32,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: Color,
+    text: &str,
+    font: &SubsetFont,
+    resource: &str,
+    skew: f32,
+    glyph_ids: Vec<u32>,
+) -> Drawn {
+    let count = text.chars().count();
+    Drawn {
+        page,
+        x,
+        y,
+        size,
+        color,
+        cids: cids_of(text, font),
+        resource: resource.to_string(),
+        skew,
+        widths: char_widths(text, size, font),
+        gaps: vec![0.0; count.saturating_sub(1)],
+        text: text.to_string(),
+        supers: vec![false; count],
+        sup_scale: 1.0,
+        sup_rise: 0.0,
+        glyph_ids,
+    }
+}
+
+fn layout_label_value_list(
+    glyphs: &[&Glyph],
+    ink: &[InkLine<'_>],
+    text: &str,
+    font: &SubsetFont,
+    extraction: &Extraction,
+    resource: &str,
+    skew: f32,
+    source_size: f32,
+    metrics: CjkMeasure,
+    media_left: f32,
+) -> Option<Vec<Drawn>> {
+    if ink.len() != 1 {
+        return None;
+    }
+    let axis = label_axis_for(extraction, &ink[0])?;
+    let scale = scale_for_heading(HeadingLevel::Body, source_size, metrics);
+    let mut size = (source_size * scale).max(1.0);
+    let floor = (source_size * 0.80).min(size);
+    let y = ink[0].y;
+    let page = ink[0].glyphs[0].page_index;
+    let color = ink[0].glyphs[0].fill_color.clone();
+    let ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+    if axis.continuation {
+        let text = text.trim();
+        if text.is_empty()
+            || text.chars().count() > 48
+            || text
+                .chars()
+                .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
+        {
+            return None;
+        }
+        return Some(vec![plain_draw(
+            page,
+            axis.value_x,
+            y,
+            size,
+            color,
+            text,
+            font,
+            resource,
+            skew,
+            ids,
+        )]);
+    }
+    let (label, value) = split_translated_label(text)?;
+    let colon = if label.chars().any(is_han_char) && font.glyphs.contains_key(&('：' as u32)) {
+        "："
+    } else {
+        ":"
+    };
+    let label_text = format!("{label}{colon}");
+    if label_text
+        .chars()
+        .chain(value.chars())
+        .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
+    {
+        return None;
+    }
+    loop {
+        let width = measure(&label_text, size, font);
+        if axis.colon_right - width >= media_left || size <= floor + 0.01 {
+            break;
+        }
+        let next = (size * 0.94).max(floor);
+        if (next - size).abs() < 0.01 {
+            break;
+        }
+        size = next;
+    }
+    let width = measure(&label_text, size, font);
+    let x = axis.colon_right - width;
+    Some(vec![
+        plain_draw(
+            page,
+            x,
+            y,
+            size,
+            color.clone(),
+            &label_text,
+            font,
+            resource,
+            skew,
+            ids.clone(),
+        ),
+        plain_draw(
+            page,
+            axis.value_x,
+            y,
+            size,
+            color,
+            &value,
+            font,
+            resource,
+            skew,
+            ids,
+        ),
+    ])
+}
+
+/// The widest row in a left-aligned stack. A short address line uses that
+/// width so its translation stays on one baseline at the shared left edge.
+fn shared_left_stack_right(extraction: &Extraction, line: &InkLine<'_>) -> Option<f32> {
+    let page = line.glyphs.first()?.page_index;
+    let size = crate::segment::representative_size(&line.glyphs).max(1.0);
+    let pieces = page_text_pieces(extraction, page);
+    let mut siblings: Vec<&TextPiece<'_>> = pieces
+        .iter()
+        .filter(|piece| {
+            (piece.left - line.left).abs() <= 1.5
+                && (piece.size - size).abs() <= size * 0.2
+                && piece.right - piece.left <= size * 16.0
+        })
+        .collect();
+    if siblings.len() < 2 {
+        return None;
+    }
+    siblings.sort_by(|left, right| right.y.total_cmp(&left.y));
+    let index = siblings
+        .iter()
+        .position(|piece| (piece.y - line.y).abs() <= 0.8)?;
+    let mut low = index;
+    let mut high = index;
+    while low > 0 {
+        let gap = siblings[low - 1].y - siblings[low].y;
+        if gap > 0.0 && gap <= size * 1.8 {
+            low -= 1;
+        } else {
+            break;
+        }
+    }
+    while high + 1 < siblings.len() {
+        let gap = siblings[high].y - siblings[high + 1].y;
+        if gap > 0.0 && gap <= size * 1.8 {
+            high += 1;
+        } else {
+            break;
+        }
+    }
+    // Two left-aligned lines are often a title and the next entry. An address
+    // block is three or more short rows, and the short one may use that width.
+    if high - low + 1 < 3 {
+        return None;
+    }
+    let right = siblings[low..=high]
+        .iter()
+        .map(|piece| piece.right)
+        .fold(line.right, f32::max);
+    (right > line.right + size * 0.4).then_some(right)
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -3741,6 +4164,31 @@ fn layout_segment(
     }
     block_right = block_right.min(media[2] - 1.0);
     block_left = block_left.max(media[0]);
+    // A role:name list is right-aligned in the source. Fit each translation
+    // to that colon axis before a paragraph reflow slides the labels left.
+    if !bilingual {
+        if let Some(drawn) = layout_label_value_list(
+            glyphs,
+            &ink,
+            text,
+            font,
+            extraction,
+            resource,
+            skew,
+            source_size,
+            metrics,
+            media[0],
+        ) {
+            return Some(drawn);
+        }
+    }
+    // Short rows that share a left edge (an address) use the stack's width.
+    // Fitting each row to its own ink shrinks or wraps the longest translation.
+    if !bilingual && ink.len() == 1 {
+        if let Some(right) = shared_left_stack_right(extraction, &ink[0]) {
+            block_right = block_right.max(right).min(media[2] - 1.0);
+        }
+    }
     // A cover line changes fill where the panel ends. Fit the translation
     // inside that primary run instead of the English tail on the artwork.
     if ink.len() == 1 && source_size >= 16.0 && text.chars().count() <= 48 {
@@ -8882,6 +9330,180 @@ ET",
     }
 
     #[test]
+    fn a_label_value_list_shares_one_colon_axis_and_one_name_column() {
+        let bytes = contents_pdf(
+            b"BT /F1 10 Tf \
+1 0 0 1 66 700 Tm (For online information and ordering of this and other Manning books, please visit the office today.) Tj \
+1 0 0 1 66 686 Tm (The publisher offers discounts on this book when ordered in quantity for a class or a team.) Tj \
+1 0 0 1 66 672 Tm (For more information please contact the sales desk before the end of the current month.) Tj \
+1 0 0 1 72 520 Tm (Manning Co.) Tj \
+1 0 0 1 240 520 Tm (Development editor: Ada Lovelace) Tj \
+1 0 0 1 72 506 Tm (20 Road St) Tj \
+1 0 0 1 275 506 Tm (Copy editor: Ann Lee) Tj \
+1 0 0 1 72 492 Tm (PO 761) Tj \
+1 0 0 1 340 492 Tm (and Lin Mei) Tj \
+1 0 0 1 185 478 Tm (Typesetter and cover designer: Mo Yan) Tj \
+ET",
+        );
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Development editor") {
+                    "开发编辑: Ada Lovelace"
+                } else if seg.text.contains("Copy editor") {
+                    "校对: Ann Lee"
+                } else if seg.text.contains("Typesetter") {
+                    "排版师与封面设计师: Mo Yan"
+                } else if seg.text.contains("and Lin") {
+                    "和 Lin Mei"
+                } else if seg.text.contains("Manning Co") {
+                    "曼宁出版公司"
+                } else if seg.text.contains("20 Road") {
+                    "20 鲍德温路"
+                } else if seg.text.contains("PO 761") {
+                    "邮政信箱 761"
+                } else {
+                    seg.text.as_str()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.to_string(),
+                }
+            })
+            .collect();
+        let mut chars: Vec<u32> = segments
+            .iter()
+            .flat_map(|seg| seg.translated.chars().chain(seg.source.chars()))
+            .map(|ch| ch as u32)
+            .collect();
+        chars.extend("： ".chars().map(|ch| ch as u32));
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&chars)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut glyphs: Vec<&Glyph> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.font_name.contains("RPT") || glyph.unicode.chars().any(is_han_char))
+            .collect();
+        glyphs.sort_by(|left, right| {
+            right.matrix[5]
+                .total_cmp(&left.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4]))
+        });
+        let mut rows: Vec<Vec<&Glyph>> = Vec::new();
+        for glyph in glyphs {
+            let same = rows.last().is_some_and(|row: &Vec<&Glyph>| {
+                let prev = row[row.len() - 1];
+                (prev.matrix[5] - glyph.matrix[5]).abs() < 1.5
+                    && glyph.matrix[4] - prev.bbox[2] < 14.0
+            });
+            if same {
+                rows.last_mut().unwrap().push(glyph);
+            } else {
+                rows.push(vec![glyph]);
+            }
+        }
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|row| row.iter().map(|glyph| glyph.unicode.as_str()).collect())
+            .collect();
+        let row_text = |needles: &[&str]| -> Vec<&Glyph> {
+            rows.iter()
+                .find(|row| {
+                    let text: String = row.iter().map(|glyph| glyph.unicode.as_str()).collect();
+                    needles.iter().all(|needle| text.contains(needle))
+                })
+                .unwrap_or_else(|| panic!("missing {needles:?} in {texts:?}"))
+                .clone()
+        };
+        let colon_right = |row: &[&Glyph]| -> f32 {
+            let colon = row
+                .iter()
+                .find(|glyph| glyph.unicode == "：")
+                .unwrap_or_else(|| panic!("missing fullwidth colon in {row:?}"));
+            colon.bbox[2].max(colon.matrix[4])
+        };
+        let name_x = |row: &[&Glyph], name: &str| -> f32 {
+            let needle = name.chars().next().unwrap();
+            row.iter()
+                .find(|glyph| glyph.unicode.starts_with(needle))
+                .map(|glyph| glyph.matrix[4])
+                .unwrap_or_else(|| panic!("{name} missing in {row:?}"))
+        };
+        let dev = row_text(&["开发编辑", "Ada"]);
+        let copy = row_text(&["校对", "Ann"]);
+        let set = row_text(&["排版师", "Mo"]);
+        let cont = row_text(&["和", "Lin"]);
+        let rights = [colon_right(&dev), colon_right(&copy), colon_right(&set)];
+        let names = [
+            name_x(&dev, "Ada"),
+            name_x(&copy, "Ann"),
+            name_x(&set, "Mo"),
+            name_x(&cont, "和"),
+        ];
+        let colon_span = rights.iter().copied().fold(rights[0], f32::max)
+            - rights.iter().copied().fold(rights[0], f32::min);
+        assert!(
+            colon_span < 1.5,
+            "colons are not on one axis: {rights:?}"
+        );
+        let name_span = names.iter().copied().fold(names[0], f32::max)
+            - names.iter().copied().fold(names[0], f32::min);
+        assert!(
+            name_span < 1.5,
+            "names and the continuation are not on one column: {names:?}"
+        );
+        assert!(
+            names[0] > rights[0] + 1.0,
+            "name overlaps the colon: colon {rights:?} name {names:?}"
+        );
+        let company = row_text(&["曼宁出版公司"]);
+        let street = row_text(&["鲍德温"]);
+        let post = row_text(&["邮政信箱"]);
+        let lefts = [company[0].matrix[4], street[0].matrix[4], post[0].matrix[4]];
+        let left_span = lefts.iter().copied().fold(lefts[0], f32::max)
+            - lefts.iter().copied().fold(lefts[0], f32::min);
+        assert!(left_span < 1.0, "address rows do not share a left edge: {lefts:?}");
+        let post_text: String = post.iter().map(|glyph| glyph.unicode.as_str()).collect();
+        assert_eq!(post_text, "邮政信箱 761", "{post_text}");
+        let sizes = [company[0].font_size, street[0].font_size, post[0].font_size];
+        let size_span = sizes.iter().copied().fold(sizes[0], f32::max)
+            - sizes.iter().copied().fold(sizes[0], f32::min);
+        assert!(
+            size_span < 0.6,
+            "address rows are not one size: {sizes:?}"
+        );
+    }
+
+    #[test]
     fn side_by_side_credits_that_share_an_operator_are_both_translated() {
         let bytes = shared_credit_pdf();
         let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
@@ -9157,7 +9779,7 @@ ET",
             .iter()
             .flat_map(|(_, text)| text.chars().map(|ch| ch as u32))
             .collect();
-        chars.extend("■—–API ".chars().map(|ch| ch as u32));
+        chars.extend("■—–API ：".chars().map(|ch| ch as u32));
         for seg in &segmentation.segments {
             chars.extend(seg.text.chars().map(|ch| ch as u32));
         }
