@@ -1673,12 +1673,15 @@ pub(crate) fn whole_line_is_personal_name(text: &str) -> bool {
     is_personal_name(text)
 }
 
+/// Two to five title-case tokens, and none of them a function word or an
+/// organization. `Julie McNamee` is a person. `The Model Context Protocol`
+/// is a title, so the Chinese translation stays.
 fn is_personal_name(text: &str) -> bool {
     let tokens: Vec<&str> = text.split_whitespace().collect();
     (2..=5).contains(&tokens.len())
         && tokens
             .iter()
-            .all(|token| is_name_token(token) && !is_org_token(token))
+            .all(|token| is_name_token(token) && !is_org_token(token) && !is_function_word(token))
 }
 
 fn is_org_token(token: &str) -> bool {
@@ -2274,6 +2277,14 @@ mod tests {
             restore_credit_names("Special Sales Department", "特别销售部"),
             "特别销售部"
         );
+        assert_eq!(
+            restore_credit_names(
+                "solution: The Model Context Protocol",
+                "解决方案: 模型上下文协议"
+            ),
+            "解决方案: 模型上下文协议"
+        );
+        assert!(!whole_line_is_personal_name("The Model Context Protocol"));
     }
 
     #[test]
