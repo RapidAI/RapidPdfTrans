@@ -6640,7 +6640,10 @@ fn english_body_source(text: &str) -> bool {
     let words: Vec<&str> = text.split_whitespace().collect();
     !words.is_empty()
         && !words.iter().all(|word| {
-            word.starts_with("http://") || word.starts_with("https://") || word.contains('@')
+            word.starts_with("http://")
+                || word.starts_with("https://")
+                || word.contains('@')
+                || word.chars().all(|ch| ch.is_ascii_digit())
         })
 }
 
@@ -8202,6 +8205,9 @@ mod tests {
         assert!(!english_body_source(html));
         assert!(english_body_source(
             "The table structure language is usually adopted as is for the sequence tokenization."
+        ));
+        assert!(!english_body_source(
+            "4 https://huggingface.co/datasets/piushorn/wikipedia-latex-formulas-319k"
         ));
     }
 
