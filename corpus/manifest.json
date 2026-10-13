@@ -147,6 +147,24 @@
       "ci": true
     },
     {
+      "id": "2025-acl-long-1",
+      "url": "https://aclanthology.org/2025.acl-long.1.pdf",
+      "source": "acl",
+      "title": "EcomScriptBench: A Multi-task Benchmark for E-commerce Script Planning via Step-wise Intention-Driven Product Association",
+      "license": "CC BY 4.0 (ACL Anthology)",
+      "sha256": "0977c066cd05116fc49eab6e043180246c4d58a27cfbbad859c4e3115347a5bb",
+      "bytes": 673497,
+      "pages": 22,
+      "tags": [
+        "acl",
+        "conference",
+        "latex",
+        "nlp",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
       "id": "arxiv-1312.6114",
       "url": "https://arxiv.org/pdf/1312.6114",
       "source": "arxiv",
@@ -1656,6 +1674,42 @@
         "latex",
         "ml",
         "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2610.13877",
+      "url": "https://arxiv.org/pdf/2610.13877.pdf",
+      "source": "arxiv",
+      "title": "On the saturability of p-adic Lie groups",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "1e50bb54e55d6089252e1e4e464b2e86f35ce290c75c8da5214ab66ae5d4dce5",
+      "bytes": 681827,
+      "pages": 48,
+      "tags": [
+        "arxiv",
+        "formulas",
+        "latex",
+        "math"
+      ],
+      "ci": false
+    },
+    {
+      "id": "bencao-yanyi-ssid-12987138",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/4/43/SSID-12987138_%E6%9C%AC%E8%8D%89%E8%A1%8D%E7%BE%A9.pdf",
+      "source": "wikimedia",
+      "title": "本草衍義 (SSID-12987138 public-domain scan)",
+      "license": "Public domain (PD-old / PD-scan; Wikimedia Commons; PDF not committed)",
+      "sha256": "23491230e7daa068b70f4f7a8d5f77748b13948570ae201d0ce7051ee9575f99",
+      "bytes": 41821253,
+      "pages": 239,
+      "tags": [
+        "book",
+        "chinese",
+        "cjk",
+        "historical",
+        "public-domain",
+        "scanned"
       ],
       "ci": false
     }
