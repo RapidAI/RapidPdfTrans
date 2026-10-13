@@ -36,7 +36,9 @@ pub use references::{identical_reference_operators, reference_glyph_ids, referen
 use crate::error::{Error, Result};
 use crate::extract::Extraction;
 use crate::segment;
-use prompt::{fallback_prompt, parse_translations, system_prompt, user_payload, PromptSegment};
+use prompt::{
+    fallback_prompt, lint_prompt, parse_translations, system_prompt, user_payload, PromptSegment,
+};
 use protect::{restore, shield};
 
 pub const DEFAULT_LLM_BASE_URL: &str = "https://hub.mypapers.top/api/llm/v1";
@@ -532,7 +534,9 @@ pub fn replay_extraction(
 /// sentence does not, and that stays an error.
 fn lookup_saved(source: &str, saved: &HashMap<String, String>) -> Option<String> {
     if let Some(hit) = saved.get(source) {
-        return Some(hit.clone());
+        if !translation_flaw(source, hit) {
+            return Some(hit.clone());
+        }
     }
     let trimmed = source.trim();
     if is_digit_index(trimmed) {
@@ -542,10 +546,13 @@ fn lookup_saved(source: &str, saved: &HashMap<String, String>) -> Option<String>
         return Some(peeled);
     }
     if let Some(joined) = join_saved_pieces(source, saved) {
-        return Some(joined);
+        if !translation_flaw(source, &joined) {
+            return Some(joined);
+        }
     }
     // The same glyphs can pick up a different space when two lines become one.
-    join_squashed(source, saved)
+    let squashed = join_squashed(source, saved)?;
+    (!translation_flaw(source, &squashed)).then_some(squashed)
 }
 
 fn is_digit_index(text: &str) -> bool {
@@ -816,7 +823,7 @@ fn load_checkpoint(
         if let Some(done) = cache.get(&seg.text) {
             // A cached echo of a body paragraph is not a translation. Leave it
             // for the model, which retries once when the reply is still English.
-            if needs_english_retry(&seg.text, done) {
+            if needs_english_retry(&seg.text, done) || translation_flaw(&seg.text, done) {
                 continue;
             }
             translated[index] = Some(done.clone());
@@ -982,8 +989,12 @@ fn translate_batch(
     calls: &mut usize,
 ) -> Result<Vec<(usize, String)>> {
     match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
-        Ok(restored) => Ok(polish(echo_fix(
-            segments, shielded, restored, opts, translator, calls,
+        Ok(restored) => Ok(polish(lint_fix(
+            segments,
+            echo_fix(segments, shielded, restored, opts, translator, calls),
+            opts,
+            translator,
+            calls,
         ))),
         Err(err) if recoverable(&err) && indexes.len() > 1 => {
             let mid = indexes.len() / 2;
@@ -1001,8 +1012,12 @@ fn translate_batch(
         }
         Err(err) if recoverable(&err) => {
             match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
-                Ok(restored) => Ok(polish(echo_fix(
-                    segments, shielded, restored, opts, translator, calls,
+                Ok(restored) => Ok(polish(lint_fix(
+                    segments,
+                    echo_fix(segments, shielded, restored, opts, translator, calls),
+                    opts,
+                    translator,
+                    calls,
                 ))),
                 Err(_) => Ok(polish(
                     indexes
@@ -1111,33 +1126,35 @@ fn is_sentence_end(chars: &[char], index: usize) -> bool {
         word_start -= 1;
     }
     let word: String = chars[word_start..index].iter().collect();
-    if word.chars().count() <= 1 {
-        return false;
-    }
-    !matches!(
-        word.to_ascii_lowercase().as_str(),
-        "al" | "etc"
-            | "eg"
-            | "ie"
-            | "fig"
-            | "eq"
-            | "dr"
-            | "mr"
-            | "mrs"
-            | "ms"
-            | "vs"
-            | "cf"
-            | "vol"
-            | "pp"
-            | "no"
-            | "approx"
-            | "st"
-            | "jr"
-            | "sr"
-            | "prof"
-            | "inc"
-            | "ltd"
-    )
+    !abbreviated_word(&word)
+}
+
+fn abbreviated_word(word: &str) -> bool {
+    word.chars().count() <= 1
+        || matches!(
+            word.to_ascii_lowercase().as_str(),
+            "al" | "etc"
+                | "eg"
+                | "ie"
+                | "fig"
+                | "eq"
+                | "dr"
+                | "mr"
+                | "mrs"
+                | "ms"
+                | "vs"
+                | "cf"
+                | "vol"
+                | "pp"
+                | "no"
+                | "approx"
+                | "st"
+                | "jr"
+                | "sr"
+                | "prof"
+                | "inc"
+                | "ltd"
+        )
 }
 
 /// Translate one echoed paragraph as separate sentences and with no neighbor
@@ -1241,6 +1258,307 @@ fn restore_expanded(text: &str, slots: &[String]) -> std::result::Result<String,
             }
         }
     }
+}
+
+/// One more call when the translation is Chinese but still defective.
+/// A repeated word or a space between Chinese characters is then removed,
+/// so a second copy of the same defect is not painted.
+fn lint_fix(
+    segments: &[Segment],
+    mut restored: Vec<(usize, String)>,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+) -> Vec<(usize, String)> {
+    for slot in &mut restored {
+        let source = &segments[slot.0].text;
+        if !translation_flaw(source, &slot.1) {
+            continue;
+        }
+        let original = slot.1.clone();
+        let candidate = translate_lint(segments[slot.0].id, source, opts, translator, calls)
+            .unwrap_or(original.clone());
+        let repaired_new = repair_translation(source, &candidate);
+        let repaired_old = repair_translation(source, &original);
+        slot.1 = if flaw_count(source, &repaired_new) <= flaw_count(source, &repaired_old) {
+            repaired_new
+        } else {
+            repaired_old
+        };
+    }
+    restored
+}
+
+fn translate_lint(
+    id: u32,
+    source: &str,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+) -> Option<String> {
+    let shielded = shield(source, &opts.glossary);
+    let prompt = PromptSegment {
+        id,
+        text: shielded.text,
+        context_before: Vec::new(),
+        context_after: Vec::new(),
+    };
+    let user = user_payload(std::slice::from_ref(&prompt)).ok()?;
+    let system = lint_prompt(&opts.target_lang);
+    *calls += 1;
+    let raw = translator.complete(&system, &user).ok()?;
+    let parsed = parse_translations(&raw).ok()?;
+    let text = parsed
+        .iter()
+        .find(|(found, _)| *found == id)
+        .map(|(_, text)| text.clone())?;
+    let restored = restore_expanded(&text, &shielded.slots).ok()?;
+    if needs_english_retry(source, &restored) {
+        None
+    } else {
+        Some(restored)
+    }
+}
+
+/// A translation the model should be asked to do again.
+///
+/// A space between two short Chinese words, a word typed twice, a full stop
+/// the source does not have, or a short English phrase left in the sentence.
+fn translation_flaw(source: &str, translated: &str) -> bool {
+    flaw_count(source, translated) > 0
+}
+
+fn flaw_count(source: &str, translated: &str) -> usize {
+    usize::from(duplicated_word(source, translated))
+        + usize::from(stray_cjk_space(translated))
+        + usize::from(extra_sentence_end(source, translated))
+        + usize::from(residual_english(translated))
+}
+
+fn repair_translation(source: &str, translated: &str) -> String {
+    drop_stray_cjk_spaces(&collapse_duplicate_tokens(source, translated))
+}
+
+fn duplicated_word(source: &str, translated: &str) -> bool {
+    let tokens: Vec<&str> = translated.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        pair[0] == pair[1]
+            && !pair[0].chars().all(|ch| ch.is_ascii_digit())
+            && !source_repeats_token(source, pair[0])
+    })
+}
+
+fn source_repeats_token(source: &str, token: &str) -> bool {
+    let tokens: Vec<&str> = source.split_whitespace().collect();
+    tokens
+        .windows(2)
+        .any(|pair| pair[0] == token && pair[1] == token)
+}
+
+fn collapse_duplicate_tokens(source: &str, text: &str) -> String {
+    let lead_len = text.len() - text.trim_start().len();
+    let lead = &text[..lead_len];
+    let mut kept: Vec<&str> = Vec::new();
+    for token in text.split_whitespace() {
+        if kept.last().copied() == Some(token)
+            && !token.chars().all(|ch| ch.is_ascii_digit())
+            && !source_repeats_token(source, token)
+        {
+            continue;
+        }
+        kept.push(token);
+    }
+    let mut out = lead.to_string();
+    out.push_str(&kept.join(" "));
+    out
+}
+
+/// `高级 检索` is a space the model inserted. `第 4 部分 摘要` keeps the
+/// space after the structural word. A transliterated name (`罗伯托 因凡特`)
+/// is three characters on each side and stays.
+fn stray_cjk_space(text: &str) -> bool {
+    !stray_cjk_space_spans(text).is_empty()
+}
+
+fn drop_stray_cjk_spaces(text: &str) -> String {
+    let spans = stray_cjk_space_spans(text);
+    if spans.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for (start, end) in spans {
+        out.push_str(&text[cursor..start]);
+        cursor = end;
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+fn stray_cjk_space_spans(text: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut spans = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !is_han(chars[index].1) {
+            index += 1;
+            continue;
+        }
+        let run_start = index;
+        while index < chars.len() && is_han(chars[index].1) {
+            index += 1;
+        }
+        let run: String = chars[run_start..index].iter().map(|(_, ch)| *ch).collect();
+        let space_start = index;
+        while index < chars.len() && chars[index].1.is_whitespace() {
+            index += 1;
+        }
+        if space_start == index || index >= chars.len() || !is_han(chars[index].1) {
+            continue;
+        }
+        if run.chars().count() <= 2 && !structural_han(&run) {
+            spans.push((chars[space_start].0, chars[index].0));
+        }
+    }
+    spans
+}
+
+fn structural_han(run: &str) -> bool {
+    matches!(run, "部分" | "章" | "节" | "图" | "表" | "第" | "附录")
+}
+
+fn is_han(ch: char) -> bool {
+    matches!(ch, '\u{3400}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
+}
+
+fn extra_sentence_end(source: &str, translated: &str) -> bool {
+    let chars: Vec<char> = source.chars().collect();
+    let source_ends = chars
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| sentence_boundary(&chars, *index))
+        .count();
+    let translated_ends = translated
+        .chars()
+        .filter(|ch| matches!(ch, '。' | '！' | '？'))
+        .count();
+    translated_ends > source_ends
+}
+
+/// A period before a new sentence, or the period that ends the segment.
+fn sentence_boundary(chars: &[char], index: usize) -> bool {
+    if is_sentence_end(chars, index) {
+        return true;
+    }
+    if !matches!(chars[index], '.' | '?' | '!') {
+        return false;
+    }
+    if chars[index + 1..].iter().any(|ch| !ch.is_whitespace()) {
+        return false;
+    }
+    let mut word_start = index;
+    while word_start > 0 && chars[word_start - 1].is_ascii_alphabetic() {
+        word_start -= 1;
+    }
+    let word: String = chars[word_start..index].iter().collect();
+    !abbreviated_word(&word)
+}
+
+/// `The Model Context Protocol` left in a sentence. A list of personal names
+/// and a product name with no function word are not this phrase.
+fn residual_english(text: &str) -> bool {
+    // A one-character mark in front of an echoed sentence is not a Chinese
+    // sentence that still contains an English phrase.
+    let han_run = text
+        .chars()
+        .fold((0usize, 0usize), |(best, run), ch| {
+            if is_han(ch) {
+                let run = run + 1;
+                (best.max(run), run)
+            } else {
+                (best, 0)
+            }
+        })
+        .0;
+    if han_run < 2 && text.chars().any(is_han) {
+        return false;
+    }
+    let mut run: Vec<String> = Vec::new();
+    let mut flagged = false;
+    let flush = |run: &mut Vec<String>, flagged: &mut bool| {
+        if (3..=4).contains(&run.len()) && run.iter().any(|word| is_function_word(word)) {
+            *flagged = true;
+        }
+        run.clear();
+    };
+    for token in text.split_whitespace() {
+        if let Some(word) = prose_word(token) {
+            run.push(word);
+        } else {
+            flush(&mut run, &mut flagged);
+        }
+    }
+    flush(&mut run, &mut flagged);
+    flagged
+}
+
+fn prose_word(token: &str) -> Option<String> {
+    let core = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            ',' | '.' | ';' | ':' | ')' | '(' | '"' | '\'' | '“' | '”' | '—' | '-'
+        )
+    });
+    if core.is_empty() {
+        return None;
+    }
+    if is_function_word(core) {
+        return Some(core.to_ascii_lowercase());
+    }
+    if !core
+        .chars()
+        .all(|ch| ch.is_ascii_alphabetic() || ch == '\'' || ch == '-')
+    {
+        return None;
+    }
+    if core.contains('-') && core.chars().any(|ch| ch.is_ascii_uppercase()) {
+        return None;
+    }
+    let letters: String = core.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    if letters.len() < 3 || !letters.chars().any(|ch| ch.is_ascii_lowercase()) {
+        return None;
+    }
+    if letters.chars().any(|ch| ch.is_ascii_uppercase())
+        && letters.chars().any(|ch| ch.is_ascii_lowercase())
+        && letters
+            .chars()
+            .zip(letters.chars().skip(1))
+            .any(|(left, right)| left.is_ascii_lowercase() && right.is_ascii_uppercase())
+    {
+        return None;
+    }
+    Some(letters.to_ascii_lowercase())
+}
+
+fn is_function_word(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "the"
+            | "of"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "to"
+            | "by"
+            | "on"
+            | "in"
+            | "a"
+            | "an"
+            | "or"
+            | "as"
+            | "at"
+    )
 }
 
 fn polish(items: Vec<(usize, String)>) -> Vec<(usize, String)> {
@@ -2160,6 +2478,92 @@ mod tests {
         );
         assert_ne!(report.segments[0].translated, source);
         assert!(report.calls >= 2, "calls={}", report.calls);
+    }
+
+    #[test]
+    fn a_defective_translation_is_retried_and_then_repaired() {
+        assert!(translation_flaw(
+            "PART 4 ADVANCED RAG ",
+            "第 4 部分 高级 检索增强生成 "
+        ));
+        assert!(!translation_flaw(
+            "PART 2 SUMMARIZATION ",
+            "第 2 部分 摘要 "
+        ));
+        assert!(translation_flaw("The The MCP ", "该 该 MCP "));
+        assert_eq!(repair_translation("The The MCP ", "该 该 MCP "), "该 MCP");
+        assert_eq!(
+            repair_translation("PART 4 ADVANCED RAG ", "第 4 部分 高级 检索增强生成 "),
+            "第 4 部分 高级检索增强生成"
+        );
+        assert!(!translation_flaw("ROBERTO INFANTE", "罗伯托 因凡特"));
+        let open = "In both cases, source code is formatted in a fixed-width font like this";
+        assert!(extra_sentence_end(
+            open,
+            "在这两种情况下，源代码都使用像这样的等宽字体格式。"
+        ));
+        assert!(translation_flaw(
+            "solution: The Model Context Protocol",
+            "解决方案： The Model Context Protocol"
+        ));
+        assert!(!translation_flaw(
+            "solution: The Model Context Protocol",
+            "解决方案：模型上下文协议"
+        ));
+        assert!(!residual_english(
+            "致审稿人—Abdullah Al Imran, Antowan Malik Batts"
+        ));
+        let source = "The projects target modern versions of Python and use standard tools such as pip and virtual environments for every chapter.";
+        let mut ex = extraction_from_lines(&[source]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &SpaceThenClean).unwrap();
+        assert!(
+            !translation_flaw(source, &report.segments[0].translated),
+            "{}",
+            report.segments[0].translated
+        );
+        assert!(report.calls >= 2, "calls={}", report.calls);
+    }
+
+    struct SpaceThenClean;
+    impl Translator for SpaceThenClean {
+        fn complete(&self, system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = if system.contains("space between Chinese") {
+                        "这些项目面向较新的 Python 版本，并使用标准工具。"
+                    } else {
+                        "这些 项目面向较新的 Python 版本。"
+                    };
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_broken_sentence_join_is_not_reused() {
+        let left = "This book contains many examples of source code both in numbered listings and in line with normal text. In both cases, source code is formatted in a fixed-width font like this";
+        let right =
+            " to separate it from ordinary text. Sometimes code is also in bold to highlight";
+        let mut saved = HashMap::new();
+        saved.insert(
+            left.to_string(),
+            "本书包含许多源代码示例，既在编号列表中，也穿插在正常文本中。在这两种情况下，源代码都使用像这样的等宽字体格式。".to_string(),
+        );
+        saved.insert(
+            right.to_string(),
+            "以将其与普通文本区分开来。有时代码也会用粗体来突出显示".to_string(),
+        );
+        let source = format!("{left}{right}");
+        assert!(
+            lookup_saved(&source, &saved).is_none(),
+            "joined the broken halves"
+        );
     }
 
     #[test]

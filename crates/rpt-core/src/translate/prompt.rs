@@ -67,6 +67,24 @@ Copy every ⟦N⟧ placeholder unchanged. Do not add notes or explanations."
     )
 }
 
+/// A retry for a translation that is Chinese but still defective: a repeated
+/// word, a space between Chinese characters, a sentence break the source
+/// does not have, or an English phrase left in the middle.
+pub fn lint_prompt(target_lang: &str) -> String {
+    let dst = language_name(target_lang);
+    format!(
+        "You translate document text into {dst}. \
+The previous answer was not acceptable: it repeated a word, put a space between Chinese characters, \
+closed a sentence the source left open, or left an English phrase untranslated. \
+Reply with JSON only, no markdown, in exactly this shape: \
+{{\"translations\":[{{\"id\":0,\"text\":\"...\"}}]}}. \
+Write {dst} with no space between Chinese characters and no repeated word. \
+Add a full stop only where the source ends a sentence. \
+Translate descriptive English into {dst}. Keep URLs, numbers, and Latin personal names unchanged. \
+Copy every ⟦N⟧ placeholder unchanged. Do not add notes."
+    )
+}
+
 pub fn user_payload(segments: &[PromptSegment]) -> Result<String> {
     let items: Vec<Value> = segments
         .iter()

@@ -1544,6 +1544,12 @@ fn caption_block(start: usize, lines: &[VisualLine<'_>], order: &[usize]) -> Vec
         if lines[index].page != lines[start].page || caption_kind(&lines[index].text).is_some() {
             break;
         }
+        // The other column sits between a caption and its wrap in reading
+        // order. Treating that line as the end of the caption left the wrap
+        // inside the figure, still in English.
+        if !x_overlaps(&lines[start], &lines[index]) {
+            continue;
+        }
         let prev = *block.last().unwrap_or(&start);
         if !continues_paragraph(&lines[prev], &lines[index], 0.0) {
             break;
@@ -7274,6 +7280,55 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("travel assistant") && !text.contains("appendix")),
             "sub-entry missing: {column:?}"
+        );
+    }
+
+    #[test]
+    fn a_caption_wrap_is_not_swallowed_by_the_other_column() {
+        let glyphs = vec![
+            wide(
+                0,
+                50.0,
+                400.0,
+                "Figure 4: Loss convergence curves of fine-tuning the ablated",
+                240.0,
+                9.0,
+            ),
+            wide(
+                1,
+                320.0,
+                390.0,
+                "This sentence is long enough to count as ordinary body text in the column today.",
+                240.0,
+                9.0,
+            ),
+            wide(
+                2,
+                50.0,
+                389.0,
+                "models of LayoutLMv3 on PubLayNet dataset and the loss of model two.",
+                240.0,
+                9.0,
+            ),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Figure 4") && text.contains("models of LayoutLMv3")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("ordinary body") && !text.contains("Figure 4")),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept.iter().all(|(_, reason)| reason != "figure"),
+            "{:?}",
+            seg.kept
         );
     }
 }
