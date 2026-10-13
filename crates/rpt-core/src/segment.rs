@@ -4280,10 +4280,7 @@ mod tests {
         ];
         let seg = segment_with(&glyphs, &SegmentFlags::default());
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
-        assert!(
-            texts.contains(&"1 Introduction"),
-            "{texts:?}"
-        );
+        assert!(texts.contains(&"1 Introduction"), "{texts:?}");
         assert!(
             texts
                 .iter()

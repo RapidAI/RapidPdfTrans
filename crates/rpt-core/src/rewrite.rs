@@ -3087,8 +3087,9 @@ fn same_root(parent: &[usize], left: usize, right: usize) -> bool {
 }
 
 /// An italic sub-entry with no bullet (`Implementing a prompt template … 32`,
-/// `appendix A … 351`, `preface xvi`). The page number stays one space after
-/// the title. A section heading and a leader-dot row still right-align.
+/// `appendix A … 351`). The arabic page number stays one space after the
+/// title. A roman front-matter token (`preface xvi`) is a contents column
+/// number, same as a part or section, and is not folded into this path.
 fn solo_italic_subentries(
     report: &TranslateReport,
     extraction: &Extraction,
@@ -3179,6 +3180,12 @@ fn build_solo_italic(
         adjacent_page_segment(&glyphs, size, report, extraction, by_id)?
     };
     if number_follows_leaders(&page_ids, extraction, size) {
+        return None;
+    }
+    // `前言 xvi` used to paint the roman numeral in the gap after the short
+    // Chinese title. v21 set that numeral on the contents column. An arabic
+    // sub-entry (`function 32`) still stays beside its title.
+    if roman_column_token(&page_label) {
         return None;
     }
     let title = strip_list_marker(&display_title(segment));
@@ -3292,6 +3299,14 @@ fn adjacent_page_segment(
         }
     }
     best.map(|(_, text, ids)| (text, ids))
+}
+
+/// `xvi`, `xxvi`. Not an arabic sub-entry number, and not a one-letter folio.
+fn roman_column_token(text: &str) -> bool {
+    let text = text.trim();
+    text.chars().count() >= 2
+        && solo_page_token(text)
+        && text.chars().any(|ch| !ch.is_ascii_digit())
 }
 
 fn solo_page_token(text: &str) -> bool {
@@ -3772,6 +3787,10 @@ fn layout_subentry_flow(
                 used = 0.0;
             }
             lines.last_mut()?.push(bullet_piece(run));
+            // Still reserve the marker's width when deciding the next break.
+            // Painting hangs that marker in the gutter; dropping it from the
+            // budget pulls the next heading up off a chapter index that is
+            // not in the drawn list.
             used += if used == 0.0 {
                 bullet_w + bullet_gap
             } else {
@@ -3980,7 +3999,18 @@ fn paint_flow_line(
 ) -> Vec<Drawn> {
     let bullet_gap = line.size * 0.45;
     let bullet_size = (line.size * 0.42).max(2.5);
-    let mut x = left;
+    // `■ AI 智能体 8` is a new item that wrapped. The marker hangs left so
+    // the title origin is `left`, matching the run's first line. A marker
+    // between two items on one line still takes its gap out of the column.
+    let hanging = line
+        .pieces
+        .first()
+        .is_some_and(|piece| piece.kind == FlowKind::Bullet);
+    let mut x = if hanging {
+        left - bullet_size - bullet_gap
+    } else {
+        left
+    };
     let mut previous_bullet = false;
     let mut previous_italic = false;
     let mut out = Vec::new();
@@ -5134,12 +5164,19 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
         for block in blocks {
             // A column page number sits to the right of its title. It is not
             // the next paragraph, and treating it as one used to drop the
-            // pull before the following section.
+            // pull before the following section. Leader dots are the same
+            // row: a hanging bullet changes the block above by a few points
+            // and used to chain the dots onto that block, leaving `171`
+            // behind. `seat_inline_page_numbers` moves both with the title.
             let page_number = block
                 .indices
                 .iter()
                 .all(|index| draw_is_bare_page_number(&drawn[*index], extraction, by_id));
-            if page_number {
+            let leaders = block
+                .indices
+                .iter()
+                .all(|index| draw_is_leader(&drawn[*index]));
+            if page_number || leaders {
                 continue;
             }
             let mut extra = 0.0f32;
@@ -5192,8 +5229,14 @@ fn column_block(
         let line = &drawn[*index];
         top = top.max(line.y);
         bottom = bottom.min(line.y);
-        left = left.min(line.x);
+        // A continuation marker hangs in the gutter. It is not the column edge.
+        if line.text != "■" {
+            left = left.min(line.x);
+        }
         size = size.max(line.size);
+    }
+    if left == f32::MAX {
+        left = drawn[indices[0]].x;
     }
     let mut source_ys = Vec::new();
     for id in &drawn[indices[0]].glyph_ids {
@@ -5375,6 +5418,9 @@ fn title_before_number(
         if item.page != page
             || item.text.trim().is_empty()
             || draw_is_bare_page_number(item, extraction, by_id)
+            // Dots end just before the number, closer than the title. They
+            // are not the row the number should follow.
+            || draw_is_leader(item)
         {
             continue;
         }
@@ -10055,6 +10101,312 @@ ET",
     }
 
     #[test]
+    fn contents_rows_share_the_source_right_edge() {
+        // Front matter, a part with leaders, a bold-italic chapter, a section,
+        // and a bullet run. Column numbers meet the source right edge. A
+        // wrapped bullet item starts at the run's first-line x.
+        let bytes = contents_row_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let source_column = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[4] > 400.0 && toc_page_char(glyph.unicode.trim()))
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
+        assert!(
+            source_column > 400.0,
+            "fixture column missing: {source_column}"
+        );
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("preface") {
+                    "前言"
+                } else if seg.text.contains("Introduction") {
+                    "代理和应用简介"
+                } else if seg.text.contains("PART") {
+                    "第1部分入门"
+                } else if seg.text.contains("1.1") {
+                    "1.1 构建应用"
+                } else if seg.text.contains("Engines") {
+                    "问答引擎摘要问答引擎摘要问答引擎摘要问答引擎摘要"
+                } else if seg.text.contains("Chatbots") {
+                    "聊天机器人应用聊天机器人应用聊天机器人应用"
+                } else if seg.text.contains("Agents") {
+                    "章节练习补充说明文字章节练习补充说明文字"
+                } else {
+                    seg.text.as_str()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"前言代理和应用简介第1部分入门构建问答引擎摘要聊天机器人应用章节练习补充说明文字■"
+                .chars()
+                .chain("xvi.134789".chars())
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut column_runs: Vec<(String, f32, f32)> = Vec::new();
+        let mut page_glyphs: Vec<&Glyph> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[4] > 300.0 && toc_page_char(glyph.unicode.trim()))
+            .collect();
+        page_glyphs.sort_by(|left, right| {
+            right.matrix[5]
+                .total_cmp(&left.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4]))
+        });
+        for glyph in page_glyphs {
+            let right = glyph.matrix[4] + glyph.advance[0].max(0.0);
+            let extend = column_runs.last().is_some_and(|(_, edge, y)| {
+                (glyph.matrix[5] - *y).abs() < 1.5
+                    && glyph.matrix[4] <= *edge + glyph.font_size * 0.5
+            });
+            if extend {
+                let row = column_runs.last_mut().unwrap();
+                row.0.push_str(glyph.unicode.trim());
+                row.1 = row.1.max(right);
+            } else {
+                column_runs.push((glyph.unicode.trim().to_string(), right, glyph.matrix[5]));
+            }
+        }
+        for token in ["xvi", "1", "3", "19"] {
+            let right = column_runs
+                .iter()
+                .find(|(text, _, _)| text == token)
+                .map(|(_, right, _)| *right);
+            assert!(
+                right.is_some_and(|edge| (edge - source_column).abs() < 1.5),
+                "{token} left the source column {source_column}: {column_runs:?} {}",
+                painted.plain_text()
+            );
+        }
+        let mut bullet_lines: Vec<(f32, f32)> = Vec::new();
+        for glyph in painted.glyphs.iter().filter(|glyph| {
+            glyph.unicode.contains('问')
+                || glyph.unicode.contains('聊')
+                || glyph.unicode.contains('章')
+        }) {
+            let y = glyph.matrix[5];
+            if let Some(row) = bullet_lines.iter_mut().find(|row| (row.0 - y).abs() < 1.5) {
+                row.1 = row.1.min(glyph.matrix[4]);
+            } else {
+                bullet_lines.push((y, glyph.matrix[4]));
+            }
+        }
+        bullet_lines.sort_by(|left, right| right.0.total_cmp(&left.0));
+        assert!(
+            bullet_lines.len() >= 2,
+            "bullet run did not wrap: {} {bullet_lines:?}",
+            painted.plain_text()
+        );
+        let first_x = bullet_lines[0].1;
+        for (_, x) in bullet_lines.iter().skip(1) {
+            assert!(
+                (x - first_x).abs() < 0.2,
+                "continuation x={x} left the first line x={first_x}"
+            );
+        }
+        let inline: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| matches!(glyph.unicode.as_str(), "7" | "8"))
+            .map(|glyph| glyph.matrix[4] + glyph.advance[0].max(0.0))
+            .collect();
+        assert_eq!(inline.len(), 2, "inline bullet numbers: {inline:?}");
+        assert!(
+            inline.iter().all(|right| source_column - right > 20.0),
+            "bullet-run numbers left their titles for the column {source_column}: {inline:?}"
+        );
+    }
+
+    fn contents_row_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let mut fonts = lopdf::Dictionary::new();
+        for (name, base) in [
+            ("F1", "NewBaskerville-Italic"),
+            ("F2", "NewBaskerville-BoldItalic"),
+            ("F3", "Helvetica"),
+        ] {
+            let mut font_dict = dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "Encoding" => "WinAnsiEncoding",
+                "FirstChar" => 0,
+                "LastChar" => 255,
+                "Widths" => widths.clone(),
+            };
+            font_dict.set("BaseFont", lopdf::Object::Name(base.as_bytes().to_vec()));
+            let font = doc.add_object(font_dict);
+            fonts.set(name, font);
+        }
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        // Part `1` is the contents column. Front matter, the chapter, and the
+        // section share its operator gap with their titles. The bullet row
+        // wraps in English inside that column.
+        let content = b"BT \
+/F1 10 Tf 1 0 0 1 72 700 Tm [(preface) -1000 (xvi)] TJ \
+/F2 13 Tf 1 0 0 1 90 640 Tm [(Introduction to AI agents) -1400 (3)] TJ \
+/F3 12 Tf 1 0 0 1 40 600 Tm (PART 1 Getting started) Tj \
+1 0 0 1 400 600 Tm (........) Tj \
+1 0 0 1 450 600 Tm (1) Tj \
+/F3 11 Tf 1 0 0 1 110 560 Tm [(1.1 Building applications) -1400 (19)] TJ \
+/F3 10 Tf \
+1 0 0 1 140 500 Tm [(Engines) -900 (4) -1400 (Chatbots) -900 (7) -1400 (Agents) -900 (8)] TJ \
+/F3 4 Tf 1 0 0 1 200 502 Tm (\x95) Tj \
+1 0 0 1 280 502 Tm (\x95) Tj \
+ET"
+        .to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn part_leaders_follow_the_title_not_the_row_above() {
+        // The block above is one drawn line whose source still reaches the
+        // part row, so closing the hole would pull a nearby left edge up.
+        // Leader dots sit in that left-edge band. They and `171` belong on
+        // the part title.
+        let size = 11.0;
+        let mut glyphs = vec![
+            ink_glyph(1, 168.0, 300.0, size, "7"),
+            ink_glyph(2, 168.0, 220.0, size, "5"),
+            ink_glyph(10, 66.0, 200.0, size, "P"),
+            ink_glyph(11, 120.0, 200.0, size, "4"),
+        ];
+        let mut leader_ids = Vec::new();
+        for index in 0..8 {
+            let id = 20 + index as u32;
+            leader_ids.push(id);
+            glyphs.push(ink_glyph(id, 209.0 + index as f32 * 28.0, 200.0, size, "."));
+        }
+        glyphs.push(ink_glyph(30, 449.0, 200.0, size, "1"));
+        glyphs.push(ink_glyph(31, 456.0, 200.0, size, "7"));
+        glyphs.push(ink_glyph(32, 463.0, 200.0, size, "1"));
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        // The part title sits below the dots. Closing the hole above used to
+        // drag the dots up, and the number then followed the dots.
+        let mut drawn = vec![
+            test_draw(168.0, 300.0, size, "7.5 追踪", vec![1, 2]),
+            test_draw(66.0, 180.0, size, "第4部分", vec![10, 11]),
+            test_draw(209.0, 200.0, size, "............", leader_ids),
+            test_draw(446.0, 200.0, size, "171", vec![30, 31, 32]),
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let mut column = HashMap::new();
+        column.insert(0, 474.0);
+        seat_inline_page_numbers(&mut drawn, &extraction, &by_id, &column);
+        let title_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('第'))
+            .unwrap()
+            .y;
+        let leader_y = drawn
+            .iter()
+            .find(|item| item.text.chars().all(|ch| ch == '.'))
+            .unwrap()
+            .y;
+        let number_y = drawn.iter().find(|item| item.text == "171").unwrap().y;
+        assert!(
+            (leader_y - title_y).abs() < 1.5,
+            "leaders y={leader_y} left the part title y={title_y}"
+        );
+        assert!(
+            (number_y - title_y).abs() < 1.5,
+            "171 y={number_y} left the part title y={title_y}"
+        );
+    }
+
+    fn test_draw(x: f32, y: f32, size: f32, text: &str, glyph_ids: Vec<u32>) -> Drawn {
+        let count = text.chars().count();
+        Drawn {
+            page: 0,
+            x,
+            y,
+            size,
+            color: Color::black(),
+            cids: vec![],
+            resource: "F".into(),
+            skew: 0.0,
+            widths: vec![size * 0.5; count],
+            gaps: vec![0.0; count.saturating_sub(1)],
+            text: text.into(),
+            supers: vec![false; count],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids,
+        }
+    }
+
+    #[test]
     fn han_title_wrap_joins_without_a_space() {
         assert_eq!(join_wrapped_title("组合成", "一个"), "组合成一个");
         assert_eq!(
@@ -10522,6 +10874,7 @@ ET",
             .map(|row| {
                 row.glyphs
                     .iter()
+                    .filter(|item| item.text != "■" && item.text != "•")
                     .map(|item| item.x)
                     .fold(f32::MAX, f32::min)
             })

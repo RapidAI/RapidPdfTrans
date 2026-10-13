@@ -1,6 +1,6 @@
 # Manning pages 1–30 review
 
-Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is the v30 cache. Layout of the contents pages was replayed after the v30 regression. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v31.pdf`. Each contents page was checked against the source and against v25.
+Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is the v30 cache. Layout of the contents pages was replayed after the v30 regression. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v32.pdf`. Each contents page (PDF pages 8–17) was checked against the source and against v25.
 
 30/30 still pass alignment, line breaks, and paragraphs. Coverage is complete (`english_body` 0).
 
@@ -10,6 +10,7 @@ Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is t
 | --- | --- | --- |
 | Roman folio painted as Chinese (`ii` → `二`, `vi` → `六`) | p4, p8 | Margin folios stay the source token. |
 | Section and chapter page numbers trailed the shorter Chinese title (v26–v30) | detailed contents, p10–p16 | They share the source contents column again (p10 edge 465.3) and sit on the title baseline. |
+| Front-matter roman numerals trailed the short Chinese title (v31) | p10 `前言 xvi` through `关于封面插图 xxvi` | Those tokens meet the same column edge, x1=465.3, as in v21. |
 | Title-page lines sized from the small-caps median and left-ragged | p5 | One line of small caps is set at the cap size and shares the source right edge. |
 | `Special Sales Department` left in English | p6 | That label paints as 特别销售部. Role/name colons and the address stack were already on one axis. |
 | Han wrap inserted a space (`检索内容 使用`, `组合成 一个`) | contents | Two Han fragments join with no space. Latin still gets a space. |
@@ -30,10 +31,10 @@ Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is t
 | 7 | Pass | Dedication only. |
 | 8 | Pass | Footer folio stays `vi`. Part leaders share a right edge. Brief-contents chapter numbers stay beside the titles, as in v25 and the source. |
 | 9 | Pass | Running head `简要目录` and `vii` are separate. Appendix rows are one line each. |
-| 10 | Pass | Chapter `1` stays 27pt. `AI 代理和应用简介` is bold with the source italic shear, and its `3` meets the column at 465.3 with `4`, `11`, `19`, `20`, `23`, and `24`. The bullet run fills that column (`…引擎 4 ■ …聊天机器人 7`) and the continuation `■ AI智能体 8` starts at the subentry indent 177. `提示工程 20 ■ …` stays inside that indent. |
-| 11 | Pass | Section numbers share the 474.2 column. Inline bullets stay with their titles. Chapters 2–4 stay 27pt. |
+| 10 | Pass | Chapter `1` stays 27pt. `AI 代理和应用简介` is bold with the source italic shear, and its `3` meets the column at 465.3 with `4`, `11`, `19`, `20`, `23`, and `24`. Front matter (`xvi`, `xviii`, `xx`, `xxv`, `xxvi`) meets that same edge; the titles stay at x=141.2. The bullet run fills the column (`…引擎 4 ■ …聊天机器人 7`). The continuation title `AI 智能体` starts at x=177.2, the same origin as `基于`, and the marker hangs at 169.4. `提示工程 20 ■ …` stays inside that indent. |
+| 11 | Pass | Section numbers share the 474.2 column. The part row `第 2 部分 摘要`, its leaders, and `53` share y≈332, matching v25 (v31 had left the leaders and `53` above the title). Chapters 2–4 stay 27pt. |
 | 12 | Pass | Chapter `5` is 27pt on its own baseline. Section numbers stay on the column. Packed subentries keep each page number with its title. |
-| 13 | Pass | Section numbers share the column. Chapters 7 and 8 stay 27pt. |
+| 13 | Pass | Section numbers share the column. Chapters 7 and 8 stay 27pt. `第 4 部分 高级 RAG`, the long leaders, and `171` share y≈409, as in v31 and v25. |
 | 14 | Pass | Chapter `10` is 27pt, separate from `10.1`. Section numbers share the page's 445.7 column. Wraps read `检索内容使用重写后的查询` and `组合成一个`. |
 | 15 | Pass | Chapter `11` is 27pt, separate from `11.1`. Section numbers share 474.2. |
 | 16 | Pass | Chapters 12–14 stay 27pt and separate from `12.1` / `13.1` / `14.1`. Section numbers share the page column. |
@@ -51,6 +52,10 @@ Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is t
 | 28 | Pass | Cover-illustration note. Folio `xxvi` kept. |
 | 29 | Pass | Part opener stacks `第 1` / `部分` the way the source does. |
 | 30 | Pass | Running head `2` and `章节` are separate. Chapter 2 has not started its body yet. |
+
+## v32 contents check
+
+Pages 8 and 9 match v31 (brief contents and the appendix list). Pages 10–17 were compared with the source and with v25. Column page numbers stay on the title baseline. The only x shifts versus v31 are the hanging continuation markers (~7.8pt into the gutter) and the title text that follows them, which now shares the run's first-line x. Page 11's part row, which v31 had split, is back with its title the way v25 draws it.
 
 ## Wording rechecked on v31
 
