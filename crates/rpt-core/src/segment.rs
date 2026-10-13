@@ -1422,6 +1422,26 @@ fn caption_kind(text: &str) -> Option<&'static str> {
     }
 }
 
+/// `Table 2` and `TABLE II`. A following word such as `in` is not an index.
+fn strip_caption_index(rest: &str) -> Option<&str> {
+    if let Some(rest) = rest.strip_prefix(|ch: char| ch.is_ascii_digit()) {
+        let rest = rest.trim_start_matches(|ch: char| ch.is_ascii_digit());
+        return Some(rest);
+    }
+    let end = rest
+        .char_indices()
+        .find(|(_, ch)| !ch.is_ascii_alphabetic())
+        .map(|(index, _)| index)
+        .unwrap_or(rest.len());
+    if end == 0 || end > 8 {
+        return None;
+    }
+    if !is_roman_numeral(&rest[..end]) {
+        return None;
+    }
+    Some(&rest[end..])
+}
+
 fn caption_prefix(lower: &str, prefixes: &[&str]) -> bool {
     for prefix in prefixes {
         let Some(rest) = lower.strip_prefix(prefix) else {
@@ -1434,10 +1454,9 @@ fn caption_prefix(lower: &str, prefixes: &[&str]) -> bool {
         }
         let rest = rest.trim_start().trim_start_matches('.');
         let rest = rest.trim_start();
-        let Some(rest) = rest.strip_prefix(|ch: char| ch.is_ascii_digit()) else {
+        let Some(rest) = strip_caption_index(rest) else {
             continue;
         };
-        let rest = rest.trim_start_matches(|ch: char| ch.is_ascii_digit());
         let rest = rest.trim_start();
         // "Figure 1:" and "Table 2." are captions. A long "Figure 1 Overview of …"
         // is too. "Fig 1" and "Table 1 shows" are ordinary sentences.
@@ -2412,10 +2431,11 @@ fn stacked_short_items(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     if upper_w >= cap || lower_w >= cap {
         return false;
     }
-    lower
-        .text
-        .trim_start()
-        .starts_with(|ch: char| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+    let trimmed = lower.text.trim_start();
+    trimmed.starts_with(|ch: char| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        || trimmed.contains('@')
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
 }
 
 fn line_has_formula(line: &VisualLine<'_>) -> bool {
@@ -3653,6 +3673,58 @@ mod tests {
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
         assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
         assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
+    }
+
+    #[test]
+    fn a_roman_table_caption_keeps_the_cells() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(
+                1,
+                72.0,
+                640.0,
+                "TABLE II: Statistics of the training and development sets.",
+                360.0,
+                10.0,
+            ),
+            wide(2, 72.0, 620.0, "Plain pages", 80.0, 9.0),
+            wide(3, 200.0, 620.0, "87608", 40.0, 9.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        assert!(seg
+            .segments
+            .iter()
+            .any(|item| item.text.contains("TABLE II")));
+        assert!(
+            !seg.segments.iter().any(|item| item.text.contains("Plain")),
+            "{:?}",
+            seg.segments
+                .iter()
+                .map(|item| &item.text)
+                .collect::<Vec<_>>()
+        );
+        assert!(seg.kept.iter().any(|(_, reason)| reason == "table"));
+    }
+
+    #[test]
+    fn an_email_under_an_address_stays_its_own_line() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(1, 94.0, 624.0, "VIC 3006, Australia", 110.0, 9.0),
+            wide(2, 94.0, 612.0, "peter.zhong@au.ibm.com", 120.0, 9.0),
+        ];
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains('@') && !text.contains("Australia")),
+            "{texts:?}"
+        );
     }
 
     #[test]

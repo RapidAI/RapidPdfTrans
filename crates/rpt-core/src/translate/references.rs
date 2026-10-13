@@ -148,6 +148,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
     let tops = page_tops(&placed);
     let mut selected: HashSet<usize> = HashSet::new();
     let mut in_refs = false;
+    let mut refs_x: Option<f32> = None;
     let mut streak_from: Option<usize> = None;
     let mut streak_entries = 0usize;
     let mut streak_gap = 0usize;
@@ -161,6 +162,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
         if !in_refs {
             if is_reference_heading(text) {
                 in_refs = true;
+                refs_x = Some(line.x);
                 selected.insert(line.seg_index);
                 streak_from = None;
                 streak_entries = 0;
@@ -179,6 +181,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
                 if streak_entries >= 2 {
                     in_refs = true;
                     let start = streak_from.unwrap_or(pos);
+                    refs_x = Some(placed[order[start]].x);
                     for &idx in &order[start..=pos] {
                         let earlier = &placed[idx];
                         if !is_running_header(&placed, &tops, earlier) {
@@ -195,8 +198,12 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
                     streak_gap = 0;
                 }
             }
+        } else if refs_x.is_some_and(|anchor| line.x < anchor - 96.0) {
+            // The heading is in the right column. Body beside it, including
+            // the conclusion under a floating table, is not a reference.
         } else if is_section_break(text) {
             in_refs = false;
+            refs_x = None;
             streak_from = None;
             streak_entries = 0;
             streak_gap = 0;
@@ -786,6 +793,33 @@ mod tests {
                 .then(a.matrix[4].total_cmp(&b.matrix[4]))
         });
         ordered.iter().map(|glyph| glyph.unicode.as_str()).collect()
+    }
+
+    #[test]
+    fn a_right_column_heading_does_not_swallow_the_left_column() {
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            640.0,
+            "The layout stays translated.",
+        );
+        line(&mut glyphs, &mut id, 0, 320.0, 660.0, "REFERENCES");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            320.0,
+            640.0,
+            "[1] Smith, A. (2020). Attention matters.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(kept.contains("Smith"), "{kept}");
+        assert!(!kept.contains("layout"), "{kept}");
     }
 
     #[test]

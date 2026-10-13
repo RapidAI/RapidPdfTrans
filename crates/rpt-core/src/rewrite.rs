@@ -2114,11 +2114,25 @@ fn cover_with_fallbacks(chars: impl Iterator<Item = char>) -> Vec<u32> {
     let mut codes = Vec::new();
     for ch in chars {
         codes.push(ch as u32);
-        for alt in coverage_fallbacks(ch) {
-            codes.push(*alt as u32);
+        for alt in stand_ins(ch) {
+            codes.push(alt as u32);
         }
     }
     codes
+}
+
+fn stand_ins(ch: char) -> Vec<char> {
+    let mut out: Vec<char> = coverage_fallbacks(ch).to_vec();
+    if let Some(base) = latin_base(ch) {
+        out.push(base);
+    }
+    if let Some(plain) = math_plain(ch) {
+        out.push(plain);
+        if let Some(ascii) = greek_ascii(plain) {
+            out.push(ascii);
+        }
+    }
+    out
 }
 
 /// Symbols academic PDFs use that a CJK face often lacks. The original is kept
@@ -2143,6 +2157,125 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
 
 /// Base letter for a precomposed Latin character the CJK face does not cover.
 /// `Jastrzębski` can then be drawn, instead of leaving the paragraph in English.
+/// Mathematical alphanumeric symbols, primes, and script digits become a
+/// letter or digit the CJK face can draw. One missing `𝜆` used to leave the
+/// whole paragraph in English.
+fn math_plain(ch: char) -> Option<char> {
+    if let Some(digit) = script_digit(ch) {
+        return Some(digit);
+    }
+    if let Some(letter) = subscript_letter(ch) {
+        return Some(letter);
+    }
+    let code = ch as u32;
+    const LATIN: &[(u32, u32)] = &[
+        (0x1D400, 0x1D41A),
+        (0x1D434, 0x1D44E),
+        (0x1D468, 0x1D482),
+        (0x1D5A0, 0x1D5BA),
+        (0x1D5D4, 0x1D5EE),
+        (0x1D608, 0x1D622),
+        (0x1D63C, 0x1D656),
+        (0x1D670, 0x1D68A),
+    ];
+    for &(upper, lower) in LATIN {
+        if (upper..upper + 26).contains(&code) {
+            return char::from_u32(u32::from('A') + (code - upper));
+        }
+        if (lower..lower + 26).contains(&code) {
+            return char::from_u32(u32::from('a') + (code - lower));
+        }
+    }
+    const GREEK_SMALL: &[u32] = &[0x1D6C2, 0x1D6FC, 0x1D736, 0x1D770, 0x1D7AA];
+    for &start in GREEK_SMALL {
+        if (start..start + 25).contains(&code) {
+            return char::from_u32(0x03B1 + (code - start));
+        }
+    }
+    const GREEK_CAP: &[u32] = &[0x1D6A8, 0x1D6E2, 0x1D71C, 0x1D756, 0x1D790];
+    for &start in GREEK_CAP {
+        if (start..start + 17).contains(&code) {
+            return char::from_u32(0x0391 + (code - start));
+        }
+        if code == start + 17 {
+            return Some('Θ');
+        }
+        if (start + 18..start + 25).contains(&code) {
+            return char::from_u32(0x03A3 + (code - (start + 18)));
+        }
+    }
+    match ch {
+        '\u{2032}' | '\u{2035}' => Some('\''),
+        '\u{2033}' => Some('"'),
+        _ => None,
+    }
+}
+
+fn greek_ascii(ch: char) -> Option<char> {
+    Some(match ch {
+        'α' | 'Α' => 'a',
+        'β' | 'Β' => 'b',
+        'γ' | 'Γ' => 'g',
+        'δ' | 'Δ' => 'd',
+        'ε' | 'Ε' => 'e',
+        'ζ' | 'Ζ' => 'z',
+        'η' | 'Η' => 'h',
+        'θ' | 'Θ' => 't',
+        'ι' | 'Ι' => 'i',
+        'κ' | 'Κ' => 'k',
+        'λ' | 'Λ' => 'l',
+        'μ' | 'Μ' => 'm',
+        'ν' | 'Ν' => 'n',
+        'ξ' | 'Ξ' => 'x',
+        'ο' | 'Ο' => 'o',
+        'π' | 'Π' => 'p',
+        'ρ' | 'Ρ' => 'r',
+        'σ' | 'ς' | 'Σ' => 's',
+        'τ' | 'Τ' => 't',
+        'υ' | 'Υ' => 'u',
+        'φ' | 'Φ' => 'f',
+        'χ' | 'Χ' => 'c',
+        'ψ' | 'Ψ' => 'y',
+        'ω' | 'Ω' => 'w',
+        _ => return None,
+    })
+}
+
+fn script_digit(ch: char) -> Option<char> {
+    let code = ch as u32;
+    match ch {
+        '\u{2080}'..='\u{2089}' => char::from_u32(u32::from('0') + (code - 0x2080)),
+        '\u{2070}' => Some('0'),
+        '\u{00B9}' => Some('1'),
+        '\u{00B2}' => Some('2'),
+        '\u{00B3}' => Some('3'),
+        '\u{2074}'..='\u{2079}' => char::from_u32(u32::from('4') + (code - 0x2074)),
+        _ => None,
+    }
+}
+
+fn subscript_letter(ch: char) -> Option<char> {
+    Some(match ch {
+        '\u{1D62}' => 'i',
+        '\u{1D63}' => 'r',
+        '\u{1D64}' => 'u',
+        '\u{1D65}' => 'v',
+        '\u{2090}' => 'a',
+        '\u{2091}' => 'e',
+        '\u{2092}' => 'o',
+        '\u{2093}' => 'x',
+        '\u{2095}' => 'h',
+        '\u{2096}' => 'k',
+        '\u{2097}' => 'l',
+        '\u{2098}' => 'm',
+        '\u{2099}' => 'n',
+        '\u{209A}' => 'p',
+        '\u{209B}' => 's',
+        '\u{209C}' => 't',
+        _ => return None,
+    })
+}
+
 fn latin_base(ch: char) -> Option<char> {
     Some(match ch {
         'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' => 'A',
@@ -2194,6 +2327,18 @@ fn substitute_covered(text: &str, font: &SubsetFont) -> String {
             if font.glyphs.contains_key(&(base as u32)) {
                 out.push(base);
                 continue;
+            }
+        }
+        if let Some(plain) = math_plain(ch) {
+            if font.glyphs.contains_key(&(plain as u32)) {
+                out.push(plain);
+                continue;
+            }
+            if let Some(ascii) = greek_ascii(plain) {
+                if font.glyphs.contains_key(&(ascii as u32)) {
+                    out.push(ascii);
+                    continue;
+                }
             }
         }
         out.push(ch);
@@ -6338,7 +6483,14 @@ fn superscript_mask(text: &str) -> Vec<bool> {
             .skip(index)
             .take_while(|ch| ch.is_alphabetic())
             .count();
-        let after_name = run == 1
+        // `8.18`, `0.001`, `n ≥ 2`, and `1)` are body text. `LayoutLMv3`
+        // is a version token. `Zhang1` is still an author mark.
+        let body_digit = decimal_digit(&chars, start)
+            || enumeration_digit(&chars, index)
+            || follows_operator(&chars, start)
+            || version_token(&chars, start);
+        let after_name = !body_digit
+            && run == 1
             && prev.is_some_and(|ch| {
                 ch.is_alphabetic() || (is_mark_star(ch) && start > 0 && mask[start - 1])
             });
@@ -6432,6 +6584,46 @@ fn han_wraps_number(chars: &[char], start: usize, end: usize) -> bool {
 
 fn is_mark_star(ch: char) -> bool {
     matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆')
+}
+
+/// `8.18` and `0.001`: the digit is the integer part of a decimal.
+fn decimal_digit(chars: &[char], start: usize) -> bool {
+    chars
+        .get(start + 1)
+        .is_some_and(|ch| matches!(ch, '.' | '．'))
+        && chars.get(start + 2).is_some_and(|ch| ch.is_ascii_digit())
+}
+
+/// `1)` starts a list item. An author mark is not followed by a parenthesis.
+fn enumeration_digit(chars: &[char], end: usize) -> bool {
+    chars.get(end).is_some_and(|ch| matches!(ch, ')' | '）'))
+}
+
+/// `n ≥ 2` and `x > 1`. The digit belongs to the relation, not to a name.
+fn follows_operator(chars: &[char], start: usize) -> bool {
+    let prev = (0..start)
+        .rev()
+        .map(|slot| chars[slot])
+        .find(|ch| !ch.is_whitespace());
+    prev.is_some_and(|ch| {
+        matches!(
+            ch,
+            '≥' | '≤' | '≈' | '>' | '<' | '=' | '+' | '−' | '-' | '×' | '/' | '＞' | '＜'
+        )
+    })
+}
+
+/// `LayoutLMv3` and `GPT4` carry a version. `Zhang1` has one capital.
+fn version_token(chars: &[char], start: usize) -> bool {
+    let mut index = start;
+    let mut uppers = 0usize;
+    while index > 0 && chars[index - 1].is_ascii_alphabetic() {
+        index -= 1;
+        if chars[index].is_ascii_uppercase() {
+            uppers += 1;
+        }
+    }
+    uppers >= 2
 }
 
 fn english_body_source(text: &str) -> bool {
@@ -7252,6 +7444,11 @@ mod tests {
         assert_eq!(raised.iter().filter(|flag| **flag).count(), 3);
         let cjk_star = superscript_mask("张轩∗1");
         assert!(cjk_star[2] && cjk_star[3], "{cjk_star:?}");
+        assert!(superscript_mask("定理8.18").iter().all(|flag| !flag));
+        assert!(superscript_mask("学习率0.001").iter().all(|flag| !flag));
+        assert!(superscript_mask("n ≥ 2").iter().all(|flag| !flag));
+        assert!(superscript_mask("研究1) 初始化").iter().all(|flag| !flag));
+        assert!(superscript_mask("LayoutLMv3").iter().all(|flag| !flag));
     }
 
     #[test]
@@ -7425,7 +7622,7 @@ mod tests {
     #[test]
     fn a_missing_name_mark_or_bullet_uses_a_covered_stand_in() {
         let mut glyphs = HashMap::new();
-        for (index, ch) in "中文e■→".chars().enumerate() {
+        for (index, ch) in "中文e■→Mly1".chars().enumerate() {
             glyphs.insert(ch as u32, (index as u16, 500));
         }
         let font = SubsetFont {
@@ -7436,6 +7633,8 @@ mod tests {
         assert_eq!(substitute_covered("中ę文", &font), "中e文");
         assert_eq!(substitute_covered("\u{f0a1}中", &font), "■中");
         assert_eq!(substitute_covered("（\u{27a5}）", &font), "（→）");
+        assert_eq!(substitute_covered("X\u{1D440} \u{1D706}", &font), "XM l");
+        assert_eq!(substitute_covered("y\u{2081}", &font), "y1");
     }
 
     #[test]

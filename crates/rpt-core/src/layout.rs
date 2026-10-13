@@ -361,7 +361,7 @@ pub(crate) fn fit_cjk_block(
     } else {
         0.62
     };
-    let floor = (source_size * floor_ratio).min(start);
+    let mut floor = (source_size * floor_ratio).min(start);
     let mut size = start;
     // The first two-line fit near the source size. A one-line fit found
     // later still wins. Shrinking a subtitle to one unreadably small line
@@ -417,11 +417,18 @@ pub(crate) fn fit_cjk_block(
             }
             // A one-line title that still does not fit at 0.80 wraps once.
             // Shrinking it to half the source size is too small to read.
+            // A two-character tail (`澳大` / `利亚`) is not a title wrap: it
+            // lands on the next source line. Shrink further and stay on one line.
+            let tail = lines
+                .last()
+                .map(|line| line.chars().filter(|ch| !ch.is_whitespace()).count())
+                .unwrap_or(0);
             if within
                 && single_source
                 && width <= source_size * 16.0
                 && lines.len() == 2
                 && size + 0.01 >= source_size * 0.80
+                && tail >= 4
             {
                 // 1.15 em drops the second line into the next heading.
                 return Some((lines, size, size * 1.0, indent));
@@ -435,7 +442,11 @@ pub(crate) fn fit_cjk_block(
             if within && lines.len() == 1 {
                 return Some((lines, size, size * metrics.leading_ratio, indent));
             }
-            return None;
+            let orphan = within && single_source && lines.len() == 2 && tail < 4;
+            if !(orphan && floor > source_size * 0.62 + 0.01) {
+                return None;
+            }
+            floor = source_size * 0.62;
         }
         let next = (size * 0.94).max(floor);
         if (next - size).abs() < 0.01 {
@@ -1392,6 +1403,25 @@ mod tests {
         assert!(
             narrow.as_ref().is_none_or(|fitted| fitted.0.len() == 1),
             "{narrow:?}"
+        );
+
+        let address = "维多利亚州3006澳大利亚";
+        let fitted_address = fit_cjk_block(
+            address,
+            10.0,
+            0.90,
+            88.0,
+            0.0,
+            0.0,
+            &uniform_font(address),
+            metrics,
+        )
+        .expect("address fits");
+        assert_eq!(fitted_address.0.len(), 1, "{:?}", fitted_address.0);
+        assert!(
+            fitted_address.1 + 0.05 >= 10.0 * 0.62,
+            "address shrunk below the body floor: {}",
+            fitted_address.1
         );
 
         let prose = "并且 Manning Publications 知悉了商标声明";
