@@ -2572,10 +2572,19 @@ fn segments_share_subentry(
     else {
         return false;
     };
-    if page != page2 || (l_left - r_left).abs() > 14.0 {
+    if page != page2 {
         return false;
     }
     let size = l_size.max(r_size).max(1.0);
+    // `Retrieving content` sits on the right of the previous entry and
+    // continues at the left indent (`with the rewritten query`). The left
+    // edges do not match, and the next entry's bullet shares the lower line.
+    let right_wrap = right_side_title_wrap(
+        left, right, page, l_left, l_top, r_left, r_top, size, extraction, by_id,
+    );
+    if !right_wrap && (l_left - r_left).abs() > 14.0 {
+        return false;
+    }
     let gap = l_bot.max(r_bot) - l_top.min(r_top);
     // Overlap is negative. A continuation sits about one line below.
     if gap >= size * 1.45 || gap <= -size * 4.0 {
@@ -2583,7 +2592,7 @@ fn segments_share_subentry(
     }
     // `1 ■ Introduction 3` and `2 ■ Executing 27` are two entries. A wrapped
     // tail (`model 15`) has no bullet of its own and still joins.
-    if gap > size * 0.45 {
+    if gap > size * 0.45 && !right_wrap {
         let upper_y = l_top.max(r_top);
         let lower_y = l_bot.min(r_bot);
         if line_has_bullet(page, upper_y, extraction) && line_has_bullet(page, lower_y, extraction)
@@ -2592,6 +2601,75 @@ fn segments_share_subentry(
         }
     }
     true
+}
+
+/// A contents title that starts beside the previous entry and finishes on the
+/// next line at the column indent. Both faces are italic, the lower line has
+/// no bullet of its own, and the fragment is at least 8em to the right.
+fn right_side_title_wrap(
+    left: &crate::translate::TranslatedSegment,
+    right: &crate::translate::TranslatedSegment,
+    page: u32,
+    l_left: f32,
+    l_top: f32,
+    r_left: f32,
+    r_top: f32,
+    size: f32,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    if !segment_is_italic(left, extraction, by_id) || !segment_is_italic(right, extraction, by_id)
+    {
+        return false;
+    }
+    if left.source.chars().count() > 80 || right.source.chars().count() > 80 {
+        return false;
+    }
+    let (upper_left, lower_left, upper_y, lower_y) = if l_top >= r_top {
+        (l_left, r_left, l_top, r_top)
+    } else {
+        (r_left, l_left, r_top, l_top)
+    };
+    let dy = upper_y - lower_y;
+    if dy <= size * 0.55 || dy >= size * 1.65 {
+        return false;
+    }
+    if lower_left + size * 8.0 >= upper_left {
+        return false;
+    }
+    !bullet_before(page, lower_left, lower_y, size, extraction)
+}
+
+fn segment_is_italic(
+    segment: &crate::translate::TranslatedSegment,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let mut italic = 0usize;
+    let mut total = 0usize;
+    for id in &segment.glyph_ids {
+        let Some(glyph) = extraction.glyphs.get(by_id[id]) else {
+            continue;
+        };
+        if glyph.unicode.trim().is_empty() || is_subentry_bullet(glyph) {
+            continue;
+        }
+        total += 1;
+        if face_style(&glyph.font_name).italic {
+            italic += 1;
+        }
+    }
+    total > 0 && italic * 2 >= total
+}
+
+fn bullet_before(page: u32, x: f32, y: f32, size: f32, extraction: &Extraction) -> bool {
+    extraction.glyphs.iter().any(|glyph| {
+        glyph.page_index == page
+            && is_subentry_bullet(glyph)
+            && (glyph.matrix[5] - y).abs() <= 4.0
+            && glyph.matrix[4] < x
+            && x - glyph.matrix[4] <= size * 3.0
+    })
 }
 
 fn line_has_bullet(page: u32, y: f32, extraction: &Extraction) -> bool {
@@ -3219,15 +3297,15 @@ fn merge_wrapped_titles(items: &mut Vec<SubentryItem>, size: f32) {
 }
 
 fn join_wrapped_title(upper: &str, lower: &str) -> String {
-    let cjk = |text: &str| {
-        text.chars()
-            .any(|ch| ('\u{3400}'..='\u{9FFF}').contains(&ch))
-    };
-    if cjk(upper) || cjk(lower) {
-        format!("{upper}{lower}")
-    } else {
-        format!("{upper} {lower}")
+    let upper = upper.trim_end();
+    let lower = lower.trim_start();
+    if upper.is_empty() {
+        return lower.to_string();
     }
+    if lower.is_empty() {
+        return upper.to_string();
+    }
+    format!("{upper} {lower}")
 }
 
 fn display_title(segment: &crate::translate::TranslatedSegment) -> String {
@@ -3343,14 +3421,15 @@ fn layout_subentry_flow(
     size: f32,
     font: &SubsetFont,
 ) -> Option<Vec<Vec<FlowPiece>>> {
-    let gap = size * 0.50;
     let bullet_gap = size * 0.45;
     let bullet_w = (size * 0.42).max(2.5);
     let mut lines: Vec<Vec<FlowPiece>> = vec![Vec::new()];
     let mut used = 0.0f32;
     for (index, item) in run.items.iter().enumerate() {
-        let title_lines = title_lines_with_page(&item.title, &item.page, width, size, font)?;
-        let first_width = piece_width(&title_lines, item, size, font, gap);
+        let page_gap = page_number_gap(size, item.italic);
+        let title_lines =
+            title_lines_with_page(&item.title, &item.page, width, size, font, page_gap)?;
+        let first_width = piece_width(&title_lines, item, size, font, page_gap);
         if index > 0 {
             let lead = bullet_gap + bullet_w + bullet_gap;
             if used > 0.0 && used + lead + first_width > width + 0.4 {
@@ -3385,7 +3464,7 @@ fn layout_subentry_flow(
                     italic: false,
                     color: item.color.clone(),
                 });
-                used += gap + measure(&item.page, size, font);
+                used += page_gap + measure(&item.page, size, font);
             }
         }
     }
@@ -3425,14 +3504,21 @@ fn piece_width(
 
 /// Title lines. The page number stays on the last line, and that line is
 /// never a single leftover character when the title is longer.
+/// Half an em after the title. An italic shear hangs about 0.2em past the
+/// advance, so the page number starts further right and the ink gap stays
+/// half an em.
+fn page_number_gap(size: f32, italic: bool) -> f32 {
+    size * 0.50 + if italic { size * 0.20 } else { 0.0 }
+}
+
 fn title_lines_with_page(
     title: &str,
     page: &str,
     width: f32,
     size: f32,
     font: &SubsetFont,
+    gap: f32,
 ) -> Option<Vec<String>> {
-    let gap = size * 0.50;
     let page_w = if page.is_empty() {
         0.0
     } else {
@@ -3559,11 +3645,11 @@ fn paint_flow_line(
     embedded: &[(String, SubsetFont)],
     styles: &HashMap<String, FaceStyle>,
 ) -> Vec<Drawn> {
-    let gap = line.size * 0.50;
     let bullet_gap = line.size * 0.45;
     let bullet_size = (line.size * 0.42).max(2.5);
     let mut x = left;
     let mut previous_bullet = false;
+    let mut previous_italic = false;
     let mut out = Vec::new();
     for piece in &line.pieces {
         let Some((resource, font)) = font_for_flow_piece(piece, embedded, styles) else {
@@ -3577,7 +3663,7 @@ fn paint_flow_line(
                 (bullet_size, 0.0, bullet_size)
             }
             FlowKind::Page => {
-                x += gap;
+                x += page_number_gap(line.size, previous_italic);
                 (line.size, 0.0, measure(&piece.text, line.size, font))
             }
             FlowKind::Title => {
@@ -3615,6 +3701,7 @@ fn paint_flow_line(
             glyph_ids: ids.to_vec(),
         });
         x += advance;
+        previous_italic = piece.kind == FlowKind::Title && piece.italic;
         previous_bullet = piece.kind == FlowKind::Bullet;
     }
     out
@@ -6705,7 +6792,7 @@ mod tests {
             units_per_em: 1000,
             glyphs,
         };
-        let lines = title_lines_with_page(text, "310", 72.0, 10.0, &font).expect("wrap");
+        let lines = title_lines_with_page(text, "310", 72.0, 10.0, &font, 5.0).expect("wrap");
         let joined = lines.join("\n");
         assert!(
             !joined.contains("Protoc\n") && !lines.iter().any(|line| line == "ol"),
@@ -9053,7 +9140,8 @@ ET",
             .find(|item| item.text == "4")
             .map(|item| item.advance)
             .unwrap_or(8.0);
-        size.max(6.0)
+        // An italic title adds 0.2em so the shear still leaves half an em.
+        size.max(6.0) + 2.2
     }
 
     fn subentry_rows_pdf() -> Vec<u8> {
@@ -9163,6 +9251,10 @@ ET",
             .expect("title end");
         let gap = digit.matrix[4] - (title_end.matrix[4] + title_end.advance[0]);
         assert!(gap < 8.0, "page number gap {gap} is wider than one space");
+        assert!(
+            gap > 5.5,
+            "italic title needs a half-em before the page number, gap {gap}"
+        );
         assert!(
             digit.matrix[2].abs() < 0.4,
             "page number is italic, skew {}",
