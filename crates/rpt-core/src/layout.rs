@@ -516,20 +516,26 @@ pub(crate) fn spread_to_lines(mut lines: Vec<String>, count: usize) -> Vec<Strin
     lines
 }
 
-/// Split near the middle, but never inside a citation, number, URL, or email.
+/// Split near the middle. Never inside a citation, number, URL, email, or
+/// Latin word (`API`), and never so the next piece starts with `；`.
 fn safe_split(line: &str) -> Option<(String, String)> {
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let chars: Vec<char> = line.chars().collect();
     if chars.len() < 2 {
         return None;
     }
     let spans = verbatim_spans(line);
+    let sticky = sticky_after(&chars);
+    let indexed: Vec<(usize, char)> = line.char_indices().collect();
     let mid = chars.len() / 2;
     let mut best: Option<(usize, usize)> = None;
-    for (index, (byte, _)) in chars.iter().enumerate().skip(1) {
+    for (index, (byte, _)) in indexed.iter().enumerate().skip(1) {
         if spans
             .iter()
             .any(|&(start, end)| *byte > start && *byte < end)
         {
+            continue;
+        }
+        if !can_break_at(&chars, &sticky, index) {
             continue;
         }
         let dist = index.abs_diff(mid);
@@ -1193,6 +1199,21 @@ mod tests {
         assert!(lines.iter().all(|line| !line.is_empty()));
         let joined: String = lines.concat();
         assert_eq!(joined, "我们提出了一种基于完全图的聚类公式并且保留每一行。");
+    }
+
+    #[test]
+    fn spreading_keeps_a_word_intact_and_off_the_line_start() {
+        let line = "简单API调用；下一句继续写完整的说明文字在这里。";
+        let lines = spread_to_lines(vec![line.into()], 4);
+        assert_eq!(lines.concat(), line);
+        assert!(lines.iter().any(|piece| piece.contains("API")), "{lines:?}");
+        assert!(
+            lines.iter().all(|piece| !piece.starts_with('；')
+                && !piece.starts_with('。')
+                && !piece.ends_with("AP")
+                && !piece.starts_with('I')),
+            "{lines:?}"
+        );
     }
 
     #[test]

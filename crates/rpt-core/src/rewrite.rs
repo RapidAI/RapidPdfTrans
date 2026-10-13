@@ -116,6 +116,9 @@ pub fn rewrite_translation(
     }
 
     let mut planned: Vec<(usize, String)> = Vec::new();
+    // An echoed column that shares a TJ with a translation. The operator is
+    // blanked for the translation; these glyphs are painted back in place.
+    let mut paint_original: HashSet<u32> = HashSet::new();
     let owners = operator_owners(&extraction.glyphs);
     let mut toc_redraw: HashSet<u32> = HashSet::new();
     // Two credit columns often share one text operator. Each column is its
@@ -192,6 +195,12 @@ pub fn rewrite_translation(
             .iter()
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
             .collect();
+        let translated = crate::translate::restore_list_marker(
+            &segment.source,
+            &crate::translate::localize_part_heading(&segment.translated),
+        );
+        let translated = crate::translate::restore_credit_names(&segment.source, &translated);
+        let will_draw = translated != segment.source;
         if !operators_are_private(&glyphs, &owners) {
             // A contents title shares its text operator with the leader dots and
             // the page number. Blank the operator, draw the translation in the
@@ -199,17 +208,36 @@ pub fn rewrite_translation(
             if let Some(companions) = toc_companion_ids(&glyphs, &owners, extraction, &by_id) {
                 toc_redraw.extend(companions);
             } else if !co_translated_operator(&glyphs, &owners, &translatable, extraction, &by_id) {
-                for id in &segment.glyph_ids {
-                    keep.insert(*id, "shared-operator".into());
+                // One column echoed. Draw the translation and put the echo
+                // back in its own box instead of leaving both columns English.
+                if will_draw {
+                    if let Some(ids) = plain_echo_siblings(
+                        &glyphs,
+                        &owners,
+                        &translatable,
+                        extraction,
+                        &by_id,
+                        &keep,
+                    ) {
+                        paint_original.extend(ids);
+                    } else {
+                        for id in &segment.glyph_ids {
+                            keep.insert(*id, "shared-operator".into());
+                        }
+                        continue;
+                    }
+                } else if sibling_will_draw(&glyphs, &owners, &translatable, extraction, &by_id) {
+                    paint_original.extend(segment.glyph_ids.iter().copied());
+                } else {
+                    for id in &segment.glyph_ids {
+                        keep.insert(*id, "shared-operator".into());
+                    }
+                    continue;
                 }
-                continue;
+            } else if !will_draw {
+                paint_original.extend(segment.glyph_ids.iter().copied());
             }
         }
-        let translated = crate::translate::restore_list_marker(
-            &segment.source,
-            &crate::translate::localize_part_heading(&segment.translated),
-        );
-        let translated = crate::translate::restore_credit_names(&segment.source, &translated);
         if translated == segment.source {
             let reason = if job_translates && english_body_source(&segment.source) {
                 "english-body"
@@ -246,6 +274,11 @@ pub fn rewrite_translation(
         .filter_map(|id| extraction.glyphs.get(by_id[id]))
         .map(|glyph| glyph.unicode.as_str())
         .collect();
+    let echo_chars: String = paint_original
+        .iter()
+        .filter_map(|id| extraction.glyphs.get(by_id[id]))
+        .map(|glyph| glyph.unicode.as_str())
+        .collect();
     if let Some(font_bytes) = opts.font_bytes.clone() {
         let chars = cover_with_fallbacks(
             planned
@@ -253,7 +286,8 @@ pub fn rewrite_translation(
                 .flat_map(|(index, text)| {
                     text.chars().chain(report.segments[*index].source.chars())
                 })
-                .chain(toc_chars.chars()),
+                .chain(toc_chars.chars())
+                .chain(echo_chars.chars()),
         );
         if let Some(font) = subset_ttf(&font_bytes, &chars) {
             place_segments(
@@ -310,7 +344,8 @@ pub fn rewrite_translation(
                     .flat_map(|(index, text)| {
                         text.chars().chain(report.segments[*index].source.chars())
                     })
-                    .chain(toc_chars.chars()),
+                    .chain(toc_chars.chars())
+                    .chain(echo_chars.chars()),
             );
             let Some(font) = subset_for_style(
                 style,
@@ -349,9 +384,13 @@ pub fn rewrite_translation(
         }
     }
 
+    // A contents mark is redrawn by the toc pass. Painting it again stacks
+    // a second `4` on the inline sub-entry.
+    paint_original.retain(|id| !toc_redraw.contains(id));
     commit_toc_operators(
         &owners,
         &toc_redraw,
+        &paint_original,
         &mut succeeded,
         &mut keep,
         &mut drawn,
@@ -360,6 +399,15 @@ pub fn rewrite_translation(
         &embedded,
         &font_styles,
     );
+    // After the shared-operator pass, so an in-place echo is not dropped
+    // for lacking a succeeded id.
+    drawn.extend(draw_original_glyphs(
+        &paint_original,
+        extraction,
+        &by_id,
+        &embedded,
+    ));
+    close_column_holes(&mut drawn, extraction, &by_id);
     let mut spans = Vec::new();
     if !overlay {
         for id in &succeeded {
@@ -956,11 +1004,155 @@ fn co_translated_operator(
     foreign
 }
 
+/// Foreign ink that is plain text the model left unchanged. A formula or a
+/// contents mark stays in the operator instead of being redrawn in the body face.
+fn plain_echo_siblings(
+    segment: &[&Glyph],
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+    translatable: &HashSet<u32>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    keep: &HashMap<u32, String>,
+) -> Option<Vec<u32>> {
+    let inside: HashSet<u32> = segment.iter().map(|glyph| glyph.id).collect();
+    let mut echoes = Vec::new();
+    for glyph in segment {
+        let span = span_of(&glyph.source)?;
+        let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+        let ids = owners.get(&key)?;
+        for id in ids {
+            if inside.contains(id) || echoes.contains(id) {
+                continue;
+            }
+            let other = extraction.glyphs.get(by_id[id])?;
+            if other.unicode.trim().is_empty() || translatable.contains(id) {
+                continue;
+            }
+            if glyph_stays_with_operator(other, keep) {
+                return None;
+            }
+            echoes.push(*id);
+        }
+    }
+    (!echoes.is_empty()).then_some(echoes)
+}
+
+fn sibling_will_draw(
+    segment: &[&Glyph],
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+    translatable: &HashSet<u32>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let inside: HashSet<u32> = segment.iter().map(|glyph| glyph.id).collect();
+    for glyph in segment {
+        let Some(span) = span_of(&glyph.source) else {
+            continue;
+        };
+        let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+        let Some(ids) = owners.get(&key) else {
+            continue;
+        };
+        for id in ids {
+            if inside.contains(id) {
+                continue;
+            }
+            let Some(other) = extraction.glyphs.get(by_id[id]) else {
+                continue;
+            };
+            if other.unicode.trim().is_empty() {
+                continue;
+            }
+            if translatable.contains(id) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn glyph_stays_with_operator(glyph: &Glyph, keep: &HashMap<u32, String>) -> bool {
+    // Segmentation records `toc` on the glyph. The rewrite `keep` map does
+    // not copy that reason, and a page number is not a plain echo.
+    let reason = keep
+        .get(&glyph.id)
+        .map(String::as_str)
+        .or(match &glyph.disposition {
+            Disposition::KeptOriginal { reason } => Some(reason.as_str()),
+            _ => None,
+        });
+    if reason.is_some_and(|reason| {
+        matches!(
+            reason,
+            "formula" | "toc" | "margin" | "reference" | "figure" | "table"
+        )
+    }) {
+        return true;
+    }
+    let upper = glyph.font_name.to_ascii_uppercase();
+    ["CMMI", "CMSY", "CMEX", "MSAM", "MSBM"]
+        .iter()
+        .any(|needle| upper.contains(needle))
+        || upper.contains("MATH")
+}
+
+fn draw_original_glyphs(
+    ids: &HashSet<u32>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+) -> Vec<Drawn> {
+    let mut drawn = Vec::new();
+    let mut ordered: Vec<u32> = ids.iter().copied().collect();
+    ordered.sort_unstable();
+    for id in ordered {
+        let Some(&index) = by_id.get(&id) else {
+            continue;
+        };
+        let glyph = &extraction.glyphs[index];
+        let text = glyph.unicode.clone();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let Some((resource, font)) = embedded.iter().find(|(_, font)| {
+            text.chars()
+                .all(|ch| ch.is_whitespace() || font.glyphs.contains_key(&(ch as u32)))
+        }) else {
+            continue;
+        };
+        let size = glyph.font_size.max(1.0);
+        let skew = if face_style(&glyph.font_name).italic {
+            0.25
+        } else {
+            0.0
+        };
+        drawn.push(Drawn {
+            page: glyph.page_index,
+            x: glyph.matrix[4],
+            y: glyph.matrix[5],
+            size,
+            color: glyph.fill_color.clone(),
+            cids: cids_of(&text, font),
+            resource: resource.clone(),
+            skew,
+            widths: char_widths(&text, size, font),
+            gaps: vec![0.0; text.chars().count().saturating_sub(1)],
+            text,
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids: vec![glyph.id],
+        });
+    }
+    drawn
+}
+
 /// Drop draws whose operator still contains ink we are not redrawing, then
 /// paint kept contents marks back at their source positions.
 fn commit_toc_operators(
     owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
     toc_redraw: &HashSet<u32>,
+    paint_original: &HashSet<u32>,
     succeeded: &mut HashSet<u32>,
     keep: &mut HashMap<u32, String>,
     drawn: &mut Vec<Drawn>,
@@ -988,8 +1180,11 @@ fn commit_toc_operators(
         });
         // A space between the leader dots and the page number is not a segment.
         // Blanking it with the operator does not drop visible text.
+        // An echoed column is painted after this pass. It is not leftover
+        // ink, so it must not cancel the translated column.
         let ignorable = |id: &u32| {
             toc_redraw.contains(id)
+                || paint_original.contains(id)
                 || extraction
                     .glyphs
                     .get(by_id[id])
@@ -2140,10 +2335,12 @@ fn layout_segment(
         vec![false; text.chars().count()]
     };
     // A short Chinese paragraph used to sit on the first baselines and leave
-    // the rest of the English lines empty. Those empty lines are dropped text.
-    // Spread the translation so each source baseline still receives ink.
+    // the rest of the English lines empty. Spreading it back onto those
+    // breaks cuts words (`API`) and starts a line on `；`. A full column
+    // keeps the wrap and covers the source lines by absorbing them.
+    let reflow = column_reflow(level, ink.len(), width, source_size, hanging.is_some());
     let mut absorbed: Vec<u32> = Vec::new();
-    let lines = if bilingual || hanging.is_some() {
+    let lines = if bilingual || hanging.is_some() || reflow {
         // A dash item is one paragraph. Spreading it onto the source line
         // breaks leaves each continuation at a different indent.
         lines
@@ -2163,7 +2360,7 @@ fn layout_segment(
     } else {
         spread_to_lines(lines, ink.len())
     };
-    if hanging.is_some() {
+    if hanging.is_some() || reflow {
         // Reflow replaces the source lines. A stray cover glyph at the source
         // size is the mixed-size glitch inside the paragraph.
         absorbed.extend(glyphs.iter().map(|glyph| glyph.id));
@@ -2207,10 +2404,12 @@ fn layout_segment(
     if last_y < media[1] - 0.5 || origin_y > media[3] {
         return None;
     }
-    let color = ink[0].glyphs[0].fill_color.clone();
+    let text_color = list_run_colors(&ink)
+        .map(|(_, text_color)| text_color)
+        .unwrap_or_else(|| ink[0].glyphs[0].fill_color.clone());
     let count = lines.len();
     let glyph_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
-    let mut drawn: Vec<Drawn> = lines
+    let drawn: Vec<Drawn> = lines
         .into_iter()
         .enumerate()
         .map(|(index, line)| {
@@ -2222,7 +2421,7 @@ fn layout_segment(
                 x: block_left + if index == 0 { indent } else { 0.0 },
                 y: ys[index],
                 size,
-                color: color.clone(),
+                color: text_color.clone(),
                 cids: cids_of(&line, font),
                 resource: resource.to_string(),
                 skew,
@@ -2236,12 +2435,366 @@ fn layout_segment(
             }
         })
         .collect();
+    let mut drawn = restyle_list_lines(drawn, &ink, font);
     if !bilingual {
         cover_unhit_clusters(
-            &mut drawn, glyphs, font, resource, skew, &color, &glyph_ids, &absorbed,
+            &mut drawn,
+            glyphs,
+            font,
+            resource,
+            skew,
+            &text_color,
+            &glyph_ids,
+            &absorbed,
         );
     }
     Some(drawn)
+}
+
+fn column_reflow(
+    level: HeadingLevel,
+    ink_len: usize,
+    width: f32,
+    size: f32,
+    hanging: bool,
+) -> bool {
+    !hanging && ink_len >= 2 && matches!(level, HeadingLevel::Body) && width >= size * 16.0
+}
+
+/// The bullet keeps its own colour. The words use the source text colour.
+/// An italic lead (through the em dash) is a shear; the explanation is roman.
+fn restyle_list_lines(lines: Vec<Drawn>, ink: &[InkLine<'_>], font: &SubsetFont) -> Vec<Drawn> {
+    let Some((marker_color, text_color)) = list_run_colors(ink) else {
+        return lines;
+    };
+    let italic_lead = italic_lead_before_emdash(ink);
+    if marker_color == text_color && !italic_lead {
+        return lines;
+    }
+    let mut out = Vec::new();
+    let mut before_emdash = italic_lead;
+    for line in lines {
+        out.extend(split_styled_line(
+            line,
+            &marker_color,
+            &text_color,
+            &mut before_emdash,
+            font,
+        ));
+    }
+    out
+}
+
+fn list_run_colors(ink: &[InkLine<'_>]) -> Option<(Color, Color)> {
+    if ink.is_empty() || !crate::segment::starts_with_list_marker(&ink_line_text(&ink[0])) {
+        return None;
+    }
+    let mut glyphs = ink[0].glyphs.clone();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut marker = None;
+    let mut body = None;
+    let mut skipped = false;
+    for glyph in &glyphs {
+        let text = glyph.unicode.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !skipped && crate::segment::starts_with_list_marker(text) {
+            marker = Some(glyph.fill_color.clone());
+            skipped = true;
+            continue;
+        }
+        skipped = true;
+        if body.is_none() {
+            body = Some(glyph.fill_color.clone());
+        }
+    }
+    if body.is_none() {
+        for line in ink.iter().skip(1) {
+            for glyph in &line.glyphs {
+                if !glyph.unicode.trim().is_empty() {
+                    body = Some(glyph.fill_color.clone());
+                    break;
+                }
+            }
+            if body.is_some() {
+                break;
+            }
+        }
+    }
+    Some((
+        marker.unwrap_or_else(Color::black),
+        body.unwrap_or_else(Color::black),
+    ))
+}
+
+fn italic_lead_before_emdash(ink: &[InkLine<'_>]) -> bool {
+    if ink.is_empty() {
+        return false;
+    }
+    let mut glyphs = ink[0].glyphs.clone();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut skipped_marker = false;
+    let mut italic = 0usize;
+    let mut roman = 0usize;
+    for glyph in &glyphs {
+        let text = glyph.unicode.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !skipped_marker && crate::segment::starts_with_list_marker(text) {
+            skipped_marker = true;
+            continue;
+        }
+        skipped_marker = true;
+        if text.chars().any(|ch| ch == '\u{2014}' || ch == '\u{2015}') {
+            break;
+        }
+        if text.chars().any(|ch| ch.is_ascii_alphabetic()) {
+            if face_style(&glyph.font_name).italic {
+                italic += 1;
+            } else {
+                roman += 1;
+            }
+        }
+    }
+    italic > 0 && italic >= roman
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PieceKind {
+    Marker,
+    Lead,
+    Body,
+}
+
+fn is_bullet_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '-' | '–' | '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧'
+    ) || ('\u{F020}'..='\u{F0FF}').contains(&ch)
+}
+
+fn split_styled_line(
+    line: Drawn,
+    marker_color: &Color,
+    text_color: &Color,
+    before_emdash: &mut bool,
+    font: &SubsetFont,
+) -> Vec<Drawn> {
+    let chars: Vec<char> = line.text.chars().collect();
+    if chars.is_empty() {
+        return vec![line];
+    }
+    // An em dash ends the italic lead. It is not the gold bullet.
+    let opens = chars.first().copied().is_some_and(is_bullet_char);
+    let mut kinds = Vec::with_capacity(chars.len());
+    for (index, ch) in chars.iter().enumerate() {
+        if index == 0 && opens {
+            kinds.push(PieceKind::Marker);
+            continue;
+        }
+        if *before_emdash && *ch != '\u{2014}' && *ch != '\u{2015}' {
+            kinds.push(PieceKind::Lead);
+        } else {
+            *before_emdash = false;
+            kinds.push(PieceKind::Body);
+        }
+    }
+    let widths = if line.widths.len() == chars.len() {
+        line.widths.clone()
+    } else {
+        char_widths(&line.text, line.size, font)
+    };
+    let mut pieces = Vec::new();
+    let mut cursor = line.x;
+    let mut start = 0usize;
+    while start < chars.len() {
+        let kind = kinds[start];
+        let mut end = start + 1;
+        while end < chars.len() && kinds[end] == kind {
+            end += 1;
+        }
+        let text: String = chars[start..end].iter().collect();
+        let piece_widths = widths[start..end].to_vec();
+        let piece_gaps: Vec<f32> = if end > start + 1 {
+            (start..end - 1)
+                .map(|index| line.gaps.get(index).copied().unwrap_or(0.0))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let bridge = if end < chars.len() {
+            line.gaps.get(end - 1).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let cids = if line.cids.len() == chars.len() {
+            line.cids[start..end].to_vec()
+        } else {
+            cids_of(&text, font)
+        };
+        let supers = if line.supers.len() == chars.len() {
+            line.supers[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
+        let (color, skew) = match kind {
+            PieceKind::Marker => (marker_color.clone(), 0.0),
+            PieceKind::Lead => (text_color.clone(), 0.25),
+            PieceKind::Body => (text_color.clone(), 0.0),
+        };
+        let advance = piece_widths.iter().sum::<f32>() + piece_gaps.iter().sum::<f32>() + bridge;
+        pieces.push(Drawn {
+            page: line.page,
+            x: cursor,
+            y: line.y,
+            size: line.size,
+            color,
+            cids,
+            resource: line.resource.clone(),
+            skew,
+            widths: piece_widths,
+            gaps: piece_gaps,
+            text,
+            supers,
+            sup_scale: line.sup_scale,
+            sup_rise: line.sup_rise,
+            glyph_ids: line.glyph_ids.clone(),
+        });
+        cursor += advance;
+        start = end;
+    }
+    pieces
+}
+
+struct ColumnBlock {
+    indices: Vec<usize>,
+    top: f32,
+    bottom: f32,
+    left: f32,
+    source_top: f32,
+    source_bottom: f32,
+    size: f32,
+    list: bool,
+}
+
+/// A shorter translation used to leave the next item on its English baseline,
+/// which opened a hole. Pull the next same-column block up until the gap
+/// matches the source gap. A footer, whose source gap is larger, stays put.
+fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &HashMap<u32, usize>) {
+    let mut pages: Vec<u32> = drawn.iter().map(|line| line.page).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    for page in pages {
+        let mut groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
+        for (index, line) in drawn.iter().enumerate() {
+            if line.page != page || line.text.trim().is_empty() {
+                continue;
+            }
+            let mut key = line.glyph_ids.clone();
+            key.sort_unstable();
+            key.dedup();
+            if key.is_empty() {
+                continue;
+            }
+            groups.entry(key).or_default().push(index);
+        }
+        let mut blocks = Vec::new();
+        for indices in groups.into_values() {
+            if let Some(block) = column_block(drawn, &indices, page, extraction, by_id) {
+                blocks.push(block);
+            }
+        }
+        blocks.sort_by(|left, right| right.top.total_cmp(&left.top));
+        let mut shift = 0.0f32;
+        let mut prev: Option<ColumnBlock> = None;
+        for block in blocks {
+            let mut extra = 0.0f32;
+            if let Some(prev) = &prev {
+                let source_gap = prev.source_bottom - block.source_top;
+                let size = prev.size.max(block.size).max(1.0);
+                let same_column = (prev.left - block.left).abs() < size * 4.0;
+                // Only list items. A contents row and its inline page number
+                // are the same kind of short gap, and pulling them stacks `4`
+                // on `7`.
+                let chained = prev.list
+                    && block.list
+                    && same_column
+                    && source_gap > 0.0
+                    && source_gap < size * 2.6;
+                if chained {
+                    // `shift` is the pull already applied above this block.
+                    // Only a hole that is still open after that pull is closed.
+                    let drawn_gap = prev.bottom - (block.top + shift);
+                    if drawn_gap > source_gap + 1.0 {
+                        extra = drawn_gap - source_gap;
+                    }
+                } else {
+                    shift = 0.0;
+                }
+            }
+            shift += extra;
+            for index in &block.indices {
+                drawn[*index].y += shift;
+            }
+            let mut placed = block;
+            placed.top += shift;
+            placed.bottom += shift;
+            prev = Some(placed);
+        }
+    }
+}
+
+fn column_block(
+    drawn: &[Drawn],
+    indices: &[usize],
+    page: u32,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Option<ColumnBlock> {
+    if indices.is_empty() {
+        return None;
+    }
+    let mut top = f32::MIN;
+    let mut bottom = f32::MAX;
+    let mut left = f32::MAX;
+    let mut size = 1.0f32;
+    for index in indices {
+        let line = &drawn[*index];
+        top = top.max(line.y);
+        bottom = bottom.min(line.y);
+        left = left.min(line.x);
+        size = size.max(line.size);
+    }
+    let mut source_ys = Vec::new();
+    for id in &drawn[indices[0]].glyph_ids {
+        let Some(&index) = by_id.get(id) else {
+            continue;
+        };
+        let glyph = &extraction.glyphs[index];
+        if glyph.page_index != page || glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        source_ys.push(glyph.matrix[5]);
+    }
+    if source_ys.is_empty() {
+        return None;
+    }
+    source_ys.sort_by(|left, right| left.total_cmp(right));
+    let list = indices
+        .iter()
+        .any(|index| crate::segment::starts_with_list_marker(drawn[*index].text.trim()));
+    Some(ColumnBlock {
+        indices: indices.to_vec(),
+        top,
+        bottom,
+        left,
+        source_top: source_ys[source_ys.len() - 1],
+        source_bottom: source_ys[0],
+        size,
+        list,
+    })
 }
 
 /// Every source baseline gets a drawn line when there are enough pieces.
@@ -2682,7 +3235,9 @@ fn layout_across_pages(
         }
         let top = ink[0].y;
         let bottom = ink[ink.len() - 1].y;
-        let lines = if hanging.is_some() {
+        let page_width = boxes[box_index].width;
+        let reflow = column_reflow(level, ink.len(), page_width, source_size, hanging.is_some());
+        let lines = if hanging.is_some() || reflow {
             lines
         } else {
             spread_to_lines(lines, ink.len())
@@ -2768,7 +3323,24 @@ fn layout_across_pages(
     if painted != wanted {
         return None;
     }
-    let skip: Vec<u32> = if hanging.is_some() {
+    let first_ink = ink_pages
+        .first()
+        .map(|(_, ink, _, _)| ink.as_slice())
+        .unwrap_or(&[]);
+    let mut drawn = restyle_list_lines(drawn, first_ink, font);
+    let cover_color = list_run_colors(first_ink)
+        .map(|(_, text_color)| text_color)
+        .unwrap_or(color);
+    let reflowed = ink_pages.iter().enumerate().any(|(index, (_, ink, _, _))| {
+        column_reflow(
+            level,
+            ink.len(),
+            boxes.get(index).map(|slot| slot.width).unwrap_or(0.0),
+            source_size,
+            hanging.is_some(),
+        )
+    });
+    let skip: Vec<u32> = if hanging.is_some() || reflowed {
         glyphs.iter().map(|glyph| glyph.id).collect()
     } else {
         Vec::new()
@@ -2779,7 +3351,7 @@ fn layout_across_pages(
         font,
         resource,
         skew,
-        &color,
+        &cover_color,
         &glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>(),
         &skip,
     );
@@ -6363,6 +6935,281 @@ mod tests {
         assert!(!text.contains("Development"), "{text}");
     }
 
+    #[test]
+    fn an_echoed_credit_column_does_not_keep_its_neighbor_english() {
+        let bytes = shared_credit_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Development") {
+                    "开发编辑：Ada".to_string()
+                } else {
+                    seg.text.clone()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated,
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"开发编辑：AdaManning Publications Co."
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let text = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(text.contains("开发编辑"), "{text}");
+        assert!(text.contains("Manning"), "{text}");
+        assert!(!text.contains("Development"), "{text}");
+    }
+
+    #[test]
+    fn a_body_paragraph_reflows_without_splitting_api_or_a_semicolon() {
+        let bytes = contents_pdf(
+            b"BT /F1 10 Tf \
+1 0 0 1 72 700 Tm (You may be an engineer who wants to move past a simple) Tj \
+1 0 0 1 72 686 Tm (API call and turn a prototype into something reliable) Tj \
+1 0 0 1 72 672 Tm (for a team that ships products every single week.) Tj \
+ET",
+        );
+        let zh = "您可能是一位希望超越简单 API 调用的工程师，并将原型转化为可靠的产品；团队每周都会发布产品。";
+        let painted = paint_translation(&bytes, &[(0, zh.to_string())]);
+        let lines = glyph_lines(&painted);
+        let joined = lines.concat();
+        assert!(joined.contains("API"), "{lines:?}");
+        assert!(
+            lines.iter().all(
+                |line| !line.starts_with('；') && !line.contains("AP I") && {
+                    let chars: Vec<char> = line.chars().collect();
+                    !chars
+                        .windows(2)
+                        .any(|pair| pair == ['A', 'P'] && !line.contains("API"))
+                }
+            ),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.contains("API")), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.ends_with("AP") && !line.starts_with('I')),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_gold_bullet_does_not_paint_the_part_text_gold() {
+        let bytes = contents_pdf_named(
+            b"BT /F1 10 Tf \
+0.8 0.651 0.349 rg \
+1 0 0 1 72 500 Tm (- ) Tj \
+0.148 g \
+1 0 0 1 78 500 Tm (Part 1: Getting started with LLMs today) Tj \
+1 0 0 1 96 486 Tm (lays the foundation for the later chapters.) Tj \
+ET",
+            "NewBaskerville-Italic",
+        );
+        let zh = "第 1 部分：入门（第 1–2 章）——本部分奠定基础。";
+        let painted = paint_translation(&bytes, &[(0, zh.to_string())]);
+        let mut gold = 0;
+        let mut text = 0;
+        for glyph in &painted.glyphs {
+            if glyph.font_name != "RPTCJK"
+                && !glyph.unicode.chars().any(is_han_char)
+                && glyph.unicode != "■"
+                && glyph.unicode != "-"
+            {
+                continue;
+            }
+            let rgb = glyph.fill_color.components.first().copied().unwrap_or(0.0);
+            let goldish = glyph.fill_color.components.first().copied().unwrap_or(0.0) > 0.5;
+            if glyph.unicode == "■" || glyph.unicode == "-" {
+                if goldish {
+                    gold += 1;
+                }
+            } else if glyph.unicode.chars().any(is_han_char) {
+                text += 1;
+                assert!(
+                    rgb < 0.4,
+                    "han {} is gold {:?}",
+                    glyph.unicode,
+                    glyph.fill_color
+                );
+            }
+        }
+        assert!(gold >= 1, "marker lost its colour");
+        assert!(text > 4, "part text missing");
+        let italic = painted
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.unicode.chars().any(is_han_char) && glyph.matrix[2].abs() > 0.1);
+        let roman = painted
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.unicode == "本" && glyph.matrix[2].abs() < 0.05);
+        assert!(italic, "part lead should keep the italic shear");
+        assert!(roman, "explanation after the em dash should be roman");
+    }
+
+    #[test]
+    fn a_short_list_item_does_not_leave_a_hole_before_the_next() {
+        let bytes = contents_pdf(
+            b"BT /F1 10 Tf \
+1 0 0 1 72 500 Tm (- Part one is a long item that wraps) Tj \
+1 0 0 1 90 486 Tm (onto a second line of the same item) Tj \
+1 0 0 1 90 472 Tm (and finishes on a third line here.) Tj \
+1 0 0 1 72 458 Tm (- Chapter two follows immediately.) Tj \
+ET",
+        );
+        let painted = paint_translation(
+            &bytes,
+            &[
+                (0, "第 1 部分很短。".into()),
+                (1, "第 2 章紧随其后。".into()),
+            ],
+        );
+        let mut rows: Vec<(f32, String)> = Vec::new();
+        for glyph in &painted.glyphs {
+            if !glyph.unicode.chars().any(is_han_char)
+                && glyph.unicode != "■"
+                && glyph.unicode != "-"
+            {
+                continue;
+            }
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|(y, _)| (*y - glyph.matrix[5]).abs() < 1.0)
+            {
+                row.1.push_str(&glyph.unicode);
+            } else {
+                rows.push((glyph.matrix[5], glyph.unicode.clone()));
+            }
+        }
+        rows.sort_by(|left, right| right.0.total_cmp(&left.0));
+        assert!(rows.len() >= 2, "{rows:?}");
+        let gap = rows[0].0 - rows[1].0;
+        assert!(gap < 24.0, "list hole is {gap}pt between {rows:?}");
+    }
+
+    fn paint_translation(bytes: &[u8], which: &[(usize, String)]) -> Extraction {
+        let mut doc = PdfDocument::open_bytes(bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let mut chars: Vec<u32> = which
+            .iter()
+            .flat_map(|(_, text)| text.chars().map(|ch| ch as u32))
+            .collect();
+        chars.extend("■—–API ".chars().map(|ch| ch as u32));
+        for seg in &segmentation.segments {
+            chars.extend(seg.text.chars().map(|ch| ch as u32));
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(index, seg)| {
+                let translated = which
+                    .iter()
+                    .find(|(slot, _)| *slot == index)
+                    .map(|(_, text)| text.clone())
+                    .unwrap_or_else(|| seg.text.clone());
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated,
+                }
+            })
+            .collect();
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&chars)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract()
+    }
+
+    fn glyph_lines(extraction: &Extraction) -> Vec<String> {
+        let mut glyphs: Vec<&Glyph> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.font_name.contains("RPT") || glyph.unicode.chars().any(is_han_char)
+            })
+            .collect();
+        glyphs.sort_by(|left, right| {
+            right.matrix[5]
+                .total_cmp(&left.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4]))
+        });
+        let mut lines: Vec<Vec<&Glyph>> = Vec::new();
+        for glyph in glyphs {
+            let same = lines.last().is_some_and(|line: &Vec<&Glyph>| {
+                (line[0].matrix[5] - glyph.matrix[5]).abs() < 1.5
+            });
+            if same {
+                lines.last_mut().unwrap().push(glyph);
+            } else {
+                lines.push(vec![glyph]);
+            }
+        }
+        lines
+            .into_iter()
+            .map(|line| line.iter().map(|glyph| glyph.unicode.as_str()).collect())
+            .collect()
+    }
+
     fn toc_column_pdf() -> Vec<u8> {
         let mut doc = Document::with_version("1.4");
         doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
@@ -6486,19 +7333,27 @@ ET",
     }
 
     fn contents_pdf(content: &[u8]) -> Vec<u8> {
+        contents_pdf_named(content, "Helvetica")
+    }
+
+    fn contents_pdf_named(content: &[u8], font_name: &str) -> Vec<u8> {
         let mut doc = Document::with_version("1.4");
         doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
         let pages_id = doc.new_object_id();
         let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
-        let font = doc.add_object(dictionary! {
+        let mut font_dict = dictionary! {
             "Type" => "Font",
             "Subtype" => "Type1",
-            "BaseFont" => "Helvetica",
             "Encoding" => "WinAnsiEncoding",
             "FirstChar" => 0,
             "LastChar" => 255,
             "Widths" => widths,
-        });
+        };
+        font_dict.set(
+            "BaseFont",
+            lopdf::Object::Name(font_name.as_bytes().to_vec()),
+        );
+        let font = doc.add_object(font_dict);
         let mut fonts = lopdf::Dictionary::new();
         fonts.set("F1", font);
         let mut resources = lopdf::Dictionary::new();

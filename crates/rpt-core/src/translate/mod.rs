@@ -36,7 +36,7 @@ pub use references::{identical_reference_operators, reference_glyph_ids, referen
 use crate::error::{Error, Result};
 use crate::extract::Extraction;
 use crate::segment;
-use prompt::{parse_translations, system_prompt, user_payload, PromptSegment};
+use prompt::{fallback_prompt, parse_translations, system_prompt, user_payload, PromptSegment};
 use protect::{restore, shield};
 
 pub const DEFAULT_LLM_BASE_URL: &str = "https://hub.mypapers.top/api/llm/v1";
@@ -857,17 +857,17 @@ fn echo_fix(
     if retry.is_empty() {
         return restored;
     }
-    let Ok(parsed) = call_batch(
+    // A failed batch retry must not skip the sentence pass and the fallback.
+    // A short credit line is often the one the batch call rejects.
+    if let Ok(parsed) = call_batch(
         segments, shielded, &retry, opts, translator, calls, false, true,
-    ) else {
-        return restored;
-    };
-    let Ok(second) = restore_all(&retry, shielded, &parsed) else {
-        return restored;
-    };
-    for (index, text) in second {
-        if let Some(slot) = restored.iter_mut().find(|(id, _)| *id == index) {
-            slot.1 = text;
+    ) {
+        if let Ok(second) = restore_all(&retry, shielded, &parsed) {
+            for (index, text) in second {
+                if let Some(slot) = restored.iter_mut().find(|(id, _)| *id == index) {
+                    slot.1 = text;
+                }
+            }
         }
     }
     // A long paragraph is often copied whole when the neighboring lines are
@@ -878,6 +878,16 @@ fn echo_fix(
         }
         if let Some(joined) = translate_sentences(&segments[slot.0].text, opts, translator, calls) {
             slot.1 = joined;
+        }
+    }
+    // The echo retry above reuses the same instructions. A segment that is
+    // still English gets one more call with a different prompt and no neighbors.
+    for slot in &mut restored {
+        if !needs_english_retry(&segments[slot.0].text, &slot.1) {
+            continue;
+        }
+        if let Some(text) = translate_fallback(&segments[slot.0].text, opts, translator, calls) {
+            slot.1 = text;
         }
     }
     restored
@@ -993,7 +1003,7 @@ fn translate_sentences(
             .iter()
             .find(|(id, _)| *id == 0)
             .map(|(_, text)| text.clone())?;
-        let restored = restore(&text, &shielded.slots).ok()?;
+        let restored = restore_expanded(&text, &shielded.slots).ok()?;
         if needs_english_retry(piece, &restored) {
             return None;
         }
@@ -1004,6 +1014,56 @@ fn translate_sentences(
         None
     } else {
         Some(joined)
+    }
+}
+
+/// One segment, no neighbors, and a prompt that is not the echo retry.
+fn translate_fallback(
+    source: &str,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+) -> Option<String> {
+    let shielded = shield(source, &opts.glossary);
+    let prompt = PromptSegment {
+        id: 0,
+        text: shielded.text,
+        context_before: Vec::new(),
+        context_after: Vec::new(),
+    };
+    let user = user_payload(std::slice::from_ref(&prompt)).ok()?;
+    let system = fallback_prompt(&opts.target_lang);
+    *calls += 1;
+    let raw = translator.complete(&system, &user).ok()?;
+    let parsed = parse_translations(&raw).ok()?;
+    let text = parsed
+        .iter()
+        .find(|(id, _)| *id == 0)
+        .map(|(_, text)| text.clone())?;
+    let restored = restore_expanded(&text, &shielded.slots).ok()?;
+    if needs_english_retry(source, &restored) {
+        None
+    } else {
+        Some(restored)
+    }
+}
+
+/// `restore` rejects a reply that wrote `20` instead of ⟦0⟧. A Chinese
+/// answer that already contains each shielded token is still a translation.
+fn restore_expanded(text: &str, slots: &[String]) -> std::result::Result<String, String> {
+    match restore(text, slots) {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            let expanded = text.chars().any(is_cjk_char)
+                && slots
+                    .iter()
+                    .all(|slot| !slot.is_empty() && text.contains(slot));
+            if expanded {
+                Ok(text.to_string())
+            } else {
+                Err(err)
+            }
+        }
     }
 }
 
@@ -1245,22 +1305,60 @@ fn url_char_mask(chars: &[char]) -> Vec<bool> {
     mask
 }
 
-/// A body paragraph the model echoed. Lines under 40 letters match the
-/// coverage check, so a shorter heading is not sent again. Names and any
-/// Chinese stay.
+/// A body paragraph the model echoed. A long English reply is sent again.
+/// A shorter echo is sent again when it is a credit line or a multi-word
+/// heading (`20 Baldwin Road`, `PART 1 GETTING STARTED WITH LLMS`). A
+/// one-word title, an acronym (`RAG`), a personal name, a URL, or any
+/// Chinese stays.
 fn needs_english_retry(source: &str, translated: &str) -> bool {
     let source = source.trim();
     let translated = translated.trim();
     if cjk_count(source) > 0 || cjk_count(translated) > 0 {
         return false;
     }
-    if latin_letters(source) < 40 || latin_letters(translated) < 40 {
+    if is_personal_name(source) || url_or_email_only(source) {
         return false;
     }
-    let only_url = source.split_whitespace().all(|word| {
-        word.starts_with("http://") || word.starts_with("https://") || word.contains('@')
-    });
-    !only_url
+    let source_letters = latin_letters(source);
+    let translated_letters = latin_letters(translated);
+    if source_letters >= 40 && translated_letters >= 40 {
+        return true;
+    }
+    translated == source && prose_echo(source)
+}
+
+/// `20 Baldwin Road` and `PART 1 GETTING STARTED WITH LLMS` are prose.
+/// `RAG`, `LLM API`, and `Introduction` are not.
+fn prose_echo(source: &str) -> bool {
+    // `Go to https://example.com/a.` is a short line plus a URL. The URL's
+    // letters must not make it look like a paragraph the model echoed.
+    let words: Vec<&str> = source
+        .split_whitespace()
+        .filter(|word| !is_url_or_email_token(word))
+        .filter(|word| word.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .collect();
+    let letters: usize = words.iter().copied().map(latin_letters).sum();
+    if words.len() < 2 || letters < 8 {
+        return false;
+    }
+    !words.iter().all(|word| is_acronym_token(word))
+}
+
+fn is_url_or_email_token(word: &str) -> bool {
+    word.contains("://") || word.contains('@') || word.starts_with("www.")
+}
+
+fn is_acronym_token(word: &str) -> bool {
+    let letters: String = word.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    !letters.is_empty() && letters.len() <= 5 && letters.chars().all(|ch| ch.is_ascii_uppercase())
+}
+
+fn url_or_email_only(source: &str) -> bool {
+    let words: Vec<&str> = source.split_whitespace().collect();
+    !words.is_empty()
+        && words.iter().all(|word| {
+            word.starts_with("http://") || word.starts_with("https://") || word.contains('@')
+        })
 }
 
 fn latin_letters(text: &str) -> usize {
@@ -1785,6 +1883,82 @@ mod tests {
         let header = "Clustering Fully connected Graphs by Multicut";
         assert!(needs_english_retry(header, header), "{header}");
         assert!(!needs_english_retry("Introduction", "Introduction"));
+        assert!(needs_english_retry("20 Baldwin Road", "20 Baldwin Road"));
+        assert!(needs_english_retry(
+            "PART 1 GETTING STARTED WITH LLMS ",
+            "PART 1 GETTING STARTED WITH LLMS "
+        ));
+        assert!(!needs_english_retry("RAG", "RAG"));
+        assert!(!needs_english_retry("Julie McNamee", "Julie McNamee"));
+        assert!(!needs_english_retry("LLM API", "LLM API"));
+    }
+
+    #[test]
+    fn a_stubborn_echo_is_translated_by_the_fallback_prompt() {
+        let source = "Setting up the chain to generate a step-back question";
+        let mut ex = extraction_from_lines(&[source]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &EchoUntilFallback)
+                .unwrap();
+        assert!(
+            report.segments[0].translated.chars().any(is_cjk_char),
+            "{}",
+            report.segments[0].translated
+        );
+        assert!(report.calls >= 2, "calls={}", report.calls);
+        let road = "20 Baldwin Road";
+        let mut road_ex = extraction_from_lines(&[road]);
+        let road_report = translate_extraction(
+            &mut road_ex,
+            &TranslateOptions::default(),
+            &EchoUntilFallback,
+        )
+        .unwrap();
+        assert!(
+            road_report.segments[0].translated.chars().any(is_cjk_char),
+            "calls={} text={}",
+            road_report.calls,
+            road_report.segments[0].translated
+        );
+    }
+
+    struct EchoUntilFallback;
+    impl Translator for EchoUntilFallback {
+        fn complete(&self, system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let raw = seg["text"].as_str().unwrap();
+                    let text = if system.contains("independent") {
+                        // Keep ⟦N⟧ so a shielded `20` still restores.
+                        let mut marks = String::new();
+                        let chars: Vec<char> = raw.chars().collect();
+                        let mut index = 0;
+                        while index < chars.len() {
+                            if chars[index] == '⟦' {
+                                let start = index;
+                                while index < chars.len() && chars[index] != '⟧' {
+                                    index += 1;
+                                }
+                                if index < chars.len() {
+                                    index += 1;
+                                }
+                                marks.extend(chars[start..index].iter());
+                            } else {
+                                index += 1;
+                            }
+                        }
+                        format!("已译{marks}")
+                    } else {
+                        raw.to_string()
+                    };
+                    serde_json::json!({ "id": seg["id"], "text": text })
+                })
+                .collect();
+            Ok(serde_json::json!({ "translations": translations }).to_string())
+        }
     }
 
     #[test]

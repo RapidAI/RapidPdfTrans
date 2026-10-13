@@ -51,6 +51,22 @@ Keep every ⟦N⟧ placeholder and every URL exactly as written.",
     prompt
 }
 
+/// A second prompt for a segment that stayed English after the echo retry.
+/// The wording is deliberately different so a deterministic model is not
+/// asked the same question again.
+pub fn fallback_prompt(target_lang: &str) -> String {
+    let dst = language_name(target_lang);
+    format!(
+        "You are an independent translator. The earlier replies copied the English unchanged, which is not acceptable. \
+Translate the segment text into {dst}. \
+Reply with JSON only, no markdown, in exactly this shape: \
+{{\"translations\":[{{\"id\":0,\"text\":\"...\"}}]}}. \
+The text value must be {dst}. Do not return the English source. \
+Keep numbers, URLs, and personal names in their original Latin spelling. \
+Copy every ⟦N⟧ placeholder unchanged. Do not add notes or explanations."
+    )
+}
+
 pub fn user_payload(segments: &[PromptSegment]) -> Result<String> {
     let items: Vec<Value> = segments
         .iter()
