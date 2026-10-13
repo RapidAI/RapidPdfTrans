@@ -1130,6 +1130,11 @@ fn is_sentence_end(chars: &[char], index: usize) -> bool {
 }
 
 fn abbreviated_word(word: &str) -> bool {
+    // A period after `)` has no word in front of it. That is a sentence
+    // end, not an initial.
+    if word.is_empty() {
+        return false;
+    }
     word.chars().count() <= 1
         || matches!(
             word.to_ascii_lowercase().as_str(),
@@ -1436,7 +1441,11 @@ fn extra_sentence_end(source: &str, translated: &str) -> bool {
     let source_ends = chars
         .iter()
         .enumerate()
-        .filter(|(index, _)| sentence_boundary(&chars, *index))
+        .filter(|(index, ch)| {
+            // `this?” moments` is not a new sentence, but the translation
+            // still has `？`. Count that mark so it is not an extra stop.
+            sentence_boundary(&chars, *index) || matches!(ch, '?' | '!')
+        })
         .count();
     let translated_ends = translated
         .chars()
@@ -2512,6 +2521,14 @@ mod tests {
         assert!(extra_sentence_end(
             open,
             "在这两种情况下，源代码都使用像这样的等宽字体格式。"
+        ));
+        assert!(!extra_sentence_end(
+            "countless “What if we tried this?” moments followed.",
+            "无数次“如果我们试试这个？”的时刻随之而来。"
+        ));
+        assert!(!extra_sentence_end(
+            "grounding outputs using Retrieval-Augmented Generation (RAG). From there, we stop.",
+            "使用检索增强生成 (RAG)。随后我们停下。"
         ));
         assert!(translation_flaw(
             "solution: The Model Context Protocol",
