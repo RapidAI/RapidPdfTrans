@@ -3450,29 +3450,17 @@ fn title_lines_with_page(
         if measure(&last, size, font) <= last_budget + 0.4 {
             break;
         }
-        let chars: Vec<char> = last.chars().collect();
-        if chars.len() <= 1 {
+        // Break on a phrase or a word. A raw character cut turns
+        // `Protocol` into `Protoc` / `ol`.
+        let budget = last_budget.max(size);
+        let Some(rewrapped) = wrap_text(&last, size, budget, budget, font) else {
+            break;
+        };
+        if rewrapped.len() <= 1 {
             break;
         }
-        let mut end = 0usize;
-        let mut used = 0.0f32;
-        while end < chars.len() {
-            let advance = measure(&chars[end].to_string(), size, font);
-            if end > 0 && used + advance > last_budget {
-                break;
-            }
-            used += advance;
-            end += 1;
-        }
-        end = end.max(1);
-        if end >= chars.len() {
-            break;
-        }
-        let prefix: String = chars[..end].iter().collect();
-        let suffix: String = chars[end..].iter().collect();
         lines.pop();
-        lines.push(prefix);
-        lines.push(suffix);
+        lines.extend(rewrapped);
     }
     absorb_orphan_tails(&mut lines);
     if lines.iter().any(|line| line.is_empty()) {
@@ -6236,6 +6224,30 @@ mod tests {
         let refs: Vec<&Glyph> = same.iter().collect();
         let lines = ink_lines(&refs);
         assert!(display_panel_right(&lines[0]).is_none());
+    }
+
+    #[test]
+    fn a_subentry_wrap_keeps_a_latin_word_intact() {
+        let text = "The Model Context Protocol";
+        let mut glyphs = std::collections::HashMap::new();
+        for (id, ch) in (1u16..).zip(text.chars().chain("310".chars())) {
+            glyphs.insert(ch as u32, (id, 600));
+        }
+        let font = crate::font::SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        };
+        let lines = title_lines_with_page(text, "310", 72.0, 10.0, &font).expect("wrap");
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("Protoc\n") && !lines.iter().any(|line| line == "ol"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Protocol")),
+            "{lines:?}"
+        );
     }
 
     #[test]

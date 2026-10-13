@@ -1356,7 +1356,19 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     if source_letters >= 40 && translated_letters >= 40 {
         return true;
     }
+    // A cached `...` is not a translation of a heading.
+    if source_letters >= 8 && ellipsis_stub(translated) {
+        return true;
+    }
     translated == source && prose_echo(source)
+}
+
+fn ellipsis_stub(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|ch| matches!(ch, '.' | '…' | '·' | '。' | ' ' | '　'))
 }
 
 /// `20 Baldwin Road` and `PART 1 GETTING STARTED WITH LLMS` are prose.
@@ -1714,6 +1726,18 @@ mod tests {
             restore_credit_names("Roberto Infante", "罗伯托·因凡特"),
             "Roberto Infante"
         );
+    }
+
+    #[test]
+    fn an_ellipsis_is_not_a_cached_heading() {
+        assert!(needs_english_retry(
+            "Query generation, routing, and retrieval postprocessing",
+            "..."
+        ));
+        assert!(!needs_english_retry(
+            "Query generation, routing, and retrieval postprocessing",
+            "查询生成、路由和检索后处理"
+        ));
     }
 
     #[test]
