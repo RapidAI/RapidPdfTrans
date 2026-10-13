@@ -2497,6 +2497,11 @@ fn find_subentry_runs(
 fn is_subentry_bullet(glyph: &Glyph) -> bool {
     let text = glyph.unicode.trim();
     if text.chars().count() == 1 && crate::segment::starts_with_list_marker(text) {
+        // A hyphen inside `LLM-based` is its own glyph. It is not the bullet
+        // between contents entries.
+        if text == "-" {
+            return false;
+        }
         return true;
     }
     let font = glyph.font_name.to_ascii_uppercase();
@@ -2547,7 +2552,26 @@ fn segments_share_subentry(
     let size = l_size.max(r_size).max(1.0);
     let gap = l_bot.max(r_bot) - l_top.min(r_top);
     // Overlap is negative. A continuation sits about one line below.
-    gap < size * 1.45 && gap > -size * 4.0
+    if gap >= size * 1.45 || gap <= -size * 4.0 {
+        return false;
+    }
+    // `1 ■ Introduction 3` and `2 ■ Executing 27` are two entries. A wrapped
+    // tail (`model 15`) has no bullet of its own and still joins.
+    if gap > size * 0.45 {
+        let upper_y = l_top.max(r_top);
+        let lower_y = l_bot.min(r_bot);
+        if line_has_bullet(page, upper_y, extraction) && line_has_bullet(page, lower_y, extraction)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn line_has_bullet(page: u32, y: f32, extraction: &Extraction) -> bool {
+    extraction.glyphs.iter().any(|glyph| {
+        glyph.page_index == page && is_subentry_bullet(glyph) && (glyph.matrix[5] - y).abs() <= 4.0
+    })
 }
 
 fn segment_box(
@@ -8028,6 +8052,104 @@ mod tests {
         assert!(
             lefts.iter().all(|x| (x - min).abs() < 1.5),
             "sub-entry lines do not share the source indent: {lefts:?}"
+        );
+    }
+
+    #[test]
+    fn bulleted_chapter_lines_are_not_one_subentry_run() {
+        let bytes = subentry_pdf(
+            b"BT /F1 10 Tf \
+1 0 0 1 72 500 Tm (1) Tj \
+1 0 0 1 100 500 Tm [(Introduction) -800 (3)] TJ \
+/F1 4 Tf \
+1 0 0 1 90 502.4 Tm (\x95) Tj \
+/F1 10 Tf \
+1 0 0 1 72 490 Tm (2) Tj \
+1 0 0 1 100 490 Tm [(Executing) -800 (27)] TJ \
+/F1 4 Tf \
+1 0 0 1 90 492.4 Tm (\x95) Tj \
+ET",
+        );
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.trim().chars().all(|ch| ch.is_ascii_digit()) {
+                    seg.text.as_str()
+                } else if seg.text.contains("Introduction") {
+                    "人工智能体与应用简介"
+                } else if seg.text.contains("Executing") {
+                    "执行"
+                } else {
+                    seg.text.as_str()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let codes: Vec<u32> = "人工智能体与应用简介执行■12327"
+            .chars()
+            .map(|ch| ch as u32)
+            .collect();
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&codes)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut rows: Vec<(f32, String)> = Vec::new();
+        for glyph in painted
+            .glyphs
+            .iter()
+            .filter(|glyph| !glyph.unicode.trim().is_empty())
+        {
+            let y = glyph.matrix[5];
+            if let Some(row) = rows.iter_mut().find(|row| (row.0 - y).abs() < 2.4) {
+                row.1.push_str(&glyph.unicode);
+            } else {
+                rows.push((y, glyph.unicode.clone()));
+            }
+        }
+        let intro = rows.iter().find(|row| row.1.contains('简')).expect("intro");
+        assert!(
+            !intro.1.contains('执') && !intro.1.contains('2'),
+            "chapter 2 joined the previous entry: {}",
+            intro.1
+        );
+        let next = rows
+            .iter()
+            .find(|row| row.1.contains('执'))
+            .expect("chapter 2");
+        assert!(
+            next.1.contains('2') && next.1.contains('7'),
+            "chapter 2 lost its number or page: {}",
+            next.1
         );
     }
 
