@@ -873,8 +873,30 @@ fn paragraph_continues(upper: &PaintLine, lower: &PaintLine) -> bool {
     if dy < size * 0.8 || dy > size * 2.2 {
         return false;
     }
+    // The last line of a paragraph may be short. An indent change after a
+    // finished sentence is the next paragraph, not a continuation.
+    if ends_sentence(&upper.text) && (upper.min_x - lower.min_x).abs() > size * 0.45 {
+        return false;
+    }
+    // `10` above `10.1 …` is a contents heading, not a one-word body line.
+    if number_only(&upper.text) || number_only(&lower.text) {
+        return false;
+    }
     let shift = (upper.min_x - lower.min_x).abs();
     shift <= size * 2.4
+}
+
+fn ends_sentence(text: &str) -> bool {
+    text.trim_end().ends_with(['.', '!', '?', '。', '！', '？'])
+}
+
+fn number_only(text: &str) -> bool {
+    let text = text.trim().trim_end_matches('.');
+    !text.is_empty()
+        && text.len() <= 4
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
 }
 
 impl PaintLine {
@@ -1166,5 +1188,18 @@ mod tests {
             !flags.iter().any(|flag| flag.text.contains("印刷")),
             "{flags:?}"
         );
+        let ending = short_paragraph_lines(&[
+            span_line(5, 93.0, 500.0, 70.0, "挑战相结合。"),
+            span_line(6, 112.0, 486.0, 340.0, "致审稿人开始下一段。"),
+        ]);
+        assert!(
+            ending.iter().all(|flag| !flag.text.contains("挑战")),
+            "{ending:?}"
+        );
+        let heading = short_paragraph_lines(&[
+            span_line(7, 113.0, 251.0, 12.0, "10"),
+            span_line(8, 93.0, 240.0, 180.0, "10.1 内容数据库查询生成"),
+        ]);
+        assert!(heading.is_empty(), "{heading:?}");
     }
 }
