@@ -6627,6 +6627,12 @@ fn version_token(chars: &[char], start: usize) -> bool {
 }
 
 fn english_body_source(text: &str) -> bool {
+    // An HTML row echoed by the model is markup, not a paragraph that failed
+    // to translate. Four tags is a table fragment; a sentence is not.
+    let tags = text.matches('<').count();
+    if tags >= 4 && text.matches('>').count() >= 4 {
+        return false;
+    }
     let latin = text.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
     if latin < 40 || text.chars().any(is_han_char) {
         return false;
@@ -8188,6 +8194,15 @@ mod tests {
             calls: 0,
             cache_hits: 0,
         }
+    }
+
+    #[test]
+    fn html_table_markup_is_not_an_english_body() {
+        let html = "<tr><td></td><td></td><td colspan=\"4\"></td><td></td></tr><tr><td></td></tr>";
+        assert!(!english_body_source(html));
+        assert!(english_body_source(
+            "The table structure language is usually adopted as is for the sequence tokenization."
+        ));
     }
 
     #[test]

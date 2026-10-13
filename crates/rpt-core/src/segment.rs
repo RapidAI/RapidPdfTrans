@@ -995,7 +995,19 @@ pub(crate) fn representative_size(glyphs: &[&Glyph]) -> f32 {
     let median = sizes[sizes.len() / 2];
     let max = sizes[sizes.len() - 1];
     if sizes.len() >= 4 && max > median * 1.8 {
-        median
+        // A drop cap is one or two glyphs. A longer run at the large size is
+        // the body: small labels on the same baseline pulled the median down,
+        // and a word space then looks like a column gutter.
+        let large: Vec<f32> = sizes
+            .iter()
+            .copied()
+            .filter(|size| *size > median * 1.8)
+            .collect();
+        if large.len() >= 4 {
+            large[large.len() / 2]
+        } else {
+            median
+        }
     } else {
         max.max(1.0)
     }
@@ -3359,6 +3371,53 @@ mod tests {
             !texts
                 .iter()
                 .any(|text| text.contains('b') && text.contains('w')),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn small_labels_on_a_baseline_do_not_split_body_words() {
+        // Figure labels at ~2.6pt share the body baseline and outnumber it.
+        // The median size used to become 2.6pt, so a 4.5pt word space was a
+        // column gutter and each word was translated on its own.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut cursor = 49.0f32;
+        for word in 0..6 {
+            if word > 0 {
+                cursor += 4.5;
+            }
+            for _ in 0..6 {
+                let mut item = glyph(id, cursor, 319.4, "a", false);
+                id += 1;
+                item.font_size = 10.0;
+                item.matrix = [10.0, 0.0, 0.0, 10.0, cursor, 319.4];
+                item.bbox = [cursor, 319.4, cursor + 4.6, 327.4];
+                glyphs.push(item);
+                cursor += 4.6;
+            }
+        }
+        let mut tiny = 370.0f32;
+        for _ in 0..48 {
+            let mut item = glyph(id, tiny, 319.4, "b", false);
+            id += 1;
+            item.font_size = 2.6;
+            item.matrix = [2.6, 0.0, 0.0, 2.6, tiny, 319.4];
+            item.bbox = [tiny, 319.4, tiny + 1.4, 321.5];
+            glyphs.push(item);
+            tiny += 1.5;
+        }
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert_eq!(
+            texts.iter().filter(|text| text.contains('a')).count(),
+            1,
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains('a') && text.contains('b')),
             "{texts:?}"
         );
     }
