@@ -346,7 +346,6 @@ pub fn rewrite_translation(
             let mut style = paragraph_style(&glyphs);
             if heading_wants_bold(&glyphs, text) {
                 style.bold = true;
-                style.italic = false;
             }
             groups
                 .entry(style)
@@ -426,7 +425,7 @@ pub fn rewrite_translation(
     // The inline flow already redrew these page numbers. Painting the
     // original digits again leaves a second copy at the source x.
     paint_original.retain(|id| !toc_redraw.contains(id) && !succeeded.contains(id));
-    commit_toc_operators(
+    let toc_column = commit_toc_operators(
         &owners,
         &toc_redraw,
         &paint_original,
@@ -450,7 +449,7 @@ pub fn rewrite_translation(
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
     // A contents title can move up to close a hole. An inline page number
     // that was redrawn on the old baseline would otherwise sit alone.
-    seat_inline_page_numbers(&mut drawn, extraction, &by_id);
+    seat_inline_page_numbers(&mut drawn, extraction, &by_id, &toc_column);
     let mut spans = Vec::new();
     if !overlay {
         for id in &succeeded {
@@ -1297,7 +1296,7 @@ fn commit_toc_operators(
     by_id: &HashMap<u32, usize>,
     embedded: &[(String, SubsetFont)],
     font_styles: &HashMap<String, FaceStyle>,
-) {
+) -> HashMap<u32, f32> {
     let mut blocked = HashSet::new();
     for ids in owners.values() {
         let live: Vec<u32> = ids
@@ -1495,6 +1494,7 @@ fn commit_toc_operators(
         }
     }
     drawn.extend(restored);
+    column_right
 }
 
 /// `12` in `architecture 12  core object`. A title (or the bullet before it)
@@ -3139,6 +3139,18 @@ fn build_solo_italic(
     if !italic {
         return None;
     }
+    // A BoldItalic chapter title (`AI 代理和应用简介`) is a heading. Folding
+    // it into this path paints a light italic and glues the page number to
+    // the title. Those numbers stay on the contents column, in the source face.
+    let bold = glyphs
+        .iter()
+        .filter(|glyph| face_style(&glyph.font_name).bold)
+        .count()
+        * 2
+        >= glyphs.len();
+    if bold {
+        return None;
+    }
     let page = glyphs[0].page_index;
     if glyphs.iter().any(|glyph| glyph.page_index != page) {
         return None;
@@ -3394,6 +3406,12 @@ fn build_subentry_run(
     let numbers = page_numbers_near(&baselines, page, size, extraction);
     for number in &numbers {
         right = right.max(glyph_ink_right(number.last().copied()?));
+    }
+    // English wraps early. The Chinese run fills the same column the section
+    // page numbers use, and only then wraps. A continuation starts at `left`.
+    let column = contents_column_right(page, extraction);
+    if column > left + size * 6.0 {
+        right = right.max(column);
     }
     let mut items = Vec::new();
     for index in indices {
@@ -5114,6 +5132,16 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
         let mut shift = 0.0f32;
         let mut prev: Option<ColumnBlock> = None;
         for block in blocks {
+            // A column page number sits to the right of its title. It is not
+            // the next paragraph, and treating it as one used to drop the
+            // pull before the following section.
+            let page_number = block
+                .indices
+                .iter()
+                .all(|index| draw_is_bare_page_number(&drawn[*index], extraction, by_id));
+            if page_number {
+                continue;
+            }
             let mut extra = 0.0f32;
             if let Some(prev) = &prev {
                 let source_gap = prev.source_bottom - block.source_top;
@@ -5193,14 +5221,30 @@ fn column_block(
     })
 }
 
+/// Right edge shared by the page's column-aligned page numbers.
+fn contents_column_right(page: u32, extraction: &Extraction) -> f32 {
+    extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| glyph.page_index == page && is_inline_page_glyph(glyph))
+        .map(glyph_ink_right)
+        .fold(0.0f32, f32::max)
+}
+
+fn drawn_ink_right(item: &Drawn) -> f32 {
+    item.x + item.widths.iter().sum::<f32>() + item.gaps.iter().sum::<f32>()
+}
+
 /// A section page number that was parked on the contents column, then left
 /// behind when its title moved up to close a hole. Put it back on the title's
-/// last line. A leader-dot row keeps the column x and only follows the title
-/// vertically.
+/// last line. Numbers that already share the page's contents column keep that
+/// x: a shorter Chinese title must not pull `4` or `11` back beside the words.
+/// A leader-dot row keeps the column x and only follows the title vertically.
 fn seat_inline_page_numbers(
     drawn: &mut [Drawn],
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
+    toc_column: &HashMap<u32, f32>,
 ) {
     let targets: Vec<usize> = drawn
         .iter()
@@ -5232,7 +5276,14 @@ fn seat_inline_page_numbers(
         let gap = source_left - title_source_right;
         let leaders = leaders_between(extraction, page, source_y, title_source_right, source_left);
         let inline = gap >= -1.0 && gap < size * 3.0 && !leaders;
-        let x = if inline {
+        let number_right = drawn_ink_right(&drawn[index]);
+        // `draw_toc_run` already moved this digit to the page's contents
+        // column. Inline sub-entry digits sit further left and may still
+        // close up to a short Chinese title. Comparing against every page
+        // number, including those sub-entries, used to miss the column.
+        let column = toc_column.get(&page).copied().unwrap_or(0.0);
+        let at_column = column > 0.0 && (number_right - column).abs() < 1.5;
+        let x = if inline && !at_column {
             title_right + page_number_gap(size, false)
         } else {
             drawn[index].x
@@ -9582,7 +9633,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_section_page_numbers_stay_beside_the_title() {
+    fn toc_section_page_numbers_share_the_source_right_edge() {
         let bytes = toc_column_pdf();
         let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
         let mut extraction = doc.extract();
@@ -9639,6 +9690,15 @@ mod tests {
                 .map(|ch| ch as u32)
                 .collect::<Vec<_>>(),
         );
+        let source_edge = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                !glyph.unicode.trim().is_empty()
+                    && glyph.unicode.trim().chars().all(|ch| ch.is_ascii_digit())
+            })
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
         doc.rewrite(
             &mut extraction,
             &report,
@@ -9674,17 +9734,16 @@ mod tests {
         let short = rows[0];
         let long = rows[1];
         assert!(
-            short.1 < 200.0,
-            "short-title page number slid to the column at x={}: {rows:?}",
-            short.1
+            (short.2 - source_edge).abs() < 1.5,
+            "short-title page number left the source column {source_edge}: {rows:?}"
         );
         assert!(
-            long.1 > short.1 + 8.0,
-            "long-title page number should sit further right: {rows:?}"
+            (long.2 - source_edge).abs() < 1.5,
+            "long-title page number left the source column {source_edge}: {rows:?}"
         );
         assert!(
-            (short.2 - long.2).abs() > 8.0,
-            "inline page numbers were forced onto one right edge: {rows:?}"
+            short.1 > 200.0,
+            "short title pulled its page number off the column: {rows:?}"
         );
     }
 
@@ -9730,6 +9789,15 @@ mod tests {
                 .map(|ch| ch as u32)
                 .collect::<Vec<_>>(),
         );
+        let source_edge = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                !glyph.unicode.trim().is_empty()
+                    && glyph.unicode.trim().chars().all(|ch| ch.is_ascii_digit())
+            })
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
         doc.rewrite(
             &mut extraction,
             &TranslateReport {
@@ -9765,10 +9833,15 @@ mod tests {
             .map(|glyph| glyph.matrix[4])
             .collect();
         assert_eq!(section.len(), 1, "section page number missing: {section:?}");
+        let section_right = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "3")
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
         assert!(
-            section[0] < 180.0,
-            "section page number left the title at x={}, inline xs={xs:?}",
-            section[0]
+            (section_right - source_edge).abs() < 1.5,
+            "section page number right {section_right} left the source column {source_edge}"
         );
         let title_y: Vec<f32> = painted
             .glyphs
@@ -9786,6 +9859,198 @@ mod tests {
         assert!(
             (title_y[0] - section_y[0]).abs() < 1.5,
             "section number left the title baseline: title={title_y:?} number={section_y:?}"
+        );
+    }
+
+    #[test]
+    fn a_bold_italic_chapter_title_keeps_a_bold_face() {
+        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc").is_file() {
+            return;
+        }
+        let bytes = contents_pdf_named(
+            b"BT /F1 13 Tf \
+1 0 0 1 120 520 Tm [(Introduction to AI agents) -900 (3)] TJ \
+/F1 11 Tf \
+1 0 0 1 120 490 Tm [(Building agents) -900 (4)] TJ \
+ET",
+            "NewBaskerville-BoldItalic",
+        );
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let source_edge = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.trim() == "3" || glyph.unicode.trim() == "4")
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| TranslatedSegment {
+                id: seg.id,
+                page_index: seg.page_index,
+                glyph_ids: seg.glyph_ids.clone(),
+                source: seg.text.clone(),
+                translated: if seg.text.contains("Introduction") {
+                    "AI代理和应用简介".into()
+                } else if seg.text.contains("Building") {
+                    "构建代理".into()
+                } else {
+                    seg.text.clone()
+                },
+            })
+            .collect();
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions::default(),
+        )
+        .unwrap();
+        let saved = doc.save_bytes().unwrap();
+        let saved_text = String::from_utf8_lossy(&saved);
+        assert!(
+            saved_text.contains("NotoSansCJKjp-Bold") || saved_text.contains("NotoSansCJK-Bold"),
+            "chapter title was not painted with the bold face"
+        );
+        let painted = PdfDocument::open_bytes(&saved).unwrap().extract();
+        let title: Vec<_> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().any(is_han_char))
+            .filter(|glyph| glyph.unicode.contains('简') || glyph.unicode.contains('代'))
+            .collect();
+        assert!(
+            !title.is_empty(),
+            "chapter title missing: {}",
+            painted.plain_text()
+        );
+        assert!(
+            title.iter().any(|glyph| glyph.matrix[2].abs() > 0.15),
+            "bold-italic chapter title lost its italic shear"
+        );
+        let number_right = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.trim() == "3")
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
+        assert!(
+            (number_right - source_edge).abs() < 4.0,
+            "chapter page number right {number_right} left the source column {source_edge}"
+        );
+    }
+
+    #[test]
+    fn a_bullet_run_fills_the_contents_column_before_wrapping() {
+        // The English row wraps inside x=300. A section number at the
+        // contents column is further right. Short Chinese entries fill that
+        // column on one line instead of breaking under an empty first line.
+        let bytes = contents_pdf(
+            b"BT /F1 10 Tf \
+1 0 0 1 72 640 Tm (Building applications) Tj \
+1 0 0 1 450 640 Tm (19) Tj \
+1 0 0 1 72 600 Tm (LLM-based applications: Summarization and Q and A engines) Tj \
+1 0 0 1 72 586 Tm [(Chatbots) -700 (7) -1600 (Agents) -700 (8)] TJ \
+/F1 4 Tf \
+1 0 0 1 150 588 Tm (\x95) Tj \
+ET",
+        );
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Summarization") {
+                    "问答引擎"
+                } else if seg.text.contains("Chatbots") {
+                    "聊天机器人"
+                } else if seg.text.contains("Agents") {
+                    "智能体"
+                } else if seg.text.contains("Building") {
+                    "构建应用"
+                } else {
+                    seg.text.as_str()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"问答引擎聊天机器人智能体构建应用■78"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut ys = Vec::new();
+        for glyph in painted.glyphs.iter().filter(|glyph| {
+            glyph.unicode.contains('问')
+                || glyph.unicode.contains('聊')
+                || glyph.unicode.contains('智')
+        }) {
+            let y = glyph.matrix[5];
+            if ys.iter().all(|other: &f32| (other - y).abs() > 2.0) {
+                ys.push(y);
+            }
+        }
+        assert_eq!(
+            ys.len(),
+            1,
+            "bullet run wrapped before the column was full: {}",
+            painted.plain_text()
+        );
+        let left = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.contains('问') || glyph.unicode.contains('聊'))
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            left < 90.0,
+            "packed run left the sub-entry indent at x={left}"
         );
     }
 
