@@ -1567,6 +1567,21 @@ fn is_function_word(word: &str) -> bool {
             | "or"
             | "as"
             | "at"
+            | "how"
+            | "got"
+            | "why"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "testing"
+            | "practical"
+            | "software"
+            | "engineering"
+            | "consultant"
+            | "versus"
+            | "theorem"
     )
 }
 
@@ -1699,7 +1714,13 @@ fn is_personal_name(text: &str) -> bool {
                 && !is_org_token(token)
                 && !is_function_word(token)
                 && !compound_title_token(token)
+                && !long_title_word(token)
         })
+}
+
+/// `Archibald` (9) is still a surname. `Infinitary` (10) is a heading word.
+fn long_title_word(token: &str) -> bool {
+    token.chars().filter(|ch| ch.is_ascii_alphabetic()).count() > 9
 }
 
 /// `Prefix-Conditioned` is a section title. `Jean-Luc` is still a given name.
@@ -2335,6 +2356,23 @@ mod tests {
             "前缀条件充分性"
         );
         assert!(whole_line_is_personal_name("Jean-Luc Picard"));
+        assert!(!whole_line_is_personal_name(
+            "How Mutation Testing Got Practical"
+        ));
+        assert!(!whole_line_is_personal_name(
+            "Software Engineering Consultant"
+        ));
+        assert!(whole_line_is_personal_name("Dustin Archibald"));
+        assert!(!whole_line_is_personal_name("Finitary Versus Infinitary"));
+        assert!(!whole_line_is_personal_name("Ramsey's Theorem"));
+        assert_eq!(
+            restore_credit_names("Finitary Versus Infinitary", "有限与无限"),
+            "有限与无限"
+        );
+        assert_eq!(
+            restore_credit_names("How Mutation Testing Got Practical", "变异测试如何变得实用"),
+            "变异测试如何变得实用"
+        );
     }
 
     #[test]

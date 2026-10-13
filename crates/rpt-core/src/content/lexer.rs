@@ -35,9 +35,24 @@ pub struct LexResult {
 }
 
 pub fn lex(data: &[u8]) -> LexResult {
+    let (mut out, pending) = lex_continued(data, Vec::new());
+    if !pending.is_empty() {
+        out.diagnostics
+            .push(format!("trailing operands at byte {}", data.len()));
+    }
+    out
+}
+
+/// Lex one piece of a page whose `/Contents` is an array of streams.
+///
+/// The PDF spec concatenates those streams before parsing. A text array can
+/// end one stream and its `TJ` can start the next. `pending` is the operand
+/// list the previous piece did not yet apply to an operator.
+pub fn lex_continued(data: &[u8], mut operands: Vec<Operand>) -> (LexResult, Vec<Operand>) {
     let mut out = LexResult::default();
     let mut i = 0;
-    let mut operands = Vec::new();
+    // Operands carried from the previous stream live in that stream. The
+    // operator blanked later is the keyword in this piece.
     let mut operand_start: Option<usize> = None;
     while i < data.len() {
         skip_ws_and_comments(data, &mut i);
@@ -87,11 +102,7 @@ pub fn lex(data: &[u8]) -> LexResult {
             }
         }
     }
-    if !operands.is_empty() {
-        out.diagnostics
-            .push(format!("trailing operands at byte {i}"));
-    }
-    out
+    (out, operands)
 }
 
 fn is_operator(name: &str) -> bool {
@@ -512,5 +523,25 @@ mod tests {
             panic!("array");
         };
         assert!(matches!(items[1], Operand::Number(n) if (n + 120.5).abs() < 1e-3));
+    }
+
+    #[test]
+    fn a_text_array_split_from_its_operator_still_shows() {
+        let (left, pending) = lex_continued(b"BT [(simpler) -20 (proof)] ", Vec::new());
+        assert!(left.diagnostics.is_empty(), "{:?}", left.diagnostics);
+        assert!(left.ops.iter().all(|op| op.operator != "TJ"));
+        assert_eq!(pending.len(), 1);
+        let (right, pending) = lex_continued(b"TJ ET", pending);
+        assert!(right.diagnostics.is_empty(), "{:?}", right.diagnostics);
+        assert!(pending.is_empty());
+        let tj = right.ops.iter().find(|op| op.operator == "TJ").unwrap();
+        let Operand::Array(items) = &tj.operands[0] else {
+            panic!("array");
+        };
+        let Operand::String(word) = &items[0] else {
+            panic!("string");
+        };
+        assert_eq!(word, b"simpler");
+        assert_eq!(&b"TJ ET"[tj.start..tj.end], b"TJ");
     }
 }

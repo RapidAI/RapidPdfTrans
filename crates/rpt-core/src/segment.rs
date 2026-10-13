@@ -2470,9 +2470,14 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
         return false;
     }
     // A display equation keeps its own segment. Joining it onto the prose
-    // around it would leave that prose untranslated. A calligraphic letter
-    // or a subscript inside a sentence does not.
-    if !hyphen && (line_has_formula(upper) || line_has_formula(lower)) {
+    // around it would leave that prose untranslated. A wrapped clause that
+    // starts with a word and then a formula (`version. We write [N] = …`,
+    // `to x + y = z`) is still the sentence above it.
+    let prose_tail = prose_formula_tail(upper, lower);
+    if !hyphen && line_has_formula(upper) {
+        return false;
+    }
+    if !hyphen && line_has_formula(lower) && !prose_tail {
         return false;
     }
     let size = upper.size.max(lower.size).max(1.0);
@@ -2697,6 +2702,44 @@ fn stacked_short_items(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
         || trimmed.contains('@')
         || trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
+}
+
+/// The lower line opens with a word, so the formula on it is inline.
+fn prose_formula_tail(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if sentence_end(upper.text.trim_end()) {
+        return false;
+    }
+    let next = lower.text.trim_start();
+    if !next.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+        return false;
+    }
+    let letters = lower.text.chars().filter(|ch| ch.is_alphabetic()).count();
+    if letters >= 8 {
+        return true;
+    }
+    let word = next
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|ch: char| !ch.is_ascii_alphabetic());
+    matches!(
+        word,
+        "to" | "of"
+            | "in"
+            | "an"
+            | "the"
+            | "and"
+            | "or"
+            | "for"
+            | "with"
+            | "by"
+            | "as"
+            | "on"
+            | "at"
+            | "from"
+            | "into"
+            | "than"
+    )
 }
 
 fn line_has_formula(line: &VisualLine<'_>) -> bool {
@@ -4510,6 +4553,59 @@ mod tests {
         assert!(texts.iter().any(|text| text.contains("a+b=c")), "{texts:?}");
         assert!(
             texts.iter().any(|text| text.starts_with("The next")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_clause_with_a_formula_stays_in_the_sentence() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            72.0,
+            500.0,
+            "Following is an equivalent finitary",
+            "CMR10",
+        );
+        glyphs.extend(paint_word(
+            &mut id,
+            72.0,
+            488.0,
+            "version. We write ",
+            "CMR10",
+        ));
+        glyphs.extend(paint_word(&mut id, 164.0, 488.0, "[N]={1,2,N}.", "CMMI10"));
+        glyphs.extend(paint_word(
+            &mut id,
+            72.0,
+            460.0,
+            "Theorem 0.1.2 is the finitary form.",
+            "CMR10",
+        ));
+        let seg = segment_glyphs(&glyphs);
+        let texts: Vec<_> = seg.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("finitary version")
+                && text.contains("[N]={1,2,N}.")
+                && !text.contains("Theorem")),
+            "{texts:?}"
+        );
+        let mut id = 100u32;
+        let mut tail = paint_word(
+            &mut id,
+            72.0,
+            400.0,
+            "then there is a monochromatic solution",
+            "CMR10",
+        );
+        tail.extend(paint_word(&mut id, 72.0, 388.0, "to ", "CMR10"));
+        tail.extend(paint_word(&mut id, 86.0, 388.0, "x+y=z.", "CMMI10"));
+        let seg = segment_glyphs(&tail);
+        let texts: Vec<_> = seg.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("solution to ") && text.contains("x+y=z")),
             "{texts:?}"
         );
     }

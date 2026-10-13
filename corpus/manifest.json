@@ -1836,6 +1836,60 @@
         "two-column"
       ],
       "ci": false
+    },
+    {
+      "id": "ocw-18-225-lec01",
+      "url": "https://ocw.mit.edu/courses/18-225-graph-theory-and-additive-combinatorics-fall-2023/mit18_225_f23_lec01.pdf",
+      "source": "mit-ocw",
+      "title": "Graph Theory and Additive Combinatorics, Lecture 01: Appetizer: Triangles and Equations",
+      "license": "CC BY-NC-SA 4.0 (MIT OpenCourseWare; PDF not committed)",
+      "sha256": "78b3bacf5c195f9ffa993dd7c97c7684ac358d249bf78dcd9c80000a9caaceff",
+      "bytes": 528175,
+      "pages": 11,
+      "tags": [
+        "lecture-notes",
+        "textbook",
+        "math",
+        "latex",
+        "single-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "fosdem-2024-mutation",
+      "url": "https://archive.fosdem.org/2024/events/attachments/fosdem-2024-2486-how-mutation-testing-got-practical/slides/22826/How_Mutation_Testing_Got_Practical_-_FOSDEM_202_FMzV7Dl.pdf",
+      "source": "fosdem",
+      "title": "How Mutation Testing Got Practical (FOSDEM 2024)",
+      "license": "CC BY (FOSDEM 2024; PDF not committed)",
+      "sha256": "22d30845c8d5d63cb4aed79d5d75ca51f2db07e01098ed9b24340363bb4553f3",
+      "bytes": 3172556,
+      "pages": 61,
+      "tags": [
+        "slides",
+        "landscape",
+        "lists",
+        "conference"
+      ],
+      "ci": false
+    },
+    {
+      "id": "nist-sp-800-218",
+      "url": "https://nvlpubs.nist.gov/nistpubs/specialpublications/nist.sp.800-218.pdf",
+      "source": "nist",
+      "title": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "license": "Public domain (US government work; PDF not committed)",
+      "sha256": "617746e553a9e2da49bfbd4eef0dfc3094758a39b869314e4173ac36605cde22",
+      "bytes": 739891,
+      "pages": 36,
+      "tags": [
+        "government",
+        "report",
+        "footnotes",
+        "lists",
+        "tables",
+        "word"
+      ],
+      "ci": false
     }
   ]
 }

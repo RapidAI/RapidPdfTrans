@@ -2236,6 +2236,9 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         '\u{0338}' => &['/'],
         '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => &['-'],
         '\u{00D7}' | '\u{2715}' | '\u{2A2F}' => &['x'],
+        // Floor and ceiling brackets. The CJK face has the ASCII brackets.
+        '\u{2308}' | '\u{230A}' => &['['],
+        '\u{2309}' | '\u{230B}' => &[']'],
         // `67.4 ∼ 118%`. The Song face has no tilde operator.
         '\u{223C}' | '\u{223D}' => &['~'],
         '\u{2018}' | '\u{2019}' | '\u{201A}' => &['\''],
@@ -2243,8 +2246,33 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2009}' => &[' '],
         // FrameMaker dingbat bullets and the line-continuation arrow.
         '\u{27A2}' | '\u{27A4}' | '\u{27A5}' | '\u{2794}' | '\u{279C}' | '\u{279E}' => &['→', '>'],
+        '\u{2705}' | '\u{2714}' => &['✓', '*'],
+        '\u{274C}' | '\u{274E}' => &['×', 'x'],
         '\u{E000}'..='\u{F8FF}' => &['■', '•', '*'],
+        _ if pictograph(ch) => &['•', '*'],
         _ => &[],
+    }
+}
+
+/// Emoji and clock pictographs. A CJK body face has none of them, and one
+/// missing icon used to leave the whole slide line in English.
+fn pictograph(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{2300}'..='\u{23FF}'
+            | '\u{2600}'..='\u{27BF}'
+            | '\u{1F000}'..='\u{1FAFF}'
+    )
+}
+
+fn expand_ligature(ch: char) -> Option<&'static str> {
+    match ch {
+        '\u{FB00}' => Some("ff"),
+        '\u{FB01}' => Some("fi"),
+        '\u{FB02}' => Some("fl"),
+        '\u{FB03}' => Some("ffi"),
+        '\u{FB04}' => Some("ffl"),
+        _ => None,
     }
 }
 
@@ -2280,9 +2308,15 @@ fn math_plain(ch: char) -> Option<char> {
         }
     }
     const GREEK_SMALL: &[u32] = &[0x1D6C2, 0x1D6FC, 0x1D736, 0x1D770, 0x1D7AA];
+    // After the 25 letters: partial, then epsilon/theta/kappa/phi/rho/pi symbols.
+    // `𝜙` (U+1D719) used to leave the whole sentence in English.
+    const GREEK_SYMBOL: &[char] = &['d', 'ε', 'θ', 'κ', 'φ', 'ρ', 'π'];
     for &start in GREEK_SMALL {
         if (start..start + 25).contains(&code) {
             return char::from_u32(0x03B1 + (code - start));
+        }
+        if (start + 25..start + 32).contains(&code) {
+            return Some(GREEK_SYMBOL[(code - (start + 25)) as usize]);
         }
     }
     const GREEK_CAP: &[u32] = &[0x1D6A8, 0x1D6E2, 0x1D71C, 0x1D756, 0x1D790];
@@ -2386,6 +2420,8 @@ fn latin_base(ch: char) -> Option<char> {
         'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' => 'i',
         'Ñ' | 'Ń' | 'Ņ' | 'Ň' => 'N',
         'ñ' | 'ń' | 'ņ' | 'ň' => 'n',
+        'Ř' => 'R',
+        'ř' => 'r',
         'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ō' | 'Ŏ' | 'Ő' => 'O',
         'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ō' | 'ŏ' | 'ő' => 'o',
         'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' => 'U',
@@ -2412,6 +2448,15 @@ fn substitute_covered(text: &str, font: &SubsetFont) -> String {
         if font.glyphs.contains_key(&(ch as u32)) {
             out.push(ch);
             continue;
+        }
+        if let Some(ligature) = expand_ligature(ch) {
+            if ligature
+                .chars()
+                .all(|part| font.glyphs.contains_key(&(part as u32)))
+            {
+                out.push_str(ligature);
+                continue;
+            }
         }
         if let Some(alt) = coverage_fallbacks(ch)
             .iter()
@@ -7571,6 +7616,68 @@ mod tests {
     fn a_planck_constant_stands_in_for_italic_h() {
         assert_eq!(math_plain('\u{210E}'), Some('h'));
         assert_eq!(math_plain('𝑑'), Some('d'));
+        assert_eq!(math_plain('\u{1D719}'), Some('φ'));
+        assert_eq!(math_plain('\u{1D715}'), Some('d'));
+        assert_eq!(latin_base('ř'), Some('r'));
+        assert_eq!(coverage_fallbacks('\u{2308}'), &['[']);
+        assert_eq!(coverage_fallbacks('\u{2309}'), &[']']);
+    }
+
+    #[test]
+    fn an_ocw_aside_with_a_year_lays_out() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/cache/ocw-18-225-lec01.pdf");
+        if !path.is_file() {
+            return;
+        }
+        let pdf = PdfDocument::open(&path).unwrap();
+        let extraction = pdf.extract();
+        let seg = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let segment = seg
+            .segments
+            .iter()
+            .find(|item| item.text.contains("Additive combinatorics describes"))
+            .expect("paragraph");
+        let translated = "加性组合学描述了一个快速发展的数学领域，其动机源于关于整数加法和乘法的简单问题。（“加性组合学”这一名称在2000年代变得流行，当时该领域因高尔斯、格林、陶哲轩等人的开创性工作而迅速爆发；此前该领域更常被称为“组合数论”。）加性组合学中的问题和方法深刻且影响深远，连接了数学的许多不同领域，如图论、调和分析、遍历理论、离散几何和模型论。";
+        let mut points: Vec<u32> = translated.chars().map(|ch| ch as u32).collect();
+        points.sort_unstable();
+        points.dedup();
+        let font = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &points,
+            &FontSources::default(),
+        )
+        .expect("font");
+        let glyphs: Vec<&Glyph> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extraction.glyphs.iter().find(|glyph| glyph.id == *id))
+            .collect();
+        let drawn = layout_segment(
+            &glyphs,
+            translated,
+            &font,
+            &extraction,
+            false,
+            "RPT",
+            0.0,
+            CjkMeasure::resolve(0.0, 0.0),
+        )
+        .expect("paragraph fits");
+        assert!(
+            drawn.len() <= 8,
+            "aside still exploded into {} lines",
+            drawn.len()
+        );
     }
 
     #[test]
@@ -7975,6 +8082,19 @@ mod tests {
         assert_eq!(substitute_covered("（\u{27a5}）", &font), "（→）");
         assert_eq!(substitute_covered("X\u{1D440} \u{1D706}", &font), "XM l");
         assert_eq!(substitute_covered("y\u{2081}", &font), "y1");
+        assert_eq!(coverage_fallbacks('✅'), &['✓', '*']);
+        assert_eq!(coverage_fallbacks('👽'), &['•', '*']);
+        let mut icons = HashMap::new();
+        for (index, ch) in "已杀死•✓×*file".chars().enumerate() {
+            icons.insert(ch as u32, (index as u16, 500));
+        }
+        let icons = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: icons,
+        };
+        assert_eq!(substitute_covered("✅已杀死👽", &icons), "✓已杀死•");
+        assert_eq!(substitute_covered("ﬁle", &icons), "file");
     }
 
     #[test]

@@ -390,6 +390,62 @@ mod tests {
     }
 
     #[test]
+    fn a_text_array_split_across_content_streams_is_still_read() {
+        let mut doc = lopdf::Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let first = doc.add_object(lopdf::Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 72 700 Td [(simpler) -20 (proof)] ".to_vec(),
+        ));
+        let second = doc.add_object(lopdf::Stream::new(dictionary! {}, b"TJ ET".to_vec()));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => vec![first.into(), second.into()],
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let pdf = PdfDocument::open_bytes(&bytes).unwrap();
+        let extraction = pdf.extract();
+        let text: String = extraction
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.unicode.as_str())
+            .collect();
+        assert!(
+            text.contains("simpler") && text.contains("proof"),
+            "{text:?} {:?}",
+            extraction.diagnostics
+        );
+    }
+
+    #[test]
     fn a_filled_rectangle_is_recorded_as_a_region() {
         let mut doc = lopdf::Document::with_version("1.4");
         doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;

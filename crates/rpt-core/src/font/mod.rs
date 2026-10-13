@@ -142,21 +142,28 @@ impl Font {
     }
 
     fn split<'a>(&self, bytes: &'a [u8]) -> Vec<(u32, &'a [u8])> {
-        if let Some(map) = self
-            .to_unicode
-            .as_ref()
-            .filter(|m| !m.codespaces.is_empty())
-        {
-            return map.split(bytes);
-        }
-        if let Some(map) = self.cid_map.as_ref().filter(|m| !m.codespaces.is_empty()) {
-            return map.split(bytes);
-        }
-        if let Some(pre) = self.predefined {
-            return pre.split_bytes(bytes);
-        }
-        if self.identity_two_byte {
-            return split_fixed(bytes, 2);
+        // Simple fonts (Type 1, TrueType, Type 3) are one byte per glyph.
+        // Word writes a ToUnicode codespace of `<0000> <FFFF>` while the
+        // `bfchar` keys and the content stream stay single-byte WinAnsi.
+        // Honouring that codespace pairs bytes (`Sp` → U+5370) and the
+        // extracted sentence is garbage. Only a CID font uses the codespace.
+        if self.is_cid {
+            if let Some(map) = self
+                .to_unicode
+                .as_ref()
+                .filter(|m| !m.codespaces.is_empty())
+            {
+                return map.split(bytes);
+            }
+            if let Some(map) = self.cid_map.as_ref().filter(|m| !m.codespaces.is_empty()) {
+                return map.split(bytes);
+            }
+            if let Some(pre) = self.predefined {
+                return pre.split_bytes(bytes);
+            }
+            if self.identity_two_byte {
+                return split_fixed(bytes, 2);
+            }
         }
         bytes
             .iter()
@@ -699,5 +706,76 @@ fn load_type3(
         matrix: Matrix::scale(0.001, 0.001),
         procs,
         resources,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BaseEncoding, CMap, CidToGid, Font, FontCmap, FontKind, SimpleEncoding, VerticalMap,
+        WidthMap,
+    };
+    use crate::geom::Matrix;
+
+    fn simple_winansi(cmap_src: &str, cid: bool) -> Font {
+        Font {
+            resource_name: "F1".into(),
+            base_name: "TimesNewRomanPSMT".into(),
+            kind: FontKind::TrueType,
+            object_id: None,
+            vertical: false,
+            font_matrix: Matrix::scale(0.001, 0.001),
+            widths: WidthMap::constant(500.0),
+            vertical_widths: VerticalMap::default(),
+            to_unicode: Some(CMap::parse(cmap_src.as_bytes())),
+            cid_map: None,
+            predefined: None,
+            simple: Some(SimpleEncoding::from_base(BaseEncoding::WinAnsi)),
+            identity_two_byte: false,
+            is_cid: cid,
+            cid_to_gid: CidToGid::None,
+            cmap: FontCmap::default(),
+            type3: None,
+        }
+    }
+
+    #[test]
+    fn a_simple_font_reads_winansi_one_byte_at_a_time() {
+        // Word declares a 2-byte codespace and 1-byte bfchar keys.
+        let src = r#"
+            1 begincodespacerange
+            <0000> <FFFF>
+            endcodespacerange
+            7 beginbfchar
+            <53> <0053>
+            <70> <0070>
+            <65> <0065>
+            <63> <0063>
+            <69> <0069>
+            <61> <0061>
+            <6C> <006C>
+            endbfchar
+        "#;
+        let font = simple_winansi(src, false);
+        let glyphs = font.decode(b"Special");
+        let text: String = glyphs.into_iter().filter_map(|g| g.unicode).collect();
+        assert_eq!(text, "Special");
+    }
+
+    #[test]
+    fn a_cid_font_still_honours_a_two_byte_codespace() {
+        let src = r#"
+            1 begincodespacerange
+            <0000> <FFFF>
+            endcodespacerange
+            1 beginbfchar
+            <0053> <0053>
+            endbfchar
+        "#;
+        let font = simple_winansi(src, true);
+        let glyphs = font.decode(&[0x00, 0x53]);
+        assert_eq!(glyphs.len(), 1);
+        assert_eq!(glyphs[0].unicode.as_deref(), Some("S"));
+        assert_eq!(glyphs[0].code_bytes, vec![0x00, 0x53]);
     }
 }

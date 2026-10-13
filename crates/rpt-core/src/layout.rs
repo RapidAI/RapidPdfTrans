@@ -638,9 +638,17 @@ pub(crate) fn wrap_text(
         } else if end < chars.len() {
             // Break at the rightmost legal point. Jumping back to the previous
             // ASCII space throws away CJK that already fit after a citation.
-            // A sticky span longer than the line falls through to one character.
+            let fitted = end;
             while end > start + 1 && !can_break_at(&chars, &sticky, end) {
                 end -= 1;
+            }
+            if end == start + 1 {
+                // The sticky span itself is wider than the measure. Fill the
+                // line at an ordinary boundary instead of one character.
+                end = fitted;
+                while end > start + 1 && !can_break(chars[end - 1], chars[end]) {
+                    end -= 1;
+                }
             }
             end = prefer_enumeration_break(&chars, &sticky, start, end);
         }
@@ -880,8 +888,7 @@ fn mark_citations(chars: &[char], sticky: &mut [bool]) {
         let end = index + 1 + rel;
         if end - index < 80 {
             let inside: String = chars[index + 1..end].iter().collect();
-            let digits = inside.chars().filter(|ch| ch.is_ascii_digit()).count();
-            if inside.to_ascii_lowercase().contains("et al") || digits >= 4 {
+            if parenthetical_is_citation(&inside) {
                 for boundary in index..end {
                     if let Some(flag) = sticky.get_mut(boundary) {
                         *flag = true;
@@ -891,6 +898,20 @@ fn mark_citations(chars: &[char], sticky: &mut [bool]) {
         }
         index = end + 1;
     }
+}
+
+/// `(Smith et al., 2020)` and `（王等，2020）` stay on one line. A year inside
+/// a Chinese sentence (`（……在2000年代……）`) is prose and still wraps.
+fn parenthetical_is_citation(inside: &str) -> bool {
+    if inside.to_ascii_lowercase().contains("et al") {
+        return true;
+    }
+    let digits = inside.chars().filter(|ch| ch.is_ascii_digit()).count();
+    if digits < 4 {
+        return false;
+    }
+    let cjk = inside.chars().filter(|ch| is_cjk_body(*ch)).count();
+    cjk <= 12
 }
 
 fn mark_emails(chars: &[char], sticky: &mut [bool]) {
@@ -1722,6 +1743,36 @@ mod tests {
         assert_eq!(
             spread_to_lines(vec!["112".into()], 3),
             vec!["112".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_prose_year_wraps_and_a_citation_year_stays_intact() {
+        let cited = "前文很长(Smith, 2020)后文继续写完这一句";
+        let cited_lines = wrap_text(cited, 10.0, 160.0, 160.0, &uniform_font(cited)).unwrap();
+        assert!(
+            cited_lines
+                .iter()
+                .any(|line| line.contains("(Smith, 2020)")),
+            "{cited_lines:?}"
+        );
+
+        let prose = "加性组合学描述了一个快速发展的数学领域，其动机源于关于整数加法和乘法的简单问题。（“加性组合学”这一名称在2000年代变得流行，当时该领域因高尔斯、格林、陶哲轩等人的开创性工作而迅速爆发；此前该领域更常被称为“组合数论”。）加性组合学中的问题和方法深刻且影响深远，连接了数学的许多不同领域。";
+        let prose_lines = wrap_text(prose, 10.0, 360.0, 380.0, &uniform_font(prose)).unwrap();
+        assert!(
+            prose_lines.len() <= 8,
+            "a year inside a Chinese aside wrapped one character at a time: {prose_lines:?}"
+        );
+        assert!(
+            prose_lines.iter().all(|line| line.chars().count() > 1),
+            "{prose_lines:?}"
+        );
+
+        let long = format!("（{} et al., 2020）", "甲".repeat(30));
+        let long_lines = wrap_text(&long, 10.0, 120.0, 120.0, &uniform_font(&long)).unwrap();
+        assert!(
+            long_lines.len() <= 8 && long_lines.iter().all(|line| line.chars().count() >= 4),
+            "a sticky span wider than the line became one character: {long_lines:?}"
         );
     }
 

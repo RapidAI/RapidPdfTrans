@@ -18,7 +18,7 @@ use crate::pdfutil::{array_of, as_f32, as_name, deref, dict_of, object_id_string
 use crate::resources::Resources;
 use crate::{font::load_font, font::DecodedGlyph, font::Font};
 
-use super::lexer::{lex, ContentOp, Operand};
+use super::lexer::{lex, lex_continued, ContentOp, LexResult, Operand};
 
 const DEFAULT_STREAM_LIMIT: usize = 32 * 1024 * 1024;
 const DIAGNOSTIC_CAP: usize = 200;
@@ -81,6 +81,9 @@ pub fn interpret_document(doc: &Document, opts: &InterpretOptions) -> Interprete
         if contents.is_empty() {
             machine.diag("page has no content stream");
         }
+        // A page `/Contents` array is one concatenated stream. An operand
+        // array can end one piece and the operator can start the next.
+        let mut carried = Vec::new();
         for (stream_index, content_id) in contents.iter().copied().enumerate() {
             let obj = Object::Reference(content_id);
             match stream_bytes(doc, &obj, opts.max_stream_bytes) {
@@ -91,13 +94,22 @@ pub fn interpret_document(doc: &Document, opts: &InterpretOptions) -> Interprete
                         stream_index: stream_index as u32,
                         resource_name: None,
                     };
-                    machine.exec_stream(&bytes, &src);
+                    carried = machine.exec_stream(&bytes, &src, carried);
                 }
-                None => machine.diag(format!(
-                    "unreadable content stream {}",
-                    object_id_string(content_id)
-                )),
+                None => {
+                    if !carried.is_empty() {
+                        machine.diag("dropped operands before an unreadable content stream");
+                        carried.clear();
+                    }
+                    machine.diag(format!(
+                        "unreadable content stream {}",
+                        object_id_string(content_id)
+                    ));
+                }
             }
+        }
+        if !carried.is_empty() {
+            machine.diag("trailing operands at end of page contents");
         }
         machine.paint_annotations(page_id);
         diagnostics.extend(machine.diagnostics);
@@ -256,10 +268,24 @@ impl<'a> Machine<'a> {
         });
     }
 
-    fn exec_stream(&mut self, bytes: &[u8], src: &SourceCtx) {
-        let lexed = lex(bytes);
-        for message in lexed.diagnostics {
-            self.diag(message);
+    fn exec_closed_stream(&mut self, bytes: &[u8], src: &SourceCtx) {
+        self.run_ops(&lex(bytes), src);
+    }
+
+    fn exec_stream(
+        &mut self,
+        bytes: &[u8],
+        src: &SourceCtx,
+        carried: Vec<Operand>,
+    ) -> Vec<Operand> {
+        let (lexed, pending) = lex_continued(bytes, carried);
+        self.run_ops(&lexed, src);
+        pending
+    }
+
+    fn run_ops(&mut self, lexed: &LexResult, src: &SourceCtx) {
+        for message in &lexed.diagnostics {
+            self.diag(message.clone());
         }
         for (index, op) in lexed.ops.iter().enumerate() {
             if let Err(message) = self.dispatch(op, index as u32, src) {
@@ -774,7 +800,7 @@ impl<'a> Machine<'a> {
             stream_index: parent.stream_index,
             resource_name: parent.resource_name.clone(),
         };
-        self.exec_stream(bytes, &src);
+        self.exec_closed_stream(bytes, &src);
         self.gs = self.gs_stack.pop().unwrap_or_default();
         self.resources = saved_resources;
         self.tm = saved_tm;
@@ -915,7 +941,7 @@ impl<'a> Machine<'a> {
             stream_index: 0,
             resource_name: Some(name.to_string()),
         };
-        self.exec_stream(bytes, &src);
+        self.exec_closed_stream(bytes, &src);
         self.gs = self.gs_stack.pop().unwrap_or_default();
         self.resources = saved_resources;
         self.tm = saved_tm;
