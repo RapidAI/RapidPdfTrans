@@ -505,7 +505,7 @@ pub fn replay_extraction(
             translated.push(Some(seg.text.clone()));
             continue;
         }
-        let Some(text) = saved_map.get(&seg.text) else {
+        let Some(text) = lookup_saved(&seg.text, &saved_map) else {
             let preview: String = seg.text.chars().take(48).collect();
             return Err(Error::Translate(format!(
                 "no saved translation for segment {} ({preview})",
@@ -515,7 +515,7 @@ pub fn replay_extraction(
         if !seen.insert(seg.text.clone()) {
             cache_hits += 1;
         }
-        translated.push(Some(text.clone()));
+        translated.push(Some(text));
     }
     finish_report(
         extraction,
@@ -525,6 +525,117 @@ pub fn replay_extraction(
         0,
         cache_hits,
     )
+}
+
+/// A layout change can split a chapter index off its title, or join two
+/// pieces of one sentence. Both still have a saved translation; a new
+/// sentence does not, and that stays an error.
+fn lookup_saved(source: &str, saved: &HashMap<String, String>) -> Option<String> {
+    if let Some(hit) = saved.get(source) {
+        return Some(hit.clone());
+    }
+    let trimmed = source.trim();
+    if is_digit_index(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    if let Some(peeled) = peel_saved_index(trimmed, saved) {
+        return Some(peeled);
+    }
+    join_saved_pieces(source, saved)
+}
+
+fn is_digit_index(text: &str) -> bool {
+    !text.is_empty() && text.len() <= 3 && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// `10 10.1 Title` loses the leading chapter index. `10.1` does not.
+fn strip_leading_index(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    let digits = text
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if !(1..=3).contains(&digits) {
+        return None;
+    }
+    let after = &text[digits..];
+    let boundary = after.chars().next()?;
+    if !boundary.is_whitespace() {
+        return None;
+    }
+    let rest = after.trim_start();
+    (!rest.is_empty()).then_some(rest)
+}
+
+fn peel_saved_index(source: &str, saved: &HashMap<String, String>) -> Option<String> {
+    for (old, translated) in saved {
+        let Some(rest) = strip_leading_index(old) else {
+            continue;
+        };
+        if rest != source {
+            continue;
+        }
+        if let Some(body) = strip_leading_index(translated) {
+            return Some(body.to_string());
+        }
+    }
+    None
+}
+
+fn rest_hit<'a>(
+    rest: &'a str,
+    saved: &'a HashMap<String, String>,
+) -> Option<(&'a str, &'a String)> {
+    if let Some(value) = saved.get(rest) {
+        return Some((rest, value));
+    }
+    let trimmed = rest.trim_start();
+    if trimmed.len() != rest.len() {
+        if let Some(value) = saved.get(trimmed) {
+            return Some((trimmed, value));
+        }
+    }
+    let trimmed = rest.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    saved
+        .iter()
+        .find(|(key, _)| key.trim() == trimmed)
+        .map(|(key, value)| (key.as_str(), value))
+}
+
+fn join_saved_pieces(source: &str, saved: &HashMap<String, String>) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for (left, left_zh) in saved {
+        if left.is_empty() || left.len() >= source.len() || !source.starts_with(left.as_str()) {
+            continue;
+        }
+        let rest = &source[left.len()..];
+        let Some((rest_key, right_zh)) = rest_hit(rest, saved) else {
+            continue;
+        };
+        let joined = splice_saved(left, left_zh, rest_key, right_zh);
+        if best.as_ref().is_none_or(|(len, _)| left.len() > *len) {
+            best = Some((left.len(), joined));
+        }
+    }
+    best.map(|(_, text)| text)
+}
+
+fn splice_saved(left_src: &str, left_zh: &str, right_src: &str, right_zh: &str) -> String {
+    let left = left_zh.trim_end();
+    let right = right_zh.trim_start();
+    let spaced =
+        left_src.ends_with(char::is_whitespace) || right_src.starts_with(char::is_whitespace);
+    let han = left.chars().last().is_some_and(crate::layout::is_cjk_body)
+        && right.chars().next().is_some_and(crate::layout::is_cjk_body);
+    let mut out = left.to_string();
+    if spaced && !han && !left.is_empty() && !right.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(right);
+    out
 }
 
 fn prepare_segments(
@@ -2722,5 +2833,46 @@ mod tests {
         let mut again = extraction_from_lines(&["Hello world.", "Second sentence stays."]);
         let err = replay_extraction(&mut again, &opts, &hole).unwrap_err();
         assert!(err.to_string().contains("no saved translation"), "{err}");
+    }
+
+    #[test]
+    fn replay_keeps_a_split_chapter_index_and_a_joined_sentence() {
+        let opts = TranslateOptions::default();
+        let saved = vec![
+            TranslatedSegment {
+                id: 1,
+                page_index: 0,
+                glyph_ids: Vec::new(),
+                source: "10 10.1 Title".into(),
+                translated: "10 10.1 标题".into(),
+            },
+            TranslatedSegment {
+                id: 2,
+                page_index: 0,
+                glyph_ids: Vec::new(),
+                source: "alpha like this".into(),
+                translated: "甲像这样".into(),
+            },
+            TranslatedSegment {
+                id: 3,
+                page_index: 0,
+                glyph_ids: Vec::new(),
+                source: " to separate it.".into(),
+                translated: "以便分开。".into(),
+            },
+        ];
+        let mut split = extraction_from_lines(&["10", "10.1 Title"]);
+        let report = replay_extraction(&mut split, &opts, &saved).expect("split replay");
+        let texts: Vec<_> = report
+            .segments
+            .iter()
+            .map(|seg| seg.translated.as_str())
+            .collect();
+        assert_eq!(texts, ["10", "10.1 标题"]);
+
+        let mut joined = extraction_from_lines(&["alpha like this to separate it."]);
+        let report = replay_extraction(&mut joined, &opts, &saved).expect("joined replay");
+        assert_eq!(report.segments.len(), 1);
+        assert_eq!(report.segments[0].translated, "甲像这样以便分开。");
     }
 }
