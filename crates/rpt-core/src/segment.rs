@@ -95,9 +95,25 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
             last_y = None;
             continue;
         }
+        // A 20pt margin stamp between two body lines used to set the window
+        // from that stamp. The next line, one leading down, stayed on this
+        // line, and x-sorting then interleaved the two sentences. The anchor
+        // stays the body baseline already collected.
+        let incoming = glyph.font_size.max(1.0);
+        let (anchor_y, tolerance) = if let Some((y, size)) = body_anchor(&current) {
+            let mismatched = incoming > size * 1.8 || size > incoming * 1.8;
+            let tolerance = if mismatched {
+                size.min(incoming) * 0.5
+            } else {
+                size * 0.5
+            };
+            (y, tolerance)
+        } else {
+            (last_y.unwrap_or(glyph.matrix[5]), last_size * 0.5)
+        };
         let new_line = match (last_page, last_y) {
-            (Some(page), Some(y)) => {
-                glyph.page_index != page || (glyph.matrix[5] - y).abs() > last_size * 0.5
+            (Some(page), Some(_)) => {
+                glyph.page_index != page || (glyph.matrix[5] - anchor_y).abs() > tolerance
             }
             _ => !current.is_empty(),
         };
@@ -232,7 +248,11 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // the column. A short left token (`Note`) still splits from the line
         // that follows it.
         let trailing_word = gap <= hard && right_w < size * 8.0 && left_w >= size * 12.0;
-        let column_gap = (gap > hard || gap > trigger) && !trailing_word;
+        // "Table 1." then a one-em space is the caption sentence, not the
+        // other column. The hard gap still splits a label from a real column.
+        let caption_label =
+            gap <= hard && left_w < size * 12.0 && caption_kind(&line_text(&current)).is_some();
+        let column_gap = (gap > hard || gap > trigger) && !trailing_word && !caption_label;
         // Two full columns on one baseline can leave only ~1.2em. Em boxes
         // overlap, so the median gap is 0 and the trigger rises to 1.25em,
         // just above that gutter. A line wider than one column, with the
@@ -262,7 +282,8 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             && span >= size * 38.0
             && cell_wide
             && gap >= size * 1.15
-            && (word_median <= 0.05 || gap >= word_median * 3.0);
+            && (word_median <= 0.05 || gap >= word_median * 3.0)
+            && !caption_label;
         // A short note in the other column (`where α is 32.`) can sit just
         // under the 24pt hard gap, and it is too narrow to be a full column.
         // Two ems, and clearly the largest gap, is still that gutter.
@@ -982,6 +1003,28 @@ fn line_bounds(glyphs: &[&Glyph]) -> Option<(f32, f32, f32, f32)> {
 /// A drop cap is one glyph several times the letters it sits in. Using that
 /// size as the line size refuses the body underneath it. The median is the
 /// body size once the line is more than a couple of glyphs.
+/// Baseline and size of the body glyphs on this line. A single oversized
+/// margin stamp does not move the anchor.
+fn body_anchor(glyphs: &[&Glyph]) -> Option<(f32, f32)> {
+    if glyphs.is_empty() {
+        return None;
+    }
+    let size = representative_size(glyphs);
+    let mut ys: Vec<f32> = glyphs
+        .iter()
+        .filter(|glyph| {
+            let ratio = glyph.font_size.max(1.0) / size;
+            (0.65..=1.8).contains(&ratio)
+        })
+        .map(|glyph| glyph.matrix[5])
+        .collect();
+    if ys.is_empty() {
+        ys = glyphs.iter().map(|glyph| glyph.matrix[5]).collect();
+    }
+    ys.sort_by(|left, right| left.total_cmp(right));
+    Some((ys[ys.len() / 2], size))
+}
+
 pub(crate) fn representative_size(glyphs: &[&Glyph]) -> f32 {
     let mut sizes: Vec<f32> = glyphs
         .iter()
@@ -1662,35 +1705,69 @@ fn is_body_barrier(line: &VisualLine<'_>, body_font: &str) -> bool {
 }
 
 /// "1 Introduction" is a section heading, not a label inside a figure.
+/// "5.3 Qualitative Results" is too: the minor number used to leave the
+/// heading, and the paragraph under it, inside the table.
 fn is_section_heading(line: &VisualLine<'_>, body_font: &str) -> bool {
-    if !body_font.is_empty() && line.font != body_font {
-        return false;
-    }
     let text = line.text.trim();
     if text.chars().count() > 48 || line.right - line.left > 260.0 {
         return false;
     }
+    let Some((dotted, rest)) = section_heading_index(text) else {
+        return false;
+    };
+    if rest.chars().filter(|ch| ch.is_alphabetic()).count() < 4 {
+        return false;
+    }
+    // A single "1 Introduction" drawn in another face is a figure label.
+    // A dotted heading is set in bold, not the body's optical size.
+    if !dotted
+        && !body_font.is_empty()
+        && line.font != body_font
+        && !same_font_family(&line.font, body_font)
+    {
+        return false;
+    }
+    true
+}
+
+/// `(true, rest)` when the index has a minor number (`5.3`, `5.3.1`).
+fn section_heading_index(text: &str) -> Option<(bool, &str)> {
     let bytes = text.as_bytes();
     let mut index = 0;
-    while index < bytes.len() && bytes[index].is_ascii_digit() {
-        index += 1;
+    let mut groups = 0;
+    loop {
+        if groups > 0 {
+            if index >= bytes.len() || bytes[index] != b'.' {
+                break;
+            }
+            let after_dot = index + 1;
+            if after_dot >= bytes.len() || !bytes[after_dot].is_ascii_digit() {
+                break;
+            }
+            index = after_dot;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == start || index - start > 2 {
+            return None;
+        }
+        groups += 1;
+        if groups > 4 {
+            return None;
+        }
     }
-    let digits = index;
-    if digits == 0 || digits > 2 {
-        return false;
+    if groups == 0 {
+        return None;
     }
     if index < bytes.len() && bytes[index] == b'.' {
         index += 1;
     }
     if index >= bytes.len() || bytes[index] != b' ' {
-        return false;
+        return None;
     }
-    text[index..]
-        .trim()
-        .chars()
-        .filter(|ch| ch.is_alphabetic())
-        .count()
-        >= 4
+    Some((groups >= 2, text[index..].trim()))
 }
 
 fn reading_order(lines: &[VisualLine<'_>]) -> Vec<usize> {
@@ -3547,6 +3624,63 @@ mod tests {
     }
 
     #[test]
+    fn a_margin_stamp_does_not_interleave_two_body_lines() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut paint = |text: &str, x: f32, y: f32, size: f32| {
+            let mut cursor = x;
+            for ch in text.chars() {
+                let mut item = glyph(id, cursor, y, &ch.to_string(), false);
+                id += 1;
+                item.font_size = size;
+                item.matrix = [size, 0.0, 0.0, size, cursor, y];
+                let width = if ch == ' ' { size * 0.33 } else { size * 0.48 };
+                item.bbox = [cursor, y - 1.5, cursor + width, y + size * 0.75];
+                cursor += width;
+                glyphs.push(item);
+            }
+        };
+        paint("with human judgment compared", 108.0, 406.9, 9.0);
+        // Offset by half a letter so a merged x-sort cannot keep either phrase.
+        paint("ing CDM and text similarity", 110.2, 395.9, 9.0);
+        paint("aligns parsed formulas well", 108.0, 385.0, 9.0);
+        for (index, y) in [402.1, 399.0, 393.0, 390.5, 387.0, 381.0, 378.0, 375.0]
+            .into_iter()
+            .enumerate()
+        {
+            let ch = ['c', '[', ' ', ' ', '3', 'v', '1', ']'][index];
+            let mut stamp = glyph(id, 37.9, y, &ch.to_string(), false);
+            id += 1;
+            stamp.font_size = 20.0;
+            stamp.matrix = [20.0, 0.0, 0.0, 20.0, 37.9, y];
+            stamp.bbox = [37.9, y - 2.0, 50.0, y + 16.0];
+            glyphs.push(stamp);
+        }
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|segment| segment.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("with human judgment")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("aligns parsed formulas")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains("iwnigth") && !text.contains("pajurdsge")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn a_bold_run_in_stays_with_the_following_regular_line() {
         let mut lead = wide(
             0,
@@ -3859,6 +3993,98 @@ mod tests {
             .segments
             .iter()
             .any(|item| item.text.contains("Table 1 shows")));
+    }
+
+    #[test]
+    fn a_wrapped_table_caption_is_translated_and_the_cells_stay() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let mut glyphs = vec![wide(0, 72.0, 720.0, body, 360.0, 10.0)];
+        let mut id = 1u32;
+        let mut paint = |glyphs: &mut Vec<Glyph>, text: &str, x: f32, y: f32| {
+            let mut cursor = x;
+            let size = 9.0f32;
+            for ch in text.chars() {
+                let mut item = glyph(id, cursor, y, &ch.to_string(), false);
+                id += 1;
+                item.font_size = size;
+                item.matrix = [size, 0.0, 0.0, size, cursor, y];
+                let width = if ch == ' ' { 3.0 } else { 4.4 };
+                item.bbox = [cursor, y - 1.0, cursor + width * 0.9, y + 7.0];
+                cursor += width;
+                glyphs.push(item);
+            }
+            cursor
+        };
+        let after = paint(&mut glyphs, "Table 1.", 72.0, 640.0);
+        paint(
+            &mut glyphs,
+            "HPO performed in OTSL and HTML representation on the same",
+            after + 12.5,
+            640.0,
+        );
+        paint(
+            &mut glyphs,
+            "transformer based architecture trained only on the public set today.",
+            72.0,
+            629.0,
+        );
+        paint(&mut glyphs, "Method", 90.0, 590.0);
+        paint(&mut glyphs, "Score", 240.0, 590.0);
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("transformer based")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("Method")),
+            "{texts:?}"
+        );
+        assert!(seg.kept.iter().any(|(_, reason)| reason == "table"));
+        assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
+    }
+
+    #[test]
+    fn a_dotted_section_stops_the_table_before_the_paragraph() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let mut heading = wide(4, 72.0, 540.0, "5.3 Qualitative Results", 150.0, 10.0);
+        heading.font_name = "SourceSans-Bold".into();
+        let glyphs = vec![
+            wide(0, 72.0, 720.0, body, 360.0, 10.0),
+            wide(
+                1,
+                72.0,
+                660.0,
+                "Table 2. TSR and cell detection results on the public sets.",
+                360.0,
+                9.0,
+            ),
+            wide(2, 180.0, 610.0, "0.965", 36.0, 9.0),
+            wide(3, 260.0, 610.0, "0.934", 36.0, 9.0),
+            heading,
+            wide(5, 72.0, 520.0, body, 360.0, 10.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("5.3 Qualitative")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("long enough") && !text.contains("Table 2")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("0.965")),
+            "{texts:?}"
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        assert!(kept.contains(&2) && kept.contains(&3), "{:?}", seg.kept);
+        assert!(!kept.contains(&4) && !kept.contains(&5), "{:?}", seg.kept);
     }
 
     #[test]
