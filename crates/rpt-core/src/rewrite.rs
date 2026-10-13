@@ -448,6 +448,9 @@ pub fn rewrite_translation(
     ));
     close_column_holes(&mut drawn, extraction, &by_id);
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
+    // A contents title can move up to close a hole. An inline page number
+    // that was redrawn on the old baseline would otherwise sit alone.
+    seat_inline_page_numbers(&mut drawn, extraction, &by_id);
     let mut spans = Vec::new();
     if !overlay {
         for id in &succeeded {
@@ -1975,6 +1978,28 @@ fn is_folio_segment(glyphs: &[&Glyph]) -> bool {
     right - left <= 48.0
 }
 
+/// A header or footer page token (`ii`, `xiv`). A contents number such as
+/// `31` sits in the text block and is not a folio.
+fn is_margin_folio(glyphs: &[&Glyph], extraction: &Extraction) -> bool {
+    if !is_folio_segment(glyphs) {
+        return false;
+    }
+    let page = glyphs[0].page_index;
+    let y = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(0.0f32, f32::max);
+    let media = extraction
+        .pages
+        .iter()
+        .find(|info| info.index == page)
+        .map(|info| info.media_box)
+        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let height = (media[3] - media[1]).max(1.0);
+    let band = height * 0.12;
+    media[3] - y < band || y - media[1] < band
+}
+
 fn place_segments(
     planned: &[(usize, String)],
     font: &SubsetFont,
@@ -1996,6 +2021,14 @@ fn place_segments(
             .iter()
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
             .collect();
+        // `ii` translated to `二` fits the folio box and would replace the
+        // printed page number. A folio stays the source token.
+        if is_margin_folio(&glyphs, extraction) {
+            for id in &segment.glyph_ids {
+                keep.insert(*id, "folio".into());
+            }
+            continue;
+        }
         match layout_segment(
             &glyphs, text, font, extraction, bilingual, resource, skew, metrics,
         ) {
@@ -2490,7 +2523,10 @@ fn find_subentry_runs(
     }
     let mut used = HashSet::new();
     let mut runs = Vec::new();
-    for indices in groups.into_values() {
+    for mut indices in groups.into_values() {
+        // A 27pt chapter index can sit inside the gap window of the row
+        // above. It is not an entry, and absorbing it blanks the big numeral.
+        indices.retain(|index| !is_chapter_index(&report.segments[*index], extraction, by_id));
         if let Some(run) =
             build_subentry_run(&indices, &bullets, report, extraction, by_id, &seg_of)
         {
@@ -2544,12 +2580,36 @@ fn segments_near_bullet(
         });
         if near
             && !section_heading_source(&segment.source)
+            && !is_chapter_index(segment, extraction, by_id)
             && !segment_spans_pages(segment, extraction, by_id)
         {
             hits.push(index);
         }
     }
     hits
+}
+
+/// A contents chapter index (`5`, `10`) is one to three digits at display
+/// size. A page number is the same shape at body size, so size is the split.
+fn is_chapter_index(
+    segment: &crate::translate::TranslatedSegment,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let text: String = segment
+        .source
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if text.is_empty() || text.len() > 3 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    segment.glyph_ids.iter().any(|id| {
+        extraction
+            .glyphs
+            .get(by_id[id])
+            .is_some_and(|glyph| !glyph.unicode.trim().is_empty() && glyph.font_size >= 16.0)
+    })
 }
 
 fn segments_share_subentry(
@@ -2559,6 +2619,11 @@ fn segments_share_subentry(
     by_id: &HashMap<u32, usize>,
 ) -> bool {
     if section_heading_source(&left.source) || section_heading_source(&right.source) {
+        return false;
+    }
+    // A 27pt chapter index is not the next bullet entry. Its size makes the
+    // gap to the row above look like one line.
+    if is_chapter_index(left, extraction, by_id) || is_chapter_index(right, extraction, by_id) {
         return false;
     }
     if segment_spans_pages(left, extraction, by_id) || segment_spans_pages(right, extraction, by_id)
@@ -2618,8 +2683,7 @@ fn right_side_title_wrap(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
 ) -> bool {
-    if !segment_is_italic(left, extraction, by_id) || !segment_is_italic(right, extraction, by_id)
-    {
+    if !segment_is_italic(left, extraction, by_id) || !segment_is_italic(right, extraction, by_id) {
         return false;
     }
     if left.source.chars().count() > 80 || right.source.chars().count() > 80 {
@@ -3305,7 +3369,15 @@ fn join_wrapped_title(upper: &str, lower: &str) -> String {
     if lower.is_empty() {
         return upper.to_string();
     }
-    format!("{upper} {lower}")
+    // `组合成` + `一个` is one phrase. A space belongs between Latin words
+    // (`LangChain` + `architecture`), not between Han characters.
+    let han_join = upper.chars().next_back().is_some_and(is_han_char)
+        && lower.chars().next().is_some_and(is_han_char);
+    if han_join {
+        format!("{upper}{lower}")
+    } else {
+        format!("{upper} {lower}")
+    }
 }
 
 fn display_title(segment: &crate::translate::TranslatedSegment) -> String {
@@ -3780,9 +3852,9 @@ fn page_text_pieces(extraction: &Extraction, page: u32) -> Vec<TextPiece<'_>> {
     });
     let mut rows: Vec<Vec<&Glyph>> = Vec::new();
     for glyph in glyphs {
-        let same = rows.last().is_some_and(|row: &Vec<&Glyph>| {
-            (row[0].matrix[5] - glyph.matrix[5]).abs() <= 0.8
-        });
+        let same = rows
+            .last()
+            .is_some_and(|row: &Vec<&Glyph>| (row[0].matrix[5] - glyph.matrix[5]).abs() <= 0.8);
         if same {
             rows.last_mut().unwrap().push(glyph);
         } else {
@@ -3935,9 +4007,9 @@ fn label_axis_for(extraction: &Extraction, line: &InkLine<'_>) -> Option<LabelAx
         }
     }
     let matched = clusters.iter().find(|cluster| {
-        cluster.iter().any(|item| {
-            (item.y - line.y).abs() <= 0.9 && (item.left - line.left).abs() <= 8.0
-        })
+        cluster
+            .iter()
+            .any(|item| (item.y - line.y).abs() <= 0.9 && (item.left - line.left).abs() <= 8.0)
     });
     if let Some(cluster) = matched {
         return Some(LabelAxis {
@@ -4168,6 +4240,80 @@ fn shared_left_stack_right(extraction: &Extraction, line: &InkLine<'_>) -> Optio
     (right > line.right + size * 0.4).then_some(right)
 }
 
+/// Lines that share a right edge and do not share a left edge are a
+/// right-aligned cluster (a title page). A justified column shares both edges,
+/// and a contents digit column is only a few ems wide.
+/// `WITH LANGCHAIN` is 19.98pt initials and 15.96pt small caps. Chinese has
+/// no small-caps face, so the line is set at the cap size.
+fn small_caps_cap_size(sizes: &[f32]) -> Option<f32> {
+    if sizes.len() < 6 {
+        return None;
+    }
+    let mut clusters: Vec<Vec<f32>> = Vec::new();
+    for size in sizes {
+        if let Some(cluster) = clusters.last_mut() {
+            let anchor = cluster[0];
+            if (size - anchor).abs() <= anchor * 0.05 {
+                cluster.push(*size);
+                continue;
+            }
+        }
+        clusters.push(vec![*size]);
+    }
+    if clusters.len() != 2 {
+        return None;
+    }
+    let small = clusters[0][clusters[0].len() / 2];
+    let large = clusters[1][clusters[1].len() / 2];
+    if small < 1.0 {
+        return None;
+    }
+    let ratio = large / small;
+    if !(1.18..=1.35).contains(&ratio) || clusters[1].len() * 2 >= sizes.len() {
+        return None;
+    }
+    Some(large)
+}
+
+fn shared_right_edge(extraction: &Extraction, line: &InkLine<'_>) -> Option<f32> {
+    let page = line.glyphs.first()?.page_index;
+    let size = crate::segment::representative_size(&line.glyphs).max(1.0);
+    let pieces = page_text_pieces(extraction, page);
+    let cluster: Vec<&TextPiece<'_>> = pieces
+        .iter()
+        .filter(|piece| {
+            (piece.right - line.right).abs() <= 2.5
+                && piece.right - piece.left >= piece.size * 0.8
+                && piece
+                    .glyphs
+                    .iter()
+                    .any(|glyph| !glyph.unicode.trim().is_empty())
+        })
+        .collect();
+    if cluster.len() < 3 {
+        return None;
+    }
+    let left_min = cluster
+        .iter()
+        .map(|piece| piece.left)
+        .fold(f32::MAX, f32::min);
+    let left_max = cluster
+        .iter()
+        .map(|piece| piece.left)
+        .fold(f32::MIN, f32::max);
+    if left_max - left_min <= size * 4.0 {
+        return None;
+    }
+    let flush_left = cluster
+        .iter()
+        .filter(|piece| (piece.left - left_min).abs() <= 3.0)
+        .count();
+    if flush_left * 2 > cluster.len() {
+        return None;
+    }
+    Some(line.right)
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -4226,7 +4372,14 @@ fn layout_segment(
         .flat_map(|line| line.glyphs.iter().map(|glyph| glyph.font_size))
         .collect();
     sizes.sort_by(|a, b| a.total_cmp(b));
-    let source_size = sizes[sizes.len() / 2].max(1.0);
+    // Small caps store the initials at the cap size and the rest smaller.
+    // The median is the small size, which paints the Chinese under the caps.
+    let source_size = if ink.len() == 1 {
+        small_caps_cap_size(&sizes).unwrap_or(sizes[sizes.len() / 2])
+    } else {
+        sizes[sizes.len() / 2]
+    }
+    .max(1.0);
     let top_y = ink[0].y;
     let bottom_y = ink[ink.len() - 1].y;
     let spans: Vec<(f32, f32)> = ink
@@ -4405,7 +4558,7 @@ fn layout_segment(
         .unwrap_or_else(|| ink[0].glyphs[0].fill_color.clone());
     let count = lines.len();
     let glyph_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
-    let drawn: Vec<Drawn> = lines
+    let mut drawn: Vec<Drawn> = lines
         .into_iter()
         .enumerate()
         .map(|(index, line)| {
@@ -4431,6 +4584,19 @@ fn layout_segment(
             }
         })
         .collect();
+    // A title page is right-aligned. Chinese is shorter than the English, so
+    // anchoring at the source left leaves a ragged right edge.
+    if !bilingual && ink.len() == 1 && drawn.len() == 1 {
+        if let Some(edge) = shared_right_edge(extraction, &ink[0]) {
+            let advance = drawn[0].widths.iter().sum::<f32>() + drawn[0].gaps.iter().sum::<f32>();
+            if advance > 0.0 {
+                let x = edge - advance;
+                if x + 0.4 >= drawn[0].x {
+                    drawn[0].x = x;
+                }
+            }
+        }
+    }
     let mut drawn = restyle_list_lines(drawn, &ink, font);
     if !bilingual {
         cover_unhit_clusters(
@@ -4781,6 +4947,231 @@ fn column_block(
         source_top: source_ys[source_ys.len() - 1],
         source_bottom: source_ys[0],
         size,
+    })
+}
+
+/// A section page number that was parked on the contents column, then left
+/// behind when its title moved up to close a hole. Put it back on the title's
+/// last line. A leader-dot row keeps the column x and only follows the title
+/// vertically.
+fn seat_inline_page_numbers(
+    drawn: &mut [Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) {
+    let targets: Vec<usize> = drawn
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| draw_is_bare_page_number(item, extraction, by_id))
+        .map(|(index, _)| index)
+        .collect();
+    let mut seats = Vec::new();
+    let mut leader_shifts = Vec::new();
+    for index in targets {
+        let Some((source_y, source_left)) = bare_number_source(&drawn[index], extraction, by_id)
+        else {
+            continue;
+        };
+        let page = drawn[index].page;
+        let size = drawn[index].size.max(1.0);
+        let Some((title_ids, title_source_right)) =
+            title_before_number(drawn, extraction, by_id, page, source_y, source_left)
+        else {
+            continue;
+        };
+        let Some(title_index) = lowest_title_line(drawn, &title_ids, page) else {
+            continue;
+        };
+        let title = &drawn[title_index];
+        let title_right =
+            title.x + title.widths.iter().sum::<f32>() + title.gaps.iter().sum::<f32>();
+        let title_y = title.y;
+        let gap = source_left - title_source_right;
+        let leaders = leaders_between(extraction, page, source_y, title_source_right, source_left);
+        let inline = gap >= -1.0 && gap < size * 3.0 && !leaders;
+        let x = if inline {
+            title_right + page_number_gap(size, false)
+        } else {
+            drawn[index].x
+        };
+        let old_y = drawn[index].y;
+        seats.push((index, x, title_y));
+        if !inline && (title_y - old_y).abs() > 0.4 {
+            let dy = title_y - old_y;
+            for (leader_index, item) in drawn.iter().enumerate() {
+                if item.page != page || !draw_is_leader(item) {
+                    continue;
+                }
+                let on_row = item.glyph_ids.iter().any(|id| {
+                    by_id.get(id).is_some_and(|glyph_index| {
+                        let glyph = &extraction.glyphs[*glyph_index];
+                        glyph.page_index == page && (glyph.matrix[5] - source_y).abs() <= 1.6
+                    })
+                });
+                if on_row {
+                    leader_shifts.push((leader_index, dy));
+                }
+            }
+        }
+    }
+    for (index, x, y) in seats {
+        drawn[index].x = x;
+        drawn[index].y = y;
+    }
+    for (index, dy) in leader_shifts {
+        drawn[index].y += dy;
+    }
+}
+
+fn draw_is_bare_page_number(
+    item: &Drawn,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let text = item.text.trim();
+    let count = text.chars().count();
+    if count == 0 || count > 3 || !text.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    !item.glyph_ids.is_empty()
+        && item.glyph_ids.iter().all(|id| {
+            by_id.get(id).is_some_and(|index| {
+                let token = extraction.glyphs[*index].unicode.trim();
+                token.is_empty() || token.chars().all(|ch| ch.is_ascii_digit())
+            })
+        })
+}
+
+fn bare_number_source(
+    item: &Drawn,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Option<(f32, f32)> {
+    let mut y = f32::MIN;
+    let mut left = f32::MAX;
+    let mut saw = false;
+    for id in &item.glyph_ids {
+        let Some(&index) = by_id.get(id) else {
+            continue;
+        };
+        let glyph = &extraction.glyphs[index];
+        if glyph.page_index != item.page || glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        saw = true;
+        y = y.max(glyph.matrix[5]);
+        left = left.min(glyph_ink_left(glyph));
+    }
+    saw.then_some((y, left))
+}
+
+/// The title whose source ink ends closest to this page number, still on its
+/// left. A row that continues past the number (`engines 4 chatbots 7`) is not
+/// that title.
+fn title_before_number(
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    page: u32,
+    source_y: f32,
+    number_left: f32,
+) -> Option<(Vec<u32>, f32)> {
+    let mut best: Option<(Vec<u32>, f32)> = None;
+    for item in drawn {
+        if item.page != page
+            || item.text.trim().is_empty()
+            || draw_is_bare_page_number(item, extraction, by_id)
+        {
+            continue;
+        }
+        let glyphs = source_glyphs_on_baseline(&item.glyph_ids, extraction, by_id, page, source_y);
+        if glyphs.is_empty()
+            || glyphs
+                .iter()
+                .any(|glyph| glyph_ink_left(glyph) > number_left + 0.5)
+        {
+            continue;
+        }
+        let right = glyphs
+            .iter()
+            .map(|glyph| glyph_ink_right(glyph))
+            .fold(0.0f32, f32::max);
+        if right > number_left + 1.0 {
+            continue;
+        }
+        let closer = best
+            .as_ref()
+            .is_none_or(|(_, best_right)| right > *best_right + 0.4);
+        if closer {
+            best = Some((item.glyph_ids.clone(), right));
+        }
+    }
+    best
+}
+
+fn source_glyphs_on_baseline<'a>(
+    ids: &[u32],
+    extraction: &'a Extraction,
+    by_id: &HashMap<u32, usize>,
+    page: u32,
+    y: f32,
+) -> Vec<&'a Glyph> {
+    let mut glyphs = Vec::new();
+    for id in ids {
+        let Some(&index) = by_id.get(id) else {
+            continue;
+        };
+        let glyph = &extraction.glyphs[index];
+        if glyph.page_index != page || glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        if (glyph.matrix[5] - y).abs() <= 1.6 {
+            glyphs.push(glyph);
+        }
+    }
+    glyphs
+}
+
+fn lowest_title_line(drawn: &[Drawn], ids: &[u32], page: u32) -> Option<usize> {
+    drawn
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            item.page == page
+                && same_glyph_ids(&item.glyph_ids, ids)
+                && !item.text.trim().is_empty()
+                && !item.text.trim().chars().all(|ch| ch.is_ascii_digit())
+        })
+        .min_by(|(_, left), (_, right)| left.y.total_cmp(&right.y))
+        .map(|(index, _)| index)
+}
+
+fn same_glyph_ids(left: &[u32], right: &[u32]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
+}
+
+fn draw_is_leader(item: &Drawn) -> bool {
+    let text = item.text.trim();
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|ch| matches!(ch, '.' | '·' | '…' | '•' | '⋅' | '‧' | '․'))
+}
+
+fn leaders_between(extraction: &Extraction, page: u32, y: f32, left: f32, right: f32) -> bool {
+    extraction.glyphs.iter().any(|glyph| {
+        glyph.page_index == page
+            && (glyph.matrix[5] - y).abs() <= 1.6
+            && is_toc_leader_glyph(glyph)
+            && glyph_ink_left(glyph) + 0.5 >= left
+            && glyph_ink_right(glyph) <= right + 1.0
     })
 }
 
@@ -8667,7 +9058,7 @@ mod tests {
     }
 
     #[test]
-    fn contents_page_numbers_share_a_right_edge() {
+    fn inline_section_page_numbers_stay_beside_the_title() {
         let bytes = toc_column_pdf();
         let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
         let mut extraction = doc.extract();
@@ -8759,13 +9150,17 @@ mod tests {
         let short = rows[0];
         let long = rows[1];
         assert!(
-            short.1 > 300.0,
-            "short-title page number stayed mid-line at x={}: {rows:?}",
+            short.1 < 200.0,
+            "short-title page number slid to the column at x={}: {rows:?}",
             short.1
         );
         assert!(
-            (short.2 - long.2).abs() < 1.5,
-            "page numbers are not right-aligned: {rows:?}"
+            long.1 > short.1 + 8.0,
+            "long-title page number should sit further right: {rows:?}"
+        );
+        assert!(
+            (short.2 - long.2).abs() > 8.0,
+            "inline page numbers were forced onto one right edge: {rows:?}"
         );
     }
 
@@ -8847,9 +9242,323 @@ mod tests {
             .collect();
         assert_eq!(section.len(), 1, "section page number missing: {section:?}");
         assert!(
-            section[0] > 220.0,
-            "section page number stayed beside the title at x={}, inline xs={xs:?}",
+            section[0] < 180.0,
+            "section page number left the title at x={}, inline xs={xs:?}",
             section[0]
+        );
+        let title_y: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "简")
+            .map(|glyph| glyph.matrix[5])
+            .collect();
+        let section_y: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "3")
+            .map(|glyph| glyph.matrix[5])
+            .collect();
+        assert_eq!(title_y.len(), 1, "title baseline missing: {title_y:?}");
+        assert!(
+            (title_y[0] - section_y[0]).abs() < 1.5,
+            "section number left the title baseline: title={title_y:?} number={section_y:?}"
+        );
+    }
+
+    #[test]
+    fn han_title_wrap_joins_without_a_space() {
+        assert_eq!(join_wrapped_title("组合成", "一个"), "组合成一个");
+        assert_eq!(
+            join_wrapped_title("LangChain", "architecture"),
+            "LangChain architecture"
+        );
+    }
+
+    #[test]
+    fn a_margin_folio_keeps_its_roman_token() {
+        let bytes = contents_pdf(b"BT /F1 12 Tf 1 0 0 1 280 760 Tm (ii) Tj ET");
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| TranslatedSegment {
+                id: seg.id,
+                page_index: seg.page_index,
+                glyph_ids: seg.glyph_ids.clone(),
+                source: seg.text.clone(),
+                translated: "二".into(),
+            })
+            .collect();
+        assert!(
+            segments.iter().any(|seg| seg.source.contains("ii")),
+            "folio was not a segment: {segments:?}"
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&['二' as u32, 'i' as u32])),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let text = painted.plain_text();
+        assert!(text.contains("ii"), "{text}");
+        assert!(!text.contains('二'), "{text}");
+    }
+
+    #[test]
+    fn a_right_aligned_cluster_keeps_a_shared_right_edge() {
+        let bytes = right_aligned_title_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Applications") {
+                    "智能体与应用"
+                } else if seg.text.contains("LangChain") {
+                    "使用 LangChain"
+                } else {
+                    "初版"
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"智能体与应用使用 LangChain初版"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut rows: Vec<(f32, f32, f32)> = Vec::new();
+        for glyph in painted.glyphs.iter().filter(|glyph| {
+            glyph.font_name.contains("RPT") || glyph.unicode.chars().any(is_han_char)
+        }) {
+            let y = glyph.matrix[5];
+            let left = glyph.matrix[4];
+            let right = left + glyph.advance[0].max(0.0);
+            if let Some(row) = rows.iter_mut().find(|row| (row.0 - y).abs() < 1.0) {
+                row.1 = row.1.min(left);
+                row.2 = row.2.max(right);
+            } else {
+                rows.push((y, left, right));
+            }
+        }
+        assert_eq!(rows.len(), 3, "title-page rows: {rows:?}");
+        let edge = rows.iter().map(|row| row.2).fold(0.0f32, f32::max);
+        for row in &rows {
+            assert!((row.2 - edge).abs() < 1.5, "right edges diverged: {rows:?}");
+        }
+        let name = rows
+            .iter()
+            .find(|row| row.2 - row.1 < 80.0)
+            .expect("short author line");
+        assert!(
+            name.1 > 400.0,
+            "author stayed left-anchored at x={}: {rows:?}",
+            name.1
+        );
+    }
+
+    #[test]
+    fn small_caps_cap_size_is_the_initial_not_the_median() {
+        let mut sizes = Vec::new();
+        sizes.extend(std::iter::repeat_n(15.96, 20));
+        sizes.extend(std::iter::repeat_n(19.98, 9));
+        let cap = small_caps_cap_size(&sizes).unwrap();
+        assert!((cap - 19.98).abs() < 0.01, "{cap}");
+        assert!(small_caps_cap_size(&[10.0; 12]).is_none());
+        let mut majority_large = vec![10.0; 4];
+        majority_large.extend(std::iter::repeat_n(12.5, 8));
+        assert!(small_caps_cap_size(&majority_large).is_none());
+    }
+
+    #[test]
+    fn a_small_caps_line_paints_at_the_cap_size() {
+        let bytes = small_caps_line_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let texts: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "small caps split: {texts:?}");
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| TranslatedSegment {
+                id: seg.id,
+                page_index: seg.page_index,
+                glyph_ids: seg.glyph_ids.clone(),
+                source: seg.text.clone(),
+                translated: "使用链接".into(),
+            })
+            .collect();
+        let font = box_ttf(&"使用链接".chars().map(|ch| ch as u32).collect::<Vec<_>>());
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let size = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().any(is_han_char))
+            .map(|glyph| glyph.font_size)
+            .fold(0.0f32, f32::max);
+        assert!(
+            size > 10.5,
+            "small-caps Chinese used the small median, size={size}"
+        );
+    }
+
+    #[test]
+    fn a_chapter_index_is_not_absorbed_into_the_subentry_row() {
+        let bytes = chapter_index_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Search") {
+                    "搜索链"
+                } else if seg.text.contains("Research") {
+                    "研究链"
+                } else {
+                    seg.text.trim()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"搜索链研究链"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let fives: Vec<_> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.trim() == "5")
+            .collect();
+        assert!(!fives.is_empty(), "chapter 5 disappeared");
+        let big = fives
+            .iter()
+            .find(|glyph| glyph.font_size >= 16.0)
+            .expect("chapter 5 was painted at body size");
+        let zh_y = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().any(is_han_char))
+            .map(|glyph| glyph.matrix[5])
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (big.matrix[5] - zh_y).abs() > 8.0,
+            "chapter 5 sat on the subentry line at y={} (row y={zh_y})",
+            big.matrix[5]
         );
     }
 
@@ -9503,7 +10212,9 @@ ET",
         let mut glyphs: Vec<&Glyph> = painted
             .glyphs
             .iter()
-            .filter(|glyph| glyph.font_name.contains("RPT") || glyph.unicode.chars().any(is_han_char))
+            .filter(|glyph| {
+                glyph.font_name.contains("RPT") || glyph.unicode.chars().any(is_han_char)
+            })
             .collect();
         glyphs.sort_by(|left, right| {
             right.matrix[5]
@@ -9563,10 +10274,7 @@ ET",
         ];
         let colon_span = rights.iter().copied().fold(rights[0], f32::max)
             - rights.iter().copied().fold(rights[0], f32::min);
-        assert!(
-            colon_span < 1.5,
-            "colons are not on one axis: {rights:?}"
-        );
+        assert!(colon_span < 1.5, "colons are not on one axis: {rights:?}");
         let name_span = names.iter().copied().fold(names[0], f32::max)
             - names.iter().copied().fold(names[0], f32::min);
         assert!(
@@ -9583,16 +10291,16 @@ ET",
         let lefts = [company[0].matrix[4], street[0].matrix[4], post[0].matrix[4]];
         let left_span = lefts.iter().copied().fold(lefts[0], f32::max)
             - lefts.iter().copied().fold(lefts[0], f32::min);
-        assert!(left_span < 1.0, "address rows do not share a left edge: {lefts:?}");
+        assert!(
+            left_span < 1.0,
+            "address rows do not share a left edge: {lefts:?}"
+        );
         let post_text: String = post.iter().map(|glyph| glyph.unicode.as_str()).collect();
         assert_eq!(post_text, "邮政信箱 761", "{post_text}");
         let sizes = [company[0].font_size, street[0].font_size, post[0].font_size];
         let size_span = sizes.iter().copied().fold(sizes[0], f32::max)
             - sizes.iter().copied().fold(sizes[0], f32::min);
-        assert!(
-            size_span < 0.6,
-            "address rows are not one size: {sizes:?}"
-        );
+        assert!(size_span < 0.6, "address rows are not one size: {sizes:?}");
     }
 
     #[test]
@@ -9992,6 +10700,47 @@ ET"
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();
         bytes
+    }
+
+    fn small_caps_line_pdf() -> Vec<u8> {
+        // Initials at 12pt, the rest at 9.6pt. Width 500 makes 6pt and 4.8pt.
+        contents_pdf(
+            b"BT \
+/F1 12 Tf 1 0 0 1 200 500 Tm (W) Tj \
+/F1 9.6 Tf 1 0 0 1 206 500 Tm (ITH ) Tj \
+/F1 12 Tf 1 0 0 1 225.2 500 Tm (L) Tj \
+/F1 9.6 Tf 1 0 0 1 231.2 500 Tm (ANG ) Tj \
+/F1 12 Tf 1 0 0 1 250.4 500 Tm (C) Tj \
+/F1 9.6 Tf 1 0 0 1 256.4 500 Tm (HAIN) Tj \
+ET",
+        )
+    }
+
+    fn chapter_index_pdf() -> Vec<u8> {
+        // The 27pt chapter index sits 30pt under the bullet row. That gap is
+        // inside 27pt * 1.45, which used to pull the numeral into the row.
+        contents_pdf(
+            b"BT /F1 11 Tf \
+1 0 0 1 72 520 Tm (Search chain) Tj \
+1 0 0 1 160 520 Tm (91) Tj \
+1 0 0 1 190 520 Tm (\x95) Tj \
+1 0 0 1 210 520 Tm (Research chain) Tj \
+1 0 0 1 310 520 Tm (99) Tj \
+/F1 27 Tf \
+1 0 0 1 105 490 Tm (5) Tj \
+ET",
+        )
+    }
+
+    fn right_aligned_title_pdf() -> Vec<u8> {
+        // Width 500 at 18pt is 9pt per character. Each line ends at x=500.
+        contents_pdf(
+            b"BT /F1 18 Tf \
+1 0 0 1 266 520 Tm (AI Agents and Applications) Tj \
+1 0 0 1 302 480 Tm (with LangChain and MCP) Tj \
+1 0 0 1 374 440 Tm (First printing) Tj \
+ET",
+        )
     }
 
     fn inline_numbers_pdf() -> Vec<u8> {

@@ -1099,6 +1099,14 @@ pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
 /// A credit line whose personal name was translated. Role words stay in
 /// Chinese; the name is the original Latin (`Copy editor: Julie McNamee`).
 pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
+    // The department is an organization, not a person. The cached rendering
+    // `特殊销售部` is not the wording used for this line.
+    if source
+        .trim()
+        .eq_ignore_ascii_case("Special Sales Department")
+    {
+        return "特别销售部".to_string();
+    }
     // A cover or byline that is only a person's name stays in the original
     // Latin, the same way a credit line keeps `Dustin Archibald`.
     if is_personal_name(source.trim()) {
@@ -1196,6 +1204,16 @@ fn is_org_token(token: &str) -> bool {
             | "group"
             | "labs"
             | "lab"
+            | "department"
+            | "division"
+            | "office"
+            | "bureau"
+            | "committee"
+            | "association"
+            | "society"
+            | "services"
+            | "headquarters"
+            | "dept"
     )
 }
 
@@ -1753,6 +1771,14 @@ mod tests {
         assert_eq!(
             restore_credit_names("Roberto Infante", "罗伯托·因凡特"),
             "Roberto Infante"
+        );
+        assert_eq!(
+            restore_credit_names("Special Sales Department", "特殊销售部"),
+            "特别销售部"
+        );
+        assert_eq!(
+            restore_credit_names("Special Sales Department", "特别销售部"),
+            "特别销售部"
         );
     }
 

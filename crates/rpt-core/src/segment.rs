@@ -140,7 +140,20 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
             let body_return = left <= line_left + 8.0 && glyph.font_size > line_size * 0.85;
             back && (at_margin || body_return)
         });
-        if (jumped_back || gutter_mark) && !current.is_empty() {
+        // A 0.0002pt baseline difference sorts the right-hand glyphs first.
+        // The left-hand word then looks like a jump to the other column, and
+        // one sentence is cut in half (`like this` / `to separate`).
+        let same_baseline = last_y.is_some_and(|y| (glyph.matrix[5] - y).abs() <= 0.6);
+        // A chapter index (`10` at 27pt) sits a few points above the section
+        // title. The large size keeps that title inside the baseline window.
+        let chapter_below = !current.is_empty()
+            && current.len() <= 3
+            && current
+                .iter()
+                .all(|item| item.font_size >= glyph.font_size * 1.8)
+            && (glyph.matrix[5] - current[0].matrix[5]).abs() > glyph.font_size * 0.55;
+        if ((jumped_back && !same_baseline) || gutter_mark || chapter_below) && !current.is_empty()
+        {
             lines.extend(finish_line(std::mem::take(&mut current)));
         }
         last_page = Some(glyph.page_index);
@@ -2960,6 +2973,81 @@ mod tests {
         let segs = segment_glyphs(&glyphs);
         let texts: Vec<_> = segs.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(texts, ["In", "Re"]);
+    }
+
+    #[test]
+    fn a_float_sized_baseline_stays_one_line() {
+        // The right-hand glyphs sit 0.0002pt higher, so they sort first.
+        // The left-hand word then looks like a jump to the other column.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut paint = |text: &str, x: f32, y: f32, size: f32| {
+            let mut cursor = x;
+            for ch in text.chars() {
+                let mut item = glyph(id, cursor, y, &ch.to_string(), false);
+                id += 1;
+                item.font_size = size;
+                item.matrix = [size, 0.0, 0.0, size, cursor, y];
+                let width = if ch == ' ' { size * 0.3 } else { size * 0.5 };
+                item.bbox = [cursor, y - 2.0, cursor + width, y + size * 0.8];
+                item.advance = [width, 0.0];
+                cursor += width;
+                glyphs.push(item);
+            }
+        };
+        paint("like", 102.0, 262.3198, 8.1);
+        // A word space, not a column gutter. The back-jump is the last glyph.
+        paint(" to separate", 122.0, 262.32, 10.0);
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains("like") && texts[0].contains("separate"),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_chapter_index_stays_above_the_section_title() {
+        let mut glyphs = Vec::new();
+        for (index, ch) in ["1", "0"].iter().enumerate() {
+            let x = 93.0 + index as f32 * 14.0;
+            let mut item = glyph(index as u32, x, 251.2, ch, false);
+            item.font_size = 27.0;
+            item.matrix = [27.0, 0.0, 0.0, 27.0, x, 251.2];
+            item.bbox = [x, 251.2, x + 13.0, 278.0];
+            item.advance = [13.0, 0.0];
+            glyphs.push(item);
+        }
+        let mut id = 2u32;
+        let mut cursor = 133.0f32;
+        for ch in "10.1 Title".chars() {
+            let mut item = glyph(id, cursor, 241.7, &ch.to_string(), false);
+            id += 1;
+            item.font_size = 11.0;
+            item.matrix = [11.0, 0.0, 0.0, 11.0, cursor, 241.7];
+            let width = if ch == ' ' { 3.0 } else { 5.5 };
+            item.bbox = [cursor, 239.0, cursor + width, 250.0];
+            item.advance = [width, 0.0];
+            cursor += width;
+            glyphs.push(item);
+        }
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.trim() == "10"),
+            "chapter index merged into the section: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("10.1") && text.contains("Title")),
+            "{texts:?}"
+        );
     }
 
     #[test]
