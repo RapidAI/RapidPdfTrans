@@ -2523,7 +2523,10 @@ fn segments_near_bullet(
                     && !is_subentry_bullet(glyph)
             })
         });
-        if near && !section_heading_source(&segment.source) {
+        if near
+            && !section_heading_source(&segment.source)
+            && !segment_spans_pages(segment, extraction, by_id)
+        {
             hits.push(index);
         }
     }
@@ -2537,6 +2540,10 @@ fn segments_share_subentry(
     by_id: &HashMap<u32, usize>,
 ) -> bool {
     if section_heading_source(&left.source) || section_heading_source(&right.source) {
+        return false;
+    }
+    if segment_spans_pages(left, extraction, by_id) || segment_spans_pages(right, extraction, by_id)
+    {
         return false;
     }
     let left_box = segment_box(left, extraction, by_id);
@@ -2572,6 +2579,27 @@ fn line_has_bullet(page: u32, y: f32, extraction: &Extraction) -> bool {
     extraction.glyphs.iter().any(|glyph| {
         glyph.page_index == page && is_subentry_bullet(glyph) && (glyph.matrix[5] - y).abs() <= 4.0
     })
+}
+
+fn segment_spans_pages(
+    segment: &crate::translate::TranslatedSegment,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let mut page = None;
+    for id in &segment.glyph_ids {
+        let Some(glyph) = extraction.glyphs.get(by_id[id]) else {
+            continue;
+        };
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        if page.is_some_and(|seen| seen != glyph.page_index) {
+            return true;
+        }
+        page = Some(glyph.page_index);
+    }
+    false
 }
 
 fn segment_box(
@@ -2667,6 +2695,9 @@ fn build_subentry_run(
     }
     let mut glyphs: Vec<&Glyph> = Vec::new();
     for index in indices {
+        if segment_spans_pages(&report.segments[*index], extraction, by_id) {
+            continue;
+        }
         for id in &report.segments[*index].glyph_ids {
             if let Some(glyph) = extraction.glyphs.get(by_id[id]) {
                 if !glyph.unicode.trim().is_empty() && !is_subentry_bullet(glyph) {
@@ -2678,7 +2709,18 @@ fn build_subentry_run(
     if glyphs.is_empty() {
         return None;
     }
-    let page = glyphs[0].page_index;
+    let page = {
+        let mut counts: HashMap<u32, usize> = HashMap::new();
+        for glyph in &glyphs {
+            *counts.entry(glyph.page_index).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(page, _)| page)
+            .unwrap_or(glyphs[0].page_index)
+    };
+    glyphs.retain(|glyph| glyph.page_index == page);
     let size = {
         let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
         sizes.sort_by(|a, b| a.total_cmp(b));
@@ -2723,6 +2765,9 @@ fn build_subentry_run(
     let mut items = Vec::new();
     for index in indices {
         let segment = &report.segments[*index];
+        if segment_spans_pages(segment, extraction, by_id) {
+            continue;
+        }
         let title = strip_list_marker(&display_title(segment));
         if title.is_empty() {
             continue;
