@@ -1712,6 +1712,76 @@
         "scanned"
       ],
       "ci": false
+    },
+    {
+      "id": "arxiv-1908.07836",
+      "url": "https://arxiv.org/pdf/1908.07836.pdf",
+      "source": "arxiv",
+      "title": "PubLayNet: largest dataset ever for document layout analysis",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "f5b9bd0163a7703fa6c967a423e77364cf93c4c3d8f8b6a4fe0ce9b916e5098a",
+      "bytes": 3731954,
+      "pages": 8,
+      "tags": [
+        "arxiv",
+        "document-layout",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2204.08387",
+      "url": "https://arxiv.org/pdf/2204.08387.pdf",
+      "source": "arxiv",
+      "title": "LayoutLMv3: Pre-training for Document AI with Unified Text and Image Masking",
+      "license": "http://creativecommons.org/licenses/by-nc-sa/4.0/ (arXiv; PDF not committed)",
+      "sha256": "bd5395610755a49e6419c406e651906e688e7a0cfe155b3c43566469dfd641fe",
+      "bytes": 1245765,
+      "pages": 10,
+      "tags": [
+        "arxiv",
+        "document-layout",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2305.03393",
+      "url": "https://arxiv.org/pdf/2305.03393.pdf",
+      "source": "arxiv",
+      "title": "Optimized Table Tokenization for Table Structure Recognition",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "62f2a2163d768d5b125a207967797aefa6c9cc113de8bb5c725c582595dd0c1d",
+      "bytes": 4318934,
+      "pages": 14,
+      "tags": [
+        "arxiv",
+        "latex",
+        "single-column",
+        "table-extraction"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2512.09874",
+      "url": "https://arxiv.org/pdf/2512.09874.pdf",
+      "source": "arxiv",
+      "title": "Benchmarking Document Parsers on Mathematical Formula Extraction from PDFs",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "64a6fa7bd984c39433e2e955569a6465a6b4203608d1c5b29b581beebc0cb177",
+      "bytes": 3764859,
+      "pages": 16,
+      "tags": [
+        "arxiv",
+        "formulas",
+        "latex",
+        "math",
+        "pdf-parsing",
+        "single-column"
+      ],
+      "ci": false
     }
   ]
 }
