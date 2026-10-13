@@ -568,18 +568,29 @@ fn strip_leading_index(text: &str) -> Option<&str> {
 }
 
 fn peel_saved_index(source: &str, saved: &HashMap<String, String>) -> Option<String> {
+    let source = source.trim();
     for (old, translated) in saved {
         let Some(rest) = strip_leading_index(old) else {
             continue;
         };
-        if rest != source {
+        // `10.1 Title` is a section heading. `Baldwin Road` is an address.
+        if rest.trim() != source || !section_number_rest(rest) {
             continue;
         }
         if let Some(body) = strip_leading_index(translated) {
-            return Some(body.to_string());
+            return Some(body.trim().to_string());
         }
     }
     None
+}
+
+fn section_number_rest(rest: &str) -> bool {
+    let rest = rest.trim();
+    let digits = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (1..=3).contains(&digits) && rest.as_bytes().get(digits) == Some(&b'.')
 }
 
 fn rest_hit<'a>(
@@ -2869,6 +2880,29 @@ mod tests {
             .map(|seg| seg.translated.as_str())
             .collect();
         assert_eq!(texts, ["10", "10.1 标题"]);
+
+        let trailing = vec![TranslatedSegment {
+            id: 4,
+            page_index: 0,
+            glyph_ids: Vec::new(),
+            source: "11 11.1 Starting simple: Building a single-tool travel info ".into(),
+            translated: "11 11.1 简单开始 ".into(),
+        }];
+        let mut spaced =
+            extraction_from_lines(&["11.1 Starting simple: Building a single-tool travel info"]);
+        let report = replay_extraction(&mut spaced, &opts, &trailing).expect("trailing replay");
+        assert_eq!(report.segments[0].translated, "11.1 简单开始");
+
+        let address = vec![TranslatedSegment {
+            id: 5,
+            page_index: 0,
+            glyph_ids: Vec::new(),
+            source: "20 Baldwin Road".into(),
+            translated: "20 鲍德温路".into(),
+        }];
+        let mut street = extraction_from_lines(&["Baldwin Road"]);
+        let err = replay_extraction(&mut street, &opts, &address).unwrap_err();
+        assert!(err.to_string().contains("no saved translation"), "{err}");
 
         let mut joined = extraction_from_lines(&["alpha like this to separate it."]);
         let report = replay_extraction(&mut joined, &opts, &saved).expect("joined replay");
