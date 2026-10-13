@@ -335,7 +335,20 @@ pub(crate) fn fit_cjk_block(
     // one-line source, may shrink to 0.62 of the English size before the
     // English is left in place. A short one-line title stays at least 0.80
     // and may use a second line. Half the source size is too small to read.
-    let floor_ratio = if available <= 0.5 && width <= source_size * 16.0 {
+    // Two characters in a folio-sized box (`十四` for `xiv`) must stay one
+    // line. Wrapping them at the 0.80 floor leaves a one-character line.
+    let chars_n = text.chars().filter(|ch| !ch.is_whitespace()).count();
+    let compact = chars_n <= 4;
+    // A cover subtitle or author line is one large source line. Shrink it
+    // onto that line before wrapping a name or a product list across the
+    // artwork. The navy panel is narrower than the English ink, so the floor
+    // sits under the 0.62 body ratio. A 10pt contents title still wraps at 0.80.
+    let display = available <= 0.5 && source_size >= 16.0 && chars_n <= 40;
+    let floor_ratio = if display {
+        0.48
+    } else if compact && available <= 0.5 {
+        0.62
+    } else if available <= 0.5 && width <= source_size * 16.0 {
         0.80
     } else {
         0.62
@@ -376,6 +389,14 @@ pub(crate) fn fit_cjk_block(
             }
         }
         if size <= floor + 0.01 {
+            if display && within && (1..=3).contains(&lines.len()) {
+                let lead = if lines.len() == 1 {
+                    size * metrics.leading_ratio
+                } else {
+                    size * 1.05
+                };
+                return Some((lines, size, lead, indent));
+            }
             // A one-line title that still does not fit at 0.80 wraps once.
             // Shrinking it to half the source size is too small to read.
             if within
@@ -647,7 +668,54 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     let mut sticky = vec![false; chars.len().saturating_sub(1)];
     mark_citations(chars, &mut sticky);
     mark_emails(chars, &mut sticky);
+    mark_dotted_names(chars, &mut sticky);
+    mark_latin_name(chars, &mut sticky);
     sticky
+}
+
+/// `罗伯托·因凡特` is one name. A break after the dot leaves `凡特` alone.
+fn mark_dotted_names(chars: &[char], sticky: &mut [bool]) {
+    let mut index = 0;
+    while index < chars.len() {
+        if !is_name_dot(chars[index]) && !is_name_cjk(chars[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut dots = 0usize;
+        while index < chars.len() && (is_name_dot(chars[index]) || is_name_cjk(chars[index])) {
+            if is_name_dot(chars[index]) {
+                dots += 1;
+            }
+            index += 1;
+        }
+        if dots > 0 && index - start <= 12 {
+            for boundary in start..index.saturating_sub(1) {
+                if let Some(flag) = sticky.get_mut(boundary) {
+                    *flag = true;
+                }
+            }
+        }
+    }
+}
+
+fn is_name_dot(ch: char) -> bool {
+    matches!(ch, '·' | '•' | '・' | '‧' | '⋅')
+}
+
+fn is_name_cjk(ch: char) -> bool {
+    ('\u{3400}'..='\u{9FFF}').contains(&ch)
+}
+
+/// `Roberto Infante` as the whole line stays on one line, including the space.
+fn mark_latin_name(chars: &[char], sticky: &mut [bool]) {
+    let text: String = chars.iter().collect();
+    if !crate::translate::whole_line_is_personal_name(text.trim()) {
+        return;
+    }
+    for flag in sticky.iter_mut() {
+        *flag = true;
+    }
 }
 
 fn mark_citations(chars: &[char], sticky: &mut [bool]) {
@@ -969,6 +1037,100 @@ mod tests {
         }
     }
 
+    fn cover_font(text: &str) -> SubsetFont {
+        let mut glyphs = std::collections::HashMap::new();
+        for (id, ch) in (1u16..).zip(text.chars()) {
+            let advance = if ch.is_ascii_alphabetic() {
+                560
+            } else if ch == ' ' {
+                258
+            } else {
+                1000
+            };
+            glyphs.insert(ch as u32, (id, advance));
+        }
+        SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        }
+    }
+
+    #[test]
+    fn a_cover_subtitle_stays_on_one_line() {
+        let metrics = CjkMeasure::resolve(0.90, 1.60);
+        let text = "使用 LangChain、LangGraph 和 MCP";
+        let fitted = fit_cjk_block(
+            text,
+            18.5,
+            0.96,
+            164.0,
+            0.0,
+            0.0,
+            &cover_font(text),
+            metrics,
+        )
+        .expect("subtitle fits the panel");
+        assert_eq!(fitted.0.len(), 1, "{:?}", fitted.0);
+        assert!(
+            fitted.1 + 0.05 >= 18.5 * 0.48,
+            "subtitle shrunk below the display floor: {}",
+            fitted.1
+        );
+        assert!(fitted.0[0].contains("LangChain"));
+        assert!(fitted.0[0].contains("LangGraph"));
+        assert!(fitted.0[0].contains("MCP"));
+
+        let wrapped = fit_cjk_block(text, 18.5, 0.96, 90.0, 0.0, 0.0, &cover_font(text), metrics)
+            .expect("a narrow panel still breaks on a phrase");
+        assert!(wrapped.0.len() >= 2, "{:?}", wrapped.0);
+        assert!(
+            wrapped.0.iter().any(|line| line.ends_with('、')),
+            "{:?}",
+            wrapped.0
+        );
+        for line in &wrapped.0 {
+            assert!(
+                !line.contains("LangCha") || line.contains("LangChain"),
+                "{line}"
+            );
+            assert!(
+                !line.contains("LangGrap") || line.contains("LangGraph"),
+                "{line}"
+            );
+        }
+
+        let name = "Roberto Infante";
+        let author = fit_cjk_block(
+            name,
+            22.0,
+            0.96,
+            110.0,
+            0.0,
+            0.0,
+            &cover_font(name),
+            metrics,
+        )
+        .expect("author name fits");
+        assert_eq!(author.0, vec![name.to_string()]);
+
+        let dotted = "罗伯托·因凡特";
+        let narrow = fit_cjk_block(
+            dotted,
+            22.0,
+            0.96,
+            40.0,
+            0.0,
+            0.0,
+            &uniform_font(dotted),
+            metrics,
+        );
+        assert!(
+            narrow.as_ref().is_none_or(|fitted| fitted.0.len() == 1),
+            "{narrow:?}"
+        );
+    }
+
     #[test]
     fn fit_paragraph_needs_no_model_and_indents_body_text() {
         let body = "编程智能体通过长轨迹解决仓库级任务。随着任务推进，早期探索会过时。";
@@ -1126,6 +1288,23 @@ mod tests {
         )
         .expect("a title that fits stays one line");
         assert_eq!(short.lines.len(), 1, "{:?}", short.lines);
+        let folio = fit_paragraph(
+            "十四",
+            9.0,
+            16.0,
+            0.0,
+            1,
+            false,
+            &uniform_font("十四"),
+            metrics,
+        )
+        .expect("a two-character folio stays one line");
+        assert_eq!(folio.lines.len(), 1, "{:?}", folio.lines);
+        assert!(
+            folio.size + 0.05 >= 9.0 * 0.62,
+            "folio shrunk below the body floor: {}",
+            folio.size
+        );
         let wide = "基于大语言模型的聊天机器人".repeat(3);
         assert!(
             fit_paragraph(

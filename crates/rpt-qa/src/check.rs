@@ -378,6 +378,350 @@ fn is_italic(name: &str) -> bool {
     upper.contains("ITALIC") || upper.contains("OBLIQUE") || upper.contains("ITAL")
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct TocFragment {
+    pub page: u32,
+    pub text: String,
+    pub reason: String,
+}
+
+/// Contents rows that lost a title, glued two entries together, or left a
+/// one-character scrap. `page` is the 1-based PDF page.
+pub fn toc_row_fragments(extraction: &Extraction) -> Vec<TocFragment> {
+    let mut lines: Vec<TocLine> = Vec::new();
+    let mut glyphs: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .collect();
+    glyphs.sort_by(|left, right| {
+        left.page_index.cmp(&right.page_index).then(
+            right.matrix[5]
+                .total_cmp(&left.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4])),
+        )
+    });
+    for glyph in glyphs {
+        let attach = lines.last().is_some_and(|line| {
+            line.page == glyph.page_index && (line.y - glyph.matrix[5]).abs() <= 2.0
+        });
+        if attach {
+            let line = lines.last_mut().expect("line just matched");
+            line.text.push_str(&glyph.unicode);
+            line.x = line.x.min(glyph.matrix[4]);
+            line.size = line.size.max(glyph.font_size);
+        } else {
+            lines.push(TocLine {
+                page: glyph.page_index,
+                y: glyph.matrix[5],
+                x: glyph.matrix[4],
+                size: glyph.font_size,
+                text: glyph.unicode.clone(),
+            });
+        }
+    }
+    let mut pages: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (index, line) in lines.iter().enumerate() {
+        pages.entry(line.page).or_default().push(index);
+    }
+    let mut flags = Vec::new();
+    for (page, indices) in pages {
+        if !page_is_contents(&lines, &indices) {
+            continue;
+        }
+        for index in indices {
+            let line = &lines[index];
+            if let Some(reason) = fragment_reason(line) {
+                flags.push(TocFragment {
+                    page: page + 1,
+                    text: line.text.clone(),
+                    reason,
+                });
+            }
+        }
+    }
+    flags.sort_by(|left, right| {
+        left.page
+            .cmp(&right.page)
+            .then(left.text.cmp(&right.text))
+            .then(left.reason.cmp(&right.reason))
+    });
+    flags
+}
+
+struct TocLine {
+    page: u32,
+    y: f32,
+    x: f32,
+    size: f32,
+    text: String,
+}
+
+fn page_is_contents(lines: &[TocLine], indices: &[usize]) -> bool {
+    let numbered = indices
+        .iter()
+        .filter(|index| line_ends_with_page_number(&lines[**index].text))
+        .count();
+    if numbered < 4 {
+        return false;
+    }
+    let mut lengths: Vec<usize> = indices
+        .iter()
+        .map(|index| lines[*index].text.chars().count())
+        .collect();
+    lengths.sort_unstable();
+    lengths[lengths.len() / 2] < 90
+}
+
+fn line_ends_with_page_number(text: &str) -> bool {
+    let text = text.trim();
+    let Some(token) = text.split_whitespace().last() else {
+        return false;
+    };
+    page_token(token) || text.chars().last().is_some_and(|ch| ch.is_ascii_digit())
+}
+
+fn page_token(text: &str) -> bool {
+    if text.is_empty() || text.chars().count() > 6 {
+        return false;
+    }
+    if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return (1..=4).contains(&text.len());
+    }
+    text.chars().all(|ch| {
+        matches!(
+            ch.to_ascii_lowercase(),
+            'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
+        )
+    })
+}
+
+fn fragment_reason(line: &TocLine) -> Option<String> {
+    let text = line.text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if compact.chars().count() >= 2
+        && compact
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
+        && compact.chars().skip(1).all(|ch| ch.is_ascii_digit())
+        && compact.chars().filter(|ch| ch.is_ascii_digit()).count() >= 2
+    {
+        return Some("latin-stub".into());
+    }
+    let body = strip_toc_chrome(text);
+    if body.starts_with('录') && !body.contains('附') {
+        return Some("split-appendix".into());
+    }
+    if let Some(at) = body.find("附录") {
+        let before = body[..at].trim();
+        let before = before.trim_start_matches(|ch: char| {
+            ch.is_ascii_digit() || ch == '.' || ch == '■' || ch == ' '
+        });
+        if before
+            .chars()
+            .any(|ch| !ch.is_ascii_digit() && ch != '■' && !ch.is_whitespace())
+        {
+            return Some("run-on".into());
+        }
+    }
+    let leftover = strip_trailing_page(&body);
+    if leftover.chars().count() == 1 && line.size < 16.0 && line.y > 80.0 {
+        return Some("orphan-char".into());
+    }
+    if leftover.is_empty()
+        && page_token(compact.as_str())
+        && line.size < 16.0
+        && line.x > 280.0
+        && line.y > 90.0
+    {
+        return Some("detached-number".into());
+    }
+    None
+}
+
+fn strip_toc_chrome(text: &str) -> String {
+    let mut out = text.trim().to_string();
+    while out.starts_with(['■', '•', '▪', ' ']) {
+        out = out[out.chars().next().map(char::len_utf8).unwrap_or(1)..]
+            .trim_start()
+            .to_string();
+    }
+    out
+}
+
+fn strip_trailing_page(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(token) = trimmed.split_whitespace().last() else {
+        return String::new();
+    };
+    if page_token(token) && trimmed.split_whitespace().count() >= 2 {
+        let end = trimmed.len() - token.len();
+        return trimmed[..end].trim().to_string();
+    }
+    if trimmed.chars().last().is_some_and(|ch| ch.is_ascii_digit()) {
+        let stem = trimmed
+            .trim_end_matches(|ch: char| ch.is_ascii_digit())
+            .trim();
+        if stem.chars().count() < trimmed.chars().count() {
+            return stem.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BoundaryCross {
+    pub page: u32,
+    pub text: String,
+    pub edge: f32,
+}
+
+/// Output text that crosses a filled path or image edge the matching source
+/// line did not. A full-bleed image is the page itself, not a panel edge.
+pub fn paint_boundary_crossings(source: &Extraction, output: &Extraction) -> Vec<BoundaryCross> {
+    let edges = vertical_edges(source);
+    if edges.is_empty() {
+        return Vec::new();
+    }
+    let source_lines = paint_lines(&source.glyphs);
+    let mut flags = Vec::new();
+    for line in paint_lines(&output.glyphs) {
+        let Some(matched) = source_lines
+            .iter()
+            .filter(|row| {
+                row.page == line.page && (row.y - line.y).abs() <= line.size.max(row.size) * 0.8
+            })
+            .min_by(|left, right| (left.y - line.y).abs().total_cmp(&(right.y - line.y).abs()))
+        else {
+            continue;
+        };
+        for edge in edges.iter().filter(|edge| edge.page == line.page) {
+            if !line_meets_edge(&line, edge) || !crosses(&line, edge.x) || crosses(matched, edge.x)
+            {
+                continue;
+            }
+            flags.push(BoundaryCross {
+                page: line.page + 1,
+                text: line.text.clone(),
+                edge: edge.x,
+            });
+        }
+    }
+    flags.sort_by(|left, right| {
+        left.page
+            .cmp(&right.page)
+            .then(left.edge.total_cmp(&right.edge))
+            .then(left.text.cmp(&right.text))
+    });
+    flags
+}
+
+struct PaintLine {
+    page: u32,
+    y: f32,
+    min_x: f32,
+    max_x: f32,
+    size: f32,
+    text: String,
+}
+
+struct PanelEdge {
+    page: u32,
+    x: f32,
+    y0: f32,
+    y1: f32,
+}
+
+fn paint_lines(glyphs: &[Glyph]) -> Vec<PaintLine> {
+    let mut ordered: Vec<&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .collect();
+    ordered.sort_by(|left, right| {
+        left.page_index.cmp(&right.page_index).then(
+            right.matrix[5]
+                .total_cmp(&left.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4])),
+        )
+    });
+    let mut lines: Vec<PaintLine> = Vec::new();
+    for glyph in ordered {
+        let left = glyph.matrix[4].min(glyph.bbox[0]);
+        let right = glyph.bbox[2].max(glyph.matrix[4] + glyph.advance[0].max(0.0));
+        let attach = lines.last().is_some_and(|line| {
+            line.page == glyph.page_index && (line.y - glyph.matrix[5]).abs() <= 2.0
+        });
+        if attach {
+            let line = lines.last_mut().expect("line just matched");
+            line.text.push_str(&glyph.unicode);
+            line.min_x = line.min_x.min(left);
+            line.max_x = line.max_x.max(right);
+            line.size = line.size.max(glyph.font_size);
+        } else {
+            lines.push(PaintLine {
+                page: glyph.page_index,
+                y: glyph.matrix[5],
+                min_x: left,
+                max_x: right,
+                size: glyph.font_size,
+                text: glyph.unicode.clone(),
+            });
+        }
+    }
+    lines
+}
+
+fn vertical_edges(extraction: &Extraction) -> Vec<PanelEdge> {
+    let mut edges = Vec::new();
+    for region in &extraction.regions {
+        let [x0, y0, x1, y1] = region.bbox;
+        let width = (x1 - x0).abs();
+        let height = (y1 - y0).abs();
+        if width < 8.0 || height < 20.0 {
+            continue;
+        }
+        let media = extraction
+            .pages
+            .iter()
+            .find(|page| page.index == region.page_index)
+            .map(|page| page.media_box)
+            .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+        let page_w = (media[2] - media[0]).abs().max(1.0);
+        let page_h = (media[3] - media[1]).abs().max(1.0);
+        if width > page_w * 0.92 && height > page_h * 0.92 {
+            continue;
+        }
+        let (lo, hi) = (y0.min(y1), y0.max(y1));
+        let (left, right) = (x0.min(x1), x0.max(x1));
+        edges.push(PanelEdge {
+            page: region.page_index,
+            x: left,
+            y0: lo,
+            y1: hi,
+        });
+        edges.push(PanelEdge {
+            page: region.page_index,
+            x: right,
+            y0: lo,
+            y1: hi,
+        });
+    }
+    edges
+}
+
+fn crosses(line: &PaintLine, edge: f32) -> bool {
+    line.min_x < edge - 1.0 && line.max_x > edge + 1.0
+}
+
+fn line_meets_edge(line: &PaintLine, edge: &PanelEdge) -> bool {
+    let pad = line.size.max(4.0);
+    line.y + pad >= edge.y0 && line.y - pad <= edge.y1
+}
+
 fn is_black(color: &rpt_core::Color) -> bool {
     color.components.iter().all(|component| *component <= 0.02)
         || (color.space == "DeviceGray" && color.components.first().is_some_and(|g| *g <= 0.02))
@@ -505,5 +849,109 @@ mod tests {
         if ran == 0 {
             eprintln!("corpus cache absent; layout samples skipped");
         }
+    }
+
+    fn text_glyph(id: u32, x: f32, y: f32, text: &str) -> Glyph {
+        let mut item = glyph(id, x, y);
+        item.unicode = text.into();
+        item.advance = [text.chars().count() as f32 * 8.0, 0.0];
+        item.bbox[2] = x + item.advance[0];
+        item
+    }
+
+    #[test]
+    fn toc_fragments_are_flagged_and_clean_rows_are_not() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let push = |glyphs: &mut Vec<Glyph>, id: &mut u32, y: f32, text: &str| {
+            glyphs.push(text_glyph(*id, 120.0, y, text));
+            *id += 1;
+        };
+        push(&mut glyphs, &mut id, 500.0, "1.1 构建应用 4");
+        push(&mut glyphs, &mut id, 480.0, "1.2 介绍框架 11");
+        push(&mut glyphs, &mut id, 460.0, "附录 A 试用 LangChain 351");
+        push(&mut glyphs, &mut id, 440.0, "提示工程 20");
+        push(&mut glyphs, &mut id, 420.0, "n351");
+        push(&mut glyphs, &mut id, 400.0, "录 C 选择 LLM 360");
+        push(
+            &mut glyphs,
+            &mut id,
+            380.0,
+            "查询生成、路由和检索后处理 附录 A 试用 LangChain 228",
+        );
+        push(&mut glyphs, &mut id, 360.0, "四");
+        glyphs.push(text_glyph(id, 400.0, 200.0, "375"));
+        let flags = toc_row_fragments(&page_with(glyphs));
+        let reasons: Vec<_> = flags.iter().map(|flag| flag.reason.as_str()).collect();
+        assert!(reasons.contains(&"latin-stub"), "{flags:?}");
+        assert!(reasons.contains(&"split-appendix"), "{flags:?}");
+        assert!(reasons.contains(&"run-on"), "{flags:?}");
+        assert!(reasons.contains(&"orphan-char"), "{flags:?}");
+        assert!(reasons.contains(&"detached-number"), "{flags:?}");
+        assert!(
+            !flags.iter().any(|flag| flag.text.contains("1.1")),
+            "{flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| flag.text.starts_with("附录 A")),
+            "{flags:?}"
+        );
+    }
+
+    fn span_line(id: u32, x: f32, y: f32, width: f32, text: &str) -> Glyph {
+        let mut item = text_glyph(id, x, y, text);
+        item.font_size = 12.0;
+        item.matrix[0] = 12.0;
+        item.matrix[3] = 12.0;
+        item.advance = [width, 0.0];
+        item.bbox = [x, y - 2.0, x + width, y + 10.0];
+        item
+    }
+
+    #[test]
+    fn text_that_crosses_a_new_panel_edge_is_flagged() {
+        let panel = rpt_core::glyph::PaintedRegion {
+            page_index: 0,
+            bbox: [0.0, 100.0, 200.0, 500.0],
+            kind: "path".into(),
+        };
+        let bleed = rpt_core::glyph::PaintedRegion {
+            page_index: 0,
+            bbox: [0.0, 0.0, 612.0, 792.0],
+            kind: "image".into(),
+        };
+        let mut source = page_with(vec![
+            span_line(1, 40.0, 300.0, 140.0, "With LangChain"),
+            span_line(2, 40.0, 260.0, 220.0, "already across"),
+        ]);
+        source.regions = vec![panel.clone(), bleed];
+        let output = page_with(vec![
+            span_line(1, 40.0, 300.0, 220.0, "使用 LangChain、LangGraph 和 MCP"),
+            span_line(2, 40.0, 280.0, 100.0, "曼宁"),
+            span_line(3, 40.0, 260.0, 220.0, "already across"),
+        ]);
+        let flags = paint_boundary_crossings(&source, &output);
+        assert!(
+            flags
+                .iter()
+                .any(|flag| { flag.text.contains("LangGraph") && (flag.edge - 200.0).abs() < 0.1 }),
+            "{flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| flag.text.contains("曼宁")),
+            "{flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| flag.text.contains("already")),
+            "{flags:?}"
+        );
+        let only_bleed = page_with(vec![span_line(1, 40.0, 300.0, 400.0, "full width")]);
+        let mut bleed_source = only_bleed.clone();
+        bleed_source.regions = vec![rpt_core::glyph::PaintedRegion {
+            page_index: 0,
+            bbox: [0.0, 0.0, 612.0, 792.0],
+            kind: "image".into(),
+        }];
+        assert!(paint_boundary_crossings(&bleed_source, &only_bleed).is_empty());
     }
 }

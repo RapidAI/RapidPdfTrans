@@ -1099,6 +1099,11 @@ pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
 /// A credit line whose personal name was translated. Role words stay in
 /// Chinese; the name is the original Latin (`Copy editor: Julie McNamee`).
 pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
+    // A cover or byline that is only a person's name stays in the original
+    // Latin, the same way a credit line keeps `Dustin Archibald`.
+    if is_personal_name(source.trim()) {
+        return source.trim().to_string();
+    }
     let Some(name) = credit_personal_name(source) else {
         return translated.to_string();
     };
@@ -1134,9 +1139,36 @@ fn credit_personal_name(source: &str) -> Option<String> {
     is_personal_name(after).then(|| after.to_string())
 }
 
+pub(crate) fn whole_line_is_personal_name(text: &str) -> bool {
+    is_personal_name(text)
+}
+
 fn is_personal_name(text: &str) -> bool {
     let tokens: Vec<&str> = text.split_whitespace().collect();
-    (2..=5).contains(&tokens.len()) && tokens.iter().all(|token| is_name_token(token))
+    (2..=5).contains(&tokens.len())
+        && tokens
+            .iter()
+            .all(|token| is_name_token(token) && !is_org_token(token))
+}
+
+fn is_org_token(token: &str) -> bool {
+    let token = token.trim_matches(|ch| matches!(ch, ',' | '.'));
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "co" | "inc"
+            | "ltd"
+            | "llc"
+            | "corp"
+            | "company"
+            | "press"
+            | "publications"
+            | "publishing"
+            | "university"
+            | "institute"
+            | "group"
+            | "labs"
+            | "lab"
+    )
 }
 
 fn is_name_token(token: &str) -> bool {
@@ -1677,6 +1709,10 @@ mod tests {
         assert_eq!(
             restore_credit_names("Shelter Island, NY 11964", "谢尔特岛，纽约 11964"),
             "谢尔特岛，纽约 11964"
+        );
+        assert_eq!(
+            restore_credit_names("Roberto Infante", "罗伯托·因凡特"),
+            "Roberto Infante"
         );
     }
 

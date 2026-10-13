@@ -1965,6 +1965,12 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
     if lower.page != upper.page + 1 {
         return false;
     }
+    // A contents row already carries its page number. The next page's next
+    // entry (`appendix A` under chapter 10) is a new row, not the rest of
+    // this title.
+    if upper.toc {
+        return false;
+    }
     // The right column ends on this page and the sentence continues at the
     // top of the next page's left column. A new paragraph, or a centered
     // running title, does not: the continuation has to finish the hyphen
@@ -1988,6 +1994,11 @@ fn column_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool
         return false;
     };
     if lower.page != upper.page {
+        return false;
+    }
+    // An indented contents sub-entry is not the next column. Joining it
+    // pulls `our travel assistant` onto `appendix D`.
+    if upper.toc {
         return false;
     }
     if is_footer_line(&upper.text)
@@ -6371,5 +6382,72 @@ mod tests {
         assert!(is_roman_numeral("xxvi"));
         assert!(!is_roman_numeral("did"));
         assert!(!is_roman_numeral("civil"));
+    }
+
+    #[test]
+    fn a_finished_contents_row_does_not_absorb_the_next_entry() {
+        let chapter = block(
+            0,
+            120.0,
+            160.0,
+            200.0,
+            10.0,
+            "Query generation, routing, and retrieval postprocessing",
+        );
+        let chapter_page = block(1, 340.0, 160.0, 24.0, 10.0, "228");
+        let mut appendix = block(
+            2,
+            110.0,
+            700.0,
+            210.0,
+            10.0,
+            "appendix A Trying out LangChain",
+        );
+        appendix.page_index = 1;
+        let mut appendix_page = block(3, 340.0, 700.0, 24.0, 10.0, "351");
+        appendix_page.page_index = 1;
+        let texts: Vec<_> = segment_glyphs(&[chapter, chapter_page, appendix, appendix_page])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Query generation")
+                && !text.to_ascii_lowercase().contains("appendix")),
+            "chapter 10 absorbed the next page: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("appendix A") && !text.contains("Query")),
+            "appendix A was not its own row: {texts:?}"
+        );
+
+        let lower = block(
+            4,
+            112.0,
+            200.0,
+            180.0,
+            10.0,
+            "appendix D Installing SQLite on Windows",
+        );
+        let lower_page = block(5, 310.0, 200.0, 24.0, 10.0, "375");
+        let upper = block(6, 186.0, 640.0, 150.0, 10.0, "our travel assistant");
+        let upper_page = block(7, 350.0, 640.0, 24.0, 10.0, "331");
+        let column: Vec<_> = segment_glyphs(&[lower, lower_page, upper, upper_page])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            column
+                .iter()
+                .any(|text| text.contains("appendix D") && !text.contains("travel")),
+            "appendix joined the indented sub-entry: {column:?}"
+        );
+        assert!(
+            column
+                .iter()
+                .any(|text| text.contains("travel assistant") && !text.contains("appendix")),
+            "sub-entry missing: {column:?}"
+        );
     }
 }
