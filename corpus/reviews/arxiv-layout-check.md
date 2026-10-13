@@ -2,14 +2,14 @@
 
 Four English arXiv papers were added to `corpus/manifest.json` (URL, license, sha256; the PDFs stay in gitignored `corpus/cache/`). Each was translated in full to Chinese on current main. Comparison used glyph coordinates from `rpt extract` as the layout evidence, with `pdftotext -layout` and side-by-side page renders as a second view. Figure interiors, table cells, and bibliographies staying in English is the intended default.
 
-Translated PDFs (not committed):
+Translated PDFs (not committed). The same files are copied to `/opt/cursor/artifacts/pdfs/`.
 
 | id | pages | PDF |
 | --- | --- | --- |
-| arxiv-1908.07836 PubLayNet | 8, two-column | `/tmp/rpt-arxiv/arxiv-1908.07836-zh.pdf` |
-| arxiv-2204.08387 LayoutLMv3 | 10, two-column | `/tmp/rpt-arxiv/arxiv-2204.08387-zh.pdf` |
-| arxiv-2305.03393 OTSL table tokenization | 14, single-column | `/tmp/rpt-arxiv/arxiv-2305.03393-zh.pdf` |
-| arxiv-2512.09874 formula-parser benchmark | 16, single-column, math | `/tmp/rpt-arxiv/arxiv-2512.09874-zh.pdf` |
+| arxiv-1908.07836 PubLayNet | 8, two-column | `/opt/cursor/artifacts/pdfs/arxiv-1908.07836-zh.pdf` |
+| arxiv-2204.08387 LayoutLMv3 | 10, two-column | `/opt/cursor/artifacts/pdfs/arxiv-2204.08387-zh.pdf` |
+| arxiv-2305.03393 OTSL table tokenization | 14, single-column | `/opt/cursor/artifacts/pdfs/arxiv-2305.03393-zh.pdf` |
+| arxiv-2512.09874 formula-parser benchmark | 16, single-column, math | `/opt/cursor/artifacts/pdfs/arxiv-2512.09874-zh.pdf` |
 
 All four reports have `coverage.complete: true`. Chinese body is `RPTCJK` CID Type 0C Identity-H. Source Latin faces (Nimbus, Computer Modern) remain for text that is kept.
 
@@ -20,6 +20,8 @@ Side-by-side renders (source left, translation right):
 - `/opt/cursor/artifacts/arxiv-layout/arxiv-2204.08387-p01.png`
 - `/opt/cursor/artifacts/arxiv-layout/arxiv-2204.08387-p04.png`
 - `/opt/cursor/artifacts/arxiv-layout/arxiv-2305.03393-p03.png`
+- `/opt/cursor/artifacts/arxiv-layout/arxiv-2305.03393-p09.png`
+- `/opt/cursor/artifacts/arxiv-layout/arxiv-2305.03393-p10.png`
 - `/opt/cursor/artifacts/arxiv-layout/arxiv-2512.09874-p01.png`
 
 ## Fixes applied on main while reviewing
@@ -33,6 +35,8 @@ Side-by-side renders (source left, translation right):
 | `72699e9` | Small figure labels outnumbered the body on a shared baseline, so the line size became ~2.6pt and every word space was a column split. HTML table markup was treated as an untranslated paragraph. | PubLayNet page 3; OTSL HTML figure |
 | `06bd856` | A footnote number plus a URL failed coverage when left unchanged. | Formula paper page 4 |
 | `8a99948` | ORCID ids `[0000-0002-…]` matched the `[1]` bibliography rule and kept the introduction in English until the next heading. | OTSL pages 2–3 |
+| `7fbb5b1` | A margin stamp widened the baseline window, so two abstract lines were collected as one interleaved sentence. A caption label’s word space was treated as a column gap, and a dotted heading such as `5.3` did not stop the table walk. | Formula paper page 1; OTSL pages 9–10 |
+| `ab2e6c2` | A table left the page transform shifted, so text appended after it painted on top of the cells. | OTSL page 10 |
 
 ## arxiv-1908.07836 PubLayNet (two-column)
 
@@ -76,8 +80,8 @@ Letter, 612×792. Journal figures on pages 2–3 and the bibliography stay Engli
 | 6 | Section prose is Chinese. | — | — |
 | 7 | Section prose is Chinese. | — | — |
 | 8 | Section prose is Chinese. OTSL token rows that are markup stay as source tokens. | — | markup no longer fails coverage (`72699e9`) |
-| 9 | The paragraph above Table 1 is Chinese. The multi-line caption (`Table 1. HPO performed…` through `HTML counterpart.`) and the numeric cells stayed English: the lines after the first caption line were kept as the table interior. | medium | not fixed |
-| 10 | Table 2 caption and cells stay English. `5.3 Qualitative Results` and the paragraph under it (`To illustrate the qualitative differences…`) were kept with the table. Figure 5’s drawing labels stay English. | medium | not fixed |
+| 9 | The paragraph above Table 1 is Chinese. The full caption is Chinese (`表 1. 在相同基于 transformer 的 TableFormer…` through the smaller-model sentence). Cells and headers (`OTSL`, `HTML`, `TEDs`, the scores) stay English on the source baselines. | was medium | caption join fixed in `7fbb5b1` |
+| 10 | Table 2’s caption is Chinese; its cells stay English. `5.3 定性结果` and the paragraph under it (`为了说明 OTSL 和 HTML 之间的定性差异…`) are Chinese and sit on the source baselines (x=134.8), under the table. Figure 5’s drawing labels stay English. | was medium | heading fixed in `7fbb5b1`; the leaked page transform that had shifted this text onto the cells is fixed in `ab2e6c2` |
 | 11 | Figure continuation, English labels inside the figure. | — | — |
 | 12 | Conclusion prose is Chinese. References begin and stay English. | — | — |
 | 13 | Bibliography, English. | — | — |
@@ -87,7 +91,7 @@ Letter, 612×792. Journal figures on pages 2–3 and the bibliography stay Engli
 
 | page | findings | severity | fixed |
 | --- | --- | --- | --- |
-| 1 | Title, authors, affiliations, and the first abstract segment are Chinese. Author marks `Horn1` and `Keuper1,2` stay superscripts. The next segment’s source text is already character-interleaved: the line `ing (CDM) and r≈0…` (y≈396) and the line `pipeline combining…` (y≈385) were collected as one line, so the model kept `ipnigpe(lCinDeMco)…` and translated only the clean sentences after it. | high | not fixed |
+| 1 | Title, authors, affiliations, the abstract, and the keywords are Chinese. Author marks `Horn1` and `Keuper1,2` stay superscripts. The abstract is one paragraph on the source block: it starts on the Abstract baseline and the keywords sit on the Keywords baseline. The old interleaved `ipnigpe(lCinDeMco)…` is gone; `(CDM)` and `pipeline combining` are consecutive lines again. | was high | fixed in `7fbb5b1` |
 | 2 | Body Chinese. Inline math stays Computer Modern. | — | — |
 | 3 | Body Chinese. | — | — |
 | 4 | Body Chinese. The dataset URL stays a URL and no longer fails coverage. | was high (coverage, 57 glyphs) | `06bd856` |
@@ -106,6 +110,5 @@ Letter, 612×792. Journal figures on pages 2–3 and the bibliography stay Engli
 
 ## Still open
 
-1. **Formula paper, page 1 (high).** Two abstract lines about one leading apart were collected as a single line, so the segment text is character-interleaved and that garbage is painted at the start of the translated paragraph.
-2. **OTSL pages 9–10 (medium).** A dotted section number such as `5.3` does not stop the table-interior walk, and caption lines after the first line are kept with the cells. Those captions and the qualitative paragraph stay English.
-3. **LayoutLMv3 page 7 (medium).** A short English fragment remains in the results-table band next to kept header cells.
+1. **LayoutLMv3 page 7 (medium).** A short English fragment remains in the results-table band next to kept header cells.
+2. **OTSL page 2 (medium).** The Figure 1 caption (`Fig. 1. Comparison…`) stays the English source line. The drawing and its in-figure labels stay English by design.
