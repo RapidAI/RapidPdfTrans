@@ -1846,20 +1846,26 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
     let measures = page_measures(&lines);
     let mut columns: Vec<Vec<VisualLine>> = Vec::new();
     for line in lines {
-        let slot = columns.iter().position(|column| {
-            column_anchor(column, line.page).is_some_and(|anchor| {
-                let distance = (anchor - line.left).abs();
-                // A wrapped word can start a list-indented line and finish
-                // back on the column margin. That line sits to the right of
-                // the margin. A body line to the left of a centered title is
-                // a different column, even when a hyphen makes the gap look
-                // like an indent.
-                let indented = line.left + 1.0 >= anchor;
-                distance <= 28.0
-                    || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some())
-            }) || column
-                .last()
-                .is_some_and(|prev| hyphen_pull(prev, &line) || hanging_pull(prev, &line))
+        // A math gap can park the hyphen on the right half of the baseline.
+        // That fragment has to claim the next line before the left-hand piece,
+        // which shares the body margin, takes it.
+        let hyphen_slot = columns
+            .iter()
+            .position(|column| column.last().is_some_and(|prev| hyphen_pull(prev, &line)));
+        let slot = hyphen_slot.or_else(|| {
+            columns.iter().position(|column| {
+                column_anchor(column, line.page).is_some_and(|anchor| {
+                    let distance = (anchor - line.left).abs();
+                    // A wrapped word can start a list-indented line and finish
+                    // back on the column margin. That line sits to the right of
+                    // the margin. A body line to the left of a centered title is
+                    // a different column, even when a hyphen makes the gap look
+                    // like an indent.
+                    let indented = line.left + 1.0 >= anchor;
+                    distance <= 28.0
+                        || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some())
+                }) || column.last().is_some_and(|prev| hanging_pull(prev, &line))
+            })
         });
         if let Some(slot) = slot {
             columns[slot].push(line);
@@ -2860,6 +2866,7 @@ fn hanging_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
 /// even when the column's median left edge is the body margin.
 fn hyphen_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
     let shift = line.left - prev.left;
+    let size = prev.size.max(line.size).max(1.0);
     prev.page == line.page
         && soft_hyphen_stem(&prev.text).is_some()
         && line
@@ -2867,10 +2874,12 @@ fn hyphen_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
             .trim_start()
             .starts_with(|ch: char| ch.is_ascii_alphabetic())
         // The continuation may hang a little to the right, or step back
-        // from an indented hyphen line onto the column margin.
-        && (-64.0..=36.0).contains(&shift)
+        // onto the column margin. A wide math gap can leave the hyphen on
+        // the right half of the line, so the step back is more than 64pt.
+        // The other column is still further left than 12em.
+        && (-(size * 12.0)..=36.0).contains(&shift)
         && prev.y > line.y
-        && prev.y - line.y < prev.size.max(line.size).max(1.0) * 1.6
+        && prev.y - line.y < size * 1.6
 }
 
 /// `83 Generating` on one baseline is the next contents entry, not a sentence.
@@ -7380,6 +7389,97 @@ mod tests {
             seg.kept.iter().all(|(_, reason)| reason != "figure"),
             "{:?}",
             seg.kept
+        );
+    }
+
+    #[test]
+    fn a_math_gap_does_not_send_the_hyphen_to_the_next_page() {
+        // `where W ∈ R` and `are learnable … em-` are one baseline. The gap
+        // after the math is just over 1.25em, so the hyphen lands on a line
+        // whose left edge is 110pt to the right. `bedding` steps back to the
+        // margin. It is that word, not `operates` at the top of the next page.
+        let size = 10.91;
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut place = |glyphs: &mut Vec<Glyph>, x: f32, y: f32, page: u32, text: &str| {
+            let mut cursor = x;
+            for ch in text.chars() {
+                let width = if ch == ' ' { size * 0.3 } else { size * 0.48 };
+                let mut item = glyph(id, cursor, y, &ch.to_string(), false);
+                id += 1;
+                item.font_size = size;
+                item.page_index = page;
+                item.matrix = [size, 0.0, 0.0, size, cursor, y];
+                item.bbox = [cursor, y, cursor + width, y + size];
+                cursor += width;
+                glyphs.push(item);
+            }
+            cursor
+        };
+        let math_end = place(&mut glyphs, 70.4, 551.7, 0, "where W q in R ");
+        let _ = math_end;
+        place(
+            &mut glyphs,
+            math_end + 14.6,
+            551.7,
+            0,
+            "are learnable projection matrices that map queries to a relational em-",
+        );
+        place(
+            &mut glyphs,
+            70.9,
+            538.1,
+            0,
+            "bedding space and the head dimension follows.",
+        );
+        place(
+            &mut glyphs,
+            70.9,
+            745.9,
+            1,
+            "operates on pairs after the page break.",
+        );
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("embedding space")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("emoperates")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn the_rtdoc_math_gap_hyphen_stays_on_the_page() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/cache/arxiv-2606.23344.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract_with(&crate::extract::ExtractOptions {
+            max_pages: Some(6),
+            ..crate::extract::ExtractOptions::default()
+        });
+        let seg = segment_with(&extraction.glyphs, &SegmentFlags::default());
+        let hit = seg.segments.iter().find(|item| {
+            item.text.contains("relational em") || item.text.contains("embedding space")
+        });
+        let hit = hit.map(|item| item.text.chars().take(100).collect::<String>());
+        assert!(
+            hit.as_deref()
+                .is_some_and(|text| text.contains("embedding")),
+            "{hit:?}"
+        );
+        assert!(
+            seg.segments
+                .iter()
+                .all(|item| !item.text.contains("emoperates")),
+            "still joined to the next page"
         );
     }
 }
