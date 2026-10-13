@@ -1098,8 +1098,13 @@ fn is_name_token(token: &str) -> bool {
 /// A contents heading the model left as `PART 4 高级 RAG`. The word is a
 /// structural label, so it becomes 部分 once the rest of the line is Chinese.
 /// A bare `PART 1` is the same heading. An English sentence that merely
-/// contains the word stays for the model.
+/// contains the word stays for the model. A heading-position label is then
+/// `第 5 部分` (ASCII digit, spaces). Body uses such as `每个部分` stay.
 pub(crate) fn localize_part_heading(text: &str) -> String {
+    normalize_part_label(&localize_part_word(text))
+}
+
+fn localize_part_word(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     if let Some(replaced) = bare_part_line(&chars) {
         return replaced;
@@ -1130,6 +1135,76 @@ pub(crate) fn localize_part_heading(text: &str) -> String {
         index += 1;
     }
     out
+}
+
+/// `部分 5` / `第５部分` at the start of a heading (after an optional bullet)
+/// becomes `第 5 部分`. A later `每个部分` is not a heading.
+fn normalize_part_label(text: &str) -> String {
+    let lead = text.len() - text.trim_start().len();
+    let mut rest = &text[lead..];
+    let mut prefix = text[..lead].to_string();
+    if crate::segment::starts_with_list_marker(rest) {
+        let marker = rest.chars().next().unwrap();
+        prefix.push(marker);
+        rest = &rest[marker.len_utf8()..];
+        let spaces = rest.len() - rest.trim_start().len();
+        prefix.push_str(&rest[..spaces]);
+        rest = &rest[spaces..];
+    }
+    let Some((number, consumed)) = part_label_prefix(rest) else {
+        return text.to_string();
+    };
+    prefix.push_str("第 ");
+    prefix.push_str(&number);
+    prefix.push_str(" 部分");
+    prefix.push_str(&rest[consumed..]);
+    prefix
+}
+
+/// A part label at the start of `text`: `部分 5`, `第5部分`, `第 ５ 部分`.
+fn part_label_prefix(text: &str) -> Option<(String, usize)> {
+    if let Some(rest) = text.strip_prefix('第') {
+        let rest = rest.trim_start();
+        let (number, after) = split_heading_digits(rest)?;
+        let after = after.trim_start();
+        let after = after.strip_prefix("部分")?;
+        return Some((number, text.len() - after.len()));
+    }
+    if let Some(rest) = text.strip_prefix("部分") {
+        let rest = rest.trim_start();
+        let (number, after) = split_heading_digits(rest)?;
+        return Some((number, text.len() - after.len()));
+    }
+    None
+}
+
+/// One or two ASCII or fullwidth digits. The returned number is ASCII.
+fn split_heading_digits(text: &str) -> Option<(String, &str)> {
+    let mut number = String::new();
+    let mut rest = text;
+    while number.chars().count() < 2 {
+        let mut chars = rest.chars();
+        let Some(ch) = chars.next() else {
+            break;
+        };
+        let digit = if ch.is_ascii_digit() {
+            ch
+        } else {
+            let value = ch as u32;
+            if (0xFF10..=0xFF19).contains(&value) {
+                char::from_u32(u32::from(b'0') + (value - 0xFF10))?
+            } else {
+                break;
+            }
+        };
+        number.push(digit);
+        rest = chars.as_str();
+    }
+    if number.is_empty() {
+        None
+    } else {
+        Some((number, rest))
+    }
 }
 
 /// `PART 4` with nothing after the number. `PART 4 ADVANCED RAG` is not bare.
@@ -1857,13 +1932,20 @@ mod tests {
     fn a_leftover_part_heading_becomes_chinese() {
         assert_eq!(
             localize_part_heading("PART 4 高级 RAG "),
-            "部分 4 高级 RAG "
+            "第 4 部分 高级 RAG "
         );
         assert_eq!(
             localize_part_heading("\u{f0a1} Part 5: AI 智能体"),
-            "\u{f0a1} 部分 5: AI 智能体"
+            "\u{f0a1} 第 5 部分: AI 智能体"
         );
-        assert_eq!(localize_part_heading("PART 1"), "部分 1");
+        assert_eq!(localize_part_heading("PART 1"), "第 1 部分");
+        assert_eq!(
+            localize_part_heading("部分 ５: AI 智能体"),
+            "第 5 部分: AI 智能体"
+        );
+        assert_eq!(localize_part_heading("第３部分：问答"), "第 3 部分：问答");
+        assert_eq!(localize_part_heading("每个部分都要译"), "每个部分都要译");
+        assert_eq!(localize_part_heading("5个部分"), "5个部分");
         assert_eq!(
             localize_part_heading("PART 4 ADVANCED RAG"),
             "PART 4 ADVANCED RAG"
@@ -1873,6 +1955,12 @@ mod tests {
             "见 https://example.com/part/4 的说明"
         );
         assert_eq!(localize_part_heading("Partial 结果"), "Partial 结果");
+        let source = "\u{f0a1}Part 5: AI agents (chapters 11-14)";
+        let model = "部分 ５: AI 智能体 (第 11–14 章)";
+        assert_eq!(
+            restore_list_marker(source, &localize_part_heading(model)),
+            "■ 第 5 部分: AI 智能体 (第 11–14 章)"
+        );
     }
 
     struct PartHeadingTranslator;
@@ -1904,7 +1992,7 @@ mod tests {
             &PartHeadingTranslator,
         )
         .unwrap();
-        assert_eq!(report.segments[0].translated, "部分 4 高级 RAG ");
+        assert_eq!(report.segments[0].translated, "第 4 部分 高级 RAG ");
     }
 
     struct AlwaysEmpty;

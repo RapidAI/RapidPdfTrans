@@ -251,9 +251,7 @@ pub fn rewrite_translation(
             planned
                 .iter()
                 .flat_map(|(index, text)| {
-                    text.chars()
-                        .chain(fullwidth_digit_requests(text))
-                        .chain(report.segments[*index].source.chars())
+                    text.chars().chain(report.segments[*index].source.chars())
                 })
                 .chain(toc_chars.chars()),
         );
@@ -310,9 +308,7 @@ pub fn rewrite_translation(
                 group
                     .iter()
                     .flat_map(|(index, text)| {
-                        text.chars()
-                            .chain(fullwidth_digit_requests(text))
-                            .chain(report.segments[*index].source.chars())
+                        text.chars().chain(report.segments[*index].source.chars())
                     })
                     .chain(toc_chars.chars()),
             );
@@ -1049,6 +1045,11 @@ fn commit_toc_operators(
             || title_follows_number(run, extraction)
             || tight_subentry_number(run, extraction);
         if keep_put {
+            // `RAG 20` is one TJ. Redrawing the page number blanks that
+            // operator, and an unchanged title is not drawn again.
+            if operator_has_unredrawn_text(run, extraction, succeeded) {
+                continue;
+            }
             let source_right = run
                 .iter()
                 .map(|glyph| glyph_ink_right(glyph))
@@ -1311,6 +1312,40 @@ fn is_toc_leader_glyph(glyph: &Glyph) -> bool {
         && text
             .chars()
             .all(|ch| matches!(ch, '.' | '·' | '…' | '•' | '⋅' | '‧' | '․'))
+}
+
+/// A title still lives in this page-number's TJ (`RAG` beside `20`).
+/// Blanking the operator to redraw the digit would drop that title.
+fn operator_has_unredrawn_text(
+    run: &[&Glyph],
+    extraction: &Extraction,
+    succeeded: &HashSet<u32>,
+) -> bool {
+    let spans: Vec<Span> = run
+        .iter()
+        .filter_map(|glyph| span_of(&glyph.source))
+        .collect();
+    if spans.is_empty() {
+        return false;
+    }
+    let run_ids: HashSet<u32> = run.iter().map(|glyph| glyph.id).collect();
+    extraction.glyphs.iter().any(|glyph| {
+        if run_ids.contains(&glyph.id)
+            || glyph.unicode.trim().is_empty()
+            || is_toc_leader_glyph(glyph)
+        {
+            return false;
+        }
+        if succeeded.contains(&glyph.id) {
+            return false;
+        }
+        let Some(span) = span_of(&glyph.source) else {
+            return false;
+        };
+        spans.iter().any(|other| {
+            other.object_id == span.object_id && other.start == span.start && other.end == span.end
+        })
+    })
 }
 
 /// Draw one page number so its right edge meets the page's contents column.
@@ -1944,14 +1979,15 @@ fn list_outdent(ink: &[InkLine<'_>], size: f32) -> Option<f32> {
     (size * 0.45..=size * 2.8).contains(&shift).then_some(shift)
 }
 
-fn next_baseline_below(
+/// The next baseline under `y`, and the tallest face on that baseline.
+fn next_line_below(
     extraction: &Extraction,
     page: u32,
     y: f32,
     size: f32,
     own: &[&Glyph],
-) -> Option<f32> {
-    let mut best: Option<f32> = None;
+) -> Option<(f32, f32)> {
+    let mut best_y: Option<f32> = None;
     for glyph in &extraction.glyphs {
         if glyph.page_index != page || own.iter().any(|item| item.id == glyph.id) {
             continue;
@@ -1963,11 +1999,22 @@ fn next_baseline_below(
         if below > y - size * 0.35 {
             continue;
         }
-        if best.is_none_or(|current| below > current) {
-            best = Some(below);
+        if best_y.is_none_or(|current| below > current) {
+            best_y = Some(below);
         }
     }
-    best
+    let best_y = best_y?;
+    let mut next_size = 0.0f32;
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page || own.iter().any(|item| item.id == glyph.id) {
+            continue;
+        }
+        if (glyph.matrix[5] - best_y).abs() > size * 0.45 {
+            continue;
+        }
+        next_size = next_size.max(glyph.font_size);
+    }
+    (next_size > 0.0).then_some((best_y, next_size))
 }
 
 fn layout_segment(
@@ -2139,11 +2186,15 @@ fn layout_segment(
         // A one-line contents title whose Chinese wraps. Keep the second line
         // above the next heading; there is no second source baseline to share.
         let mut lead = leading.max(size * 0.92);
-        if let Some(next) = next_baseline_below(extraction, page, top_y, size, glyphs) {
-            let room = top_y - next - size * 0.9;
-            if room > 0.0 {
-                let step = room / (lines.len() - 1) as f32;
-                lead = lead.min(step).max(size * 0.92);
+        if let Some((next, next_size)) = next_line_below(extraction, page, top_y, size, glyphs) {
+            // Clear the next heading's ascent, this line's descent, and a
+            // 2pt gap. A 0.92em lead sets `天机器人` flush against `1.2`.
+            let clearance = next_size * 0.80 + size * 0.20 + 2.0;
+            let room = top_y - next - clearance;
+            let step = room / (lines.len() - 1) as f32;
+            let packed = step.max(size * 0.72);
+            if packed < lead {
+                lead = packed;
             }
         }
         (0..lines.len())
@@ -3252,8 +3303,9 @@ fn superscript_mask(text: &str) -> Vec<bool> {
             }
             continue;
         }
-        // `第4章`, `第4 章`, and `第1–2章` are body text. `张轩1` has no Han after it.
-        if han_wraps_number(&chars, start, index) {
+        // `第4章`, `第4 章`, `第1–2章`, and `章节3–5` are body text.
+        // `张轩1` has no Han after it and is not a range.
+        if han_wraps_number(&chars, start, index) || chapter_range_digit(&chars, start) {
             continue;
         }
         let prev = start.checked_sub(1).map(|slot| chars[slot]);
@@ -3377,61 +3429,29 @@ fn is_han_char(ch: char) -> bool {
     matches!(ch, '\u{3400}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
 }
 
-/// A digit sitting against a Han character (`第4章`) uses the fullwidth digit
-/// so it matches the body size. Author marks (`张1`) stay ASCII and can rise.
-fn fullwidth_han_digits(text: &str, supers: &[bool], font: &SubsetFont) -> (String, Vec<bool>) {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut mask = Vec::with_capacity(chars.len());
-    for (index, ch) in chars.iter().enumerate() {
-        let sup = supers.get(index).copied().unwrap_or(false);
-        // A multi-digit run stays ASCII. Converting only the digit that
-        // touches Han (`箱761` → `７61`) opens a gap inside the number.
-        if !sup
-            && ch.is_ascii_digit()
-            && !in_multidigit_run(&chars, index)
-            && digit_touches_han(&chars, index)
-        {
-            if let Some(full) = char::from_u32(0xFF10 + (*ch as u32 - '0' as u32)) {
-                if font.glyphs.contains_key(&(full as u32)) {
-                    out.push(full);
-                    mask.push(false);
-                    continue;
-                }
-            }
-        }
-        out.push(*ch);
-        mask.push(sup);
-    }
-    (out, mask)
+/// Digits stay ASCII, including a chapter index against Han (`第4章`).
+/// Mixing fullwidth and ASCII (`第８–10章`) makes the same number two widths.
+/// Author marks (`张1`) stay ASCII and can still rise.
+fn fullwidth_han_digits(text: &str, supers: &[bool], _font: &SubsetFont) -> (String, Vec<bool>) {
+    let mask = text
+        .chars()
+        .enumerate()
+        .map(|(index, _)| supers.get(index).copied().unwrap_or(false))
+        .collect();
+    (text.to_string(), mask)
 }
 
-/// Fullwidth digits to embed so `第4章` can be drawn at body size.
-fn fullwidth_digit_requests(text: &str) -> Vec<char> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::new();
-    for (index, ch) in chars.iter().enumerate() {
-        if !ch.is_ascii_digit()
-            || in_multidigit_run(&chars, index)
-            || !digit_touches_han(&chars, index)
-        {
-            continue;
-        }
-        if let Some(full) = char::from_u32(0xFF10 + (*ch as u32 - '0' as u32)) {
-            out.push(full);
-        }
-    }
-    out
-}
-
-fn in_multidigit_run(chars: &[char], index: usize) -> bool {
-    if (index > 0 && chars[index - 1].is_ascii_digit())
-        || (index + 1 < chars.len() && chars[index + 1].is_ascii_digit())
-    {
-        return true;
-    }
-    // `第8–10章`: the single digit is one number with the multi-digit side.
-    dash_range(chars, index).is_some_and(|(start, end)| range_has_long_group(chars, start, end))
+/// `第8–10章` and `章节3–5`: the digits are one chapter range, not author marks.
+fn chapter_range_digit(chars: &[char], index: usize) -> bool {
+    let Some((start, end)) = dash_range(chars, index) else {
+        return false;
+    };
+    let prev = (0..start)
+        .rev()
+        .map(|slot| chars[slot])
+        .find(|ch| !ch.is_whitespace());
+    let next = chars[end..].iter().copied().find(|ch| !ch.is_whitespace());
+    prev.is_some_and(is_han_char) || next.is_some_and(is_han_char)
 }
 
 /// Digits joined by a dash (`3–5`, `8–10`), including spaces around the dash.
@@ -3490,48 +3510,6 @@ fn dash_range(chars: &[char], index: usize) -> Option<(usize, usize)> {
         start = cursor;
     }
     saw_dash.then_some((start, end))
-}
-
-fn range_has_long_group(chars: &[char], start: usize, end: usize) -> bool {
-    let mut run = 0usize;
-    for ch in chars.iter().take(end).skip(start) {
-        if ch.is_ascii_digit() {
-            run += 1;
-            if run >= 2 {
-                return true;
-            }
-        } else {
-            run = 0;
-        }
-    }
-    false
-}
-
-fn digit_touches_han(chars: &[char], index: usize) -> bool {
-    if han_beside_digit(chars, index) {
-        return true;
-    }
-    // `章节3–5）`: only one side sits on Han. Both digits stay the same width.
-    dash_range(chars, index).is_some_and(|(start, end)| {
-        let prev = (0..start)
-            .rev()
-            .map(|slot| chars[slot])
-            .find(|ch| !ch.is_whitespace());
-        let next = chars[end..].iter().copied().find(|ch| !ch.is_whitespace());
-        prev.is_some_and(is_han_char) || next.is_some_and(is_han_char)
-    })
-}
-
-fn han_beside_digit(chars: &[char], index: usize) -> bool {
-    let prev = (0..index)
-        .rev()
-        .map(|slot| chars[slot])
-        .find(|ch| !ch.is_whitespace());
-    let next = chars[index + 1..]
-        .iter()
-        .copied()
-        .find(|ch| !ch.is_whitespace());
-    prev.is_some_and(is_han_char) || next.is_some_and(is_han_char)
 }
 
 fn split_superscripts(text: &str, lines: &[String], mask: &[bool]) -> Vec<Vec<bool>> {
@@ -4358,9 +4336,9 @@ mod tests {
     }
 
     #[test]
-    fn a_chapter_number_between_han_is_fullwidth_and_not_a_superscript() {
+    fn a_chapter_number_between_han_stays_ascii_and_is_not_a_superscript() {
         let mut glyphs = HashMap::new();
-        for (index, ch) in "第４章".chars().enumerate() {
+        for (index, ch) in "第4章构建".chars().enumerate() {
             glyphs.insert(ch as u32, (index as u16, 1000));
         }
         let font = SubsetFont {
@@ -4370,44 +4348,26 @@ mod tests {
         };
         let mask = superscript_mask("第4章构建");
         let (text, flags) = fullwidth_han_digits("第4章构建", &mask, &font);
-        assert_eq!(text, "第４章构建");
+        assert_eq!(text, "第4章构建");
         assert!(flags.iter().all(|flag| !flag), "{flags:?}");
         let wide = "邮政信箱761©2026至少15%第11–14章20 鲍德温路";
-        let mut digits = font.glyphs.clone();
-        for ch in ['０', '１', '２', '３', '４', '５', '６', '７', '８', '９'] {
-            digits.insert(ch as u32, (9, 1000));
+        let (kept, _) = fullwidth_han_digits(wide, &vec![false; wide.chars().count()], &font);
+        assert_eq!(kept, wide, "digits stay ASCII");
+        for sample in ["第8–10章", "章节3–5）", "第1–2章", "第 4 章"] {
+            let mask = superscript_mask(sample);
+            assert!(
+                mask.iter().all(|flag| !flag),
+                "{sample} raised a digit: {mask:?}"
+            );
+            let (drawn, _) = fullwidth_han_digits(sample, &mask, &font);
+            assert_eq!(drawn, sample, "{sample}");
+            assert!(
+                !drawn
+                    .chars()
+                    .any(|ch| ('\u{FF10}'..='\u{FF19}').contains(&ch)),
+                "{drawn}"
+            );
         }
-        for ch in wide.chars() {
-            digits.entry(ch as u32).or_insert((1, 500));
-        }
-        let wide_font = SubsetFont {
-            bytes: Vec::new(),
-            units_per_em: 1000,
-            glyphs: digits,
-        };
-        let (kept, _) = fullwidth_han_digits(wide, &vec![false; wide.chars().count()], &wide_font);
-        assert_eq!(
-            kept, wide,
-            "a multi-digit run must not mix fullwidth digits"
-        );
-        let (range, _) = fullwidth_han_digits(
-            "第8–10章",
-            &vec![false; "第8–10章".chars().count()],
-            &wide_font,
-        );
-        assert_eq!(range, "第8–10章", "a dash range stays one digit width");
-        let (both, _) = fullwidth_han_digits(
-            "章节3–5）",
-            &vec![false; "章节3–5）".chars().count()],
-            &wide_font,
-        );
-        assert_eq!(both, "章节３–５）");
-        let (pair, _) = fullwidth_han_digits(
-            "第1–2章",
-            &vec![false; "第1–2章".chars().count()],
-            &wide_font,
-        );
-        assert_eq!(pair, "第１–２章");
         let author = superscript_mask("张轩1");
         let (name, name_flags) = fullwidth_han_digits("张轩1", &author, &font);
         assert_eq!(name, "张轩1");
@@ -6182,6 +6142,156 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_title_beside_its_page_number_is_not_blanked() {
+        let bytes = rag_row_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Prompt") {
+                    "提示工程"
+                } else if seg.text.contains("Fine") {
+                    "微调"
+                } else {
+                    seg.text.as_str()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"提示工程微调RAG20"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let text = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(text.contains("提示工程"), "{text}");
+        assert!(text.contains("微调"), "{text}");
+        assert!(text.contains("RAG"), "{text}");
+    }
+
+    #[test]
+    fn a_wrapped_contents_title_clears_the_next_heading() {
+        let bytes = wrapped_title_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("chatbots") {
+                    "基于大语言模型的聊天机器人"
+                } else {
+                    seg.text.as_str()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font = box_ttf(
+            &"基于大语言模型的聊天机器人1.2LangChain"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut cjk: Vec<&Glyph> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().any(is_han_char))
+            .collect();
+        assert!(
+            cjk.len() > 4,
+            "wrapped title missing: {:?}",
+            painted.plain_text()
+        );
+        cjk.sort_by(|left, right| right.matrix[5].total_cmp(&left.matrix[5]));
+        let top = cjk[0].matrix[5];
+        let lower: Vec<_> = cjk
+            .iter()
+            .copied()
+            .filter(|glyph| top - glyph.matrix[5] > 1.0)
+            .collect();
+        assert!(!lower.is_empty(), "title stayed on one line: {top}");
+        let wrap_bottom = lower
+            .iter()
+            .map(|glyph| glyph.bbox[1].min(glyph.bbox[3]))
+            .fold(f32::MAX, f32::min);
+        let heading_top = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "L" || glyph.unicode == "1")
+            .map(|glyph| glyph.bbox[1].max(glyph.bbox[3]))
+            .fold(0.0f32, f32::max);
+        assert!(
+            wrap_bottom > heading_top + 1.0,
+            "wrap bottom {wrap_bottom} does not clear heading top {heading_top}"
+        );
+    }
+
+    #[test]
     fn side_by_side_credits_that_share_an_operator_are_both_translated() {
         let bytes = shared_credit_pdf();
         let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
@@ -6331,6 +6441,69 @@ ET"
 ET"
         .to_vec();
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn rag_row_pdf() -> Vec<u8> {
+        contents_pdf(
+            b"BT /F1 12 Tf \
+1 0 0 1 72 500 Tm [(Prompt engineering) -900 (20)] TJ \
+1 0 0 1 250 500 Tm [(RAG) -700 (20)] TJ \
+1 0 0 1 340 500 Tm [(Fine-tuning) -900 (22)] TJ \
+ET",
+        )
+    }
+
+    fn wrapped_title_pdf() -> Vec<u8> {
+        contents_pdf(
+            b"BT /F1 10 Tf \
+1 0 0 1 72 400 Tm (chatbots) Tj \
+1 0 0 1 72 383 Tm (1.2 LangChain) Tj \
+ET",
+        )
+    }
+
+    fn contents_pdf(content: &[u8]) -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.to_vec()));
         let page = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
