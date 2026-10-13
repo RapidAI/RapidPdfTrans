@@ -6307,6 +6307,12 @@ fn merge_dict(doc: &Document, dst: &mut Dictionary, src: &Dictionary) {
 }
 
 fn append_contents(doc: &mut Document, page_id: ObjectId, stream_id: ObjectId) -> Result<()> {
+    // A page can leave the CTM translated (a table or a form that never
+    // restored `Q`). Content streams share that state, so text appended
+    // afterwards is shifted onto the table. Save the initial CTM, let the
+    // page run, then restore before drawing.
+    let saved = doc.add_object(Stream::new(Dictionary::new(), b"q\n".to_vec()));
+    let restored = doc.add_object(Stream::new(Dictionary::new(), b"Q\n".to_vec()));
     let contents = doc
         .get_dictionary(page_id)
         .ok()
@@ -6315,17 +6321,32 @@ fn append_contents(doc: &mut Document, page_id: ObjectId, stream_id: ObjectId) -
         None => Object::Reference(stream_id),
         Some(Object::Reference(id)) => match doc.get_object(id) {
             Ok(Object::Array(array)) => {
-                let mut array = array.clone();
-                array.push(Object::Reference(stream_id));
-                Object::Array(array)
+                let mut wrapped = vec![Object::Reference(saved)];
+                wrapped.extend(array.iter().cloned());
+                wrapped.push(Object::Reference(restored));
+                wrapped.push(Object::Reference(stream_id));
+                Object::Array(wrapped)
             }
-            _ => Object::Array(vec![Object::Reference(id), Object::Reference(stream_id)]),
+            _ => Object::Array(vec![
+                Object::Reference(saved),
+                Object::Reference(id),
+                Object::Reference(restored),
+                Object::Reference(stream_id),
+            ]),
         },
-        Some(Object::Array(mut array)) => {
-            array.push(Object::Reference(stream_id));
-            Object::Array(array)
+        Some(Object::Array(array)) => {
+            let mut wrapped = vec![Object::Reference(saved)];
+            wrapped.extend(array.iter().cloned());
+            wrapped.push(Object::Reference(restored));
+            wrapped.push(Object::Reference(stream_id));
+            Object::Array(wrapped)
         }
-        Some(other) => Object::Array(vec![other, Object::Reference(stream_id)]),
+        Some(other) => Object::Array(vec![
+            Object::Reference(saved),
+            other,
+            Object::Reference(restored),
+            Object::Reference(stream_id),
+        ]),
     };
     let page = doc
         .get_object_mut(page_id)
@@ -11031,6 +11052,58 @@ ET",
 1 0 0 1 72 383 Tm (1.2 LangChain) Tj \
 ET",
         )
+    }
+
+    #[test]
+    fn a_leaked_page_transform_does_not_move_the_translation() {
+        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc")
+            .is_file()
+        {
+            return;
+        }
+        let bytes = contents_pdf(
+            b"1 0 0 1 80 40 cm\nBT /F1 12 Tf 1 0 0 1 72 500 Tm (This sentence is long enough to count as ordinary body text in the column today.) Tj ET",
+        );
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let source_y = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "T")
+            .map(|glyph| glyph.matrix[5])
+            .unwrap();
+        struct ToChinese;
+        impl Translator for ToChinese {
+            fn complete(&self, _system: &str, user: &str) -> Result<String> {
+                let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+                let translations: Vec<serde_json::Value> = payload["segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|seg| {
+                        serde_json::json!({"id": seg["id"], "text": "这句正文应当留在原来的基线上而不要跟着页面变换走。"})
+                    })
+                    .collect();
+                Ok(serde_json::json!({"translations": translations}).to_string())
+            }
+        }
+        let report =
+            translate_extraction(&mut extraction, &TranslateOptions::default(), &ToChinese)
+                .unwrap();
+        doc.rewrite(&mut extraction, &report, &RewriteOptions::default())
+            .unwrap();
+        let saved = doc.save_bytes().unwrap();
+        let again = PdfDocument::open_bytes(&saved).unwrap().extract();
+        let painted = again
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode.contains('应'))
+            .unwrap_or_else(|| panic!("missing translation: {}", again.plain_text()));
+        assert!(
+            (painted.matrix[5] - source_y).abs() < 3.0,
+            "painted y {} source y {source_y}",
+            painted.matrix[5]
+        );
     }
 
     fn contents_pdf(content: &[u8]) -> Vec<u8> {
