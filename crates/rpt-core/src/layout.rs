@@ -687,6 +687,7 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     let mut sticky = vec![false; chars.len().saturating_sub(1)];
     mark_citations(chars, &mut sticky);
     mark_emails(chars, &mut sticky);
+    mark_urls(chars, &mut sticky);
     mark_dotted_names(chars, &mut sticky);
     mark_latin_name(chars, &mut sticky);
     mark_proper_names(chars, &mut sticky);
@@ -910,6 +911,55 @@ fn mark_emails(chars: &[char], sticky: &mut [bool]) {
         }
         index = right + 1;
     }
+}
+
+/// `https://mng.bz/rZlZ` stays on one line. A line that cannot finish the
+/// URL takes the whole token onto the next line.
+fn mark_urls(chars: &[char], sticky: &mut [bool]) {
+    let lower: String = chars
+        .iter()
+        .map(|ch| {
+            if ch.is_ascii() {
+                ch.to_ascii_lowercase()
+            } else {
+                *ch
+            }
+        })
+        .collect();
+    let mut from = 0usize;
+    while from < lower.len() {
+        let Some(rel) = url_start(&lower[from..]) else {
+            break;
+        };
+        let start = from + rel;
+        let mut end = start;
+        while end < chars.len() && is_url_char(chars[end]) {
+            end += 1;
+        }
+        if end > start + 4 {
+            for boundary in start..end.saturating_sub(1) {
+                if let Some(flag) = sticky.get_mut(boundary) {
+                    *flag = true;
+                }
+            }
+        }
+        from = end.max(start + 1);
+    }
+}
+
+fn url_start(lower: &str) -> Option<usize> {
+    ["https://", "http://", "www."]
+        .into_iter()
+        .filter_map(|needle| lower.find(needle))
+        .min()
+}
+
+fn is_url_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            ':' | '/' | '.' | '-' | '_' | '~' | '?' | '#' | '%' | '&' | '=' | '+' | '@'
+        )
 }
 
 fn is_addr_char(ch: char) -> bool {
@@ -1186,6 +1236,39 @@ mod tests {
             units_per_em: 1000,
             glyphs,
         }
+    }
+
+    #[test]
+    fn a_url_moves_intact_to_the_next_line() {
+        let text = "位于 https://mng.bz/rZlZ 处";
+        let metrics = CjkMeasure::resolve(1.0, 1.60);
+        let fitted = fit_cjk_block(
+            text,
+            10.0,
+            1.0,
+            200.0,
+            0.0,
+            0.0,
+            &uniform_font(text),
+            metrics,
+        )
+        .expect("url paragraph fits");
+        assert!(
+            fitted
+                .0
+                .iter()
+                .any(|line| line.contains("https://mng.bz/rZlZ")),
+            "url was split: {:?}",
+            fitted.0
+        );
+        assert!(
+            !fitted
+                .0
+                .iter()
+                .any(|line| line.contains("https://") && !line.contains("mng.bz/rZlZ")),
+            "scheme was left behind: {:?}",
+            fitted.0
+        );
     }
 
     #[test]
