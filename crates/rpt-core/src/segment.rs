@@ -2330,7 +2330,14 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     if dy < size * 0.7 || dy > size * 1.5 {
         return false;
     }
-    if (upper.size - lower.size).abs() > size * 0.2 {
+    // A broken word stays one paragraph when the next line's math is a
+    // little larger. A heading and a footnote are still different lines.
+    let size_gap = (upper.size - lower.size).abs();
+    if hyphen {
+        if size_gap > size * 0.45 {
+            return false;
+        }
+    } else if size_gap > size * 0.2 {
         return false;
     }
     // A bold or italic run-in is the same paragraph as the regular line under it.
@@ -5939,6 +5946,50 @@ mod tests {
                 item.page_index
             );
         }
+    }
+
+    #[test]
+    fn a_hyphen_still_joins_when_the_next_line_carries_larger_math() {
+        // Inline math on the continuation lifts the line size past the 20%
+        // body tolerance. The broken word is still the next line, not the
+        // lowercase sentence at the top of the next page.
+        let upper = block(
+            0,
+            70.0,
+            548.0,
+            450.0,
+            10.0,
+            "matrices that map queries to a relational em-",
+        );
+        let lower = block(
+            1,
+            70.0,
+            534.0,
+            450.0,
+            12.6,
+            "bedding space, and the head dimension follows.",
+        );
+        let mut jumped = block(
+            2,
+            70.0,
+            750.0,
+            420.0,
+            10.0,
+            "operates on pairs after the page break.",
+        );
+        jumped.page_index = 1;
+        let texts: Vec<_> = segment_glyphs(&[upper, lower, jumped])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("embedding space")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("emoperates")),
+            "{texts:?}"
+        );
     }
 
     #[test]
