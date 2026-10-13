@@ -1782,6 +1782,60 @@
         "single-column"
       ],
       "ci": false
+    },
+    {
+      "id": "arxiv-2606.23344",
+      "url": "https://arxiv.org/pdf/2606.23344.pdf",
+      "source": "arxiv",
+      "title": "RT-DocLayout: Real-Time End-to-End Document Layout Analysis with Reading Order in the Wild",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "6331259d7f49aa70883a881b5aed5fd0cd7b9efead4bb69097f0ec612fda0d9a",
+      "bytes": 7550464,
+      "pages": 16,
+      "tags": [
+        "arxiv",
+        "document-layout",
+        "latex",
+        "reading-order",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2607.01018",
+      "url": "https://arxiv.org/pdf/2607.01018.pdf",
+      "source": "arxiv",
+      "title": "Reading Order Inference for Complex Document Layouts",
+      "license": "arXiv non-exclusive distribution license 1.0 (PDF not committed)",
+      "sha256": "d253c5ffb5e4d7c45967c555c18cf10ecee815b56e5cfe18548f19b909b80029",
+      "bytes": 9773979,
+      "pages": 17,
+      "tags": [
+        "arxiv",
+        "document-layout",
+        "latex",
+        "reading-order",
+        "single-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "arxiv-2608.06146",
+      "url": "https://arxiv.org/pdf/2608.06146.pdf",
+      "source": "arxiv",
+      "title": "PaDoc: Layout-Grounded Parallel Decoding for Document Parsing",
+      "license": "http://creativecommons.org/licenses/by-nc-sa/4.0/ (arXiv; PDF not committed)",
+      "sha256": "ed107d4e87e8fbcf0028c2b1ad593855d5410e302eed7eb25b9a9023b81d5bf7",
+      "bytes": 572784,
+      "pages": 17,
+      "tags": [
+        "arxiv",
+        "document-layout",
+        "latex",
+        "pdf-parsing",
+        "two-column"
+      ],
+      "ci": false
     }
   ]
 }
