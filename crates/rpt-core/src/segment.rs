@@ -202,6 +202,11 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
     } else {
         hard
     };
+    let mut ranked = gaps.clone();
+    ranked.sort_by(|left, right| right.total_cmp(left));
+    let largest = ranked.first().copied().unwrap_or(0.0);
+    let second = ranked.get(1).copied().unwrap_or(0.0);
+    let span = piece_width(&line);
     let mut parts = Vec::new();
     let mut current = vec![line[0]];
     for (index, glyph) in line.iter().copied().enumerate().skip(1) {
@@ -219,7 +224,28 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         let gutter_digit = glyph.font_size <= prev_size * 0.8
             && gap > prev_size * 0.5
             && trailing_gutter_mark(&line[index..], prev_size);
-        if (gap > trigger || gutter_digit) && !current.is_empty() && !crumb {
+        let left_w = piece_width(&current);
+        let right_w = piece_width(&line[index..]);
+        let both_wide = left_w >= size * 12.0 && right_w >= size * 12.0;
+        // A justified space before a few last words (`are used to`) exceeds
+        // the median trigger. The tail is short and the head already fills
+        // the column. A short left token (`Note`) still splits from the line
+        // that follows it.
+        let trailing_word = gap <= hard && right_w < size * 8.0 && left_w >= size * 12.0;
+        let column_gap = (gap > hard || gap > trigger) && !trailing_word;
+        // Two full columns on one baseline can leave only ~1.2em. Em boxes
+        // overlap, so the median gap is 0 and the trigger rises to 1.25em,
+        // just above that gutter. A line wider than one column, with the
+        // gap standing above the next word space, is still two columns.
+        // Character glyphs, not a handful of pre-grouped blocks. A subscript
+        // in the middle of one prose line is three boxes and must stay one line.
+        let tight_column = line.len() >= 40
+            && span >= size * 38.0
+            && both_wide
+            && gap + 0.05 >= largest
+            && gap >= size * 1.0
+            && (second <= 0.05 || gap >= second * 1.45);
+        if (column_gap || tight_column || gutter_digit) && !current.is_empty() && !crumb {
             parts.push(std::mem::take(&mut current));
         }
         current.push(glyph);
@@ -3021,11 +3047,9 @@ mod tests {
             item.advance = [13.0, 0.0];
             glyphs.push(item);
         }
-        let mut id = 2u32;
         let mut cursor = 133.0f32;
-        for ch in "10.1 Title".chars() {
+        for (id, ch) in (2u32..).zip("10.1 Title".chars()) {
             let mut item = glyph(id, cursor, 241.7, &ch.to_string(), false);
-            id += 1;
             item.font_size = 11.0;
             item.matrix = [11.0, 0.0, 0.0, 11.0, cursor, 241.7];
             let width = if ch == ' ' { 3.0 } else { 5.5 };
@@ -3102,6 +3126,64 @@ mod tests {
         assert!(segs
             .iter()
             .any(|seg| seg.text.chars().all(|ch| ch == 'b' || ch == ' ')));
+    }
+
+    #[test]
+    fn a_12pt_gutter_on_a_full_two_column_line_is_split() {
+        // PubLayNet's abstract shares a baseline. The gutter is 12pt and the
+        // em boxes overlap, so the median gap is ~0 and the 1.25em trigger
+        // sits just above the gutter.
+        let mut glyphs = Vec::new();
+        for index in 0..60 {
+            let (start, slot) = if index < 30 {
+                (50.0, index)
+            } else {
+                // Left ink ends at 50+29*8.2+8 = 295.8. Right starts 12pt later.
+                (307.8, index - 30)
+            };
+            let x = start + slot as f32 * 8.2;
+            let mut item = glyph(index as u32, x, 565.0, "a", false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 565.0];
+            item.bbox = [x, 565.0, x + 8.0, 573.0];
+            glyphs.push(item);
+        }
+        let segs = segment_glyphs(&glyphs);
+        assert_eq!(
+            segs.len(),
+            2,
+            "{:?}",
+            segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_wide_word_space_at_the_end_of_one_column_stays_in_the_line() {
+        // `the same document from PubMed Central are used to`: a 14pt
+        // justified space is not a column. The tail is only a few words.
+        let mut glyphs = Vec::new();
+        for index in 0..34 {
+            let (x, text) = if index < 24 {
+                (312.0 + index as f32 * 6.0, "a")
+            } else {
+                // 24 steps land one point past the last ink. The extra 13pt
+                // makes a 14pt word space before the short tail.
+                (312.0 + 24.0 * 6.0 + 13.0 + (index - 24) as f32 * 6.0, "b")
+            };
+            let mut item = glyph(index as u32, x, 174.0, text, false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 174.0];
+            item.bbox = [x, 174.0, x + 5.0, 182.0];
+            glyphs.push(item);
+        }
+        let segs = segment_glyphs(&glyphs);
+        assert_eq!(
+            segs.len(),
+            1,
+            "{:?}",
+            segs.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+        assert!(segs[0].text.contains('b'));
     }
 
     #[test]
