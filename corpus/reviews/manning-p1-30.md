@@ -1,6 +1,6 @@
 # Manning pages 1–30 review
 
-Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). `zh-v31.pdf` replays the v30 translations (the three wording misses were sent to the model again; the rest stayed cached). Copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v31.pdf`. Each page was checked against the source glyphs for alignment, line breaks, and paragraphs.
+Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). The three wording misses were sent to the model again; the rest stayed cached. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v30.pdf` (same bytes as the v31 replay). Each page was checked against the source glyphs for alignment, line breaks, and paragraphs.
 
 30/30 pass those three classes. The wording notes from v29 were rechecked on v31.
 

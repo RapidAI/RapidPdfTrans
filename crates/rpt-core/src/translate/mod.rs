@@ -533,10 +533,10 @@ pub fn replay_extraction(
 /// pieces of one sentence. Both still have a saved translation; a new
 /// sentence does not, and that stays an error.
 fn lookup_saved(source: &str, saved: &HashMap<String, String>) -> Option<String> {
+    // An exact saved sentence is what this replay paints. A flaw still
+    // makes the live checkpoint miss, so the model is asked again there.
     if let Some(hit) = saved.get(source) {
-        if !translation_flaw(source, hit) {
-            return Some(hit.clone());
-        }
+        return Some(hit.clone());
     }
     let trimmed = source.trim();
     if is_digit_index(trimmed) {
@@ -2633,6 +2633,19 @@ mod tests {
             lookup_saved(&source, &saved).is_none(),
             "joined the broken halves"
         );
+    }
+
+    #[test]
+    fn replay_keeps_an_exact_sentence_the_lint_would_retry() {
+        let source = "∗These authors contributed equally. †Corresponding author.";
+        let saved_text = "∗这些作者同等贡献。†通讯作者。";
+        assert!(
+            translation_flaw(source, saved_text),
+            "the extra stop is a flaw"
+        );
+        let mut saved = HashMap::new();
+        saved.insert(source.to_string(), saved_text.to_string());
+        assert_eq!(lookup_saved(source, &saved).as_deref(), Some(saved_text));
     }
 
     #[test]

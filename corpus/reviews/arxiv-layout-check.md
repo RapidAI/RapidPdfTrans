@@ -148,12 +148,14 @@ Side-by-side renders:
 | `A Derivations` and `A.1 From Region-Specific…` did not end the bibliography, so appendices A–E stayed English. | PaDoc |
 | `1 Introduction` in CMBX under the caption was a figure label. A bold Computer Modern title is a section heading. A semibold diagram label is not. | Reading-order paper page 2 |
 | One missing `ℎ` (U+210E), `×`, or `∼` dropped the whole paragraph. Those stand in for `h`, `x`, and `~`. | RT-DocLayout embedding sentence; PaDoc throughput sentence |
+| `N×N` a few points above the words became its own baseline, so `得到` was painted on top of the next line. A short math-script cluster joins the line it sits on. | RT-DocLayout page 5 |
+| `Applying this with A = Y_k` and `Since the conditioning…` share a baseline with subscripts and were kept as formulas. A sentence with a function word still translates; `Lbbox` stays an equation. | PaDoc appendix A |
 
 ## arxiv-2606.23344 RT-DocLayout (two-column)
 
 | page | findings | severity | fixed |
 | --- | --- | --- | --- |
-| 5 | Figure 2’s caption is the full Chinese sentence, including the centered wrap about reading-order prediction. The formula lead-in `where Wq, Wk` stays math. The following prose is Chinese. The embedding sentence is Chinese; `dh` stands in for the Planck constant in `𝑑ℎ`. The line that wraps `得到` is a little tight. | was high | caption bar, caption wrap, page-floor hyphen, Planck stand-in |
+| 5 | Figure 2’s caption is the full Chinese sentence, including the centered wrap about reading-order prediction. The formula lead-in `where Wq, Wk` stays math. The following prose is Chinese. The embedding sentence is Chinese; `dh` stands in for the Planck constant in `𝑑ℎ`. `由此得到的关系矩阵` is one line. | was high | caption bar, caption wrap, page-floor hyphen, Planck stand-in, script baseline |
 | 6 | `顺序损失` on page 5 continues as `作用于 O(N^2)` on this page. Run-in headings `总体目标。` and `掩码分割损失。` are Chinese. | was high | equation no longer blocks the page break; headings are not bylines |
 | 14–16 | Bibliography, English. Page 13 is still body (`4.4 定性分析`). | — | — |
 
@@ -172,5 +174,5 @@ Side-by-side renders:
 | --- | --- | --- | --- |
 | 2 | Body is Chinese, including the OmniDocBench / throughput paragraph (`吞吐量提高了67.4–118%`). Figure labels (`ViT`, `Layout Analysis Model`, `<BOS>`) stay English. | was high (534 glyphs) | `∼` stand-in |
 | 8–9 | Bibliography, English. AAAI puts it before the appendix. | — | — |
-| 10 | Appendix A is Chinese (`A 推导`, `A.1 从区域特定充分性到`, `前缀条件充分性`). Two lead-in lines that share a baseline with subscripts stay with the formula: `Applying this with A = Yk…` and `Since the conditioning…`. | low | lettered appendix; compound title |
+| 10 | Appendix A is Chinese (`A 推导`, `A.1 从区域特定充分性到`, `前缀条件充分性`). The subscript lead-ins are prose: `将其应用于 A = Yk…`, `由于条件 (X,Bk,B<k) 作为元组是相同的`, and `到 (X,B≤k)，这变为`. Display equations stay math. | was low | lettered appendix; compound title; subscript sentences |
 | 11–17 | Appendices B–E are Chinese. Table cells and display formulas stay English. | was high | bibliography stops at `A Derivations` |
