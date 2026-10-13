@@ -245,7 +245,28 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             && gap + 0.05 >= largest
             && gap >= size * 1.0
             && (second <= 0.05 || gap >= second * 1.45);
-        if (column_gap || tight_column || gutter_digit) && !current.is_empty() && !crumb {
+        // A table header on the same baseline as the other column
+        // (`Document layout` | `XML category`) is the second gap, under the
+        // 1.25em trigger. Each cell is still wider than a short word tail.
+        let cell_wide = left_w >= size * 4.0 && right_w >= size * 4.0;
+        let word_median = {
+            let mut ordinary: Vec<f32> = gaps.iter().copied().filter(|gap| *gap < size).collect();
+            if ordinary.is_empty() {
+                0.0
+            } else {
+                ordinary.sort_by(|left, right| left.total_cmp(right));
+                ordinary[ordinary.len() / 2]
+            }
+        };
+        let table_cell = line.len() >= 40
+            && span >= size * 38.0
+            && cell_wide
+            && gap >= size * 1.15
+            && (word_median <= 0.05 || gap >= word_median * 3.0);
+        if (column_gap || tight_column || table_cell || gutter_digit)
+            && !current.is_empty()
+            && !crumb
+        {
             parts.push(std::mem::take(&mut current));
         }
         current.push(glyph);
@@ -3184,6 +3205,98 @@ mod tests {
             segs.iter().map(|s| &s.text).collect::<Vec<_>>()
         );
         assert!(segs[0].text.contains('b'));
+    }
+
+    #[test]
+    fn a_table_header_gap_does_not_merge_the_two_cells() {
+        // PubLayNet Table I: `Document layout` and `XML category` share a
+        // baseline with a 12pt gap at 8pt. The wrapped word `category` sits
+        // under the first cell only.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let paint = |glyphs: &mut Vec<Glyph>, id: &mut u32, text: &str, x: f32, y: f32| {
+            let mut cursor = x;
+            for ch in text.chars() {
+                let mut item = glyph(*id, cursor, y, &ch.to_string(), false);
+                *id += 1;
+                item.font_size = 8.0;
+                item.matrix = [8.0, 0.0, 0.0, 8.0, cursor, y];
+                let width = 4.0;
+                item.bbox = [cursor, y, cursor + width, y + 6.4];
+                item.advance = [width, 0.0];
+                glyphs.push(item);
+                cursor += if ch == ' ' { 3.6 } else { width };
+            }
+        };
+        paint(&mut glyphs, &mut id, "Document", 325.0, 447.7);
+        paint(&mut glyphs, &mut id, "layout", 360.6, 447.7);
+        // 12pt between the two header cells, matching the real table.
+        paint(&mut glyphs, &mut id, "XML", 396.6, 447.7);
+        paint(&mut glyphs, &mut id, "category", 412.0, 447.7);
+        paint(&mut glyphs, &mut id, "category", 325.0, 438.7);
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("XML") && text.contains("Document")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_cell_gap_beside_another_column_still_splits() {
+        // The other column's gutter is the largest gap, so the 1.25em trigger
+        // sits just above the 12pt header cells. Those cells stay apart.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        for index in 0..45 {
+            let x = 40.0 + index as f32 * 5.0;
+            let mut item = glyph(id, x, 447.7, "a", false);
+            id += 1;
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 447.7];
+            item.bbox = [x, 447.7, x + 4.5, 455.7];
+            glyphs.push(item);
+        }
+        let mut cursor = 40.0 + 45.0 * 5.0 + 26.0;
+        for ch in "Document".chars() {
+            let mut item = glyph(id, cursor, 447.7, &ch.to_string(), false);
+            id += 1;
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, cursor, 447.7];
+            item.bbox = [cursor, 447.7, cursor + 5.0, 455.7];
+            glyphs.push(item);
+            cursor += 5.0;
+        }
+        cursor += 3.0;
+        for ch in "layout".chars() {
+            let mut item = glyph(id, cursor, 447.7, &ch.to_string(), false);
+            id += 1;
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, cursor, 447.7];
+            item.bbox = [cursor, 447.7, cursor + 5.0, 455.7];
+            glyphs.push(item);
+            cursor += 5.0;
+        }
+        cursor += 12.0;
+        for ch in "XMLcategory".chars() {
+            let mut item = glyph(id, cursor, 447.7, &ch.to_string(), false);
+            id += 1;
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, cursor, 447.7];
+            item.bbox = [cursor, 447.7, cursor + 5.0, 455.7];
+            glyphs.push(item);
+            cursor += 5.0;
+        }
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("layout") && text.contains("XML")),
+            "{texts:?}"
+        );
     }
 
     #[test]
