@@ -916,42 +916,51 @@ fn mark_emails(chars: &[char], sticky: &mut [bool]) {
 /// `https://mng.bz/rZlZ` stays on one line. A line that cannot finish the
 /// URL takes the whole token onto the next line.
 fn mark_urls(chars: &[char], sticky: &mut [bool]) {
-    let lower: String = chars
-        .iter()
-        .map(|ch| {
-            if ch.is_ascii() {
-                ch.to_ascii_lowercase()
-            } else {
-                *ch
-            }
-        })
-        .collect();
-    let mut from = 0usize;
-    while from < lower.len() {
-        let Some(rel) = url_start(&lower[from..]) else {
-            break;
+    // Indexes are characters. A byte offset slips once CJK precedes the URL
+    // and leaves `https://` free to break from its host.
+    let mut index = 0usize;
+    while index < chars.len() {
+        let Some(len) = url_len_at(chars, index) else {
+            index += 1;
+            continue;
         };
-        let start = from + rel;
-        let mut end = start;
-        while end < chars.len() && is_url_char(chars[end]) {
-            end += 1;
-        }
-        if end > start + 4 {
-            for boundary in start..end.saturating_sub(1) {
+        let end = index + len;
+        if len > 4 {
+            for boundary in index..end.saturating_sub(1) {
                 if let Some(flag) = sticky.get_mut(boundary) {
                     *flag = true;
                 }
             }
         }
-        from = end.max(start + 1);
+        index = end.max(index + 1);
     }
 }
 
-fn url_start(lower: &str) -> Option<usize> {
-    ["https://", "http://", "www."]
-        .into_iter()
-        .filter_map(|needle| lower.find(needle))
-        .min()
+fn url_len_at(chars: &[char], index: usize) -> Option<usize> {
+    let rest = &chars[index..];
+    let prefix = if has_prefix(rest, "https://") {
+        8
+    } else if has_prefix(rest, "http://") {
+        7
+    } else if has_prefix(rest, "www.") {
+        4
+    } else {
+        return None;
+    };
+    let mut end = prefix;
+    while end < rest.len() && is_url_char(rest[end]) {
+        end += 1;
+    }
+    (end > prefix).then_some(end)
+}
+
+fn has_prefix(chars: &[char], needle: &str) -> bool {
+    let needle: Vec<char> = needle.chars().collect();
+    chars.len() >= needle.len()
+        && chars[..needle.len()]
+            .iter()
+            .zip(&needle)
+            .all(|(ch, want)| ch.to_ascii_lowercase() == *want)
 }
 
 fn is_url_char(ch: char) -> bool {
@@ -1229,6 +1238,51 @@ mod tests {
             } else {
                 1000
             };
+            glyphs.insert(ch as u32, (id, advance));
+        }
+        SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        }
+    }
+
+    #[test]
+    fn a_github_url_is_not_left_as_a_scheme() {
+        let text = "获取获取获取获取获取获取获取获取获取获取源代码可以从 Manning 在 www.manning.com/books/ai-agents-and-applications 获取，并在 GitHub 上于 https://mng.bz/rZlZ 镜像";
+        let metrics = CjkMeasure::resolve(0.90, 1.60);
+        let fitted = fit_cjk_block(
+            text,
+            10.0,
+            0.90,
+            372.0,
+            0.0,
+            40.0,
+            &mixed_ascii_font(text),
+            metrics,
+        )
+        .expect("paragraph");
+        assert!(
+            fitted
+                .0
+                .iter()
+                .any(|line| line.contains("https://mng.bz/rZlZ")),
+            "{:?}",
+            fitted.0
+        );
+        let chars: Vec<char> = text.chars().collect();
+        let sticky = sticky_after(&chars);
+        let scheme = chars.iter().position(|ch| *ch == 'h').expect("scheme");
+        assert!(
+            sticky.get(scheme + 7).copied().unwrap_or(false),
+            "CJK before the URL shifted the sticky span off https://"
+        );
+    }
+
+    fn mixed_ascii_font(text: &str) -> SubsetFont {
+        let mut glyphs = std::collections::HashMap::new();
+        for (id, ch) in (1u16..).zip(text.chars()) {
+            let advance = if ch.is_ascii() { 500 } else { 1000 };
             glyphs.insert(ch as u32, (id, advance));
         }
         SubsetFont {
