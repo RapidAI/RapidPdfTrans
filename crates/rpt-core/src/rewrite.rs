@@ -2340,14 +2340,14 @@ fn layout_segment(
     // keeps the wrap and covers the source lines by absorbing them.
     let reflow = column_reflow(level, ink.len(), width, source_size, hanging.is_some());
     let mut absorbed: Vec<u32> = Vec::new();
-    let lines = if bilingual || hanging.is_some() || reflow {
+    // A narrow contents tail (`engines` beside page number `4`) is packed
+    // before a full-column reflow. Reflow would keep `引擎` on the wide line
+    // and leave `4` as the first mark on the next baseline.
+    let lines = if bilingual || hanging.is_some() {
         // A dash item is one paragraph. Spreading it onto the source line
         // breaks leaves each continuation at a different indent.
         lines
     } else if let Some(packed) = pack_narrow_tail(text, size, indent, &spans, font) {
-        // The English tail (`engines`) is only a few ems. Once the Chinese
-        // fits on the wide line, that tail is not a second title. Leaving it
-        // empty keeps `引擎` from sitting on the page number.
         for (index, line) in packed.iter().enumerate() {
             if line.trim().is_empty() {
                 absorbed.extend(ink[index].glyphs.iter().map(|glyph| glyph.id));
@@ -2357,6 +2357,8 @@ fn layout_segment(
             .into_iter()
             .filter(|line| !line.trim().is_empty())
             .collect()
+    } else if reflow {
+        lines
     } else {
         spread_to_lines(lines, ink.len())
     };
@@ -2676,7 +2678,6 @@ struct ColumnBlock {
     source_top: f32,
     source_bottom: f32,
     size: f32,
-    list: bool,
 }
 
 /// A shorter translation used to leave the next item on its English baseline,
@@ -2715,14 +2716,10 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
                 let source_gap = prev.source_bottom - block.source_top;
                 let size = prev.size.max(block.size).max(1.0);
                 let same_column = (prev.left - block.left).abs() < size * 4.0;
-                // Only list items. A contents row and its inline page number
-                // are the same kind of short gap, and pulling them stacks `4`
-                // on `7`.
-                let chained = prev.list
-                    && block.list
-                    && same_column
-                    && source_gap > 0.0
-                    && source_gap < size * 2.6;
+                // A shorter paragraph used to leave the next block on the
+                // English baseline. Same-baseline marks (a page number beside
+                // its title) have no positive source gap, so they are not pulled.
+                let chained = same_column && source_gap > 0.0 && source_gap < size * 2.6;
                 if chained {
                     // `shift` is the pull already applied above this block.
                     // Only a hole that is still open after that pull is closed.
@@ -2782,9 +2779,6 @@ fn column_block(
         return None;
     }
     source_ys.sort_by(|left, right| left.total_cmp(right));
-    let list = indices
-        .iter()
-        .any(|index| crate::segment::starts_with_list_marker(drawn[*index].text.trim()));
     Some(ColumnBlock {
         indices: indices.to_vec(),
         top,
@@ -2793,7 +2787,6 @@ fn column_block(
         source_top: source_ys[source_ys.len() - 1],
         source_bottom: source_ys[0],
         size,
-        list,
     })
 }
 
