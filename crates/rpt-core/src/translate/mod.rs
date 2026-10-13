@@ -541,7 +541,11 @@ fn lookup_saved(source: &str, saved: &HashMap<String, String>) -> Option<String>
     if let Some(peeled) = peel_saved_index(trimmed, saved) {
         return Some(peeled);
     }
-    join_saved_pieces(source, saved)
+    if let Some(joined) = join_saved_pieces(source, saved) {
+        return Some(joined);
+    }
+    // The same glyphs can pick up a different space when two lines become one.
+    join_squashed(source, saved)
 }
 
 fn is_digit_index(text: &str) -> bool {
@@ -632,6 +636,56 @@ fn join_saved_pieces(source: &str, saved: &HashMap<String, String>) -> Option<St
         }
     }
     best.map(|(_, text)| text)
+}
+
+fn squash_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Join saved pieces after collapsing whitespace. A piece shorter than a
+/// short phrase is not a prefix, so page numbers are not stitched into a
+/// paragraph.
+fn join_squashed(source: &str, saved: &HashMap<String, String>) -> Option<String> {
+    let flat = squash_ws(source);
+    let mut pieces: Vec<(String, String)> = saved
+        .iter()
+        .map(|(key, value)| (squash_ws(key), value.clone()))
+        .filter(|(key, _)| !key.is_empty())
+        .collect();
+    pieces.sort_by_key(|piece| std::cmp::Reverse(piece.0.len()));
+    cover_flat(&flat, &pieces)
+}
+
+fn cover_flat(flat: &str, pieces: &[(String, String)]) -> Option<String> {
+    if flat.is_empty() {
+        return Some(String::new());
+    }
+    for (left, left_zh) in pieces {
+        if left.len() > flat.len() || (left.len() < 12 && flat != left) {
+            continue;
+        }
+        if flat == left {
+            return Some(left_zh.trim().to_string());
+        }
+        if !flat.starts_with(left.as_str()) {
+            continue;
+        }
+        if !flat
+            .as_bytes()
+            .get(left.len())
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            continue;
+        }
+        let rest = flat[left.len()..].trim_start();
+        if rest.is_empty() || rest.len() >= flat.len() {
+            continue;
+        }
+        if let Some(right) = cover_flat(rest, pieces) {
+            return Some(splice_saved(left, left_zh, rest, &right));
+        }
+    }
+    None
 }
 
 fn splice_saved(left_src: &str, left_zh: &str, right_src: &str, right_zh: &str) -> String {
@@ -2907,6 +2961,26 @@ mod tests {
         let mut joined = extraction_from_lines(&["alpha like this to separate it."]);
         let report = replay_extraction(&mut joined, &opts, &saved).expect("joined replay");
         assert_eq!(report.segments.len(), 1);
+        assert_eq!(report.segments[0].translated, "甲像这样以便分开。");
+
+        let spaced = vec![
+            TranslatedSegment {
+                id: 6,
+                page_index: 0,
+                glyph_ids: Vec::new(),
+                source: "alpha  like this".into(),
+                translated: "甲像这样".into(),
+            },
+            TranslatedSegment {
+                id: 7,
+                page_index: 0,
+                glyph_ids: Vec::new(),
+                source: "to separate it.".into(),
+                translated: "以便分开。".into(),
+            },
+        ];
+        let mut loose = extraction_from_lines(&["alpha like this to separate it."]);
+        let report = replay_extraction(&mut loose, &opts, &spaced).expect("squashed replay");
         assert_eq!(report.segments[0].translated, "甲像这样以便分开。");
     }
 }
