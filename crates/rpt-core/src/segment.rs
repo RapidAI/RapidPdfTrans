@@ -263,7 +263,16 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             && cell_wide
             && gap >= size * 1.15
             && (word_median <= 0.05 || gap >= word_median * 3.0);
-        if (column_gap || tight_column || table_cell || gutter_digit)
+        // A short note in the other column (`where α is 32.`) can sit just
+        // under the 24pt hard gap, and it is too narrow to be a full column.
+        // Two ems, and clearly the largest gap, is still that gutter.
+        let column_stub = line.len() >= 40
+            && left_w >= size * 18.0
+            && right_w >= size * 4.0
+            && gap >= size * 2.0
+            && gap + 0.05 >= largest
+            && (second <= 0.05 || gap >= second * 2.0);
+        if (column_gap || tight_column || table_cell || column_stub || gutter_digit)
             && !current.is_empty()
             && !crumb
         {
@@ -3315,6 +3324,41 @@ mod tests {
             !texts
                 .iter()
                 .any(|text| text.contains("layout") && text.contains("XML")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_note_in_the_other_column_still_splits() {
+        // LayoutLMv3: the body runs up to a 23.6pt gutter, just under the
+        // 24pt hard gap, then `where α is 32.` The note is not a word tail.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        for index in 0..50 {
+            let x = 54.0 + index as f32 * 4.6;
+            let mut item = glyph(id, x, 473.6, "b", false);
+            id += 1;
+            item.font_size = 9.0;
+            item.matrix = [9.0, 0.0, 0.0, 9.0, x, 473.6];
+            item.bbox = [x, 473.6, x + 4.2, 481.0];
+            glyphs.push(item);
+        }
+        let mut cursor = 54.0 + 50.0 * 4.6 + 23.6;
+        for ch in "whereais32.".chars() {
+            let mut item = glyph(id, cursor, 473.6, &ch.to_string(), false);
+            id += 1;
+            item.font_size = 9.0;
+            item.matrix = [9.0, 0.0, 0.0, 9.0, cursor, 473.6];
+            item.bbox = [cursor, 473.6, cursor + 4.2, 481.0];
+            glyphs.push(item);
+            cursor += 4.5;
+        }
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains('b') && text.contains('w')),
             "{texts:?}"
         );
     }
