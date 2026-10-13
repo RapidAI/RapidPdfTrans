@@ -722,6 +722,167 @@ fn line_meets_edge(line: &PaintLine, edge: &PanelEdge) -> bool {
     line.y + pad >= edge.y0 && line.y - pad <= edge.y1
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ContrastFlag {
+    pub page: u32,
+    pub text: String,
+    pub ratio: f32,
+}
+
+/// WCAG contrast of a fill against a background RGB sample in 0..1.
+/// Text at 18pt or larger uses the 3:1 floor. Smaller text uses 4.5:1.
+pub fn low_contrast_lines(
+    glyphs: &[Glyph],
+    mut sample: impl FnMut(u32, f32, f32) -> Option<[f32; 3]>,
+) -> Vec<ContrastFlag> {
+    let mut flags = Vec::new();
+    for line in paint_lines(glyphs) {
+        let Some(fill) = line_fill(glyphs, &line) else {
+            continue;
+        };
+        let probe_y = line.y + line.size * 1.15;
+        let Some(background) = sample(line.page, line.min_x, probe_y) else {
+            continue;
+        };
+        let ratio = contrast_ratio(&fill, background);
+        let floor = if line.size >= 18.0 { 3.0 } else { 4.5 };
+        if ratio + 0.05 < floor {
+            flags.push(ContrastFlag {
+                page: line.page + 1,
+                text: line.text.clone(),
+                ratio,
+            });
+        }
+    }
+    flags
+}
+
+fn line_fill(glyphs: &[Glyph], line: &PaintLine) -> Option<rpt_core::Color> {
+    glyphs.iter().find_map(|glyph| {
+        if glyph.page_index != line.page || (glyph.matrix[5] - line.y).abs() > 2.0 {
+            return None;
+        }
+        let left = glyph.matrix[4].min(glyph.bbox[0]);
+        if (left - line.min_x).abs() > 1.5 {
+            return None;
+        }
+        Some(glyph.fill_color.clone())
+    })
+}
+
+pub fn contrast_ratio(foreground: &rpt_core::Color, background: [f32; 3]) -> f32 {
+    let Some(rgb) = color_rgb(foreground) else {
+        return 21.0;
+    };
+    let lighter = relative_luminance(rgb).max(relative_luminance(background));
+    let darker = relative_luminance(rgb).min(relative_luminance(background));
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+fn color_rgb(color: &rpt_core::Color) -> Option<[f32; 3]> {
+    match color.space.as_str() {
+        "DeviceGray" => {
+            let g = *color.components.first()?;
+            Some([g, g, g])
+        }
+        "DeviceRGB" if color.components.len() >= 3 => Some([
+            color.components[0],
+            color.components[1],
+            color.components[2],
+        ]),
+        "DeviceCMYK" if color.components.len() >= 4 => {
+            let (c, m, y, k) = (
+                color.components[0],
+                color.components[1],
+                color.components[2],
+                color.components[3],
+            );
+            Some([
+                (1.0 - c) * (1.0 - k),
+                (1.0 - m) * (1.0 - k),
+                (1.0 - y) * (1.0 - k),
+            ])
+        }
+        _ => None,
+    }
+}
+
+fn relative_luminance(rgb: [f32; 3]) -> f32 {
+    let channel = |value: f32| {
+        let value = value.clamp(0.0, 1.0);
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ShortBodyLine {
+    pub page: u32,
+    pub text: String,
+    pub width_ratio: f32,
+}
+
+/// A non-final line of a body paragraph whose ink is under 30% of the
+/// paragraph width. The last line of a paragraph may be short.
+pub fn short_paragraph_lines(glyphs: &[Glyph]) -> Vec<ShortBodyLine> {
+    let lines = paint_lines(glyphs);
+    let mut flags = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let mut end = index + 1;
+        while end < lines.len() && paragraph_continues(&lines[end - 1], &lines[end]) {
+            end += 1;
+        }
+        if end - index >= 2 {
+            let measure = lines[index..end]
+                .iter()
+                .map(|line| line.max_x - line.min_x)
+                .fold(0.0f32, f32::max)
+                .max(1.0);
+            for line in &lines[index..end - 1] {
+                let width = line.max_x - line.min_x;
+                let ratio = width / measure;
+                let letters = line.chars_of_text();
+                if ratio < 0.30 && letters >= 2 && width > 1.0 {
+                    flags.push(ShortBodyLine {
+                        page: line.page + 1,
+                        text: line.text.clone(),
+                        width_ratio: ratio,
+                    });
+                }
+            }
+        }
+        index = end;
+    }
+    flags
+}
+
+fn paragraph_continues(upper: &PaintLine, lower: &PaintLine) -> bool {
+    if upper.page != lower.page {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    if (upper.size - lower.size).abs() > size * 0.25 {
+        return false;
+    }
+    let dy = upper.y - lower.y;
+    if dy < size * 0.8 || dy > size * 2.2 {
+        return false;
+    }
+    let shift = (upper.min_x - lower.min_x).abs();
+    shift <= size * 2.4
+}
+
+impl PaintLine {
+    fn chars_of_text(&self) -> usize {
+        self.text.chars().filter(|ch| !ch.is_whitespace()).count()
+    }
+}
+
 fn is_black(color: &rpt_core::Color) -> bool {
     color.components.iter().all(|component| *component <= 0.02)
         || (color.space == "DeviceGray" && color.components.first().is_some_and(|g| *g <= 0.02))
@@ -953,5 +1114,57 @@ mod tests {
             kind: "image".into(),
         }];
         assert!(paint_boundary_crossings(&bleed_source, &only_bleed).is_empty());
+    }
+
+    #[test]
+    fn black_on_navy_fails_contrast_and_light_gray_does_not() {
+        let navy = [29.0 / 255.0, 48.0 / 255.0, 70.0 / 255.0];
+        let mut dark = span_line(1, 43.0, 330.0, 160.0, "使用 LangChain、");
+        dark.fill_color = Color::black();
+        dark.font_size = 9.5;
+        let mut light = span_line(2, 43.0, 300.0, 160.0, "LangGraph 和 MCP");
+        light.fill_color = Color::cmyk(0.0, 0.0, 0.0, 0.3);
+        light.font_size = 18.0;
+        let mut body = span_line(3, 72.0, 200.0, 300.0, "正文");
+        body.fill_color = Color::black();
+        let flags = low_contrast_lines(&[dark, light.clone(), body], |_page, _x, y| {
+            if y > 250.0 {
+                Some(navy)
+            } else {
+                Some([1.0, 1.0, 1.0])
+            }
+        });
+        assert!(
+            flags.iter().any(|flag| flag.text.contains("LangChain")),
+            "{flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| flag.text.contains("LangGraph")),
+            "{flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| flag.text.contains("正文")),
+            "{flags:?}"
+        );
+        let _ = light;
+    }
+
+    #[test]
+    fn a_short_line_in_the_middle_of_a_paragraph_is_flagged() {
+        let glyphs = vec![
+            span_line(1, 66.0, 400.0, 320.0, "当那些标识出现在书中，并且"),
+            span_line(2, 66.0, 386.0, 54.0, "Manning"),
+            span_line(3, 84.0, 372.0, 300.0, "Publications 知悉了商标声明"),
+            span_line(4, 66.0, 340.0, 80.0, "印刷。"),
+        ];
+        let flags = short_paragraph_lines(&glyphs);
+        assert!(
+            flags.iter().any(|flag| flag.text.contains("Manning")),
+            "{flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| flag.text.contains("印刷")),
+            "{flags:?}"
+        );
     }
 }

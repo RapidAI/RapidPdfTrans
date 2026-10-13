@@ -2187,7 +2187,10 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     }
     let upper_w = upper.right - upper.left;
     let lower_w = lower.right - lower.left;
-    if upper.right + size * 2.2 < lower.right {
+    // A short heading above a full line stays apart. A body wrap can end
+    // early by a whole word (`and Manning` / `Publications was…`) and is
+    // still the same paragraph.
+    if upper.right + size * 2.2 < lower.right && !wrapped_body_continuation(upper, lower, upper_w) {
         return false;
     }
     // A short tail that does not finish a sentence is a new item (`20 Baldwin`).
@@ -2249,8 +2252,57 @@ fn toc_same_indent_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool 
     dy >= size * 0.7 && dy <= size * 1.5 && (upper.size - lower.size).abs() <= size * 0.2
 }
 
-/// Both lines are well under the page's column measure, and the next one
-/// starts a new item (`Manning Publications`, `20 Baldwin Road`).
+/// The upper line is a wrapped body line, not a heading or a contents title.
+/// `visit` / `www…` continues in lowercase. `Manning` / `Publications`
+/// continues a proper name.
+fn wrapped_body_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>, upper_w: f32) -> bool {
+    if sentence_end(upper.text.trim_end()) {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    // A contents title is about twenty ems. A wrapped body line is longer.
+    if upper_w < size * 26.0 {
+        return false;
+    }
+    let next = lower.text.trim_start();
+    if next.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+        return true;
+    }
+    ends_with_capitalized_word(&upper.text)
+        && starts_with_capitalized_word(next)
+        && upper.text.chars().any(|ch| ch.is_ascii_lowercase())
+}
+
+fn ends_with_capitalized_word(text: &str) -> bool {
+    text.split_whitespace()
+        .last()
+        .is_some_and(is_capitalized_word)
+}
+
+fn starts_with_capitalized_word(text: &str) -> bool {
+    text.split_whitespace()
+        .next()
+        .is_some_and(is_capitalized_word)
+}
+
+fn is_capitalized_word(token: &str) -> bool {
+    let token =
+        token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' | ')' | '(' | '“' | '”'));
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    let rest: Vec<char> = chars.collect();
+    !rest.is_empty()
+        && rest.iter().any(|ch| ch.is_ascii_lowercase())
+        && rest
+            .iter()
+            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '-' | '\'' | '’'))
+}
+
 /// A bullet, dash, or dingbat at the start of a list item.
 pub(crate) fn starts_with_list_marker(text: &str) -> bool {
     let trimmed = text.trim_start();
@@ -2287,6 +2339,8 @@ fn hanging_list_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> 
     (size * 0.45..=size * 2.8).contains(&shift)
 }
 
+/// Both lines are well under the page's column measure, and the next one
+/// starts a new item (`Manning Publications`, `20 Baldwin Road`).
 fn stacked_short_items(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: f32) -> bool {
     let size = upper.size.max(lower.size).max(1.0);
     if measure < size * 18.0 {
@@ -6318,6 +6372,94 @@ mod tests {
                 .any(|text| text.contains("Chapter 4") && !text.contains("Chapter 3")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn a_name_split_across_body_lines_stays_one_paragraph() {
+        let glyphs = vec![
+            block(
+                0,
+                66.0,
+                405.0,
+                363.0,
+                9.0,
+                "Many of the designations used by manufacturers and sellers to distinguish their products are",
+            ),
+            block(
+                1,
+                66.0,
+                394.0,
+                329.0,
+                9.0,
+                "claimed as trademarks. Where those designations appear in the book, and Manning",
+            ),
+            block(
+                2,
+                66.0,
+                383.0,
+                369.0,
+                9.0,
+                "Publications was aware of a trademark claim, the designations have been printed in initial caps",
+            ),
+            block(3, 66.0, 372.0, 42.0, 9.0, "or all caps."),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains("and Manning Publications was aware"),
+            "{texts:?}"
+        );
+        assert!(texts[0].contains("or all caps."), "{texts:?}");
+    }
+
+    #[test]
+    fn a_contents_title_shorter_than_the_next_stays_apart() {
+        let glyphs = vec![
+            block(
+                0,
+                177.0,
+                360.0,
+                221.0,
+                10.0,
+                "Setting up the chain to generate a step-back question",
+            ),
+            block(
+                1,
+                177.0,
+                347.0,
+                264.0,
+                10.0,
+                "Incorporating step-back question generation into the RAG chain",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+    }
+
+    #[test]
+    fn a_finished_sentence_above_a_longer_line_stays_apart() {
+        let glyphs = vec![
+            block(0, 66.0, 400.0, 180.0, 9.0, "or all caps."),
+            block(
+                1,
+                66.0,
+                389.0,
+                360.0,
+                9.0,
+                "Recognizing the importance of preserving what has been written, it is policy.",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
     }
 
     #[test]

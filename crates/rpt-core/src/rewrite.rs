@@ -3674,6 +3674,11 @@ fn layout_segment(
     let covered = substitute_covered(text, font);
     let raw_mask = superscript_mask(&covered);
     let (normalized, body_mask) = fullwidth_han_digits(&covered, &raw_mask, font);
+    let (normalized, body_mask) = if font.glyphs.contains_key(&0x20) {
+        crate::layout::space_cjk_latin_mask(&normalized, &body_mask)
+    } else {
+        (normalized, body_mask)
+    };
     let text = normalized.as_str();
     if text
         .chars()
@@ -5278,6 +5283,14 @@ fn color_ops(color: &Color) -> String {
         )
     } else if color.space == "DeviceGray" && !color.components.is_empty() {
         format!("{} g", pdf_num(color.components[0]))
+    } else if color.space == "DeviceCMYK" && color.components.len() >= 4 {
+        format!(
+            "{} {} {} {} k",
+            pdf_num(color.components[0]),
+            pdf_num(color.components[1]),
+            pdf_num(color.components[2]),
+            pdf_num(color.components[3])
+        )
     } else {
         "0 g".into()
     }
@@ -6185,6 +6198,12 @@ mod tests {
                 resource_name: Some("F1".into()),
             },
         }
+    }
+
+    #[test]
+    fn cmyk_fill_is_written_as_cmyk() {
+        let ops = color_ops(&Color::cmyk(0.0, 0.0, 0.0, 0.3));
+        assert_eq!(ops, "0.000 0.000 0.000 0.300 k");
     }
 
     #[test]

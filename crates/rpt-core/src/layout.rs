@@ -339,13 +339,21 @@ pub(crate) fn fit_cjk_block(
     // line. Wrapping them at the 0.80 floor leaves a one-character line.
     let chars_n = text.chars().filter(|ch| !ch.is_whitespace()).count();
     let compact = chars_n <= 4;
-    // A cover subtitle or author line is one large source line. Shrink it
-    // onto that line before wrapping a name or a product list across the
-    // artwork. The navy panel is narrower than the English ink, so the floor
-    // sits under the 0.62 body ratio. A 10pt contents title still wraps at 0.80.
-    let display = available <= 0.5 && source_size >= 16.0 && chars_n <= 40;
-    let floor_ratio = if display {
-        0.48
+    // A whole-line personal name cannot break. Shrink it onto one line.
+    // Other display text (a cover subtitle) stays near the source size and
+    // may use a second line. Nine-point type on a dark panel cannot be read.
+    let name_chars: Vec<char> = text.chars().collect();
+    let name_sticky = sticky_after(&name_chars);
+    let unbreakable = name_chars.len() > 1
+        && name_sticky.len() + 1 == name_chars.len()
+        && name_sticky.iter().all(|flag| *flag);
+    let display = !unbreakable && available <= 0.5 && source_size >= 16.0 && chars_n <= 40;
+    let floor_ratio = if unbreakable {
+        // The name stays one line. 0.50 still clears the panel; a split
+        // `R` / `oberto` is worse than a slightly smaller line.
+        0.50
+    } else if display {
+        0.80
     } else if compact && available <= 0.5 {
         0.62
     } else if available <= 0.5 && width <= source_size * 16.0 {
@@ -355,6 +363,10 @@ pub(crate) fn fit_cjk_block(
     };
     let floor = (source_size * floor_ratio).min(start);
     let mut size = start;
+    // The first two-line fit near the source size. A one-line fit found
+    // later still wins. Shrinking a subtitle to one unreadably small line
+    // does not.
+    let mut kept_display: Option<(Vec<String>, f32, f32, f32)> = None;
     loop {
         let indent = size * indent_ems;
         let first_width = (width - indent).max(size * 0.5);
@@ -377,6 +389,9 @@ pub(crate) fn fit_cjk_block(
             fit_measure(line, size, font) <= limit + 1.0
         });
         let single_source = available <= 0.5;
+        if display && within && lines.len() == 2 && kept_display.is_none() {
+            kept_display = Some((lines.clone(), size, size * 1.05, indent));
+        }
         if within && (!single_source || lines.len() == 1) {
             if gaps == 0 {
                 return Some((lines, size, size * metrics.leading_ratio, indent));
@@ -389,6 +404,9 @@ pub(crate) fn fit_cjk_block(
             }
         }
         if size <= floor + 0.01 {
+            if let Some(saved) = kept_display {
+                return Some(saved);
+            }
             if display && within && (1..=3).contains(&lines.len()) {
                 let lead = if lines.len() == 1 {
                     size * metrics.leading_ratio
@@ -613,6 +631,7 @@ pub(crate) fn wrap_text(
             while end > start + 1 && !can_break_at(&chars, &sticky, end) {
                 end -= 1;
             }
+            end = prefer_enumeration_break(&chars, &sticky, start, end);
         }
         let mut line_end = end;
         while line_end > start && chars[line_end - 1].is_whitespace() {
@@ -670,7 +689,120 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     mark_emails(chars, &mut sticky);
     mark_dotted_names(chars, &mut sticky);
     mark_latin_name(chars, &mut sticky);
+    mark_proper_names(chars, &mut sticky);
     sticky
+}
+
+/// `Manning Publications` is one name. It may move to the next line, but
+/// the two words do not split and leave `Manning` alone.
+fn mark_proper_names(chars: &[char], sticky: &mut [bool]) {
+    let mut index = 0;
+    while index < chars.len() {
+        let Some(mut end) = capitalized_word(chars, index) else {
+            index += 1;
+            continue;
+        };
+        let start = index;
+        let mut words = 1usize;
+        loop {
+            let mut gap = end;
+            while gap < chars.len() && chars[gap].is_whitespace() {
+                gap += 1;
+            }
+            if gap == end || gap - end > 1 {
+                break;
+            }
+            let Some(next) = capitalized_word(chars, gap) else {
+                break;
+            };
+            words += 1;
+            end = next;
+        }
+        if words >= 2 {
+            for boundary in start..end.saturating_sub(1) {
+                if let Some(flag) = sticky.get_mut(boundary) {
+                    *flag = true;
+                }
+            }
+        }
+        index = end.max(index + 1);
+    }
+}
+
+fn capitalized_word(chars: &[char], start: usize) -> Option<usize> {
+    let first = chars.get(start).copied()?;
+    if !first.is_ascii_uppercase() {
+        return None;
+    }
+    let mut end = start + 1;
+    let mut lower = false;
+    while end < chars.len() {
+        let ch = chars[end];
+        if ch.is_ascii_lowercase() {
+            lower = true;
+            end += 1;
+            continue;
+        }
+        if ch.is_ascii_uppercase() {
+            end += 1;
+            continue;
+        }
+        if matches!(ch, '-' | '\'' | '’')
+            && chars
+                .get(end + 1)
+                .is_some_and(|next| next.is_ascii_alphabetic())
+        {
+            end += 1;
+            continue;
+        }
+        break;
+    }
+    if end - start >= 2 && (lower || chars[start..end].iter().all(|ch| ch.is_ascii_uppercase())) {
+        Some(end)
+    } else {
+        None
+    }
+}
+
+/// `使用 LangChain、LangGraph 和 MCP` breaks after `、`, not before `和`.
+fn prefer_enumeration_break(chars: &[char], sticky: &[bool], start: usize, end: usize) -> usize {
+    let mut look = end;
+    while look < chars.len() && chars[look].is_whitespace() {
+        look += 1;
+    }
+    if !matches!(chars.get(look).copied(), Some('和' | '与' | '及')) {
+        return end;
+    }
+    let mut alt = end;
+    while alt > start + 1 {
+        alt -= 1;
+        if chars[alt - 1] == '、' && can_break_at(chars, sticky, alt) && alt - start >= 4 {
+            return alt;
+        }
+    }
+    end
+}
+
+/// A missing space between Latin and CJK (`Publications知悉了`) is inserted.
+/// Digits stay glued (`第4章`, `15%`). Superscript marks stay on their character.
+pub(crate) fn space_cjk_latin_mask(text: &str, mask: &[bool]) -> (String, Vec<bool>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut out_mask = Vec::with_capacity(chars.len() + 4);
+    for (index, ch) in chars.iter().enumerate() {
+        if index > 0 && cjk_latin_boundary(chars[index - 1], *ch) {
+            out.push(' ');
+            out_mask.push(false);
+        }
+        out.push(*ch);
+        out_mask.push(mask.get(index).copied().unwrap_or(false));
+    }
+    (out, out_mask)
+}
+
+fn cjk_latin_boundary(prev: char, next: char) -> bool {
+    (is_cjk_body(prev) && next.is_ascii_alphabetic())
+        || (prev.is_ascii_alphabetic() && is_cjk_body(next))
 }
 
 /// `罗伯托·因凡特` is one name. A break after the dot leaves `凡特` alone.
@@ -1057,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cover_subtitle_stays_on_one_line() {
+    fn a_cover_subtitle_breaks_after_the_enumeration_comma() {
         let metrics = CjkMeasure::resolve(0.90, 1.60);
         let text = "使用 LangChain、LangGraph 和 MCP";
         let fitted = fit_cjk_block(
@@ -1071,34 +1203,29 @@ mod tests {
             metrics,
         )
         .expect("subtitle fits the panel");
-        assert_eq!(fitted.0.len(), 1, "{:?}", fitted.0);
+        assert_eq!(fitted.0.len(), 2, "{:?}", fitted.0);
         assert!(
-            fitted.1 + 0.05 >= 18.5 * 0.48,
-            "subtitle shrunk below the display floor: {}",
+            fitted.1 + 0.05 >= 18.5 * 0.80,
+            "subtitle shrunk below a readable size: {}",
             fitted.1
         );
-        assert!(fitted.0[0].contains("LangChain"));
-        assert!(fitted.0[0].contains("LangGraph"));
-        assert!(fitted.0[0].contains("MCP"));
-
-        let wrapped = fit_cjk_block(text, 18.5, 0.96, 90.0, 0.0, 0.0, &cover_font(text), metrics)
-            .expect("a narrow panel still breaks on a phrase");
-        assert!(wrapped.0.len() >= 2, "{:?}", wrapped.0);
+        assert!(fitted.0[0].ends_with('、'), "{:?}", fitted.0);
         assert!(
-            wrapped.0.iter().any(|line| line.ends_with('、')),
+            fitted.0[1].contains("LangGraph") && fitted.0[1].contains("MCP"),
             "{:?}",
-            wrapped.0
+            fitted.0
         );
-        for line in &wrapped.0 {
-            assert!(
-                !line.contains("LangCha") || line.contains("LangChain"),
-                "{line}"
-            );
-            assert!(
-                !line.contains("LangGrap") || line.contains("LangGraph"),
-                "{line}"
-            );
-        }
+        assert!(!fitted.0[1].starts_with('和'), "{:?}", fitted.0);
+
+        let forced = wrap_text(text, 12.0, 170.0, 170.0, &cover_font(text)).expect("wrap");
+        assert!(
+            forced.iter().any(|line| line.ends_with('、')),
+            "a wide line must still break after the comma, not before 和: {forced:?}"
+        );
+        assert!(
+            !forced.iter().any(|line| line.starts_with('和')),
+            "{forced:?}"
+        );
 
         let name = "Roberto Infante";
         let author = fit_cjk_block(
@@ -1129,6 +1256,24 @@ mod tests {
             narrow.as_ref().is_none_or(|fitted| fitted.0.len() == 1),
             "{narrow:?}"
         );
+
+        let prose = "并且 Manning Publications 知悉了商标声明";
+        let lines = wrap_text(prose, 10.0, 80.0, 220.0, &uniform_font(prose)).expect("name");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Manning Publications")),
+            "the name should stay on one line: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.trim() == "Manning"),
+            "{lines:?}"
+        );
+        assert_eq!(
+            space_cjk_latin_mask("Publications知悉了商标声明，并且Manning", &[]).0,
+            "Publications 知悉了商标声明，并且 Manning"
+        );
+        assert_eq!(space_cjk_latin_mask("第4章与15%", &[]).0, "第4章与15%");
     }
 
     #[test]
