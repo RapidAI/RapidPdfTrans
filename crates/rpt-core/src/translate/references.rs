@@ -567,7 +567,16 @@ fn starts_bracket_marker(text: &str) -> bool {
     } else {
         return false;
     };
-    after.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    let digits = after.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    // [1] and [12, 3]. An ORCID `[0000-0002-3723-6960]` is four digits
+    // and must not open a bibliography.
+    if digits == 0 || digits > 3 {
+        return false;
+    }
+    matches!(
+        after.chars().nth(digits),
+        Some(']' | '］' | ',' | '，' | '-' | '–')
+    )
 }
 
 fn starts_numbered_marker(text: &str) -> bool {
@@ -1065,5 +1074,57 @@ mod tests {
         );
         let ids = reference_glyph_ids(&glyphs);
         assert!(ids.is_empty(), "{}", text_of(&glyphs, &ids));
+    }
+
+    #[test]
+    fn an_orcid_does_not_swallow_the_introduction() {
+        // Two `[0000-0002-…]` author ids used to look like `[1]` entries and
+        // keep every paragraph after the byline until the next heading.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            200.0,
+            700.0,
+            "[0000-0002-3723-6960]",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            360.0,
+            700.0,
+            "[0000-0001-8513-3491]",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            640.0,
+            "The introduction explains the method and the data.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            500.0,
+            "[1] Smith, A. (2020). Attention matters.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            480.0,
+            "[2] Jones, B. (2019). Layout analysis.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(!kept.contains("introduction"), "{kept}");
+        assert!(kept.contains("Smith"), "{kept}");
     }
 }
