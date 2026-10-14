@@ -1,6 +1,6 @@
 # Manning pages 1–30 review
 
-Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is the v30 cache. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v35.pdf`. Contents pages (PDF pages 8–17) were compared with the source geometry, not with a right-aligned column.
+Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is the v30 cache. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v36.pdf`. Contents pages (PDF pages 8–17) were compared with the source geometry, not with a right-aligned column.
 
 30/30 still pass alignment, line breaks, and paragraphs. Coverage is complete (`english_body` 0; kept 2151, rewritten 35509, total 37660).
 
@@ -19,6 +19,11 @@ The source does not right-align page numbers. Front matter, chapters, and sectio
 | 27pt chapter index glued to the section under it, or to the bullet row above | p12 `■5`, p14–p16 `10`–`13` | A large numeral is its own line, and it is not a bullet entry. |
 | One sentence split by a 0.0002pt baseline, leaving a hole | p25 | A same-baseline return to the left margin stays one line. |
 | `https://` left at the end of a line | p25 | A URL is one token. The index is by character, so CJK before the URL does not shift it. |
+| Brief-contents part 3 had no leader dots | p8 `第 3 部分` / `119` | Dots that share an operator only with the page number are redrawn with that number. |
+| `Text 摘要` | p11 under 2.4 | An echoed contents word takes the Han gloss the other short titles share, so the join paints `文本摘要`. |
+| A wrapped sub-entry opened with `■` left of the column | p10–p17 bullet runs | The separator stays at the end of the previous line. Every line of the block starts at the source sub-entry x. |
+| Sub-entry blocks on one page did not share a left edge | p10 1.1/1.2/1.4, p11 2.1/2.3/2.4 | Blocks within 2.2em snap to one source indent (p10 177.2, p11 186.2). Front matter stays further left. |
+| Section gaps tightened or loosened per block | contents | Lines use the source baselines (wrap 12pt, section gap ~16pt). A taller or shorter block shifts every following row by the same unused leading, including the 27pt chapter index. |
 
 ## Per page
 
@@ -55,17 +60,15 @@ The source does not right-align page numbers. Front matter, chapters, and sectio
 | 29 | Pass | Part opener stacks `第 1` / `部分` the way the source does. |
 | 30 | Pass | Running head `2` and `章节` are separate. Chapter 2 has not started its body yet. |
 
-## v35 contents check
+## v36 contents check
 
-Pages 8–17 were measured against the source word boxes.
+Pages 8–17 were measured against the source word boxes and read beside the source pages.
 
-- Part rows keep leaders and the source number edge (brief contents 453.1–453.2; detailed contents 465.3 or 474.2 by page). No stray `S` sits in the part 1 dots. The small-caps `S` in `LLMS` stays with the title.
-- Section indexes occupy the source index x (p10 138.9, p11 147.9). The dot in `1.1` is its own glyph, so the title column is the source title x (p10 165.2, p11 174.2), not a word space after the index. Index and title share one baseline and one size (11.2). Closing a hole above a section moves both draws together.
-- Page numbers on front matter, chapters, and sections sit one gap after the title. `3.1`’s `56` is beside the shorter Chinese title, not at the English edge 474.
-- Sub-entry rows use the source left per page (177.2 on even contents pages, 186.2 on odd). Continuation lines use that same x. Wrap stays inside the source run’s ink, short of the part-row edge.
-- `使用 LangChain 的 PromptTemplate 33` is one line. A title wraps only when that column is full. `LangChain的核心对象模型 15` is one line because the Chinese title fits; the English source wraps.
-
-Brief-contents part 3 (`第 3 部分 问答聊天机器人` / `119`) still has a gap where the source draws leader dots. That gap is the same in v34. The number remains at the source edge 453.1.
+- No contents line from page 10 on starts with `■`. The separator sits between items or at the end of the line it follows. Continuation lines start at the same x as the first line of the block (p10 177.2, p11 186.2, and the same pair on later even/odd pages).
+- Section-to-sub-entry gap is 16.9pt and the wrap step is 12.0pt, matching the source. A block that uses fewer lines than the English (p11 `3.1`) pulls the following rows up by that unused leading, so `3.2` still sits 16pt under the last painted line. The 27pt chapter index moves with those rows (`3` with `使用 LangChain 总结文本`, `4` with `构建研究摘要引擎`).
+- `文本摘要` replaces `Text 摘要`. `问答阶段` replaces the echoed `stage`.
+- Part rows keep leaders, including brief-contents part 3 (`第 3 部分 问答聊天机器人` …… `119`). Dot chunks that were not in the redrawn group are blanked, so a shifted part row does not leave a second run of dots on the English baseline.
+- Section indexes, inline page numbers, and `使用 LangChain 的 PromptTemplate 33` on one line are unchanged from v35.
 
 ## v32 contents check
 

@@ -457,6 +457,18 @@ pub fn rewrite_translation(
     ));
     close_column_holes(&mut drawn, extraction, &by_id);
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
+    // A 27pt chapter index is kept in the source font (`(3) Tj`). The rows
+    // around it move with a taller or shorter sub-entry, and the numeral has
+    // to move by the same amount or it lands on the next section.
+    shift_kept_chapter_indexes(
+        &mut drawn,
+        &mut succeeded,
+        &mut keep,
+        &subentry_shifts,
+        extraction,
+        &embedded,
+        &font_styles,
+    );
     // A contents title can move up to close a hole. An inline page number
     // that was redrawn on the old baseline would otherwise sit alone.
     seat_inline_page_numbers(&mut drawn, extraction, &by_id);
@@ -1501,6 +1513,7 @@ fn commit_toc_operators(
             group.push(glyph);
         }
     }
+    let mut replaced_baselines: Vec<(u32, f32, f32)> = Vec::new();
     for group in &leader_groups {
         let Some((resource, font, _)) =
             font_for_page(group[0].page_index, group[0], embedded, drawn, font_styles)
@@ -1508,6 +1521,7 @@ fn commit_toc_operators(
             continue;
         };
         if let Some(item) = place_leader_run(group, drawn, extraction, toc_redraw, font, resource) {
+            replaced_baselines.push((item.page, item.y, item.size));
             succeeded.extend(item.glyph_ids.iter().copied());
             restored.push(item);
         } else {
@@ -1517,6 +1531,28 @@ fn commit_toc_operators(
                     restored.push(item);
                 }
             }
+        }
+    }
+    // A dot run can be several Tj chunks. The replacement paints one line.
+    // Chunks that were not in that group still sit on the English baseline
+    // after the row moves.
+    for glyph in &extraction.glyphs {
+        if !is_toc_leader_glyph(glyph) {
+            continue;
+        }
+        let covered = replaced_baselines.iter().any(|(page, y, size)| {
+            glyph.page_index == *page && (glyph.matrix[5] - *y).abs() <= (*size).max(1.0) * 0.45
+        });
+        if covered {
+            keep.remove(&glyph.id);
+            succeeded.insert(glyph.id);
+        }
+    }
+    // These marks were `kept` as toc, then drawn again. Leave them in `keep`
+    // and the source dots stay under the shifted row.
+    for item in &restored {
+        for id in &item.glyph_ids {
+            keep.remove(id);
         }
     }
     drawn.extend(restored);
@@ -2793,7 +2829,7 @@ fn reflow_inline_subentries(
                 font_styles,
             ));
         }
-        if extra > 0.4 {
+        if extra.abs() > 0.4 {
             shifts.push(SubentryShift {
                 page: run.page,
                 below_y: source_bottom,
@@ -2806,17 +2842,84 @@ fn reflow_inline_subentries(
 }
 
 fn apply_subentry_shifts(drawn: &mut [Drawn], shifts: &[SubentryShift]) {
-    for shift in shifts {
-        for line in drawn.iter_mut() {
-            if line.page != shift.page || line.y >= shift.below_y - 0.5 {
+    // Membership uses the source baseline. An earlier lift must not carry a
+    // row above a later block's `below_y` and make that block skip it, or the
+    // section title and its sub-entry move by different amounts.
+    let original: Vec<f32> = drawn.iter().map(|line| line.y).collect();
+    for (index, line) in drawn.iter_mut().enumerate() {
+        let y0 = original[index];
+        let mut delta = 0.0f32;
+        for shift in shifts {
+            if shift.page != line.page || y0 >= shift.below_y - 0.5 {
                 continue;
             }
             if line.glyph_ids.iter().any(|id| shift.own_ids.contains(id)) {
                 continue;
             }
-            line.y -= shift.delta;
+            delta += shift.delta;
         }
+        line.y -= delta;
     }
+}
+
+fn subentry_delta_at(shifts: &[SubentryShift], page: u32, y: f32) -> f32 {
+    shifts
+        .iter()
+        .filter(|shift| shift.page == page && y < shift.below_y - 0.5)
+        .map(|shift| shift.delta)
+        .sum()
+}
+
+/// Chapter indexes stay in the source operator when the translation is the
+/// same digit. `apply_subentry_shifts` only sees redrawn lines, so a shorter
+/// block used to slide the title up and leave `3` on the English baseline.
+fn shift_kept_chapter_indexes(
+    drawn: &mut Vec<Drawn>,
+    succeeded: &mut HashSet<u32>,
+    keep: &mut HashMap<u32, String>,
+    shifts: &[SubentryShift],
+    extraction: &Extraction,
+    embedded: &[(String, SubsetFont)],
+    font_styles: &HashMap<String, FaceStyle>,
+) {
+    if shifts.is_empty() {
+        return;
+    }
+    let painted: HashSet<u32> = drawn
+        .iter()
+        .flat_map(|item| item.glyph_ids.iter().copied())
+        .collect();
+    let mut extra = Vec::new();
+    for glyph in &extraction.glyphs {
+        if painted.contains(&glyph.id) || succeeded.contains(&glyph.id) {
+            continue;
+        }
+        let text = glyph.unicode.trim();
+        if glyph.font_size < 16.0
+            || text.is_empty()
+            || text.len() > 3
+            || !text.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let delta = subentry_delta_at(shifts, glyph.page_index, glyph.matrix[5]);
+        if delta.abs() <= 0.4 {
+            continue;
+        }
+        let Some((resource, font, skew)) =
+            font_for_page(glyph.page_index, glyph, embedded, drawn, font_styles)
+        else {
+            continue;
+        };
+        let Some(mut item) = draw_toc_glyph(glyph, font, resource, skew) else {
+            continue;
+        };
+        item.y -= delta;
+        keep.remove(&glyph.id);
+        succeeded.insert(glyph.id);
+        extra.push(item);
+    }
+    drawn.extend(extra);
 }
 
 fn find_subentry_runs(
@@ -2945,7 +3048,10 @@ fn share_subentry_column(runs: &mut [SubentryRun]) {
             let size = runs[index].size.max(1.0);
             let join = clusters.last().is_some_and(|cluster| {
                 let anchor = runs[cluster[0]].left;
-                (left - anchor).abs() <= size * 1.5
+                // Sub-entry blocks on one page share the source indent.
+                // Front matter sits more than two ems further left and stays
+                // its own column.
+                (left - anchor).abs() <= size * 2.2
             });
             if join {
                 clusters.last_mut().unwrap().push(index);
@@ -3955,22 +4061,17 @@ fn layout_subentry_flow(
         let first_width = piece_width(&title_lines, item, size, font, page_gap);
         if index > 0 {
             let lead = bullet_gap + bullet_w + bullet_gap;
-            if used > 0.0 && used + lead + first_width > width + 0.4 {
-                // The marker stays on the title's line. A bullet alone is a
-                // one-character row and collides with the next heading.
+            let fits = used > 0.0 && used + lead + first_width <= width + 0.4;
+            if fits {
+                lines.last_mut()?.push(bullet_piece(run));
+                used += lead;
+            } else if used > 0.0 {
+                // The separator stays at the end of this line. The next item
+                // starts the following line at the column, never with a ■.
+                lines.last_mut()?.push(bullet_piece(run));
                 lines.push(Vec::new());
                 used = 0.0;
             }
-            lines.last_mut()?.push(bullet_piece(run));
-            // Still reserve the marker's width when deciding the next break.
-            // Painting hangs that marker in the gutter; dropping it from the
-            // budget pulls the next heading up off a chapter index that is
-            // not in the drawn list.
-            used += if used == 0.0 {
-                bullet_w + bullet_gap
-            } else {
-                lead
-            };
         }
         for (line_index, line) in title_lines.iter().enumerate() {
             if line_index > 0 {
@@ -4147,10 +4248,13 @@ fn place_subentry_lines(
             ys.push(prev - step);
         }
     }
-    let extra = if flow.len() > run.baselines.len() {
-        run.baselines[run.baselines.len() - 1] - ys[ys.len() - 1]
-    } else {
+    // Positive when the Chinese block is taller than the source: followers
+    // move down. Negative when it is shorter: followers move up by the
+    // unused source lines, so the gap under the block stays the source gap.
+    let extra = if ys.is_empty() || run.baselines.is_empty() {
         0.0
+    } else {
+        run.baselines[run.baselines.len() - 1] - ys[ys.len() - 1]
     };
     let lines = flow
         .iter()
@@ -4174,18 +4278,10 @@ fn paint_flow_line(
 ) -> Vec<Drawn> {
     let bullet_gap = line.size * 0.45;
     let bullet_size = (line.size * 0.42).max(2.5);
-    // `■ AI 智能体 8` is a new item that wrapped. The marker hangs left so
-    // the title origin is `left`, matching the run's first line. A marker
-    // between two items on one line still takes its gap out of the column.
-    let hanging = line
-        .pieces
-        .first()
-        .is_some_and(|piece| piece.kind == FlowKind::Bullet);
-    let mut x = if hanging {
-        left - bullet_size - bullet_gap
-    } else {
-        left
-    };
+    // Every line of the block starts at `left`. A separator sits between
+    // items, or at the end of the line it follows. It does not hang in the
+    // gutter and it does not open the next line.
+    let mut x = left;
     let mut previous_bullet = false;
     let mut previous_italic = false;
     let mut out = Vec::new();
@@ -5498,6 +5594,34 @@ struct ColumnBlock {
     size: f32,
 }
 
+/// A contents title shares its baseline with a kept page number. Body text
+/// does not, so closing a hole in a paragraph still runs.
+fn block_is_contents_row(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let page = drawn[block.indices[0]].page;
+    let size = block.size.max(1.0);
+    let mut ids = Vec::new();
+    for index in &block.indices {
+        ids.extend(drawn[*index].glyph_ids.iter().copied());
+    }
+    if ids.iter().any(|id| {
+        by_id.get(id).and_then(|index| extraction.glyphs.get(*index)).is_some_and(|glyph| {
+            matches!(&glyph.disposition, Disposition::KeptOriginal { reason } if reason == "toc")
+        })
+    }) {
+        return true;
+    }
+    extraction.glyphs.iter().any(|glyph| {
+        glyph.page_index == page
+            && (glyph.matrix[5] - block.source_top).abs() <= size * 0.8
+            && matches!(&glyph.disposition, Disposition::KeptOriginal { reason } if reason == "toc")
+    })
+}
+
 /// A shorter translation used to leave the next item on its English baseline,
 /// which opened a hole. Pull the next same-column block up until the gap
 /// matches the source gap. A footer, whose source gap is larger, stays put.
@@ -5547,7 +5671,14 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
                 .indices
                 .iter()
                 .all(|index| draw_is_leader(&drawn[*index]));
-            if page_number || leaders {
+            if page_number || leaders || block_is_contents_row(&block, drawn, extraction, by_id) {
+                // Contents rows keep the source baseline. A taller or shorter
+                // sub-entry block moves them in `apply_subentry_shifts`, by
+                // one source leading, instead of closing each hole differently.
+                if !page_number && !leaders {
+                    shift = 0.0;
+                    prev = Some(block);
+                }
                 continue;
             }
             let mut extra = 0.0f32;
@@ -10494,6 +10625,131 @@ ET",
     }
 
     #[test]
+    fn a_wrapped_subentry_does_not_open_a_line_with_the_separator() {
+        let chars: Vec<u32> = "问答引擎摘要聊天机器人应用智能体练习补充说明甲乙丙48■"
+            .chars()
+            .map(|ch| ch as u32)
+            .collect();
+        let font = subset_ttf(&box_ttf(&chars), &chars).expect("font");
+        let color = Color::black();
+        let item = |title: &str, page: &str| SubentryItem {
+            title: title.to_string(),
+            page: page.to_string(),
+            title_ids: Vec::new(),
+            page_ids: Vec::new(),
+            italic: true,
+            color: color.clone(),
+            y: 500.0,
+            x: 180.0,
+        };
+        let run = SubentryRun {
+            page: 0,
+            left: 180.0,
+            right: 360.0,
+            baselines: vec![500.0, 488.0],
+            size: 10.0,
+            items: vec![
+                item("问答引擎摘要问答引擎摘要", "4"),
+                item("聊天机器人应用聊天机器人", "8"),
+            ],
+            bullet_ids: vec![1],
+            bullet_color: color,
+        };
+        let lines = layout_subentry_flow(&run, run.right - run.left, 10.0, &font).expect("flow");
+        assert!(lines.len() >= 2, "the run stayed on one line");
+        for line in &lines {
+            assert!(
+                line.first()
+                    .is_none_or(|piece| piece.kind != FlowKind::Bullet),
+                "a separator opens the line"
+            );
+        }
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.iter().any(|piece| piece.kind == FlowKind::Bullet)),
+            "the separator disappeared"
+        );
+        let (placed, extra_tall) = place_subentry_lines(&run, &lines, 10.0);
+        let step = placed[0].y - placed[1].y;
+        assert!(
+            (step - 12.0).abs() < 0.2,
+            "wrap leading {step} left the source 12pt step"
+        );
+        if lines.len() > run.baselines.len() {
+            assert!(
+                extra_tall > 8.0,
+                "a taller block did not push the rows below: {extra_tall}"
+            );
+        }
+        let short = vec![lines[0].clone()];
+        let (_, extra_short) = place_subentry_lines(&run, &short, 10.0);
+        assert!(
+            extra_short < -8.0,
+            "a shorter block did not pull the rows below: {extra_short}"
+        );
+        let painted = paint_flow_line(
+            0,
+            run.left,
+            &placed[0],
+            &[1],
+            &[("F1".into(), font)],
+            &HashMap::new(),
+        );
+        let text_left = painted
+            .iter()
+            .filter(|item| item.text != "■")
+            .map(|item| item.x)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            (text_left - run.left).abs() < 0.2,
+            "first line text x={text_left} left the column {}",
+            run.left
+        );
+        assert!(
+            painted
+                .iter()
+                .filter(|item| item.text == "■")
+                .all(|item| item.x > run.left + 1.0),
+            "a separator sits left of the column"
+        );
+    }
+
+    #[test]
+    fn subentry_blocks_on_one_page_share_the_source_indent() {
+        let color = Color::black();
+        let run = |page, left, bullets: bool| SubentryRun {
+            page,
+            left,
+            right: left + 200.0,
+            baselines: vec![400.0],
+            size: 10.0,
+            items: Vec::new(),
+            bullet_ids: if bullets { vec![1] } else { Vec::new() },
+            bullet_color: color.clone(),
+        };
+        // 16pt apart is more than the old 1.5em join and still one source column.
+        // Front matter sits 36pt further left and keeps its own x.
+        let mut runs = vec![
+            run(9, 141.2, false),
+            run(9, 170.0, true),
+            run(9, 186.2, true),
+        ];
+        share_subentry_column(&mut runs);
+        assert!(
+            (runs[0].left - 141.2).abs() < 0.2,
+            "front matter joined the sub-entry column: {}",
+            runs[0].left
+        );
+        assert!(
+            (runs[1].left - runs[2].left).abs() < 0.2,
+            "sub-entry blocks kept different indents: {} {}",
+            runs[1].left,
+            runs[2].left
+        );
+    }
+
+    #[test]
     fn a_bullet_run_fills_the_contents_column_before_wrapping() {
         // The English row wraps inside x=300. A section number at the
         // contents column is further right. Short Chinese entries fill that
@@ -11517,6 +11773,144 @@ ET"
             (big.matrix[5] - zh_y).abs() > 8.0,
             "chapter 5 sat on the subentry line at y={} (row y={zh_y})",
             big.matrix[5]
+        );
+    }
+
+    #[test]
+    fn a_shorter_subentry_moves_the_chapter_index_with_the_rows_below() {
+        // The 27pt index is an unchanged digit, so it never enters `drawn`.
+        // A shorter block still has to lift it by the same unused leading as
+        // the title, or `3` stays on the English baseline.
+        let chars: Vec<u32> = "524".chars().map(|ch| ch as u32).collect();
+        let font = subset_ttf(&box_ttf(&chars), &chars).expect("font");
+        let glyph = |id, y, size, text: &str| Glyph {
+            id,
+            page_index: 0,
+            unicode: text.into(),
+            unmapped: false,
+            char_code: text.as_bytes().to_vec(),
+            gid: None,
+            font_resource: "F1".into(),
+            font_name: "Times-Bold".into(),
+            font_object: None,
+            font_size: size,
+            matrix: [size, 0.0, 0.0, size, 40.0, y],
+            bbox: [40.0, y, 50.0, y + size],
+            advance: [size * 0.6, 0.0],
+            fill_color: Color::black(),
+            stroke_color: Color::black(),
+            render_mode: 0,
+            invisible: false,
+            clipped: false,
+            clip_uncertain: false,
+            vertical: false,
+            disposition: Disposition::KeptOriginal {
+                reason: "unchanged".into(),
+            },
+            source: GlyphSource {
+                kind: SourceKind::PageContent,
+                object_id: Some("1 0".into()),
+                stream_index: 0,
+                operator_index: id,
+                byte_start: 0,
+                byte_end: 1,
+                resource_name: Some("F1".into()),
+            },
+        };
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![
+                glyph(1, 442.0, 27.0, "5"),
+                glyph(2, 600.0, 27.0, "2"),
+                glyph(3, 400.0, 11.0, "4"),
+            ],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut drawn = Vec::new();
+        let mut succeeded = HashSet::new();
+        let mut keep = HashMap::from([(1, "unchanged".into())]);
+        let shifts = vec![SubentryShift {
+            page: 0,
+            below_y: 508.0,
+            delta: -12.0,
+            own_ids: HashSet::new(),
+        }];
+        shift_kept_chapter_indexes(
+            &mut drawn,
+            &mut succeeded,
+            &mut keep,
+            &shifts,
+            &extraction,
+            &[("F1".into(), font)],
+            &HashMap::new(),
+        );
+        assert_eq!(
+            drawn.len(),
+            1,
+            "body digits or the index above the block moved"
+        );
+        assert_eq!(drawn[0].text, "5");
+        assert!(
+            (drawn[0].y - 454.0).abs() < 0.2,
+            "chapter index y={} was not lifted by the unused 12pt",
+            drawn[0].y
+        );
+        assert!(succeeded.contains(&1));
+        assert!(!keep.contains_key(&1));
+        assert!(!succeeded.contains(&2));
+        assert!(!succeeded.contains(&3));
+    }
+
+    #[test]
+    fn stacked_subentry_shifts_use_the_source_baseline() {
+        let line = |y, ids: Vec<u32>| Drawn {
+            page: 0,
+            x: 0.0,
+            y,
+            size: 11.0,
+            color: Color::black(),
+            cids: Vec::new(),
+            resource: "F".into(),
+            skew: 0.0,
+            text: "行".into(),
+            glyph_ids: ids,
+            widths: Vec::new(),
+            gaps: Vec::new(),
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        // Upper block lifts everything below 500 by 12. The lower block's
+        // source bottom is 400. A row at 390 is below both; applying the
+        // first lift before the test used to carry it above 400 and drop
+        // the second.
+        let mut drawn = vec![line(390.0, vec![9]), line(380.0, vec![7])];
+        let shifts = vec![
+            SubentryShift {
+                page: 0,
+                below_y: 500.0,
+                delta: -12.0,
+                own_ids: HashSet::new(),
+            },
+            SubentryShift {
+                page: 0,
+                below_y: 400.0,
+                delta: -12.0,
+                own_ids: HashSet::from([7]),
+            },
+        ];
+        apply_subentry_shifts(&mut drawn, &shifts);
+        assert!(
+            (drawn[0].y - 414.0).abs() < 0.2,
+            "row under both blocks y={}",
+            drawn[0].y
+        );
+        assert!(
+            (drawn[1].y - 392.0).abs() < 0.2,
+            "the block's own line took its own shift y={}",
+            drawn[1].y
         );
     }
 
