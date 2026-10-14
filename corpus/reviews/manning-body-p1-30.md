@@ -16,6 +16,8 @@ Each translated page was rendered beside the source. Word boxes on all 30 pages 
 | Lone `CHAPTER` on the blank verso became `第` | p2 | A CHAPTER/PART label with no title stays as the source. It does not become one CJK character. |
 | Chapter title ran through the giant numeral and split `智能体` | p3, p27 | A two-line title stops short of the numeral path. A Latin lead stays on the first line (`AI` / `智能体及应用简介`). |
 | Numbered steps after Figure 1.4 were headings | p9 | A number plus a hanging indent is one body paragraph. The number keeps its source face, colour, and x. Every line of the words shares the hanging indent, with no first-line indent. A heading cannot end on `的` or `，`. |
+| Prerequisite bullets disagreed: one black square, one larger gold square, and two text indents | p28, and the same list shape on the chapter openers | Every dingbat in a list is redrawn from the source glyph, colour, size, and x. Every line of the words starts at the source hanging indent. A wrapped item uses the same mark as a one-line sibling. |
+| `思维链（` left the opening bracket at the end of the line | p28 | An opening bracket cannot end a line. It moves onto the next line with the text it opens. |
 
 ## Accepted
 
@@ -30,7 +32,7 @@ Each translated page was rendered beside the source. Word boxes on all 30 pages 
 | --- | --- | --- |
 | 1 | Pass | `第 1 部分` and `LLM 入门` do not overlap. Body uses the 2em indent. `（LLM）` and `（RAG）` stay. |
 | 2 | Pass | Blank except the license line, matching the source. No lone `第`. |
-| 3 | Pass | Title is two lines, `AI` then `智能体及应用简介`, both ending at x=384.8. The giant `1` starts near x=428, so the title does not cross the stem. `本章涵盖` and the four bullets are Chinese. |
+| 3 | Pass | Title is two lines, `AI` then `智能体及应用简介`, both ending at x=384.8. The giant `1` starts near x=428, so the title does not cross the stem. The four `本章涵盖` bullets are one mark: x=96.2, size 8.46, and the words start at x=108.2. |
 | 4 | Pass | `1.1` and `1.1.1` share the title baseline (`1.1.1` at x=57.2, title at x=93.2, y=401). Body indent and the three category bullets hold. |
 | 5 | Pass | Figure 1.1 labels stay English. Caption is Chinese. `定义：嵌入是…映射到一个连续的高维空间` is one paragraph, first line indented, continuations flush. |
 | 6 | Pass | `定义：检索增强生成（RAG）…` and `如图1.2`. Figure 1.2 step labels stay English. |
@@ -54,7 +56,7 @@ Each translated page was rendered beside the source. Word boxes on all 30 pages 
 | 24 | Pass | Section prose. Names that are products stay Latin inside Chinese sentences. |
 | 25 | Pass | Headings `摘要` are short titles, not orphaned body words. |
 | 26 | Pass | Closing prose of the chapter. Footer folio stays the source digit. |
-| 27 | Pass | Chapter title is two lines, `以编程方式` then `执行提示词`, both ending at x=360.5. The giant `2` starts near x=398, so the title does not cross it. |
-| 28 | Pass | Both requirement bullets start at the source indent (x=108.8 and x=111.1). `2.1` and `2.1.1` stay with their headings. |
+| 27 | Pass | Chapter title is two lines, `以编程方式` then `执行提示词`, both ending at x=360.5. The giant `2` starts near x=398, so the title does not cross it. The four `本章涵盖` bullets match page 3: x=96.2, size 8.46, words at x=108.2. |
+| 28 | Pass | Both requirement bullets are the same gold square at x=108.8, size 8.46, on the item baseline. Both word lines start at x=120.8. The first paragraph ends `例如思维链` and the next line starts `（CoT）。`. `2.1` and `2.1.1` stay with their headings. |
 | 29 | Pass | Shell listing stays English. The prose around it is Chinese. |
 | 30 | Pass | Python and the `ChatCompletion` dump stay English, including the English string inside the JSON. The surrounding steps are Chinese. |

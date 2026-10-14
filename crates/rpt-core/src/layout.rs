@@ -738,6 +738,7 @@ pub(crate) fn wrap_text(
             return None;
         }
     }
+    let lines = move_opening_brackets(lines);
     Some(lines).filter(|lines| !lines.is_empty())
 }
 
@@ -1119,7 +1120,60 @@ fn break_before(ch: char) -> bool {
 }
 
 fn break_after(ch: char) -> bool {
-    !matches!(ch, '《' | '「' | '『' | '【' | '(' | '[' | '{')
+    !is_opening_bracket(ch)
+}
+
+/// An opening bracket is not a line ending. `思维链（` / `CoT）` leaves the
+/// bracket hanging, and justification then opens a gap in front of it.
+fn is_opening_bracket(ch: char) -> bool {
+    matches!(
+        ch,
+        '（' | '［'
+            | '｛'
+            | '〈'
+            | '《'
+            | '「'
+            | '『'
+            | '【'
+            | '〔'
+            | '〖'
+            | '〘'
+            | '〚'
+            | '｢'
+            | '('
+            | '['
+            | '{'
+    )
+}
+
+/// Move a trailing opener onto the next line. A line that is only the opener
+/// joins that line instead of standing alone.
+fn move_opening_brackets(mut lines: Vec<String>) -> Vec<String> {
+    let mut index = 0;
+    while index + 1 < lines.len() {
+        let chars: Vec<char> = lines[index].chars().collect();
+        let take = chars
+            .iter()
+            .rev()
+            .take_while(|ch| is_opening_bracket(**ch))
+            .count();
+        if take == 0 {
+            index += 1;
+            continue;
+        }
+        let keep = chars.len() - take;
+        let head: String = chars[..keep].iter().collect();
+        let tail: String = chars[keep..].iter().collect();
+        if head.trim().is_empty() {
+            lines[index + 1] = format!("{tail}{}", lines[index + 1]);
+            lines.remove(index);
+            continue;
+        }
+        lines[index] = head;
+        lines[index + 1] = format!("{tail}{}", lines[index + 1]);
+        index += 1;
+    }
+    lines
 }
 
 /// One page's measure: how many source lines it can hold, and how wide they are.
@@ -1771,6 +1825,22 @@ mod tests {
             ),
             HeadingLevel::Body,
             "a numbered item with a hanging continuation is not a heading"
+        );
+        let wrapped = "例如思维链（CoT）。LangChain 的一系列提示工程工具";
+        let lines = wrap_text(wrapped, 10.0, 60.0, 60.0, &uniform_font(wrapped)).expect("wrap");
+        assert!(
+            lines.len() >= 2,
+            "the opener must wrap onto the next line: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.ends_with('（') && !line.ends_with('(')),
+            "an opening bracket ends a line: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with('（')),
+            "the opener should move with the following text: {lines:?}"
         );
         assert_eq!(
             heading_level(1, 11.0, true, "1.1 构建基于大语言模型的应用"),

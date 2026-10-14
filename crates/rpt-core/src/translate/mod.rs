@@ -2077,7 +2077,7 @@ pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
         || translated_trim.starts_with('●')
         || crate::segment::starts_with_list_marker(translated_trim)
     {
-        return translated.to_string();
+        return translated_trim.to_string();
     }
     let marker = source.trim_start().chars().next().unwrap_or('■');
     let shown = if ('\u{E000}'..='\u{F8FF}').contains(&marker) {
@@ -2085,8 +2085,7 @@ pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
     } else {
         marker
     };
-    let lead = &translated[..translated.len() - translated_trim.len()];
-    format!("{lead}{shown} {translated_trim}")
+    format!("{shown} {translated_trim}")
 }
 
 /// A credit line whose personal name was translated. Role words stay in
@@ -2895,6 +2894,10 @@ mod tests {
         let source = "\u{f0a1}Part 3: Q&A chatbots (chapters 6-7)—This part shifts the focus";
         let dropped = "第3部分：问答聊天机器人（第6–7章）——这一部分将重点转移";
         assert_eq!(restore_list_marker(source, dropped), format!("■ {dropped}"));
+        assert_eq!(
+            restore_list_marker(source, " 第3部分：问答"),
+            "■ 第3部分：问答"
+        );
         assert_eq!(
             restore_list_marker("–Chapter 1 maps the landscape", "第1章描绘了格局"),
             "– 第1章描绘了格局"

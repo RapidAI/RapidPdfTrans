@@ -3275,6 +3275,116 @@ fn decorative_numeral_left(extraction: &Extraction, page: u32, y: f32, size: f32
     best
 }
 
+struct BulletItem {
+    marker: String,
+    marker_x: f32,
+    marker_size: f32,
+    marker_color: Color,
+    text_left: f32,
+    text_color: Color,
+}
+
+/// A dingbat item, one line or wrapped. The mark keeps the source glyph,
+/// colour, size, and x. Every line of the words starts at the hanging indent.
+/// A dash item (`- Part`) stays on `list_outdent`.
+fn single_line_bullet(ink: &[InkLine<'_>]) -> Option<BulletItem> {
+    if ink.is_empty() {
+        return None;
+    }
+    let mut glyphs = ink[0].glyphs.clone();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut marker_ids = Vec::new();
+    let mut marker_x = 0.0f32;
+    let mut marker_size = 1.0f32;
+    let mut marker_color = None;
+    let mut marker_char = None;
+    let mut text_x = None;
+    let mut text_color = None;
+    for glyph in &glyphs {
+        let token = glyph.unicode.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if text_x.is_none()
+            && marker_ids.is_empty()
+            && token.chars().count() == 1
+            && is_graphic_bullet(token.chars().next().unwrap_or('\0'))
+        {
+            marker_ids.push(glyph.id);
+            marker_x = glyph.matrix[4];
+            marker_size = glyph.font_size.max(1.0);
+            marker_color = Some(glyph.fill_color.clone());
+            marker_char = token.chars().next();
+            continue;
+        }
+        if marker_ids.is_empty() {
+            return None;
+        }
+        if text_x.is_none() {
+            text_x = Some(glyph.matrix[4]);
+            text_color = Some(glyph.fill_color.clone());
+        }
+    }
+    // The first line may be only the mark. The hanging indent is the next line.
+    if text_x.is_none() {
+        let next = ink.get(1)?;
+        text_x = Some(next.left);
+        text_color = next
+            .glyphs
+            .iter()
+            .find(|glyph| !glyph.unicode.trim().is_empty())
+            .map(|glyph| glyph.fill_color.clone());
+    }
+    let mut text_x = text_x?;
+    if ink.len() >= 2 {
+        let hanging = ink[1..]
+            .iter()
+            .map(|line| line.left)
+            .fold(f32::MAX, f32::min);
+        // Wrapped lines already share the indent. A first line that starts
+        // in the gutter moves out to that same edge.
+        if hanging.is_finite() && (hanging - text_x).abs() > 0.8 && hanging > marker_x {
+            text_x = hanging;
+        }
+    }
+    let marker_char = marker_char?;
+    let shift = text_x - marker_x;
+    if !(marker_size * 0.35..=marker_size * 3.5).contains(&shift) {
+        return None;
+    }
+    let _ = marker_ids;
+    let marker = if ('\u{E000}'..='\u{F8FF}').contains(&marker_char) {
+        "■".to_string()
+    } else {
+        marker_char.to_string()
+    };
+    Some(BulletItem {
+        marker,
+        marker_x,
+        marker_size,
+        marker_color: marker_color?,
+        text_left: text_x,
+        text_color: text_color?,
+    })
+}
+
+/// Drop a leading dingbat the model kept or that was restored in front of
+/// the words. An em dash that opens the sentence stays.
+fn bullet_body_text(text: &str) -> &str {
+    let rest = text.trim_start();
+    let Some(first) = rest.chars().next() else {
+        return rest;
+    };
+    let bullet = matches!(first, '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧')
+        || ('\u{E000}'..='\u{F8FF}').contains(&first)
+        || (matches!(first, '-' | '–')
+            && rest[first.len_utf8()..].starts_with(char::is_whitespace));
+    if !bullet {
+        return rest;
+    }
+    rest[first.len_utf8()..].trim_start()
+}
+
 /// How far a list's wrapped lines sit to the right of the marker.
 fn list_outdent(ink: &[InkLine<'_>], size: f32) -> Option<f32> {
     if ink.len() < 2 || size <= 0.0 {
@@ -5852,7 +5962,12 @@ fn layout_segment(
     if numbered.is_some() {
         level = HeadingLevel::Body;
     }
-    let hanging = if numbered.is_some() {
+    let bullet = if numbered.is_some() {
+        None
+    } else {
+        single_line_bullet(&ink)
+    };
+    let hanging = if numbered.is_some() || bullet.is_some() {
         None
     } else {
         list_outdent(&ink, source_size)
@@ -5873,6 +5988,13 @@ fn layout_segment(
         body_text = crate::segment::numbered_item_body(text)
             .unwrap_or(text)
             .to_string();
+        body_text.as_str()
+    } else if let Some(item) = &bullet {
+        // The words share the source hanging indent, with no first-line
+        // indent. The mark is drawn again on this baseline.
+        block_left = item.text_left.min(block_right - source_size.max(1.0));
+        indent_ems = 0.0;
+        body_text = bullet_body_text(text).to_string();
         body_text.as_str()
     } else {
         text
@@ -6010,6 +6132,8 @@ fn layout_segment(
     }
     let text_color = if let Some(item) = &numbered {
         item.text_color.clone()
+    } else if let Some(item) = &bullet {
+        item.text_color.clone()
     } else {
         list_run_colors(&ink)
             .map(|(_, text_color)| text_color)
@@ -6043,6 +6167,36 @@ fn layout_segment(
             }
         })
         .collect();
+    if let Some(item) = &bullet {
+        if let Some(host) = drawn.first() {
+            // Same glyph ids as the words, so a later column shift moves the
+            // mark with the line. A marker left in the source stream stays on
+            // the English baseline after that shift.
+            let marker = item.marker.clone();
+            let widths = char_widths(&marker, item.marker_size, font);
+            let glyph_ids = host.glyph_ids.clone();
+            drawn.insert(
+                0,
+                Drawn {
+                    page,
+                    x: item.marker_x,
+                    y: host.y,
+                    size: item.marker_size,
+                    color: item.marker_color.clone(),
+                    cids: cids_of(&marker, font),
+                    resource: resource.to_string(),
+                    skew: 0.0,
+                    widths,
+                    gaps: Vec::new(),
+                    text: marker,
+                    supers: Vec::new(),
+                    sup_scale: 1.0,
+                    sup_rise: 0.0,
+                    glyph_ids,
+                },
+            );
+        }
+    }
     // A title page is right-aligned. Chinese is shorter than the English, so
     // anchoring at the source left leaves a ragged right edge. A contents
     // row shares that right-looking edge only by coincidence (a page number
@@ -6250,6 +6404,17 @@ fn is_bullet_char(ch: char) -> bool {
         ch,
         '-' | '–' | '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧'
     ) || ('\u{E000}'..='\u{F8FF}').contains(&ch)
+}
+
+/// A dingbat, not a dash that opens a sentence (`——本部分`).
+fn is_graphic_bullet(ch: char) -> bool {
+    matches!(ch, '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧')
+        || ('\u{E000}'..='\u{F8FF}').contains(&ch)
+}
+
+fn lone_bullet_mark(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(is_graphic_bullet) && chars.next().is_none()
 }
 
 fn split_styled_line(
@@ -6938,7 +7103,7 @@ fn column_block(
         top = top.max(line.y);
         bottom = bottom.min(line.y);
         // A continuation marker hangs in the gutter. It is not the column edge.
-        if line.text != "■" {
+        if !lone_bullet_mark(&line.text) {
             left = left.min(line.x);
         }
         size = size.max(line.size);
@@ -14903,6 +15068,155 @@ ET",
                 .all(|line| !line.ends_with("AP") && !line.starts_with('I')),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn a_bullet_list_shares_one_marker_and_one_text_edge() {
+        let bytes = contents_pdf(
+            b"BT /F1 10 Tf \
+0.8 0.651 0.349 rg \
+1 0 0 1 108.8 420 Tm (\x95) Tj \
+0.148 g \
+1 0 0 1 120.8 420 Tm (You have an OpenAI API key.) Tj \
+0.8 0.651 0.349 rg \
+1 0 0 1 108.8 406 Tm (\x95) Tj \
+0.148 g \
+1 0 0 1 120.8 406 Tm (You know how to create a notebook.) Tj \
+ET",
+        );
+        let painted = paint_translation(
+            &bytes,
+            &[
+                (0, " 您拥有 OpenAI API 密钥。".into()),
+                (1, "\u{f0a1} 您知道如何创建笔记本环境。".into()),
+            ],
+        );
+        let markers: Vec<_> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.unicode == "\u{2022}" || glyph.unicode == "•" || glyph.unicode == "■"
+            })
+            .collect();
+        assert_eq!(markers.len(), 2, "markers: {markers:?}");
+        let first = &markers[0];
+        for marker in &markers {
+            assert!((marker.matrix[4] - first.matrix[4]).abs() < 0.4, "marker x");
+            assert!(
+                (marker.font_size - first.font_size).abs() < 0.2,
+                "marker size"
+            );
+            assert_eq!(marker.fill_color, first.fill_color, "marker colour");
+            assert_eq!(marker.unicode, first.unicode, "marker glyph");
+            assert!(
+                marker.fill_color.components.first().copied().unwrap_or(0.0) > 0.5,
+                "marker lost the source colour: {:?}",
+                marker.fill_color
+            );
+        }
+        let mut rows: Vec<(f32, f32)> = Vec::new();
+        for glyph in &painted.glyphs {
+            if !glyph.unicode.chars().any(is_han_char) {
+                continue;
+            }
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|(y, _)| (*y - glyph.matrix[5]).abs() < 0.8)
+            {
+                row.1 = row.1.min(glyph.matrix[4]);
+            } else {
+                rows.push((glyph.matrix[5], glyph.matrix[4]));
+            }
+        }
+        assert!(rows.len() >= 2, "both items should draw: {rows:?}");
+        let text_x = rows[0].1;
+        for (_, x) in &rows {
+            assert!(
+                (*x - text_x).abs() < 0.6,
+                "item text x {x:.1} vs {text_x:.1}"
+            );
+            assert!(
+                (*x - 120.8).abs() < 1.5,
+                "text left the source hanging indent: {x:.1}"
+            );
+        }
+        for marker in &markers {
+            assert!(
+                rows.iter()
+                    .any(|(y, _)| (*y - marker.matrix[5]).abs() < 0.8),
+                "marker y {:.1} is not on an item baseline: {rows:?}",
+                marker.matrix[5]
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_bullet_matches_its_one_line_sibling() {
+        let bytes = contents_pdf(
+            b"BT \
+/F1 8.5 Tf \
+0.278 0.42 0.522 rg \
+1 0 0 1 96.2 340 Tm (\x95) Tj \
+/F1 10 Tf \
+0.148 g \
+1 0 0 1 108.2 340 Tm (Core challenges in building applications) Tj \
+1 0 0 1 108.2 326 Tm (powered by large language models.) Tj \
+/F1 8.5 Tf \
+0.278 0.42 0.522 rg \
+1 0 0 1 96.2 312 Tm (\x95) Tj \
+/F1 10 Tf \
+0.148 g \
+1 0 0 1 108.2 312 Tm (Patterns for engines and agents.) Tj \
+ET",
+        );
+        let painted = paint_translation(
+            &bytes,
+            &[
+                (0, "构建由大语言模型驱动的应用程序所面临的核心挑战".into()),
+                (1, "引擎、聊天机器人和智能体的模式".into()),
+            ],
+        );
+        let markers: Vec<_> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.unicode == "•" || glyph.unicode == "\u{2022}" || glyph.unicode == "■"
+            })
+            .collect();
+        assert_eq!(markers.len(), 2, "markers: {markers:?}");
+        for marker in &markers {
+            assert!((marker.matrix[4] - 96.2).abs() < 0.6, "marker x");
+            assert!(
+                (marker.font_size - 8.5).abs() < 0.3,
+                "marker used the body size: {}",
+                marker.font_size
+            );
+            assert!(
+                marker.fill_color.components.first().copied().unwrap_or(0.0) > 0.2
+                    && marker.fill_color.components.first().copied().unwrap_or(0.0) < 0.4,
+                "marker colour {:?}",
+                marker.fill_color
+            );
+            assert_eq!(marker.unicode, markers[0].unicode);
+        }
+        let mut rows: Vec<(f32, f32)> = Vec::new();
+        for glyph in &painted.glyphs {
+            if !glyph.unicode.chars().any(is_han_char) {
+                continue;
+            }
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|(y, _)| (*y - glyph.matrix[5]).abs() < 0.8)
+            {
+                row.1 = row.1.min(glyph.matrix[4]);
+            } else {
+                rows.push((glyph.matrix[5], glyph.matrix[4]));
+            }
+        }
+        assert!(rows.len() >= 2, "{rows:?}");
+        for (y, x) in &rows {
+            assert!((*x - 108.2).abs() < 1.5, "text x {x:.1} on y {y:.1}");
+        }
     }
 
     #[test]
