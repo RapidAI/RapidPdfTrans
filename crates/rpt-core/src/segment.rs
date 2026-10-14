@@ -622,6 +622,10 @@ fn assemble(
     kept.extend(detach_toc_marks(&mut lines));
     kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
+    // A contents row can sit in a table: Word paints "Table 1: … …. 5"
+    // as a caption, and a boxed contents list looks like a figure. The
+    // title is still translated. Leaders and page numbers stay.
+    release_toc_titles(&lines, &mut kept);
     kept.extend(margin_stamps(&lines));
     release_hyphen_continuations(&lines, &mut kept);
     // A theorem frame is a box, so a short wrap (`version. We write…`,
@@ -1276,6 +1280,10 @@ fn interior_glyphs(lines: &[VisualLine<'_>], flags: &SegmentFlags) -> Vec<(u32, 
         let Some(kind) = caption_kind(&lines[start].text) else {
             continue;
         };
+        // "Table 2: Practices …… 24" is a contents row, not a caption.
+        if lines[start].toc {
+            continue;
+        }
         if (kind == "figure" && !flags.skip_figures) || (kind == "table" && !flags.skip_tables) {
             continue;
         }
@@ -1525,6 +1533,7 @@ fn rects_near(a: Rect, b: Rect, gap: f32) -> bool {
 
 fn line_in_figure(line: &VisualLine<'_>, unions: &[Rect]) -> bool {
     if unions.is_empty()
+        || line.toc
         || caption_kind(&line.text).is_some()
         || is_running_header(&line.text)
         || is_footer_line(&line.text)
@@ -1753,9 +1762,28 @@ fn is_running_header(text: &str) -> bool {
 }
 
 fn stops_interior(line: &VisualLine<'_>, body_font: &str) -> bool {
-    caption_kind(&line.text).is_some()
+    line.toc
+        || caption_kind(&line.text).is_some()
         || is_body_barrier(line, body_font)
         || is_section_heading(line, body_font)
+}
+
+/// Titles on a contents row are translated even when a table or a box
+/// claimed them. Leaders and page numbers are not on these lines.
+fn release_toc_titles(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
+    let mut titles = std::collections::HashSet::new();
+    for line in lines {
+        if !line.toc {
+            continue;
+        }
+        for glyph in &line.glyphs {
+            titles.insert(glyph.id);
+        }
+    }
+    if titles.is_empty() {
+        return;
+    }
+    kept.retain(|(id, reason)| !(titles.contains(id) && (reason == "table" || reason == "figure")));
 }
 
 fn x_overlaps(anchor: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
@@ -4185,6 +4213,107 @@ mod tests {
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
         assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
         assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
+    }
+
+    #[test]
+    fn a_contents_row_inside_a_table_keeps_leaders_and_translates_the_title() {
+        // Word paints a contents list as table rows, and "Table 2: … …. 24"
+        // matches a table caption. The titles are still translated. A real
+        // caption with no leaders still keeps its cells. A box around the
+        // contents rows does not turn those titles into figure labels.
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let glyphs = vec![
+            block(0, 72.0, 780.0, 360.0, 10.0, body),
+            block(1, 230.0, 750.0, 110.0, 12.0, "Table of Contents"),
+            block(2, 230.0, 724.0, 80.0, 12.0, "List of Tables"),
+            block(3, 72.0, 660.0, 120.0, 10.0, "Executive Summary"),
+            block(4, 200.0, 660.0, 280.0, 10.0, "...................."),
+            block(5, 490.0, 660.0, 14.0, 10.0, "vi"),
+            block(6, 72.0, 640.0, 110.0, 10.0, "1 Introduction"),
+            block(7, 190.0, 640.0, 290.0, 10.0, "......................"),
+            block(8, 490.0, 640.0, 10.0, 10.0, "1"),
+            block(
+                9,
+                72.0,
+                620.0,
+                220.0,
+                10.0,
+                "Table 2: SSDF Practices and Clauses",
+            ),
+            block(10, 300.0, 620.0, 180.0, 10.0, ".................."),
+            block(11, 488.0, 620.0, 16.0, 10.0, "24"),
+            block(
+                12,
+                72.0,
+                460.0,
+                360.0,
+                10.0,
+                "Table 1: Pass rates for each method on the benchmark.",
+            ),
+            block(13, 72.0, 440.0, 50.0, 10.0, "Method"),
+            block(14, 220.0, 440.0, 40.0, 10.0, "Score"),
+        ];
+        let regions = [
+            crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [60.0, 600.0, 520.0, 680.0],
+                kind: "path".into(),
+            },
+            crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [60.0, 590.0, 78.0, 675.0],
+                kind: "path".into(),
+            },
+        ];
+        let seg = segment_placed(&glyphs, &SegmentFlags::default(), &regions, &[]);
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        for title in [
+            "Table of Contents",
+            "List of Tables",
+            "Executive Summary",
+            "1 Introduction",
+            "Table 2: SSDF Practices",
+            "Table 1:",
+        ] {
+            assert!(
+                texts.iter().any(|text| text.contains(title)),
+                "missing {title} in {texts:?}"
+            );
+        }
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains("....") && *text != "vi"),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("Method")),
+            "{texts:?}"
+        );
+        let reason = |id: u32| -> Vec<&str> {
+            seg.kept
+                .iter()
+                .filter(|(glyph, _)| *glyph == id)
+                .map(|(_, reason)| reason.as_str())
+                .collect()
+        };
+        for id in [4, 5, 7, 8, 10, 11] {
+            let reasons = reason(id);
+            assert!(
+                reasons.contains(&"toc") && !reasons.iter().any(|item| *item != "toc"),
+                "mark {id} should stay a contents mark: {reasons:?}"
+            );
+        }
+        for id in [1, 2, 3, 6, 9] {
+            assert!(
+                reason(id).is_empty(),
+                "title {id} was kept: {:?}",
+                reason(id)
+            );
+        }
+        assert_eq!(reason(13), vec!["table"]);
+        assert_eq!(reason(14), vec!["table"]);
     }
 
     #[test]
