@@ -160,7 +160,12 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
         }
         let text = line.text.as_str();
         if !in_refs {
-            if is_reference_heading(text) {
+            // A contents row `References …… 20` is a title, not the
+            // bibliography. The leaders and the page number sit on this
+            // baseline and are not part of the title segment.
+            if is_reference_heading(text)
+                && !toc_title_beside_leaders(&segments[line.seg_index], glyphs)
+            {
                 in_refs = true;
                 refs_x = Some(line.x);
                 selected.insert(line.seg_index);
@@ -494,6 +499,74 @@ fn same_line(seed: &Glyph, glyph: &Glyph) -> bool {
 pub(crate) fn is_reference_heading(text: &str) -> bool {
     let norm = normalize_heading(text);
     REF_HEADINGS.iter().any(|heading| norm == *heading)
+}
+
+/// `References …… 20` is a contents row. The title segment is only the word.
+fn toc_title_beside_leaders(seg: &Segment, glyphs: &[Glyph]) -> bool {
+    let ids: HashSet<u32> = seg.glyph_ids.iter().copied().collect();
+    let mine: Vec<&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| ids.contains(&glyph.id))
+        .collect();
+    if mine.is_empty() {
+        return false;
+    }
+    let y = mine[0].matrix[5];
+    let size = mine
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max)
+        .max(1.0);
+    let right = mine
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]))
+        .fold(0.0f32, f32::max);
+    let page = mine[0].page_index;
+    let mut side: Vec<&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == page
+                && !ids.contains(&glyph.id)
+                && (glyph.matrix[5] - y).abs() <= size * 0.55
+                && glyph.matrix[4] >= right - 1.0
+        })
+        .collect();
+    side.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut dots = 0usize;
+    let mut page_label = String::new();
+    for glyph in side {
+        let text = glyph.unicode.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if text.chars().all(is_toc_leader) {
+            dots += text.chars().count();
+            continue;
+        }
+        page_label.push_str(text);
+    }
+    dots >= 4 && is_toc_page_label(&page_label)
+}
+
+fn is_toc_leader(ch: char) -> bool {
+    matches!(ch, '.' | '·' | '…' | '•' | '⋅' | '‧' | '․')
+}
+
+fn is_toc_page_label(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 6 {
+        return false;
+    }
+    if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return text.len() <= 3;
+    }
+    text.chars().count() >= 2
+        && text.chars().all(|ch| {
+            matches!(
+                ch.to_ascii_lowercase(),
+                'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
+            )
+        })
 }
 
 fn is_end_heading(text: &str) -> bool {
@@ -863,6 +936,44 @@ mod tests {
         let kept = text_of(&glyphs, &ids);
         assert!(kept.contains("Smith"), "{kept}");
         assert!(!kept.contains("layout"), "{kept}");
+    }
+
+    #[test]
+    fn a_contents_row_named_references_does_not_start_the_bibliography() {
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            700.0,
+            "The model uses attention.",
+        );
+        line(&mut glyphs, &mut id, 0, 72.0, 660.0, "References");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            200.0,
+            660.0,
+            "....................",
+        );
+        line(&mut glyphs, &mut id, 0, 400.0, 660.0, "20");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            640.0,
+            "A software development life cycle is a method.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(
+            !kept.contains("life cycle") && !kept.contains("References"),
+            "{kept}"
+        );
     }
 
     #[test]
