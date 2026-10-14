@@ -425,7 +425,7 @@ pub fn rewrite_translation(
     // The inline flow already redrew these page numbers. Painting the
     // original digits again leaves a second copy at the source x.
     paint_original.retain(|id| !toc_redraw.contains(id) && !succeeded.contains(id));
-    let toc_column = commit_toc_operators(
+    commit_toc_operators(
         &owners,
         &toc_redraw,
         &paint_original,
@@ -449,7 +449,7 @@ pub fn rewrite_translation(
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
     // A contents title can move up to close a hole. An inline page number
     // that was redrawn on the old baseline would otherwise sit alone.
-    seat_inline_page_numbers(&mut drawn, extraction, &by_id, &toc_column);
+    seat_inline_page_numbers(&mut drawn, extraction, &by_id);
     let mut spans = Vec::new();
     if !overlay {
         for id in &succeeded {
@@ -1296,7 +1296,7 @@ fn commit_toc_operators(
     by_id: &HashMap<u32, usize>,
     embedded: &[(String, SubsetFont)],
     font_styles: &HashMap<String, FaceStyle>,
-) -> HashMap<u32, f32> {
+) {
     let mut blocked = HashSet::new();
     for ids in owners.values() {
         let live: Vec<u32> = ids
@@ -1353,27 +1353,13 @@ fn commit_toc_operators(
     // Those glyph ids are in `succeeded`. Drawing them again from the toc
     // disposition stacks a second italic number on the line.
     let runs = toc_page_number_runs(extraction, toc_redraw, succeeded);
-    let mut column_right: HashMap<u32, f32> = HashMap::new();
-    for run in &runs {
-        let page = run[0].page_index;
-        let right = run
-            .iter()
-            .map(|glyph| glyph_ink_right(glyph))
-            .fold(0.0f32, f32::max);
-        column_right
-            .entry(page)
-            .and_modify(|edge| *edge = edge.max(right))
-            .or_insert(right);
-    }
     let mut placed = HashSet::new();
     for run in &runs {
-        // Leader dots already end at this number. Sliding it would open a hole.
-        // Inline sub-entries (`engines 4` beside `7` and `8`, `architecture 12`
-        // with another title to the right, `model 15` tight against its word)
-        // stay next to their titles. A section number that the shorter Chinese
-        // title no longer reaches slides to the page's right edge. The digit
-        // often shares the title's TJ, so it is drawn again once that operator
-        // is blanked, in the source face rather than the page's first CJK font.
+        // The source puts the page number one gap after the title. Only a
+        // part row, whose dots already end at the number, keeps that number
+        // on the right edge. A shorter Chinese title must not slide `4` or
+        // `xvi` out to that edge. The digit often shares the title's TJ, so
+        // it is drawn again once that operator is blanked.
         let keep_put = run_follows_leaders(run, extraction, toc_redraw)
             || shares_baseline_with_another_number(run, &runs)
             || title_follows_number(run, extraction)
@@ -1416,8 +1402,11 @@ fn commit_toc_operators(
         else {
             continue;
         };
-        let target = column_right[&glyph.page_index];
-        if let Some(item) = draw_toc_run(run, target, font, resource, skew) {
+        let source_right = run
+            .iter()
+            .map(|glyph| glyph_ink_right(glyph))
+            .fold(0.0f32, f32::max);
+        if let Some(item) = draw_toc_run(run, source_right, font, resource, skew) {
             placed.extend(run.iter().map(|glyph| glyph.id));
             succeeded.extend(item.glyph_ids.iter().copied());
             restored.push(item);
@@ -1494,7 +1483,64 @@ fn commit_toc_operators(
         }
     }
     drawn.extend(restored);
-    column_right
+    strip_ink_inside_leaders(drawn);
+}
+
+/// A small-caps letter (`S` in `LLMS`) sits just before the leader dots.
+/// Stretching the dots across the shorter Chinese title runs through that
+/// x. The letter belongs to the title, which is already drawn, so a second
+/// copy here is a mark in the middle of the dots.
+fn strip_ink_inside_leaders(drawn: &mut Vec<Drawn>) {
+    let spans: Vec<(u32, f32, f32, f32, f32)> = drawn
+        .iter()
+        .filter(|item| draw_is_leader(item))
+        .map(|item| {
+            (
+                item.page,
+                item.y,
+                item.size.max(1.0),
+                item.x,
+                drawn_ink_right(item),
+            )
+        })
+        .collect();
+    if spans.is_empty() {
+        return;
+    }
+    drawn.retain(|item| {
+        if draw_is_leader(item) || bare_page_label(&item.text) {
+            return true;
+        }
+        let letters = item.text.trim().chars().count();
+        if letters == 0 || letters > 2 {
+            return true;
+        }
+        let right = drawn_ink_right(item);
+        let inside = spans.iter().any(|(page, y, size, left, lead_right)| {
+            item.page == *page
+                && (item.y - *y).abs() <= (*size).max(item.size.max(1.0)) * 0.7
+                && item.x > *left + 0.8
+                && right < *lead_right - 0.4
+        });
+        !inside
+    });
+}
+
+fn bare_page_label(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 6 {
+        return false;
+    }
+    if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return text.len() <= 3;
+    }
+    text.chars().count() >= 2
+        && text.chars().all(|ch| {
+            matches!(
+                ch.to_ascii_lowercase(),
+                'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
+            )
+        })
 }
 
 /// `12` in `architecture 12  core object`. A title (or the bullet before it)
@@ -1688,8 +1734,10 @@ fn operator_has_unredrawn_text(
     })
 }
 
-/// Draw one page number so its right edge meets the page's contents column.
-/// A shorter Chinese title used to leave the number where the English title ended.
+/// Draw one page number so its right edge meets `target_right`.
+/// Contents rows pass the source right edge. A part row is already there,
+/// against its leader dots. `seat_inline_page_numbers` then closes a gap
+/// after a shorter title when the row has no leaders.
 fn draw_toc_run(
     run: &[&Glyph],
     target_right: f32,
@@ -1811,9 +1859,8 @@ fn font_for_page<'a>(
         .map(|(resource, font)| (resource.as_str(), font, 0.0))
 }
 
-/// `model 15`: the digit sits against the word, in the left indent. Sliding it
-/// to the section column pulls it off the title. A section number left where
-/// the longer English title ended has a wider gap and is not this case.
+/// `model 15`: the digit sits against the word. It stays with that title
+/// instead of being treated as the row's right-edge number.
 fn tight_subentry_number(run: &[&Glyph], extraction: &Extraction) -> bool {
     let text: String = run.iter().map(|glyph| glyph.unicode.trim()).collect();
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -2754,7 +2801,9 @@ fn find_subentry_runs(
                 seg_of.insert(*id, index);
             }
         }
-        return solo_italic_subentries(report, extraction, by_id, &seg_of, &HashSet::new());
+        let mut runs = solo_italic_subentries(report, extraction, by_id, &seg_of, &HashSet::new());
+        share_subentry_column(&mut runs);
+        return runs;
     }
     let mut seg_of: HashMap<u32, usize> = HashMap::new();
     for (index, segment) in report.segments.iter().enumerate() {
@@ -2829,12 +2878,78 @@ fn find_subentry_runs(
     runs.extend(solo_italic_subentries(
         report, extraction, by_id, &seg_of, &used,
     ));
+    share_subentry_column(&mut runs);
     runs.sort_by(|left, right| {
         left.page
             .cmp(&right.page)
             .then(right.baselines[0].total_cmp(&left.baselines[0]))
     });
     runs
+}
+
+/// Sub-entry rows on one contents page share the source indent and the
+/// source wrap edge. That edge is where the English runs end (`Q&A`,
+/// `Minimal`), not the part-row page number at the page margin. A short
+/// line such as `PromptTemplate 33` may use the wider sibling edge, and
+/// wraps only once that column is full. Continuation lines use the same x.
+/// Front matter sits further left (`preface` vs `Engines`); it keeps its
+/// own column. Odd and even pages differ in the source and stay apart.
+fn share_subentry_column(runs: &mut [SubentryRun]) {
+    let mut by_page: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (index, run) in runs.iter().enumerate() {
+        by_page.entry(run.page).or_default().push(index);
+    }
+    for indices in by_page.values() {
+        let mut ordered = indices.clone();
+        ordered.sort_by(|left, right| runs[*left].left.total_cmp(&runs[*right].left));
+        let mut clusters: Vec<Vec<usize>> = Vec::new();
+        for index in ordered {
+            let left = runs[index].left;
+            let size = runs[index].size.max(1.0);
+            let join = clusters.last().is_some_and(|cluster| {
+                let anchor = runs[cluster[0]].left;
+                (left - anchor).abs() <= size * 1.5
+            });
+            if join {
+                clusters.last_mut().unwrap().push(index);
+            } else {
+                clusters.push(vec![index]);
+            }
+        }
+        for cluster in clusters {
+            let mut lefts: Vec<f32> = cluster.iter().map(|index| runs[*index].left).collect();
+            lefts.sort_by(|left, right| left.total_cmp(right));
+            let left = lefts[lefts.len() / 2];
+            let ink = cluster
+                .iter()
+                .map(|index| runs[*index].right)
+                .fold(0.0f32, f32::max);
+            let size = cluster
+                .iter()
+                .map(|index| runs[*index].size)
+                .fold(1.0f32, f32::max);
+            // A bullet row's ink is the source column (`Q&A`, `Minimal`).
+            // An italic row with no bullet (`preface xvi`) has no such
+            // column; give it room for a longer Chinese title.
+            let bulleted = cluster
+                .iter()
+                .any(|index| !runs[*index].bullet_ids.is_empty());
+            let right = if bulleted {
+                ink
+            } else {
+                ink.max(left + size * 16.0)
+            };
+            let unify_left = cluster.len() >= 2;
+            for index in cluster {
+                if unify_left {
+                    runs[index].left = left;
+                }
+                if right > runs[index].right {
+                    runs[index].right = right;
+                }
+            }
+        }
+    }
 }
 
 fn is_subentry_bullet(glyph: &Glyph) -> bool {
@@ -3132,9 +3247,8 @@ fn same_root(parent: &[usize], left: usize, right: usize) -> bool {
 }
 
 /// An italic sub-entry with no bullet (`Implementing a prompt template … 32`,
-/// `appendix A … 351`). The arabic page number stays one space after the
-/// title. A roman front-matter token (`preface xvi`) is a contents column
-/// number, same as a part or section, and is not folded into this path.
+/// `preface xvi`, `appendix A … 351`). The page number stays one space after
+/// the title. A part row's number follows leader dots and is not this path.
 fn solo_italic_subentries(
     report: &TranslateReport,
     extraction: &Extraction,
@@ -3186,8 +3300,8 @@ fn build_solo_italic(
         return None;
     }
     // A BoldItalic chapter title (`AI 代理和应用简介`) is a heading. Folding
-    // it into this path paints a light italic and glues the page number to
-    // the title. Those numbers stay on the contents column, in the source face.
+    // it into this path paints a light italic. Its page number is seated
+    // after the title by the contents pass, in the source face.
     let bold = glyphs
         .iter()
         .filter(|glyph| face_style(&glyph.font_name).bold)
@@ -3227,12 +3341,6 @@ fn build_solo_italic(
     if number_follows_leaders(&page_ids, extraction, size) {
         return None;
     }
-    // `前言 xvi` used to paint the roman numeral in the gap after the short
-    // Chinese title. v21 set that numeral on the contents column. An arabic
-    // sub-entry (`function 32`) still stays beside its title.
-    if roman_column_token(&page_label) {
-        return None;
-    }
     let title = strip_list_marker(&display_title(segment));
     if title.is_empty() {
         return None;
@@ -3245,7 +3353,7 @@ fn build_solo_italic(
         .iter()
         .map(|glyph| glyph_ink_right(glyph))
         .fold(left, f32::max);
-    let number_right = page_ids
+    let right = page_ids
         .iter()
         .filter_map(|id| {
             by_id
@@ -3254,7 +3362,6 @@ fn build_solo_italic(
         })
         .map(glyph_ink_right)
         .fold(ink_right, f32::max);
-    let right = number_right.max(left + size * 16.0);
     let y = glyphs
         .iter()
         .map(|glyph| glyph.matrix[5])
@@ -3344,14 +3451,6 @@ fn adjacent_page_segment(
         }
     }
     best.map(|(_, text, ids)| (text, ids))
-}
-
-/// `xvi`, `xxvi`. Not an arabic sub-entry number, and not a one-letter folio.
-fn roman_column_token(text: &str) -> bool {
-    let text = text.trim();
-    text.chars().count() >= 2
-        && solo_page_token(text)
-        && text.chars().any(|ch| !ch.is_ascii_digit())
 }
 
 fn solo_page_token(text: &str) -> bool {
@@ -3466,12 +3565,6 @@ fn build_subentry_run(
     let numbers = page_numbers_near(&baselines, page, size, extraction);
     for number in &numbers {
         right = right.max(glyph_ink_right(number.last().copied()?));
-    }
-    // English wraps early. The Chinese run fills the same column the section
-    // page numbers use, and only then wraps. A continuation starts at `left`.
-    let column = contents_column_right(page, extraction);
-    if column > left + size * 6.0 {
-        right = right.max(column);
     }
     let mut items = Vec::new();
     for index in indices {
@@ -4650,6 +4743,177 @@ fn shared_right_edge(extraction: &Extraction, line: &InkLine<'_>) -> Option<f32>
     Some(line.right)
 }
 
+/// A contents baseline has a kept page number or leader dots. Title-page
+/// right alignment must not slide that row.
+fn contents_baseline(extraction: &Extraction, line: &InkLine<'_>) -> bool {
+    let Some(page) = line.glyphs.first().map(|glyph| glyph.page_index) else {
+        return false;
+    };
+    let size = crate::segment::representative_size(&line.glyphs).max(1.0);
+    extraction.glyphs.iter().any(|glyph| {
+        glyph.page_index == page
+            && (glyph.matrix[5] - line.y).abs() <= size * 0.55
+            && (is_toc_leader_glyph(glyph) || is_inline_page_glyph(glyph))
+    })
+}
+
+/// `1.1` / `2.1` occupy their own column. The title starts at the source
+/// title x, so every section title on the page shares that x, and the index
+/// stays at the source index size rather than growing with a display face.
+fn layout_indexed_contents_heading(
+    glyphs: &[&Glyph],
+    line: &InkLine<'_>,
+    text: &str,
+    font: &SubsetFont,
+    extraction: &Extraction,
+    resource: &str,
+    skew: f32,
+    metrics: CjkMeasure,
+) -> Option<Vec<Drawn>> {
+    if !contents_baseline(extraction, line) {
+        return None;
+    }
+    let (index_glyphs, title_glyphs) = split_contents_index(glyphs)?;
+    let source_index: String = index_glyphs
+        .iter()
+        .map(|glyph| glyph.unicode.trim())
+        .collect();
+    let (index_text, title_text) = match split_indexed_label(text) {
+        Some((index, title)) if index == source_index => (index.to_string(), title.to_string()),
+        Some(_) => return None,
+        None => (source_index.clone(), text.trim().to_string()),
+    };
+    if title_text.chars().count() > 80 || ends_with_sentence(&title_text) {
+        return None;
+    }
+    if !text_covered(&index_text, font) || !text_covered(&title_text, font) {
+        return None;
+    }
+    let title_size = {
+        let mut sizes: Vec<f32> = title_glyphs.iter().map(|glyph| glyph.font_size).collect();
+        sizes.sort_by(|left, right| left.total_cmp(right));
+        sizes[sizes.len() / 2].max(1.0)
+    };
+    let bold = title_glyphs
+        .iter()
+        .all(|glyph| face_style(&glyph.font_name).bold);
+    let level = heading_level(1, title_size, bold, text);
+    let scale = scale_for_heading(level, title_size, metrics);
+    let size = title_size * scale;
+    let index_x = index_glyphs
+        .iter()
+        .map(|glyph| glyph_ink_left(glyph))
+        .fold(f32::MAX, f32::min);
+    let title_x = title_glyphs
+        .iter()
+        .map(|glyph| glyph_ink_left(glyph))
+        .fold(f32::MAX, f32::min);
+    let page = index_glyphs[0].page_index;
+    let media = extraction
+        .pages
+        .iter()
+        .find(|info| info.index == page)
+        .map(|info| info.media_box)
+        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let room = media[2] - title_x - size * 3.0;
+    if measure(&title_text, size, font) > room.max(size * 4.0) {
+        return None;
+    }
+    let y = line.y;
+    let color = title_glyphs[0].fill_color.clone();
+    let index_ids: Vec<u32> = index_glyphs.iter().map(|glyph| glyph.id).collect();
+    let title_ids: Vec<u32> = title_glyphs.iter().map(|glyph| glyph.id).collect();
+    let piece = |x: f32, drawn_text: &str, ids: Vec<u32>| Drawn {
+        page,
+        x,
+        y,
+        size,
+        color: color.clone(),
+        cids: cids_of(drawn_text, font),
+        resource: resource.to_string(),
+        skew,
+        widths: char_widths(drawn_text, size, font),
+        gaps: vec![0.0; drawn_text.chars().count().saturating_sub(1)],
+        text: drawn_text.to_string(),
+        supers: vec![false; drawn_text.chars().count()],
+        sup_scale: 1.0,
+        sup_rise: 0.0,
+        glyph_ids: ids,
+    };
+    Some(vec![
+        piece(index_x, &index_text, index_ids),
+        piece(title_x, &title_text, title_ids),
+    ])
+}
+
+fn split_contents_index<'a>(glyphs: &[&'a Glyph]) -> Option<(Vec<&'a Glyph>, Vec<&'a Glyph>)> {
+    let mut ordered: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    ordered.sort_by(|left, right| glyph_ink_left(left).total_cmp(&glyph_ink_left(right)));
+    let mut index = Vec::new();
+    let mut cursor = 0;
+    while cursor < ordered.len() {
+        let token = ordered[cursor].unicode.trim();
+        let index_char = token.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+            && token.chars().any(|ch| ch.is_ascii_digit());
+        if !index_char {
+            break;
+        }
+        index.push(ordered[cursor]);
+        cursor += 1;
+    }
+    if index.is_empty() || cursor >= ordered.len() {
+        return None;
+    }
+    let index_text: String = index.iter().map(|glyph| glyph.unicode.trim()).collect();
+    if !index_text.contains('.') {
+        return None;
+    }
+    let index_right = index
+        .iter()
+        .map(|glyph| glyph_ink_right(glyph))
+        .fold(0.0f32, f32::max);
+    let title_left = glyph_ink_left(ordered[cursor]);
+    let size = index
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max)
+        .max(1.0);
+    if title_left - index_right < size * 0.35 {
+        return None;
+    }
+    Some((index, ordered[cursor..].to_vec()))
+}
+
+fn split_indexed_label(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    let mut end = 0;
+    while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
+        end += 1;
+    }
+    if end == 0 || !text[..end].contains('.') {
+        return None;
+    }
+    let rest = text[end..].trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    Some((&text[..end], rest))
+}
+
+fn ends_with_sentence(text: &str) -> bool {
+    text.ends_with('.')
+        || text.ends_with('。')
+        || text.ends_with('!')
+        || text.ends_with('?')
+        || text.ends_with('？')
+        || text.ends_with('！')
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -4692,6 +4956,13 @@ fn layout_segment(
     let pages = pages_of(glyphs);
     if pages.len() > 1 {
         return layout_across_pages(glyphs, text, font, extraction, resource, skew, metrics);
+    }
+    if !bilingual && ink.len() == 1 {
+        if let Some(drawn) = layout_indexed_contents_heading(
+            glyphs, &ink[0], text, font, extraction, resource, skew, metrics,
+        ) {
+            return Some(drawn);
+        }
     }
     let size0 = ink
         .iter()
@@ -4921,8 +5192,10 @@ fn layout_segment(
         })
         .collect();
     // A title page is right-aligned. Chinese is shorter than the English, so
-    // anchoring at the source left leaves a ragged right edge.
-    if !bilingual && ink.len() == 1 && drawn.len() == 1 {
+    // anchoring at the source left leaves a ragged right edge. A contents
+    // row shares that right-looking edge only by coincidence (a page number
+    // or the end of a long title). Those rows stay at the source left.
+    if !bilingual && ink.len() == 1 && drawn.len() == 1 && !contents_baseline(extraction, &ink[0]) {
         if let Some(edge) = shared_right_edge(extraction, &ink[0]) {
             let advance = drawn[0].widths.iter().sum::<f32>() + drawn[0].gaps.iter().sum::<f32>();
             if advance > 0.0 {
@@ -5309,30 +5582,19 @@ fn column_block(
     })
 }
 
-/// Right edge shared by the page's column-aligned page numbers.
-fn contents_column_right(page: u32, extraction: &Extraction) -> f32 {
-    extraction
-        .glyphs
-        .iter()
-        .filter(|glyph| glyph.page_index == page && is_inline_page_glyph(glyph))
-        .map(glyph_ink_right)
-        .fold(0.0f32, f32::max)
-}
-
 fn drawn_ink_right(item: &Drawn) -> f32 {
     item.x + item.widths.iter().sum::<f32>() + item.gaps.iter().sum::<f32>()
 }
 
-/// A section page number that was parked on the contents column, then left
-/// behind when its title moved up to close a hole. Put it back on the title's
-/// last line. Numbers that already share the page's contents column keep that
-/// x: a shorter Chinese title must not pull `4` or `11` back beside the words.
-/// A leader-dot row keeps the column x and only follows the title vertically.
+/// A page number left where the English title ended, then left behind when
+/// its title moved up to close a hole. Put it on the title's last line, one
+/// gap after the words. A leader-dot row keeps its source x and only follows
+/// the title vertically. Front matter, chapters, and sections all sit inline;
+/// the source does not park those numbers on a right edge.
 fn seat_inline_page_numbers(
     drawn: &mut [Drawn],
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
-    toc_column: &HashMap<u32, f32>,
 ) {
     let targets: Vec<usize> = drawn
         .iter()
@@ -5364,14 +5626,7 @@ fn seat_inline_page_numbers(
         let gap = source_left - title_source_right;
         let leaders = leaders_between(extraction, page, source_y, title_source_right, source_left);
         let inline = gap >= -1.0 && gap < size * 3.0 && !leaders;
-        let number_right = drawn_ink_right(&drawn[index]);
-        // `draw_toc_run` already moved this digit to the page's contents
-        // column. Inline sub-entry digits sit further left and may still
-        // close up to a short Chinese title. Comparing against every page
-        // number, including those sub-entries, used to miss the column.
-        let column = toc_column.get(&page).copied().unwrap_or(0.0);
-        let at_column = column > 0.0 && (number_right - column).abs() < 1.5;
-        let x = if inline && !at_column {
+        let x = if inline {
             title_right + page_number_gap(size, false)
         } else {
             drawn[index].x
@@ -5410,16 +5665,14 @@ fn draw_is_bare_page_number(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
 ) -> bool {
-    let text = item.text.trim();
-    let count = text.chars().count();
-    if count == 0 || count > 3 || !text.chars().all(|ch| ch.is_ascii_digit()) {
+    if !bare_page_label(&item.text) {
         return false;
     }
     !item.glyph_ids.is_empty()
         && item.glyph_ids.iter().all(|id| {
             by_id.get(id).is_some_and(|index| {
                 let token = extraction.glyphs[*index].unicode.trim();
-                token.is_empty() || token.chars().all(|ch| ch.is_ascii_digit())
+                token.is_empty() || bare_page_label(token) || toc_page_char(token)
             })
         })
 }
@@ -9799,7 +10052,7 @@ mod tests {
     }
 
     #[test]
-    fn toc_section_page_numbers_share_the_source_right_edge() {
+    fn toc_section_page_numbers_sit_after_the_title() {
         let bytes = toc_column_pdf();
         let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
         let mut extraction = doc.extract();
@@ -9851,20 +10104,11 @@ mod tests {
             cache_hits: 0,
         };
         let font = box_ttf(
-            &"代理查询生成与检索后处理27"
+            &"代理查询生成与检索后处理278"
                 .chars()
                 .map(|ch| ch as u32)
                 .collect::<Vec<_>>(),
         );
-        let source_edge = extraction
-            .glyphs
-            .iter()
-            .filter(|glyph| {
-                !glyph.unicode.trim().is_empty()
-                    && glyph.unicode.trim().chars().all(|ch| ch.is_ascii_digit())
-            })
-            .map(glyph_ink_right)
-            .fold(0.0f32, f32::max);
         doc.rewrite(
             &mut extraction,
             &report,
@@ -9899,17 +10143,27 @@ mod tests {
         rows.sort_by(|left, right| right.0.total_cmp(&left.0));
         let short = rows[0];
         let long = rows[1];
+        let title_right = |needle: char, y: f32| {
+            painted
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.unicode.contains(needle) && (glyph.matrix[5] - y).abs() < 2.0)
+                .map(glyph_ink_right)
+                .fold(0.0f32, f32::max)
+        };
+        let short_title = title_right('理', short.0);
+        let long_title = title_right('理', long.0);
         assert!(
-            (short.2 - source_edge).abs() < 1.5,
-            "short-title page number left the source column {source_edge}: {rows:?}"
+            short_title > 0.0 && (short.1 - short_title) < 18.0 && short.1 + 1.0 >= short_title,
+            "short page number is not inline after 代理: title_right={short_title} number={short:?}"
         );
         assert!(
-            (long.2 - source_edge).abs() < 1.5,
-            "long-title page number left the source column {source_edge}: {rows:?}"
+            long_title > 0.0 && (long.1 - long_title) < 24.0 && long.1 + 1.0 >= long_title,
+            "long page number is not inline after its title: title_right={long_title} number={long:?}"
         );
         assert!(
-            short.1 > 200.0,
-            "short title pulled its page number off the column: {rows:?}"
+            long.2 - short.2 > 24.0,
+            "section numbers collapsed onto one right edge: {rows:?}"
         );
     }
 
@@ -9955,15 +10209,6 @@ mod tests {
                 .map(|ch| ch as u32)
                 .collect::<Vec<_>>(),
         );
-        let source_edge = extraction
-            .glyphs
-            .iter()
-            .filter(|glyph| {
-                !glyph.unicode.trim().is_empty()
-                    && glyph.unicode.trim().chars().all(|ch| ch.is_ascii_digit())
-            })
-            .map(glyph_ink_right)
-            .fold(0.0f32, f32::max);
         doc.rewrite(
             &mut extraction,
             &TranslateReport {
@@ -9999,15 +10244,16 @@ mod tests {
             .map(|glyph| glyph.matrix[4])
             .collect();
         assert_eq!(section.len(), 1, "section page number missing: {section:?}");
-        let section_right = painted
+        let title_right = painted
             .glyphs
             .iter()
-            .filter(|glyph| glyph.unicode == "3")
+            .filter(|glyph| glyph.unicode == "简")
             .map(glyph_ink_right)
             .fold(0.0f32, f32::max);
         assert!(
-            (section_right - source_edge).abs() < 1.5,
-            "section page number right {section_right} left the source column {source_edge}"
+            section[0] + 1.0 >= title_right && section[0] - title_right < 18.0,
+            "section page number x={} is not inline after 简介 at {title_right}",
+            section[0]
         );
         let title_y: Vec<f32> = painted
             .glyphs
@@ -10052,12 +10298,6 @@ ET",
         for (id, reason) in &segmentation.kept {
             extraction.mark_kept(*id, reason.clone()).unwrap();
         }
-        let source_edge = extraction
-            .glyphs
-            .iter()
-            .filter(|glyph| glyph.unicode.trim() == "3" || glyph.unicode.trim() == "4")
-            .map(glyph_ink_right)
-            .fold(0.0f32, f32::max);
         let segments: Vec<_> = segmentation
             .segments
             .iter()
@@ -10107,15 +10347,24 @@ ET",
             title.iter().any(|glyph| glyph.matrix[2].abs() > 0.15),
             "bold-italic chapter title lost its italic shear"
         );
-        let number_right = painted
+        let number_left = painted
             .glyphs
             .iter()
             .filter(|glyph| glyph.unicode.trim() == "3")
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        let title_right = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.contains('简'))
             .map(glyph_ink_right)
             .fold(0.0f32, f32::max);
         assert!(
-            (number_right - source_edge).abs() < 4.0,
-            "chapter page number right {number_right} left the source column {source_edge}"
+            number_left.is_finite()
+                && title_right > 0.0
+                && number_left + 1.0 >= title_right
+                && number_left - title_right < 20.0,
+            "chapter page number x={number_left} is not inline after the title at {title_right}"
         );
     }
 
@@ -10221,10 +10470,12 @@ ET",
     }
 
     #[test]
-    fn contents_rows_share_the_source_right_edge() {
-        // Front matter, a part with leaders, a bold-italic chapter, a section,
-        // and a bullet run. Column numbers meet the source right edge. A
-        // wrapped bullet item starts at the run's first-line x.
+    fn contents_rows_follow_the_source_geometry() {
+        // Source geometry, measured from the fixture, not from a column rule:
+        // front matter, chapter, and section numbers sit one gap after the
+        // title; only the part number meets the leader edge. Section indexes
+        // share an x and section titles share a later x. Bullet rows wrap at
+        // the source run's right edge and continue at that run's left.
         let bytes = contents_row_pdf();
         let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
         let mut extraction = doc.extract();
@@ -10237,16 +10488,29 @@ ET",
         for (id, reason) in &segmentation.kept {
             extraction.mark_kept(*id, reason.clone()).unwrap();
         }
-        let source_column = extraction
+        let source_part = extraction
             .glyphs
             .iter()
-            .filter(|glyph| glyph.matrix[4] > 400.0 && toc_page_char(glyph.unicode.trim()))
+            .filter(|glyph| glyph.matrix[4] > 400.0 && glyph.unicode.trim() == "1")
             .map(glyph_ink_right)
             .fold(0.0f32, f32::max);
-        assert!(
-            source_column > 400.0,
-            "fixture column missing: {source_column}"
-        );
+        assert!(source_part > 400.0, "part number missing: {source_part}");
+        let source_x = |needle: &str| {
+            extraction
+                .glyphs
+                .iter()
+                .find(|glyph| glyph.unicode == needle)
+                .map(|glyph| glyph.matrix[4])
+                .unwrap_or(f32::NAN)
+        };
+        let index_x = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "1" && glyph.matrix[4] < 140.0)
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        let title_x = source_x("B");
+        let subentry_x = source_x("E");
         let segments: Vec<_> = segmentation
             .segments
             .iter()
@@ -10255,16 +10519,28 @@ ET",
                     "前言"
                 } else if seg.text.contains("Introduction") {
                     "代理和应用简介"
-                } else if seg.text.contains("PART") {
+                } else if seg.text.contains("PART") || seg.text == "S" {
                     "第1部分入门"
-                } else if seg.text.contains("1.1") {
+                } else if seg.text.contains("1.1") && seg.text.contains("Building") {
                     "1.1 构建应用"
+                } else if seg.text.trim() == "1.1" {
+                    "1.1"
+                } else if seg.text.contains("Building") {
+                    "构建应用"
+                } else if seg.text.contains("2.1") && seg.text.contains("Running") {
+                    "2.1 运行提示"
+                } else if seg.text.trim() == "2.1" {
+                    "2.1"
+                } else if seg.text.contains("Running") {
+                    "运行提示"
                 } else if seg.text.contains("Engines") {
                     "问答引擎摘要问答引擎摘要问答引擎摘要问答引擎摘要"
                 } else if seg.text.contains("Chatbots") {
                     "聊天机器人应用聊天机器人应用聊天机器人应用"
                 } else if seg.text.contains("Agents") {
                     "章节练习补充说明文字章节练习补充说明文字"
+                } else if seg.text.contains("PromptTemplate") {
+                    "使用模板长标题使用模板长标题使用模板长标题使用模板长标题尾"
                 } else {
                     seg.text.as_str()
                 };
@@ -10278,9 +10554,9 @@ ET",
             })
             .collect();
         let font = box_ttf(
-            &"前言代理和应用简介第1部分入门构建问答引擎摘要聊天机器人应用章节练习补充说明文字■"
+            &"前言代理和应用简介第1部分入门构建应用运行提示问答引擎摘要聊天机器人章节练习补充说明文字使用模板长标题尾■"
                 .chars()
-                .chain("xvi.134789".chars())
+                .chain("xvi.123456789".chars())
                 .map(|ch| ch as u32)
                 .collect::<Vec<_>>(),
         );
@@ -10300,42 +10576,106 @@ ET",
         let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
             .unwrap()
             .extract();
-        let mut column_runs: Vec<(String, f32, f32)> = Vec::new();
-        let mut page_glyphs: Vec<&Glyph> = painted
+        let part_right = painted
             .glyphs
             .iter()
-            .filter(|glyph| glyph.matrix[4] > 300.0 && toc_page_char(glyph.unicode.trim()))
-            .collect();
-        page_glyphs.sort_by(|left, right| {
-            right.matrix[5]
-                .total_cmp(&left.matrix[5])
-                .then(left.matrix[4].total_cmp(&right.matrix[4]))
-        });
-        for glyph in page_glyphs {
-            let right = glyph.matrix[4] + glyph.advance[0].max(0.0);
-            let extend = column_runs.last().is_some_and(|(_, edge, y)| {
-                (glyph.matrix[5] - *y).abs() < 1.5
-                    && glyph.matrix[4] <= *edge + glyph.font_size * 0.5
-            });
-            if extend {
-                let row = column_runs.last_mut().unwrap();
-                row.0.push_str(glyph.unicode.trim());
-                row.1 = row.1.max(right);
-            } else {
-                column_runs.push((glyph.unicode.trim().to_string(), right, glyph.matrix[5]));
-            }
-        }
-        for token in ["xvi", "1", "3", "19"] {
-            let right = column_runs
+            .filter(|glyph| glyph.unicode.trim() == "1" && glyph.matrix[4] > 300.0)
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
+        assert!(
+            (part_right - source_part).abs() < 1.5,
+            "part number right {part_right} left the source edge {source_part}"
+        );
+        let preface = painted
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "前")
+            .expect("front matter");
+        assert!(
+            painted
+                .glyphs
                 .iter()
-                .find(|(text, _, _)| text == token)
-                .map(|(_, right, _)| *right);
+                .any(|glyph| glyph.unicode == "x" || glyph.unicode == "xvi"),
+            "xvi missing: {}",
+            painted.plain_text()
+        );
+        let preface_right = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                (glyph.matrix[5] - preface.matrix[5]).abs() < 1.5
+                    && glyph.unicode != "x"
+                    && glyph.unicode != "v"
+                    && glyph.unicode != "i"
+                    && glyph.unicode != "xvi"
+            })
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
+        let xvi_left = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                (glyph.matrix[5] - preface.matrix[5]).abs() < 1.5
+                    && matches!(glyph.unicode.as_str(), "x" | "v" | "i" | "xvi")
+            })
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            xvi_left.is_finite() && xvi_left - preface_right < 16.0 && part_right - xvi_left > 40.0,
+            "xvi x={xvi_left} is not inline after 前言 at {preface_right}; part edge {part_right}"
+        );
+        let index_draws: Vec<&Glyph> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                matches!(glyph.unicode.as_str(), "1" | "2")
+                    && (glyph.matrix[4] - index_x).abs() < 3.0
+            })
+            .collect();
+        assert!(
+            index_draws.len() >= 2,
+            "section indexes left the source column {index_x}: {}",
+            painted.plain_text()
+        );
+        let title_draws: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "构" || glyph.unicode == "运")
+            .map(|glyph| glyph.matrix[4])
+            .collect();
+        assert_eq!(
+            title_draws.len(),
+            2,
+            "section titles: {title_draws:?} text={}",
+            painted.plain_text()
+        );
+        for x in &title_draws {
             assert!(
-                right.is_some_and(|edge| (edge - source_column).abs() < 1.5),
-                "{token} left the source column {source_column}: {column_runs:?} {}",
-                painted.plain_text()
+                (x - title_x).abs() < 2.0,
+                "section title x={x} left the source title column {title_x}"
             );
         }
+        let mut sizes: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.unicode == "构"
+                    || glyph.unicode == "运"
+                    || (matches!(glyph.unicode.as_str(), "1" | "2")
+                        && (glyph.matrix[4] - index_x).abs() < 3.0)
+            })
+            .map(|glyph| glyph.font_size)
+            .collect();
+        sizes.sort_by(|left, right| left.total_cmp(right));
+        assert!(
+            sizes.len() >= 4 && sizes[sizes.len() - 1] - sizes[0] < 0.4,
+            "section index and title sizes diverged: {sizes:?}"
+        );
+        assert!(
+            !painted.glyphs.iter().any(|glyph| glyph.unicode == "S"),
+            "small-caps S was painted into the part row: {}",
+            painted.plain_text()
+        );
         let mut bullet_lines: Vec<(f32, f32)> = Vec::new();
         for glyph in painted.glyphs.iter().filter(|glyph| {
             glyph.unicode.contains('问')
@@ -10365,13 +10705,52 @@ ET",
         let inline: Vec<f32> = painted
             .glyphs
             .iter()
-            .filter(|glyph| matches!(glyph.unicode.as_str(), "7" | "8"))
+            .filter(|glyph| {
+                matches!(glyph.unicode.as_str(), "7" | "8")
+                    && bullet_lines
+                        .iter()
+                        .any(|row| (row.0 - glyph.matrix[5]).abs() < 2.0)
+            })
             .map(|glyph| glyph.matrix[4] + glyph.advance[0].max(0.0))
             .collect();
-        assert_eq!(inline.len(), 2, "inline bullet numbers: {inline:?}");
+        assert_eq!(
+            inline.len(),
+            2,
+            "inline bullet numbers: {inline:?} lines={bullet_lines:?} text={}",
+            painted.plain_text()
+        );
         assert!(
-            inline.iter().all(|right| source_column - right > 20.0),
-            "bullet-run numbers left their titles for the column {source_column}: {inline:?}"
+            inline.iter().all(|right| part_right - right > 20.0),
+            "bullet-run numbers left their titles for the part edge {part_right}: {inline:?}"
+        );
+        assert!(
+            (first_x - subentry_x).abs() < 2.0,
+            "bullet run x={first_x} left the source sub-entry column {subentry_x}"
+        );
+        let bullet_right = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.unicode.contains('问')
+                    || glyph.unicode.contains('聊')
+                    || glyph.unicode.contains('章')
+            })
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
+        assert!(
+            part_right - bullet_right > 20.0,
+            "bullet run reached the part edge {part_right}: ink {bullet_right}"
+        );
+        let prompt_ys: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "使" || glyph.unicode == "尾")
+            .map(|glyph| glyph.matrix[5])
+            .collect();
+        assert!(
+            prompt_ys.len() >= 2 && prompt_ys.iter().all(|y| (y - prompt_ys[0]).abs() < 1.5),
+            "PromptTemplate wrapped with column room left: {prompt_ys:?} {}",
+            painted.plain_text()
         );
     }
 
@@ -10400,20 +10779,38 @@ ET",
         }
         let mut resources = lopdf::Dictionary::new();
         resources.set("Font", fonts);
-        // Part `1` is the contents column. Front matter, the chapter, and the
-        // section share its operator gap with their titles. The bullet row
-        // wraps in English inside that column.
+        // Part `1` is the only right-edge number. Section indexes sit in
+        // their own column; titles share a later x. The bullet run ends
+        // well short of that part number. `S` is the small-caps tail of
+        // the part title, a few points before the dots.
         let content = b"BT \
-/F1 10 Tf 1 0 0 1 72 700 Tm [(preface) -1000 (xvi)] TJ \
-/F2 13 Tf 1 0 0 1 90 640 Tm [(Introduction to AI agents) -1400 (3)] TJ \
-/F3 12 Tf 1 0 0 1 40 600 Tm (PART 1 Getting started) Tj \
-1 0 0 1 400 600 Tm (........) Tj \
+/F1 10 Tf 1 0 0 1 72 700 Tm (preface) Tj \
+1 0 0 1 125 700 Tm (xvi) Tj \
+/F2 13 Tf 1 0 0 1 90 640 Tm (Introduction to AI agents) Tj \
+1 0 0 1 280 640 Tm (3) Tj \
+/F3 12 Tf 1 0 0 1 40 600 Tm (PART LLM) Tj \
+/F3 9.6 Tf 1 0 0 1 96 600 Tm (S) Tj \
+/F3 12 Tf 1 0 0 1 220 600 Tm (........) Tj \
 1 0 0 1 450 600 Tm (1) Tj \
-/F3 11 Tf 1 0 0 1 110 560 Tm [(1.1 Building applications) -1400 (19)] TJ \
+/F3 11 Tf 1 0 0 1 110 560 Tm (1.1) Tj \
+1 0 0 1 136 560 Tm (Building applications) Tj \
+1 0 0 1 275 560 Tm (19) Tj \
+1 0 0 1 110 530 Tm (2.1) Tj \
+1 0 0 1 136 530 Tm (Running prompts) Tj \
+1 0 0 1 230 530 Tm (28) Tj \
 /F3 10 Tf \
-1 0 0 1 140 500 Tm [(Engines) -900 (4) -1400 (Chatbots) -900 (7) -1400 (Agents) -900 (8)] TJ \
-/F3 4 Tf 1 0 0 1 200 502 Tm (\x95) Tj \
-1 0 0 1 280 502 Tm (\x95) Tj \
+1 0 0 1 180 470 Tm (Engines) Tj \
+1 0 0 1 230 470 Tm (4) Tj \
+/F3 4 Tf 1 0 0 1 248 472 Tm (\x95) Tj \
+/F3 10 Tf \
+1 0 0 1 258 470 Tm (Chatbots) Tj \
+1 0 0 1 305 470 Tm (7) Tj \
+/F3 4 Tf 1 0 0 1 322 472 Tm (\x95) Tj \
+/F3 10 Tf \
+1 0 0 1 332 470 Tm (Agents) Tj \
+1 0 0 1 370 470 Tm (8) Tj \
+/F1 10 Tf 1 0 0 1 180 420 Tm (PromptTemplate) Tj \
+1 0 0 1 270 420 Tm (33) Tj \
 ET"
         .to_vec();
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));
@@ -10481,9 +10878,7 @@ ET"
             test_draw(446.0, 200.0, size, "171", vec![30, 31, 32]),
         ];
         close_column_holes(&mut drawn, &extraction, &by_id);
-        let mut column = HashMap::new();
-        column.insert(0, 474.0);
-        seat_inline_page_numbers(&mut drawn, &extraction, &by_id, &column);
+        seat_inline_page_numbers(&mut drawn, &extraction, &by_id);
         let title_y = drawn
             .iter()
             .find(|item| item.text.starts_with('第'))

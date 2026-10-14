@@ -144,8 +144,19 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
         // A line number in the gutter is lower and smaller than this line,
         // but still inside the baseline tolerance. Gluing it to the hyphen
         // makes the line look like a contents entry, so the word never joins.
-        let gutter_mark =
-            glyph.font_size <= line_size * 0.8 && left > line_right + line_size * 0.35;
+        // `LLMS` ends in a small-caps `S` a few points before the leader
+        // dots. That letter is the last of the word, not a gutter mark.
+        let gap_after = left - line_right;
+        let small_caps_letter = glyph.unicode.trim().chars().count() == 1
+            && glyph
+                .unicode
+                .trim()
+                .chars()
+                .all(|ch| ch.is_ascii_alphabetic())
+            && gap_after < line_size * 1.25;
+        let gutter_mark = glyph.font_size <= line_size * 0.8
+            && gap_after > line_size * 0.35
+            && !small_caps_letter;
         // A subscript a few points inside the left edge is not the other
         // column. A body-sized glyph that returns to this margin is: the
         // line walked onto the other column through a mark in between.
@@ -237,9 +248,20 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // trigger. Leaving it here glues the digit to the word, and the line
         // is then read as a contents entry. A small index such as `(i)` has
         // body text tight on its right, so it stays in the sentence.
+        // `LLMS` ends in a small-caps `S` a few points before the leader
+        // dots. The size drop looks like a gutter digit, but the letter is
+        // the last of the word. Splitting it leaves that `S` in the dots.
+        let small_caps_letter = glyph.unicode.trim().chars().count() == 1
+            && glyph
+                .unicode
+                .trim()
+                .chars()
+                .all(|ch| ch.is_ascii_alphabetic())
+            && gap < prev_size * 1.25;
         let gutter_digit = glyph.font_size <= prev_size * 0.8
             && gap > prev_size * 0.5
-            && trailing_gutter_mark(&line[index..], prev_size);
+            && trailing_gutter_mark(&line[index..], prev_size)
+            && !small_caps_letter;
         let left_w = piece_width(&current);
         let right_w = piece_width(&line[index..]);
         let both_wide = left_w >= size * 12.0 && right_w >= size * 12.0;
