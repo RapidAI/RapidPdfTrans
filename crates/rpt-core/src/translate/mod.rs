@@ -2490,10 +2490,14 @@ fn is_acronym_token(word: &str) -> bool {
 }
 
 fn url_or_email_only(source: &str) -> bool {
-    let words: Vec<&str> = source.split_whitespace().collect();
+    let body = strip_leading_marker(source);
+    let words: Vec<&str> = body.split_whitespace().collect();
     !words.is_empty()
         && words.iter().all(|word| {
-            word.starts_with("http://") || word.starts_with("https://") || word.contains('@')
+            word.starts_with("http://")
+                || word.starts_with("https://")
+                || word.starts_with("www.")
+                || word.contains('@')
         })
 }
 

@@ -1378,7 +1378,7 @@ fn interior_glyphs(lines: &[VisualLine<'_>], flags: &SegmentFlags) -> Vec<(u32, 
         let body_font = body_fonts
             .entry(page)
             .or_insert_with(|| dominant_body_font(lines, page));
-        for index in figure_side(&block, lines, body_font, &caption_line) {
+        for index in figure_side(&block, lines, body_font, &caption_line, kind == "table") {
             if claimed[index] || caption_line[index] {
                 continue;
             }
@@ -1842,6 +1842,7 @@ fn figure_side(
     lines: &[VisualLine<'_>],
     body_font: &str,
     caption_line: &[bool],
+    table: bool,
 ) -> Vec<usize> {
     let page = lines[block[0]].page;
     let top = block
@@ -1852,8 +1853,17 @@ fn figure_side(
         .iter()
         .map(|index| lines[*index].y)
         .fold(f32::MAX, f32::min);
-    let above = walk_interior(top, 1.0, page, block, lines, body_font, caption_line);
-    let below = walk_interior(bottom, -1.0, page, block, lines, body_font, caption_line);
+    let above = walk_interior(top, 1.0, page, block, lines, body_font, caption_line, table);
+    let below = walk_interior(
+        bottom,
+        -1.0,
+        page,
+        block,
+        lines,
+        body_font,
+        caption_line,
+        table,
+    );
     // A figure caption sits under the drawing; a table caption sits above the cells.
     if above.len() >= below.len() && !above.is_empty() {
         above
@@ -1870,6 +1880,7 @@ fn walk_interior(
     lines: &[VisualLine<'_>],
     body_font: &str,
     caption_line: &[bool],
+    table: bool,
 ) -> Vec<usize> {
     let anchor = &lines[block[0]];
     let mut cursor = origin_y;
@@ -1892,7 +1903,18 @@ fn walk_interior(
         band.sort_by(|a, b| a.1.total_cmp(&b.1));
         let nearest = band[0].1;
         // A blank band this wide is the next region, not more of the drawing.
-        if nearest > 140.0 || (cursor - origin_y).abs() > 420.0 {
+        // A table's cells sit on consecutive leadings. A shaded callout a
+        // few lines below the last cell (`Beyond Chain of Thought`) is the
+        // next region, not another row. Figures keep the wider band.
+        // The first row may sit well under a wrapped caption. Later rows
+        // stay within about four leadings. A shaded callout 42pt under the
+        // last 10.5pt row is the next region, not another cell.
+        let band_limit = if table && !picked.is_empty() {
+            lines[band[0].0].size.max(1.0) * 4.05
+        } else {
+            140.0
+        };
+        if nearest > band_limit || (cursor - origin_y).abs() > 420.0 {
             break;
         }
         let size = lines[band[0].0].size.max(1.0);
@@ -2656,6 +2678,11 @@ fn list_carries_over(prev: &[VisualLine<'_>], lower: &VisualLine<'_>) -> bool {
     }
     let tail = upper.text.trim_end();
     if sentence_end(tail) || soft_hyphen_stem(tail).is_some() {
+        return false;
+    }
+    // A bullet that is only a link is the whole item. The next page's
+    // heading (`Summary`) is not the rest of that URL.
+    if tail.contains("://") || tail.contains("www.") {
         return false;
     }
     let size = upper.size.max(lower.size).max(1.0);
@@ -4546,6 +4573,61 @@ mod tests {
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
         assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
         assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
+    }
+
+    #[test]
+    fn a_callout_below_a_table_is_not_kept_as_a_cell() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today. It continues so the column face stays the body face and the sidebar does not.";
+        let mut body_line = wide(0, 72.0, 700.0, body, 360.0, 10.0);
+        body_line.font_name = "NewBaskerville-Roman".into();
+        let mut caption = wide(
+            1,
+            102.0,
+            360.0,
+            "Table 2.2 In-context learning prompts and methods.",
+            300.0,
+            8.0,
+        );
+        caption.font_name = "FranklinGothic-Demi".into();
+        let mut cell = wide(
+            2,
+            108.0,
+            340.0,
+            "Zero-shot learning provides no example in the prompt at all.",
+            280.0,
+            8.5,
+        );
+        cell.font_name = "FranklinGothic-Book".into();
+        let mut title = wide(3, 114.0, 290.0, "Beyond Chain of Thought", 180.0, 10.5);
+        title.font_name = "FranklinGothic-Demi".into();
+        let mut prose = wide(
+            4,
+            114.0,
+            276.0,
+            "Chain of Thought improves how language models handle complex reasoning by",
+            340.0,
+            9.5,
+        );
+        prose.font_name = "FranklinGothic-Book".into();
+        let seg = segment_with(
+            &[body_line, caption, cell, title, prose],
+            &SegmentFlags::default(),
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        assert!(kept.contains(&2), "table cell stays: {:?}", seg.kept);
+        assert!(
+            !kept.contains(&3) && !kept.contains(&4),
+            "callout was swallowed: {:?}",
+            seg.kept
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Beyond Chain of Thought")),
+            "{texts:?}"
+        );
     }
 
     #[test]
@@ -6558,6 +6640,32 @@ mod tests {
             1,
             "{:?}",
             segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_url_bullet_does_not_join_the_next_heading() {
+        let mut url = glyph(
+            0,
+            108.0,
+            80.0,
+            "\u{f0a1} https://github.com/dair-ai/Prompt-Engineering-Guide",
+            false,
+        );
+        url.page_index = 0;
+        let mut summary = glyph(1, 108.0, 560.0, "Summary", false);
+        summary.page_index = 1;
+        let segs = segment_glyphs(&[url, summary]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("github.com") && !text.contains("Summary")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.trim() == "Summary"),
+            "{texts:?}"
         );
     }
 

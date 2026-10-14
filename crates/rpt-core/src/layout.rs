@@ -409,6 +409,12 @@ pub(crate) fn fit_cjk_block(
         // character down so the tail is at least two characters. The last
         // line was one em wide, so two characters still fit the measure.
         absorb_one_char_tail(&mut lines);
+        // `使用 LangChain 摘` / `要文本` cuts 摘要 because one more CJK
+        // character still fit after the Latin word. A display title moves
+        // that short tail down so the word stays whole.
+        if source_size >= 16.0 {
+            rejoin_cjk_tail_after_latin(&mut lines, size, width, first_width, font);
+        }
         let gaps = lines.len().saturating_sub(1);
         let within = lines.iter().enumerate().all(|(index, line)| {
             let limit = if index == 0 { first_width } else { width };
@@ -545,6 +551,54 @@ fn line_skips_justification(text: &str) -> bool {
 
 /// `组件` must not end as `组` / `件`. One CJK character on the last line
 /// moves down with the character before it.
+/// A display line that ends `LangChain 摘` with `要文本` on the next line
+/// has room for one CJK character and uses it to cut a word. Move that
+/// one- or two-character tail onto the next line when both lines still fit.
+fn rejoin_cjk_tail_after_latin(
+    lines: &mut [String],
+    size: f32,
+    width: f32,
+    first_width: f32,
+    font: &SubsetFont,
+) {
+    if lines.len() < 2 {
+        return;
+    }
+    for index in 0..lines.len() - 1 {
+        let chars: Vec<char> = lines[index].chars().collect();
+        let mut cut = chars.len();
+        while cut > 0 && is_cjk_body(chars[cut - 1]) {
+            cut -= 1;
+        }
+        let run = chars.len() - cut;
+        if run == 0 || run > 2 || cut == 0 {
+            continue;
+        }
+        let prev = chars[cut - 1];
+        if !(prev.is_whitespace() || prev.is_ascii_alphanumeric()) {
+            continue;
+        }
+        if !lines[index + 1].chars().next().is_some_and(is_cjk_body) {
+            continue;
+        }
+        let moved: String = chars[cut..].iter().collect();
+        let left: String = chars[..cut].iter().collect();
+        let left = left.trim_end().to_string();
+        if left.is_empty() {
+            continue;
+        }
+        let right = format!("{moved}{}", lines[index + 1]);
+        let limit = if index == 0 { first_width } else { width };
+        if fit_measure(&left, size, font) > limit + 1.0
+            || fit_measure(&right, size, font) > width + 1.0
+        {
+            continue;
+        }
+        lines[index] = left;
+        lines[index + 1] = right;
+    }
+}
+
 fn absorb_one_char_tail(lines: &mut [String]) {
     if lines.len() < 2 {
         return;
@@ -1428,6 +1482,27 @@ mod tests {
         assert!(
             sticky.get(scheme + 7).copied().unwrap_or(false),
             "CJK before the URL shifted the sticky span off https://"
+        );
+    }
+
+    #[test]
+    fn a_display_title_does_not_split_a_cjk_word_after_latin() {
+        let text = "使用 LangChain 摘要文本";
+        let font = mixed_ascii_font(text);
+        let metrics = CjkMeasure::resolve(1.0, 1.15);
+        // Width fits `使用 LangChain 摘` and not the next character, which
+        // is how 摘要 was cut on the chapter opener.
+        let fitted =
+            fit_cjk_block(text, 30.0, 1.0, 260.0, 0.0, 32.0, &font, metrics).expect("title");
+        assert!(
+            fitted.0.iter().any(|line| line.contains("摘要文本")),
+            "{:?}",
+            fitted.0
+        );
+        assert!(
+            fitted.0.iter().all(|line| !line.ends_with('摘')),
+            "{:?}",
+            fitted.0
         );
     }
 

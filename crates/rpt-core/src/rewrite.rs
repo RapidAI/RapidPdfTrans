@@ -554,7 +554,7 @@ pub fn rewrite_translation(
         &owners,
     );
     let listing_shifts = close_column_holes(&mut drawn, extraction, &by_id);
-    reposition_listings(doc, extraction, &listing_shifts, &mut succeeded)?;
+    reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
     // A 27pt chapter index is kept in the source font (`(3) Tj`). The rows
     // around it move with a taller or shorter sub-entry, and the numeral has
@@ -6210,7 +6210,12 @@ fn layout_segment(
         let shared = ink.iter().all(|line| (line.right - ink_edge).abs() <= 2.0);
         let left_min = ink.iter().map(|line| line.left).fold(f32::MAX, f32::min);
         let left_max = ink.iter().map(|line| line.left).fold(f32::MIN, f32::max);
-        let ragged_left = ink.len() >= 2 && left_max - left_min > 8.0;
+        // A chapter title can share its right edge while the English lines
+        // differ by only a few points (`Summarizing text` / `using LangChain`).
+        // Eight points missed that pair, so the short Chinese line stayed
+        // on the left. Body text never reaches this size.
+        let left_slop = if source_size >= 16.0 { 3.0 } else { 8.0 };
+        let ragged_left = ink.len() >= 2 && left_max - left_min > left_slop;
         let page_edge =
             if ink.len() == 1 && drawn.len() == 1 && !contents_baseline(extraction, &ink[0]) {
                 shared_right_edge(extraction, &ink[0])
@@ -6981,7 +6986,14 @@ fn close_column_holes(
             if let Some(prev) = &prev {
                 let source_gap = prev.source_bottom - block.source_top;
                 let size = prev.size.max(block.size).max(1.0);
-                let same_column = (prev.left - block.left).abs() < size * 4.0;
+                // An indented code continuation starts well to the right of
+                // the line above it, then the next bracket returns to the
+                // margin. Both are still the same listing.
+                let same_column = if prev.listing && block.listing {
+                    (prev.left - block.left).abs() < size * 16.0
+                } else {
+                    (prev.left - block.left).abs() < size * 4.0
+                };
                 // A shorter paragraph used to leave the next block on the
                 // English baseline. Same-baseline marks (a page number beside
                 // its title) have no positive source gap, so they are not pulled.
@@ -7247,7 +7259,7 @@ fn listing_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<Co
                     || glyph.sideways()
                     || glyph.unicode.is_empty()
                     || (glyph.matrix[5] - y).abs() >= 0.8
-                    || glyph.matrix[4] < left - size * 2.5
+                    || glyph.matrix[4] < left - size * 12.0
                     || glyph.matrix[4] > right + size
                 {
                     continue;
@@ -7278,6 +7290,7 @@ fn reposition_listings(
     extraction: &Extraction,
     shifts: &[ListingShift],
     succeeded: &mut HashSet<u32>,
+    keep: &mut HashMap<u32, String>,
 ) -> Result<()> {
     if shifts.is_empty() {
         return Ok(());
@@ -7345,7 +7358,12 @@ fn reposition_listings(
         };
         let stream_id = doc.add_object(Stream::new(Dictionary::new(), stream.into_bytes()));
         append_contents(doc, page_id, stream_id)?;
-        succeeded.extend(moved);
+        succeeded.extend(moved.iter().copied());
+        // A kept listing would otherwise stay on the English baseline under
+        // the copy drawn at the closed-up y.
+        for id in moved {
+            keep.remove(&id);
+        }
     }
     Ok(())
 }
@@ -9030,15 +9048,27 @@ fn english_body_source(text: &str) -> bool {
     if tags >= 4 && text.matches('>').count() >= 4 {
         return false;
     }
-    let latin = text.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    if latin < 40 || text.chars().any(is_han_char) {
+    let trimmed = text.trim();
+    let body = if crate::segment::starts_with_list_marker(trimmed) {
+        trimmed
+            .chars()
+            .skip(1)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    } else {
+        trimmed.to_string()
+    };
+    let latin = body.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    if latin < 40 || body.chars().any(is_han_char) {
         return false;
     }
-    let words: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<&str> = body.split_whitespace().collect();
     !words.is_empty()
         && !words.iter().all(|word| {
             word.starts_with("http://")
                 || word.starts_with("https://")
+                || word.starts_with("www.")
                 || word.contains('@')
                 || word.chars().all(|ch| ch.is_ascii_digit())
         })
@@ -10793,6 +10823,9 @@ mod tests {
         ));
         assert!(!english_body_source(
             "4 https://huggingface.co/datasets/piushorn/wikipedia-latex-formulas-319k"
+        ));
+        assert!(!english_body_source(
+            "\u{f0a1} https://github.com/dair-ai/Prompt-Engineering-Guide"
         ));
     }
 
@@ -15486,6 +15519,7 @@ ET",
 1 0 0 1 60 456 Tm (>) Tj \
 /F2 10 Tf \
 1 0 0 1 72 456 Tm (python -m venv env_ch02 don\x92t) Tj \
+1 0 0 1 120 446 Tm (echo hello) Tj \
 /F1 10 Tf \
 1 0 0 1 72 436 Tm (Create and activate a virtual environment with venv now.) Tj \
 ET",
@@ -15538,7 +15572,22 @@ ET",
             "listing dropped the prompt mark or the apostrophe: {}",
             code_row.1
         );
+        let copies = rows
+            .iter()
+            .filter(|(_, text)| text.contains("python"))
+            .count();
+        assert_eq!(copies, 1, "listing was drawn twice: {rows:?}");
+        let echo = rows
+            .iter()
+            .filter(|(_, text)| text.contains("echo"))
+            .collect::<Vec<_>>();
+        assert_eq!(echo.len(), 1, "indented continuation: {rows:?}");
         let code = code_row.0;
+        let echo_y = echo[0].0;
+        assert!(
+            (code - echo_y - 10.0).abs() < 4.0,
+            "indented continuation split from the listing: code {code:.1} echo {echo_y:.1}"
+        );
         let follow = rows.iter().find(|(_, text)| text.contains('虚')).unwrap().0;
         let line = 15.0;
         let source_gap = 20.0;
