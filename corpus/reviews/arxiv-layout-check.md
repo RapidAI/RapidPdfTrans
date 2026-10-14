@@ -185,7 +185,7 @@ Three openly licensed PDFs. Each translation is coverage-complete (`english_body
 | --- | --- | --- |
 | ocw-18-225-lec01, MIT OCW 18.225 lecture 1, CC BY-NC-SA | 11, letter | `/opt/cursor/artifacts/pdfs/ocw-18-225-lec01-zh.pdf` |
 | fosdem-2024-mutation, CC BY | 61, landscape slides | `/opt/cursor/artifacts/pdfs/fosdem-2024-mutation-zh.pdf` |
-| nist-sp-800-218, public domain | 36, Word report | `/opt/cursor/artifacts/pdfs/nist-sp-800-218-zh.pdf` |
+| nist-sp-800-218, public domain | 36, Word report | `/opt/cursor/artifacts/pdfs/nist-sp-800-218-zh-v6.pdf` |
 
 Renders: `/opt/cursor/artifacts/corpus-loop/`.
 
@@ -203,6 +203,7 @@ Renders: `/opt/cursor/artifacts/corpus-loop/`.
 | `How Mutation Testing Got Practical` and `Software Engineering Consultant` were restored as personal names. A function word, `versus`, `theorem`, or a word longer than nine letters is a title. `Dustin Archibald` and `Jean-Luc Picard` stay names. | FOSDEM title; OCW `Finitary Versus Infinitary` |
 | Emoji and icon-font pictures (✅, ❌, 👽) and the fi ligature had no CJK glyph, so the line stayed English. They stand in for `✓`, `×`, `•`, and `fi`. | FOSDEM |
 | The rotated footer `This publication is available free of charge from…` shared a baseline with the changelog and the line stayed English. A sideways text matrix is a margin stamp, not part of the sentence. | NIST page 36 |
+| A title-case contents heading (`Executive Summary`, `Change Log`) was put back in Latin because it has the shape of a person's name. A heading word (`summary`, `log`, `executive`, `change`, `contents`, `introduction`) is not a byline, so the translation stays. | NIST page 9 |
 
 ### ocw-18-225-lec01
 
@@ -228,7 +229,7 @@ Renders: `/opt/cursor/artifacts/corpus-loop/`.
 | page | findings | severity | fixed |
 | --- | --- | --- | --- |
 | 2 | Title and affiliations are Chinese. `Murugiah Souppaya` and `Karen Scarfone` stay Latin. The DOI footer stays English. | was high | one-byte WinAnsi |
-| 9 | Contents page stays English (`Table of Contents`, `1 Introduction`). | low | toc |
+| 9 | Contents titles are Chinese (`目录`, `执行摘要`, `1 引言`, `参考文献`, `缩略语`, `变更日志`). Leader dots and page numbers stay (`vi`, `1`, `27`). | was low | heading is not a byline |
 | 10 | Introduction is Chinese, including the superscript note. The rotated footer is still the English DOI line, in the margin. | — | sideways footer |
 | 11 | Nested bullets are Chinese, including the wrap under `物联网（IoT）`. Footnote 2 is Chinese. | — | — |
 | 14 | Practice prose is Chinese. Column headers and `Example 1:` cells stay English. | — | table cells |

@@ -1747,6 +1747,20 @@ fn is_function_word(word: &str) -> bool {
             | "consultant"
             | "versus"
             | "theorem"
+            // Document headings, not bylines. `Executive Summary` and
+            // `Change Log` are title case, the same shape as a person's name.
+            | "summary"
+            | "log"
+            | "executive"
+            | "change"
+            | "contents"
+            | "introduction"
+            | "references"
+            | "appendix"
+            | "abstract"
+            | "overview"
+            | "chapter"
+            | "section"
     )
 }
 
@@ -2530,6 +2544,16 @@ mod tests {
         assert!(whole_line_is_personal_name("Dustin Archibald"));
         assert!(!whole_line_is_personal_name("Finitary Versus Infinitary"));
         assert!(!whole_line_is_personal_name("Ramsey's Theorem"));
+        assert!(!whole_line_is_personal_name("Executive Summary"));
+        assert!(!whole_line_is_personal_name("Change Log"));
+        assert_eq!(
+            restore_credit_names("Executive Summary", "执行摘要"),
+            "执行摘要"
+        );
+        assert_eq!(
+            restore_credit_names(" Change Log ", " 变更日志 "),
+            " 变更日志 "
+        );
         assert_eq!(
             restore_credit_names("Finitary Versus Infinitary", "有限与无限"),
             "有限与无限"
