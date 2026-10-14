@@ -285,9 +285,19 @@ pub fn rewrite_translation(
     let mut succeeded: HashSet<u32> = HashSet::new();
     let mut embedded: Vec<(String, SubsetFont)> = Vec::new();
     let mut font_styles: HashMap<String, FaceStyle> = HashMap::new();
-    let toc_chars: String = toc_redraw
+    // A leader row can be dots and a page number with no title glyph in
+    // that operator. Those marks are not companions of the title, but the
+    // subset still has to draw them once the page number blanks the line.
+    let toc_chars: String = extraction
+        .glyphs
         .iter()
-        .filter_map(|id| extraction.glyphs.get(by_id[id]))
+        .filter(|glyph| {
+            toc_redraw.contains(&glyph.id)
+                || matches!(
+                    &glyph.disposition,
+                    Disposition::KeptOriginal { reason } if reason == "toc"
+                )
+        })
         .map(|glyph| glyph.unicode.as_str())
         .collect();
     let echo_chars: String = paint_original
@@ -1413,7 +1423,34 @@ fn commit_toc_operators(
         }
     }
     let mut leaders: Vec<&Glyph> = Vec::new();
-    for id in toc_redraw {
+    // `.......  119` is one operator and the title is another. The dots are
+    // not companions of the title, so they never enter `toc_redraw`. Drawing
+    // `119` still blanks that operator. Put the dots back with the number.
+    let mut redraw_ids: Vec<u32> = toc_redraw.iter().copied().collect();
+    let mut seen_redraw: HashSet<u32> = toc_redraw.clone();
+    for glyph in &extraction.glyphs {
+        if seen_redraw.contains(&glyph.id)
+            || !is_toc_leader_glyph(glyph)
+            || !is_toc_mark(glyph, toc_redraw)
+        {
+            continue;
+        }
+        let Some(span) = span_of(&glyph.source) else {
+            continue;
+        };
+        let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+        let shares_redraw = owners.get(&key).is_some_and(|ids| {
+            ids.iter()
+                .any(|id| succeeded.contains(id) && !keep.contains_key(id))
+        });
+        if !shares_redraw {
+            continue;
+        }
+        seen_redraw.insert(glyph.id);
+        redraw_ids.push(glyph.id);
+        live_ops.insert(key);
+    }
+    for id in &redraw_ids {
         if placed.contains(id) {
             continue;
         }
@@ -10840,6 +10877,146 @@ ET",
             "PromptTemplate wrapped with column room left: {prompt_ys:?} {}",
             painted.plain_text()
         );
+    }
+
+    #[test]
+    fn glued_part_leaders_are_redrawn_with_the_page_number() {
+        // Part 3 puts the dots and `  119` in one TJ, with no title glyph in
+        // that operator. Parts 1 and 2 start the dot string with a space, so
+        // the title still shares the operator. Blanking `119` used to drop
+        // the dots and leave the gap.
+        let bytes = glued_part_leader_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let title = segmentation
+            .segments
+            .iter()
+            .find(|seg| seg.text.contains("CHATBOTS"))
+            .expect("part title");
+        assert!(
+            !title.text.contains('.'),
+            "leaders stayed in the title: {}",
+            title.text
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let font = box_ttf(
+            &"第3部分问答聊天机器人.119"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments: vec![TranslatedSegment {
+                    id: title.id,
+                    page_index: title.page_index,
+                    glyph_ids: title.glyph_ids.clone(),
+                    source: title.text.clone(),
+                    translated: "第3部分问答聊天机器人".into(),
+                }],
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let dots: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == ".")
+            .map(|glyph| glyph.matrix[4])
+            .collect();
+        assert!(
+            dots.len() >= 4,
+            "glued leaders were not redrawn: {}",
+            painted.plain_text()
+        );
+        let title_right = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "人")
+            .map(glyph_ink_right)
+            .fold(0.0f32, f32::max);
+        let number_left = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "1" || glyph.unicode == "9")
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            title_right > 0.0 && number_left.is_finite() && number_left - title_right > 20.0,
+            "119 is not past the title: title_right={title_right} number_left={number_left}"
+        );
+        assert!(
+            dots.iter().any(|x| *x > title_right && *x < number_left),
+            "no leader between the title and 119: dots={dots:?} title_right={title_right} number={number_left}"
+        );
+    }
+
+    fn glued_part_leader_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let mut font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        };
+        font_dict.set("BaseFont", lopdf::Object::Name(b"Helvetica".to_vec()));
+        let font = doc.add_object(font_dict);
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let content = b"BT \
+/F1 13.5 Tf \
+1 0 0 1 57 400 Tm (PART 3 QA CHATBOTS) Tj \
+13.5 0 0 13.5 250 400 Tm [(............)-147(  119)] TJ \
+ET"
+        .to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 531.into(), 666.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
     }
 
     fn contents_row_pdf() -> Vec<u8> {

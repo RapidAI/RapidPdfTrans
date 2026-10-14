@@ -761,11 +761,17 @@ fn finish_report(
     calls: usize,
     cache_hits: usize,
 ) -> Result<TranslateReport> {
-    let mut report_segments = Vec::with_capacity(segments.len());
+    let mut texts: Vec<String> = Vec::with_capacity(segments.len());
     for (i, seg) in segments.iter().enumerate() {
         let text = translated[i]
             .clone()
             .ok_or_else(|| Error::Translate(format!("segment {} was not translated", seg.id)))?;
+        texts.push(text);
+    }
+    gloss_echoed_words(segments, &mut texts);
+    let mut report_segments = Vec::with_capacity(segments.len());
+    for (i, seg) in segments.iter().enumerate() {
+        let text = texts[i].clone();
         let kept = seg.glyph_ids.iter().any(|id| reference_ids.contains(id));
         if !kept {
             for id in &seg.glyph_ids {
@@ -1338,6 +1344,7 @@ fn flaw_count(source: &str, translated: &str) -> usize {
         + usize::from(stray_cjk_space(translated))
         + usize::from(extra_sentence_end(source, translated))
         + usize::from(residual_english(translated))
+        + usize::from(leftover_source_word(source, translated))
 }
 
 fn repair_translation(source: &str, translated: &str) -> String {
@@ -1509,6 +1516,164 @@ fn residual_english(text: &str) -> bool {
     }
     flush(&mut run, &mut flagged);
     flagged
+}
+
+/// `Text summarization` came back as `Text 摘要`. The other source word was
+/// translated and this one was left. A name kept beside Chinese
+/// (`编辑 Dustin Archibald`) is more than one word, and a long sentence that
+/// keeps `Python` is not a short title.
+fn leftover_source_word(source: &str, translated: &str) -> bool {
+    if source.split_whitespace().count() > 6 {
+        return false;
+    }
+    let words: Vec<String> = translated
+        .split_whitespace()
+        .filter_map(prose_word)
+        .collect();
+    if words.len() != 1 || !translated.chars().any(is_han) {
+        return false;
+    }
+    let word = &words[0];
+    if !contains_word(source, word) {
+        return false;
+    }
+    source.split_whitespace().any(|token| {
+        let Some(other) = prose_word(token) else {
+            return false;
+        };
+        other != *word && !contains_word(translated, &other)
+    })
+}
+
+/// `Text` was its own segment because the contents line wrapped, and the
+/// model echoed it. Other short titles in the same job already translated
+/// that word (`Text classification` → `文本分类`, `Composing text` →
+/// `撰写文本`). Use the Han string they share. A product token with no
+/// shared gloss (`Chroma`) stays, and a roman folio (`xvi`) is not a word.
+fn gloss_echoed_words(segments: &[Segment], translated: &mut [String]) {
+    let owned: Vec<(String, String)> = segments
+        .iter()
+        .zip(translated.iter())
+        .map(|(segment, text)| (segment.text.clone(), text.clone()))
+        .collect();
+    let pairs: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(source, text)| (source.as_str(), text.as_str()))
+        .collect();
+    for (segment, text) in segments.iter().zip(translated.iter_mut()) {
+        let source = segment.text.trim();
+        let current = text.trim();
+        if !echoed_prose_word(source) || !source.eq_ignore_ascii_case(current) {
+            continue;
+        }
+        let Some(gloss) = shared_gloss(&pairs, source) else {
+            continue;
+        };
+        let lead = text.len() - text.trim_start().len();
+        let trail = text.len() - text.trim_end().len();
+        let mut next = text[..lead].to_string();
+        next.push_str(&gloss);
+        next.push_str(&text[text.len() - trail..]);
+        *text = next;
+    }
+}
+
+fn echoed_prose_word(text: &str) -> bool {
+    let mut tokens = text.split_whitespace();
+    let Some(token) = tokens.next() else {
+        return false;
+    };
+    tokens.next().is_none() && prose_word(token).is_some() && !roman_token(token)
+}
+
+fn roman_token(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().all(|ch| {
+            matches!(
+                ch.to_ascii_lowercase(),
+                'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
+            )
+        })
+}
+
+fn shared_gloss(pairs: &[(&str, &str)], word: &str) -> Option<String> {
+    let mut sets: Vec<std::collections::HashSet<String>> = Vec::new();
+    for (source, translated) in pairs {
+        if source.trim().eq_ignore_ascii_case(word) || source.split_whitespace().count() > 14 {
+            continue;
+        }
+        if !contains_word(source, word) || contains_word(translated, word) {
+            continue;
+        }
+        let subs = han_substrings(translated);
+        if subs.is_empty() {
+            continue;
+        }
+        sets.push(subs);
+    }
+    if sets.len() < 2 {
+        return None;
+    }
+    let mut common = sets[0].clone();
+    for set in sets.iter().skip(1) {
+        common.retain(|item| set.contains(item));
+    }
+    let max = common.iter().map(|item| item.chars().count()).max()?;
+    if max < 2 {
+        return None;
+    }
+    let longest: Vec<String> = common
+        .into_iter()
+        .filter(|item| item.chars().count() == max)
+        .collect();
+    (longest.len() == 1).then(|| longest.into_iter().next().unwrap())
+}
+
+fn han_substrings(text: &str) -> std::collections::HashSet<String> {
+    let mut subs = std::collections::HashSet::new();
+    let mut run = String::new();
+    let flush = |run: &str, subs: &mut std::collections::HashSet<String>| {
+        let chars: Vec<char> = run.chars().collect();
+        for start in 0..chars.len() {
+            for end in start + 2..=chars.len() {
+                subs.insert(chars[start..end].iter().collect());
+            }
+        }
+    };
+    for ch in text.chars() {
+        if is_han(ch) {
+            run.push(ch);
+        } else if !run.is_empty() {
+            flush(&run, &mut subs);
+            run.clear();
+        }
+    }
+    if !run.is_empty() {
+        flush(&run, &mut subs);
+    }
+    subs
+}
+
+fn contains_word(text: &str, word: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let needle = word.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = lower.as_bytes();
+    let mut start = 0usize;
+    while let Some(found) = lower[start..].find(&needle) {
+        let at = start + found;
+        let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphabetic();
+        let after = at + needle.len();
+        let after_ok = after >= bytes.len() || !bytes[after].is_ascii_alphabetic();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = at + 1;
+    }
+    false
 }
 
 fn prose_word(token: &str) -> Option<String> {
@@ -2620,6 +2785,12 @@ mod tests {
         assert!(!residual_english(
             "致审稿人—Abdullah Al Imran, Antowan Malik Batts"
         ));
+        assert!(translation_flaw("Text summarization", "Text 摘要"));
+        assert!(!translation_flaw("Text classification", "文本分类"));
+        assert!(!translation_flaw(
+            "The projects target modern versions of Python and use standard tools.",
+            "这些项目面向较新的 Python 版本，并使用标准工具。"
+        ));
         let source = "The projects target modern versions of Python and use standard tools such as pip and virtual environments for every chapter.";
         let mut ex = extraction_from_lines(&[source]);
         let report =
@@ -2650,6 +2821,49 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
         }
+    }
+
+    #[test]
+    fn an_echoed_contents_word_takes_the_gloss_the_other_titles_share() {
+        let sources = [
+            "Text classification",
+            "Composing text",
+            "Summarizing text using LangChain",
+            "Text ",
+            "Chroma",
+            "RAG fundamentals with ChromaDB",
+            "xvi",
+            "Content ingestion stage",
+            "Question-answering stage",
+            "stage",
+        ];
+        let mut translated = vec![
+            "文本分类".to_string(),
+            "撰写文本".to_string(),
+            "使用 LangChain 总结文本".to_string(),
+            "Text ".to_string(),
+            "Chroma".to_string(),
+            "RAG 基础知识与 ChromaDB".to_string(),
+            "xvi".to_string(),
+            "内容摄取阶段".to_string(),
+            "问答阶段".to_string(),
+            "stage".to_string(),
+        ];
+        let segments: Vec<Segment> = sources
+            .iter()
+            .enumerate()
+            .map(|(index, text)| Segment {
+                id: index as u32,
+                page_index: 0,
+                glyph_ids: Vec::new(),
+                text: (*text).to_string(),
+            })
+            .collect();
+        gloss_echoed_words(&segments, &mut translated);
+        assert_eq!(translated[3], "文本 ");
+        assert_eq!(translated[4], "Chroma");
+        assert_eq!(translated[6], "xvi");
+        assert_eq!(translated[9], "阶段");
     }
 
     #[test]
