@@ -1,6 +1,6 @@
 # Manning pages 1–30 review
 
-Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is the v30 cache. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v37.pdf`. Contents pages (PDF pages 8–17) were compared with the source geometry, not with a right-aligned column.
+Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is the v30 cache. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v38.pdf`. Contents pages (PDF pages 8–17) were compared with the source geometry, not with a right-aligned column.
 
 30/30 still pass alignment, line breaks, and paragraphs. Coverage is complete (`english_body` 0; kept 2142, rewritten 35518, total 37660).
 
@@ -24,6 +24,7 @@ The source does not right-align page numbers. Front matter, chapters, and sectio
 | A wrapped sub-entry opened with `■` left of the column | p10–p17 bullet runs | `■` sits only between two items on the same line. A wrap drops it. Every line of the block starts at the source sub-entry x. |
 | A heading with no page number on its first line was hole-closed and then shifted again | p16 `12.3` into the 12.2 block; `13.4` into chapter 14 | Contents rows inside the toc band stay on the source baseline. Only the signed sub-entry shift moves them, so a taller block pushes every following row and a shorter block pulls them by the same leading. |
 | Chapter 14 wrap painted `超越 327` alone at the continuation indent | p16 | The indented wrap joins the title. The Chinese fits on one line at the title x (129.2), and the unused wrap line pulls `14.1` up with it. |
+| A section heading lost the page number that the source put on the next line (`component 302`, `agent 268`, `tool 283`) | p15 `11.1` / `11.7`, p16 `12.3` | A lowercase wrap under a numbered heading joins that heading, including when it starts at the shared sub-entry x. The page number is redrawn onto the joined line. The following sub-entry keeps its own copy of the same number. |
 | Sub-entry blocks on one page did not share a left edge | p10 1.1/1.2/1.4, p11 2.1/2.3/2.4 | Blocks within 2.2em snap to one source indent (p10 177.2, p11 186.2). Front matter stays further left. |
 | Section gaps tightened or loosened per block | contents | Lines use the source baselines (wrap 12pt, section gap ~16pt). A taller or shorter block shifts every following row by the same unused leading, including the 27pt chapter index. |
 
@@ -45,8 +46,8 @@ The source does not right-align page numbers. Front matter, chapters, and sectio
 | 12 | Pass | Chapter `5` is 27pt on its own baseline. Section numbers stay on the column. Packed subentries keep each page number with its title. |
 | 13 | Pass | Section numbers share the column. Chapters 7 and 8 stay 27pt. `第 4 部分 高级 RAG`, the long leaders, and `171` share y≈409, as in v31 and v25. |
 | 14 | Pass | Chapter `10` is 27pt, separate from `10.1`. Section numbers share the page's 445.7 column. Wraps read `检索内容使用重写后的查询` and `组合成一个`. |
-| 15 | Pass | Chapter `11` is 27pt, separate from `11.1`. Section numbers share 474.2. |
-| 16 | Pass | Chapters 12–14 stay 27pt and separate from `12.1` / `13.1` / `14.1`. `12.3` clears the 12.2 block by 16pt. Chapter 14 is one line at x=129.2, and `14.1` follows one source gap later. |
+| 15 | Pass | Chapter `11` is 27pt, separate from `11.1`. Section numbers share 474.2. `11.1 …代理 268` and `11.7 …工具 283` keep the page number that the source wrapped onto the next line. `项目设置 268` and `实现模拟天气服务 283` keep their own numbers. |
+| 16 | Pass | Chapters 12–14 stay 27pt and separate from `12.1` / `13.1` / `14.1`. `12.3 处理多代理请求与监督器组件 302` clears the 12.2 block by 16pt, and `监督者模式：智能体的智能体 302` follows on the next line. Chapter 14 is one line at x=129.2, and `14.1` follows one source gap later. |
 | 17 | Pass | `14.2` / `14.3` page numbers meet at 298.1, the same edge as v25. Inline rows stay in the indent. Han joins stay closed in `人在环中循环`. |
 | 18 | Pass | Preface body. First line indented, continuations flush. Folio `xvi` kept. |
 | 19 | Pass | Continuation. Indents match page 18. |
@@ -61,6 +62,15 @@ The source does not right-align page numbers. Front matter, chapters, and sectio
 | 28 | Pass | Cover-illustration note. Folio `xxvi` kept. |
 | 29 | Pass | Part opener stacks `第 1` / `部分` the way the source does. |
 | 30 | Pass | Running head `2` and `章节` are separate. Chapter 2 has not started its body yet. |
+
+## v38 contents check
+
+Pages 8–17 were measured again against the source word boxes. Every trailing page label on those pages is still present (part leaders included). No text boxes on different baselines overlap.
+
+- A heading whose source page number sat on the next lowercase line keeps that number on the joined title: p9 `以及更多 327`, p15 `11.1 …代理 268` and `11.7 …工具 283`, p16 `12.3 …监督器组件 302` and chapter 14 `…超越 327`.
+- The sub-entry under each of those headings still has its own number (`项目设置 268`, `实现模拟天气服务 283`, `监督者模式：智能体的智能体 302`). The wrap word is not painted a second time as its own row.
+- `12.3` still clears `尝试使用路由代理 301` by 16pt. Absorbing the unused wrap line pulls chapter 14 and `14.1` up by that same leading. They do not overlap.
+- Shared sub-entry x, part leaders (including brief-contents part 3), `文本摘要`, and the rule that `■` sits only between items on one line are unchanged from v37.
 
 ## v37 contents check
 

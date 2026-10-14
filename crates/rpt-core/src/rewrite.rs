@@ -470,6 +470,16 @@ pub fn rewrite_translation(
     let mut subentry_shifts = if overlay {
         Vec::new()
     } else {
+        let joined_continuations: HashSet<usize> = heading_wraps
+            .values()
+            .filter(|wrap| {
+                report.segments[wrap.continuation]
+                    .glyph_ids
+                    .iter()
+                    .all(|id| succeeded.contains(id))
+            })
+            .map(|wrap| wrap.continuation)
+            .collect();
         reflow_inline_subentries(
             &mut drawn,
             &mut succeeded,
@@ -481,6 +491,7 @@ pub fn rewrite_translation(
             &embedded,
             &font_styles,
             metrics,
+            &joined_continuations,
         )
     };
     // A joined chapter title that used fewer (or more) lines than the source
@@ -491,9 +502,11 @@ pub fn rewrite_translation(
     // The inline flow already redrew these page numbers. Painting the
     // original digits again leaves a second copy at the source x.
     paint_original.retain(|id| !toc_redraw.contains(id) && !succeeded.contains(id));
+    let heading_page_ids = heading_wrap_page_ids(&heading_wraps, extraction, &succeeded);
     commit_toc_operators(
         &owners,
         &toc_redraw,
+        &heading_page_ids,
         &paint_original,
         &mut succeeded,
         &mut keep,
@@ -1369,6 +1382,7 @@ fn draw_original_glyphs(
 fn commit_toc_operators(
     owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
     toc_redraw: &HashSet<u32>,
+    heading_page_ids: &HashSet<u32>,
     paint_original: &HashSet<u32>,
     succeeded: &mut HashSet<u32>,
     keep: &mut HashMap<u32, String>,
@@ -1441,7 +1455,14 @@ fn commit_toc_operators(
         // on the right edge. A shorter Chinese title must not slide `4` or
         // `xvi` out to that edge. The digit often shares the title's TJ, so
         // it is drawn again once that operator is blanked.
-        let keep_put = run_follows_leaders(run, extraction, toc_redraw)
+        // A heading wrap (`tool 283`) keeps its number on a separate
+        // operator. `l` is also a roman digit, so the tight-gap test skips
+        // the word and the number is never redrawn. Draw it anyway; seating
+        // then puts it on the joined title.
+        let forced =
+            !run.is_empty() && run.iter().all(|glyph| heading_page_ids.contains(&glyph.id));
+        let keep_put = forced
+            || run_follows_leaders(run, extraction, toc_redraw)
             || shares_baseline_with_another_number(run, &runs)
             || title_follows_number(run, extraction)
             || tight_subentry_number(run, extraction);
@@ -2346,9 +2367,11 @@ fn baseline_has_toc_page(extraction: &Extraction, page: u32, y: f32, size: f32) 
     })
 }
 
-/// `Productionizing … and` / `beyond 327` is one chapter title. The wrap is
-/// indented about an em, so the segmenter keeps it as its own line and the
-/// Chinese paints `超越 327` in that indent. Join it back onto the title x.
+/// A contents heading whose page number sits on the next line. `beyond 327`
+/// is indented about an em under the chapter title. `component 302`,
+/// `agent 268`, and `tool 283` sit at the sub-entry x under a section
+/// heading that has no number of its own. The segmenter keeps each as its
+/// own line. Join the wrap back onto the heading so the number stays with it.
 fn find_heading_wraps(
     planned: &[(usize, String)],
     report: &TranslateReport,
@@ -2385,8 +2408,13 @@ fn find_heading_wraps(
             .get(&(cont.page, (cont.left / 4.0).round() as i32))
             .copied()
             .unwrap_or(0);
-        // A sub-entry column shares its x across the page. A title wrap does not.
-        if column >= 4 || !baseline_has_toc_page(extraction, cont.page, cont.y, cont.size) {
+        // A sub-entry column shares its x across the page. A chapter wrap
+        // like `beyond` does not. A section heading can still carry its page
+        // number on that shared x.
+        let shared_column = column >= 4;
+        if !baseline_has_toc_page(extraction, cont.page, cont.y, cont.size)
+            || line_has_bullet(cont.page, cont.y, extraction)
+        {
             continue;
         }
         let Some(host) = lines
@@ -2415,9 +2443,20 @@ fn find_heading_wraps(
                     return false;
                 }
                 let indent = cont.left - host.left;
-                indent >= size * 0.30
+                // `beyond` is indented about an em from the chapter title.
+                let modest = indent >= size * 0.30
                     && indent <= size * 1.85
-                    && cont.left < host.right - size * 0.4
+                    && cont.left < host.right - size * 0.4;
+                // `12.3 Handling…` / `component 302` is the heading's own
+                // page number, even though it uses the sub-entry x.
+                let section_wrap = section_heading_source(&host.source)
+                    && cont.left > host.left + size * 0.30
+                    && cont.left < host.right - size * 0.2;
+                if shared_column {
+                    section_wrap
+                } else {
+                    modest || section_wrap
+                }
             })
             .min_by(|left, right| (left.y - cont.y).total_cmp(&(right.y - cont.y)))
         else {
@@ -2447,6 +2486,33 @@ fn find_heading_wraps(
         );
     }
     wraps
+}
+
+/// Page-number glyphs on a heading wrap that was actually joined (`tool 283`
+/// under `11.7 … forecast`). They are redrawn even when the word they follow
+/// is a roman letter, then seated on the joined title.
+fn heading_wrap_page_ids(
+    wraps: &HashMap<usize, HeadingWrap>,
+    extraction: &Extraction,
+    succeeded: &HashSet<u32>,
+) -> HashSet<u32> {
+    let mut ids = HashSet::new();
+    for wrap in wraps.values() {
+        let joined = wrap.extra_ids.iter().any(|id| succeeded.contains(id));
+        if !joined {
+            continue;
+        }
+        for glyph in &extraction.glyphs {
+            if glyph.page_index != wrap.page || !is_inline_page_glyph(glyph) {
+                continue;
+            }
+            if (glyph.matrix[5] - wrap.cont_y).abs() > 1.6 {
+                continue;
+            }
+            ids.insert(glyph.id);
+        }
+    }
+    ids
 }
 
 /// Fit the joined title on the host line when a slight shrink reaches, and
@@ -3101,7 +3167,7 @@ fn subentry_font_chars(
     by_id: &HashMap<u32, usize>,
 ) -> String {
     let mut chars = Vec::new();
-    for run in find_subentry_runs(report, extraction, by_id) {
+    for run in find_subentry_runs(report, extraction, by_id, &HashSet::new()) {
         for item in &run.items {
             chars.extend(item.title.chars());
             chars.extend(item.page.chars());
@@ -3187,8 +3253,12 @@ fn reflow_inline_subentries(
     embedded: &[(String, SubsetFont)],
     font_styles: &HashMap<String, FaceStyle>,
     metrics: CjkMeasure,
+    skip: &HashSet<usize>,
 ) -> Vec<SubentryShift> {
-    let runs = find_subentry_runs(report, extraction, by_id);
+    // A heading wrap (`component` under `12.3`) already painted its page
+    // number on the heading. Leaving it in the bullet run draws that number
+    // a second time and the heading keeps neither.
+    let runs = find_subentry_runs(report, extraction, by_id, skip);
     let mut shifts = Vec::new();
     for run in runs {
         let Some((flow, flow_size)) = flow_subentry(&run, embedded, font_styles, metrics) else {
@@ -3324,6 +3394,7 @@ fn find_subentry_runs(
     report: &TranslateReport,
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
+    skip: &HashSet<usize>,
 ) -> Vec<SubentryRun> {
     let bullets: Vec<&Glyph> = extraction
         .glyphs
@@ -3339,7 +3410,7 @@ fn find_subentry_runs(
                 seg_of.insert(*id, index);
             }
         }
-        let mut runs = solo_italic_subentries(report, extraction, by_id, &seg_of, &HashSet::new());
+        let mut runs = solo_italic_subentries(report, extraction, by_id, &seg_of, skip);
         share_subentry_column(&mut runs);
         return runs;
     }
@@ -3353,7 +3424,10 @@ fn find_subentry_runs(
     let mut parent: Vec<usize> = (0..count).collect();
     let mut bullet_roots: HashSet<usize> = HashSet::new();
     for bullet in &bullets {
-        let near = segments_near_bullet(bullet, report, extraction, by_id);
+        let near: Vec<usize> = segments_near_bullet(bullet, report, extraction, by_id)
+            .into_iter()
+            .filter(|index| !skip.contains(index))
+            .collect();
         let Some(first) = near.first().copied() else {
             continue;
         };
@@ -3369,11 +3443,11 @@ fn find_subentry_runs(
     while grew {
         grew = false;
         for left in 0..count {
-            if !bullet_component(&parent, &bullet_roots, left) {
+            if skip.contains(&left) || !bullet_component(&parent, &bullet_roots, left) {
                 continue;
             }
             for right in 0..count {
-                if left == right || same_root(&parent, left, right) {
+                if left == right || skip.contains(&right) || same_root(&parent, left, right) {
                     continue;
                 }
                 if segments_share_subentry(
@@ -3390,7 +3464,7 @@ fn find_subentry_runs(
     }
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for index in 0..count {
-        if !bullet_component(&parent, &bullet_roots, index) {
+        if skip.contains(&index) || !bullet_component(&parent, &bullet_roots, index) {
             continue;
         }
         let root = find_root(&mut parent, index);
@@ -3401,7 +3475,9 @@ fn find_subentry_runs(
     for mut indices in groups.into_values() {
         // A 27pt chapter index can sit inside the gap window of the row
         // above. It is not an entry, and absorbing it blanks the big numeral.
-        indices.retain(|index| !is_chapter_index(&report.segments[*index], extraction, by_id));
+        indices.retain(|index| {
+            !skip.contains(index) && !is_chapter_index(&report.segments[*index], extraction, by_id)
+        });
         if let Some(run) =
             build_subentry_run(&indices, &bullets, report, extraction, by_id, &seg_of)
         {
@@ -3413,6 +3489,7 @@ fn find_subentry_runs(
             runs.push(run);
         }
     }
+    used.extend(skip.iter().copied());
     runs.extend(solo_italic_subentries(
         report, extraction, by_id, &seg_of, &used,
     ));
@@ -11524,6 +11601,328 @@ ET",
                 glyph.matrix[5]
             );
         }
+        let source_labels = page_label_tokens(&extraction);
+        let painted_labels = page_label_tokens(&painted);
+        assert_eq!(
+            painted_labels, source_labels,
+            "a contents row lost or duplicated its page number"
+        );
+    }
+
+    #[test]
+    fn contents_rows_keep_source_page_numbers() {
+        // Page 0 is a contents page because of its toc marks, not because
+        // it is pages 8–17. Rows cover an inline number, three headings
+        // whose number sits on the next source line, a same-x sub-entry
+        // wrap, and the chapter title wrap.
+        let bytes = contents_pdf(
+            b"BT \
+/F1 10 Tf \
+1 0 0 1 133 730 Tm (12.2 Building a router assistant) Tj \
+1 0 0 1 300 730 Tm (298) Tj \
+1 0 0 1 142 710 Tm (11.1 Starting simple: Building a single-tool travel info) Tj \
+1 0 0 1 162 696 Tm (agent) Tj \
+1 0 0 1 193 696 Tm (268) Tj \
+1 0 0 1 162 682 Tm (Project setup) Tj \
+1 0 0 1 233 682 Tm (268) Tj \
+1 0 0 1 162 668 Tm (Loading variables) Tj \
+1 0 0 1 253 668 Tm (269) Tj \
+/F1 4 Tf \
+1 0 0 1 360 683 Tm (\x95) Tj \
+1 0 0 1 360 669 Tm (\x95) Tj \
+/F1 10 Tf \
+1 0 0 1 133 630 Tm (12.3 Handling multi-agent requests with a Supervisor) Tj \
+1 0 0 1 162 614 Tm (component) Tj \
+1 0 0 1 213 614 Tm (302) Tj \
+1 0 0 1 162 600 Tm (Supervisor pattern) Tj \
+1 0 0 1 258 600 Tm (302) Tj \
+1 0 0 1 162 586 Tm (Return ticket) Tj \
+1 0 0 1 233 586 Tm (304) Tj \
+/F1 4 Tf \
+1 0 0 1 360 601 Tm (\x95) Tj \
+1 0 0 1 360 587 Tm (\x95) Tj \
+/F1 10 Tf \
+1 0 0 1 162 540 Tm (Designing the router) Tj \
+1 0 0 1 268 540 Tm (298) Tj \
+1 0 0 1 162 526 Tm (Trying out the) Tj \
+1 0 0 1 162 512 Tm (router agent) Tj \
+1 0 0 1 228 512 Tm (301) Tj \
+/F1 4 Tf \
+1 0 0 1 360 541 Tm (\x95) Tj \
+1 0 0 1 360 513 Tm (\x95) Tj \
+/F1 10 Tf \
+1 0 0 1 142 470 Tm (11.7 Expanding your agent: Adding a weather forecast) Tj \
+1 0 0 1 162 456 Tm (tool) Tj \
+1 0 0 1 188 456 Tm (283) Tj \
+1 0 0 1 162 442 Tm (Mock weather service) Tj \
+1 0 0 1 268 442 Tm (283) Tj \
+/F1 4 Tf \
+1 0 0 1 360 443 Tm (\x95) Tj \
+/F1 27 Tf \
+1 0 0 1 93 400 Tm (14) Tj \
+/F1 12 Tf \
+1 0 0 1 129 378 Tm (Productionizing agents memory guardrails and) Tj \
+1 0 0 1 141 363 Tm (beyond) Tj \
+1 0 0 1 186 363 Tm (327) Tj \
+/F1 10 Tf \
+1 0 0 1 133 340 Tm (14.1 Memory) Tj \
+1 0 0 1 195 340 Tm (328) Tj \
+ET",
+        );
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let pages = contents_page_indexes(&extraction);
+        assert!(
+            pages.contains(&0),
+            "toc marks were not detected: {pages:?} kept {:?}",
+            segmentation
+                .kept
+                .iter()
+                .map(|(_, reason)| reason.as_str())
+                .collect::<Vec<_>>()
+        );
+        let sources: Vec<String> = segmentation
+            .segments
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        let source_labels = page_label_tokens(&extraction);
+        assert!(
+            source_labels.len() >= 10,
+            "fixture lost source page numbers before rewrite: {source_labels:?} sources {sources:?}"
+        );
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("12.2") {
+                    "12.2 路由助手"
+                } else if seg.text.contains("11.1") {
+                    "11.1 从简出发"
+                } else if seg.text.contains("12.3") {
+                    "12.3 处理多代理请求"
+                } else if seg.text.contains("11.7") {
+                    "11.7 扩展预报"
+                } else if seg.text.contains("14.1") {
+                    "14.1 内存"
+                } else if seg.text.contains("component") {
+                    "组件"
+                } else if seg.text.trim() == "agent" {
+                    "代理"
+                } else if seg.text.contains("Project") {
+                    "项目设置"
+                } else if seg.text.contains("Loading") {
+                    "加载变量"
+                } else if seg.text.contains("Supervisor") {
+                    "监督模式"
+                } else if seg.text.contains("Return") {
+                    "往返交互"
+                } else if seg.text.contains("Designing") {
+                    "设计路由"
+                } else if seg.text.contains("Trying") && seg.text.contains("router") {
+                    "尝试使用路由代理"
+                } else if seg.text.contains("Trying") {
+                    "尝试使用"
+                } else if seg.text.contains("router agent") {
+                    "路由代理"
+                } else if seg.text.trim() == "tool" {
+                    "工具"
+                } else if seg.text.contains("Mock") {
+                    "模拟天气"
+                } else if seg.text.contains("Productionizing") {
+                    "将代理投入生产"
+                } else if seg.text.contains("beyond") {
+                    "超越"
+                } else {
+                    seg.text.as_str()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font_chars: String = segments.iter().map(|seg| seg.translated.as_str()).collect();
+        let codes: Vec<u32> = format!("{font_chars}■0123456789")
+            .chars()
+            .map(|ch| ch as u32)
+            .collect();
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&codes)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let painted_labels = page_label_tokens(&painted);
+        assert_eq!(
+            painted_labels, source_labels,
+            "a contents row lost or duplicated its page number; sources {sources:?}"
+        );
+        let y_of = |marker: char| {
+            painted
+                .glyphs
+                .iter()
+                .find(|glyph| glyph.unicode.contains(marker))
+                .unwrap_or_else(|| panic!("missing {marker}; sources {sources:?}"))
+                .matrix[5]
+        };
+        let heading = y_of('处');
+        let wrap = y_of('组');
+        assert!(
+            (heading - wrap).abs() < 1.5,
+            "组件 was not joined onto 12.3 (heading {heading} wrap {wrap})"
+        );
+        assert!(
+            page_label_on_baseline(&painted, heading, "302"),
+            "12.3 lost 302"
+        );
+        assert!(
+            page_label_on_baseline(&painted, y_of('监'), "302"),
+            "the sub-entry under 12.3 lost its own 302"
+        );
+        assert!(
+            page_label_on_baseline(&painted, y_of('简'), "268"),
+            "11.1 lost 268; sources {sources:?}"
+        );
+        assert!(
+            page_label_on_baseline(&painted, y_of('扩'), "283"),
+            "11.7 lost 283; sources {sources:?}"
+        );
+        assert!(
+            page_label_on_baseline(&painted, y_of('拟'), "283"),
+            "the sub-entry under 11.7 lost its own 283"
+        );
+        assert!(
+            page_label_on_baseline(&painted, y_of('将'), "327")
+                || page_label_on_baseline(&painted, y_of('超'), "327"),
+            "chapter 14 lost 327"
+        );
+        assert!(
+            (y_of('将') - y_of('超')).abs() < 1.5,
+            "chapter 14 title wrapped off the title line"
+        );
+        assert!(
+            page_label_on_baseline(&painted, y_of('内'), "328"),
+            "14.1 lost 328"
+        );
+        assert!(
+            page_label_on_baseline(&painted, y_of('助'), "298"),
+            "inline 12.2 lost 298"
+        );
+        assert!(
+            source_labels.iter().any(|label| label == "301"),
+            "fixture dropped the wrapped sub-entry page number"
+        );
+        let overlap = overlapping_text(&painted, &pages);
+        assert!(overlap.is_none(), "contents text overlaps: {overlap:?}");
+    }
+
+    fn page_label_tokens(extraction: &Extraction) -> Vec<String> {
+        let mut glyphs: Vec<&Glyph> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| !glyph.unicode.trim().is_empty())
+            .collect();
+        glyphs.sort_by(|left, right| {
+            left.page_index.cmp(&right.page_index).then(
+                right.matrix[5]
+                    .total_cmp(&left.matrix[5])
+                    .then(left.matrix[4].total_cmp(&right.matrix[4])),
+            )
+        });
+        let mut labels = Vec::new();
+        let mut index = 0;
+        while index < glyphs.len() {
+            let page = glyphs[index].page_index;
+            let y = glyphs[index].matrix[5];
+            let mut line = Vec::new();
+            while index < glyphs.len()
+                && glyphs[index].page_index == page
+                && (glyphs[index].matrix[5] - y).abs() <= 2.0
+            {
+                line.push(glyphs[index]);
+                index += 1;
+            }
+            line.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+            let mut token: Vec<&Glyph> = Vec::new();
+            for glyph in line {
+                if let Some(prev) = token.last() {
+                    let size = prev.font_size.max(glyph.font_size).max(1.0);
+                    if glyph_ink_left(glyph) - glyph_ink_right(prev) > size * 0.35 {
+                        push_page_label(&token, &mut labels);
+                        token.clear();
+                    }
+                }
+                token.push(glyph);
+            }
+            push_page_label(&token, &mut labels);
+        }
+        labels.sort();
+        labels
+    }
+
+    fn push_page_label(token: &[&Glyph], labels: &mut Vec<String>) {
+        if token.is_empty() {
+            return;
+        }
+        let size = token
+            .iter()
+            .map(|glyph| glyph.font_size)
+            .fold(0.0f32, f32::max);
+        let text: String = token.iter().map(|glyph| glyph.unicode.trim()).collect();
+        if size < 16.0 && bare_page_label(&text) {
+            labels.push(text);
+        }
+    }
+
+    fn page_label_on_baseline(extraction: &Extraction, y: f32, label: &str) -> bool {
+        let mut glyphs: Vec<&Glyph> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| (glyph.matrix[5] - y).abs() <= 2.0 && !glyph.unicode.trim().is_empty())
+            .collect();
+        glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+        let mut token: Vec<&Glyph> = Vec::new();
+        let mut found = false;
+        for glyph in glyphs {
+            if let Some(prev) = token.last() {
+                let size = prev.font_size.max(glyph.font_size).max(1.0);
+                if glyph_ink_left(glyph) - glyph_ink_right(prev) > size * 0.35 {
+                    if token_text(&token) == label {
+                        found = true;
+                    }
+                    token.clear();
+                }
+            }
+            token.push(glyph);
+        }
+        found || token_text(&token) == label
+    }
+
+    fn token_text(token: &[&Glyph]) -> String {
+        token.iter().map(|glyph| glyph.unicode.trim()).collect()
     }
 
     fn overlapping_text(extraction: &Extraction, pages: &[u32]) -> Option<String> {
