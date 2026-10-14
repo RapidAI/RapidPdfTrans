@@ -277,6 +277,15 @@ pub fn rewrite_translation(
         rewrite_ids.extend(segment.glyph_ids.iter().copied());
     }
 
+    let heading_wraps = if overlay {
+        HashMap::new()
+    } else {
+        find_heading_wraps(&planned, report, extraction, &by_id)
+    };
+    let heading_chars: String = heading_wraps
+        .values()
+        .map(|wrap| wrap.text.as_str())
+        .collect();
     let metrics = CjkMeasure::resolve(opts.cjk_size_scale, opts.cjk_leading);
     // Unchanged titles in a bullet row (`RAG`) are not planned, but the row
     // is redrawn as one flow and still needs those characters.
@@ -305,6 +314,7 @@ pub fn rewrite_translation(
         .filter_map(|id| extraction.glyphs.get(by_id[id]))
         .map(|glyph| glyph.unicode.as_str())
         .collect();
+    let mut heading_shifts = Vec::new();
     if let Some(font_bytes) = opts.font_bytes.clone() {
         let chars = cover_with_fallbacks(
             planned
@@ -314,7 +324,8 @@ pub fn rewrite_translation(
                 })
                 .chain(toc_chars.chars())
                 .chain(echo_chars.chars())
-                .chain(subentry_chars.chars()),
+                .chain(subentry_chars.chars())
+                .chain(heading_chars.chars()),
         );
         if let Some(font) = subset_ttf(&font_bytes, &chars) {
             place_segments(
@@ -330,6 +341,8 @@ pub fn rewrite_translation(
                 &mut succeeded,
                 &mut drawn,
                 &mut keep,
+                &heading_wraps,
+                &mut heading_shifts,
             );
             font_styles.insert(
                 "RPTF".into(),
@@ -372,7 +385,8 @@ pub fn rewrite_translation(
                     })
                     .chain(toc_chars.chars())
                     .chain(echo_chars.chars())
-                    .chain(subentry_chars.chars()),
+                    .chain(subentry_chars.chars())
+                    .chain(heading_chars.chars()),
             );
             let Some(font) = subset_for_style(
                 style,
@@ -405,16 +419,55 @@ pub fn rewrite_translation(
                 &mut succeeded,
                 &mut drawn,
                 &mut keep,
+                &heading_wraps,
+                &mut heading_shifts,
             );
             font_styles.insert(resource.clone(), style);
             embedded.push((resource, font));
+        }
+    }
+    if !heading_wraps.is_empty() {
+        let pending: Vec<(usize, String)> = heading_wraps
+            .values()
+            .filter(|wrap| {
+                report.segments[wrap.continuation]
+                    .glyph_ids
+                    .iter()
+                    .any(|id| !succeeded.contains(id))
+            })
+            .filter_map(|wrap| {
+                planned
+                    .iter()
+                    .find(|(index, _)| *index == wrap.continuation)
+                    .cloned()
+            })
+            .collect();
+        if let Some((resource, font)) = embedded.first() {
+            if !pending.is_empty() {
+                place_segments(
+                    &pending,
+                    font,
+                    resource,
+                    0.0,
+                    metrics,
+                    report,
+                    extraction,
+                    &by_id,
+                    overlay,
+                    &mut succeeded,
+                    &mut drawn,
+                    &mut keep,
+                    &HashMap::new(),
+                    &mut heading_shifts,
+                );
+            }
         }
     }
 
     // A bullet-separated contents row is one flow (`title page ▪ title
     // page`), not a stack of English line breaks. Do this before the toc
     // pass so those page numbers are not also drawn at the old x.
-    let subentry_shifts = if overlay {
+    let mut subentry_shifts = if overlay {
         Vec::new()
     } else {
         reflow_inline_subentries(
@@ -430,6 +483,9 @@ pub fn rewrite_translation(
             metrics,
         )
     };
+    // A joined chapter title that used fewer (or more) lines than the source
+    // wrap moves the rows under that wrap by the same leading as a sub-entry.
+    subentry_shifts.extend(heading_shifts);
     // A contents mark is redrawn by the toc pass. Painting it again stacks
     // a second `4` on the inline sub-entry.
     // The inline flow already redrew these page numbers. Painting the
@@ -469,6 +525,9 @@ pub fn rewrite_translation(
         &embedded,
         &font_styles,
     );
+    // A contents page that a taller block pushed past the text band is
+    // scaled as one stack. Rows stay in order and do not overlap.
+    fit_contents_stack(&mut drawn, extraction);
     // A contents title can move up to close a hole. An inline page number
     // that was redrawn on the old baseline would otherwise sit alone.
     seat_inline_page_numbers(&mut drawn, extraction, &by_id);
@@ -2210,6 +2269,297 @@ fn is_margin_folio(glyphs: &[&Glyph], extraction: &Extraction) -> bool {
     media[3] - y < band || y - media[1] < band
 }
 
+struct HeadingLine {
+    index: usize,
+    page: u32,
+    y: f32,
+    left: f32,
+    right: f32,
+    size: f32,
+    source: String,
+}
+
+fn heading_line(
+    index: usize,
+    report: &TranslateReport,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Option<HeadingLine> {
+    let segment = &report.segments[index];
+    let mut glyphs = Vec::new();
+    for id in &segment.glyph_ids {
+        let glyph = extraction.glyphs.get(by_id[id])?;
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        glyphs.push(glyph);
+    }
+    if glyphs.is_empty() {
+        return None;
+    }
+    let size = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max)
+        .max(1.0);
+    let y = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MIN, f32::max);
+    let low = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MAX, f32::min);
+    // A segment that already spans two baselines was joined by the segmenter.
+    if y - low > size * 0.45 {
+        return None;
+    }
+    Some(HeadingLine {
+        index,
+        page: glyphs[0].page_index,
+        y,
+        left: glyphs
+            .iter()
+            .map(|glyph| glyph_ink_left(glyph))
+            .fold(f32::MAX, f32::min),
+        right: glyphs
+            .iter()
+            .map(|glyph| glyph_ink_right(glyph))
+            .fold(0.0f32, f32::max),
+        size,
+        source: segment.source.clone(),
+    })
+}
+
+fn source_ends_with_page_number(text: &str) -> bool {
+    text.split_whitespace().last().is_some_and(|token| {
+        !token.is_empty() && token.len() <= 3 && token.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn baseline_has_toc_page(extraction: &Extraction, page: u32, y: f32, size: f32) -> bool {
+    let limit = size.max(1.0) * 0.55;
+    extraction.glyphs.iter().any(|glyph| {
+        glyph.page_index == page
+            && (glyph.matrix[5] - y).abs() <= limit
+            && is_inline_page_glyph(glyph)
+    })
+}
+
+/// `Productionizing … and` / `beyond 327` is one chapter title. The wrap is
+/// indented about an em, so the segmenter keeps it as its own line and the
+/// Chinese paints `超越 327` in that indent. Join it back onto the title x.
+fn find_heading_wraps(
+    planned: &[(usize, String)],
+    report: &TranslateReport,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> HashMap<usize, HeadingWrap> {
+    let lines: Vec<HeadingLine> = planned
+        .iter()
+        .filter_map(|(index, _)| heading_line(*index, report, extraction, by_id))
+        .collect();
+    let mut column_count: HashMap<(u32, i32), usize> = HashMap::new();
+    for line in &lines {
+        let key = (line.page, (line.left / 4.0).round() as i32);
+        *column_count.entry(key).or_default() += 1;
+    }
+    let text_of: HashMap<usize, &str> = planned
+        .iter()
+        .map(|(index, text)| (*index, text.as_str()))
+        .collect();
+    let mut taken_hosts = HashSet::new();
+    let mut wraps = HashMap::new();
+    for cont in &lines {
+        let source = cont.source.trim_start();
+        let Some(first) = source.chars().next() else {
+            continue;
+        };
+        if !first.is_ascii_lowercase() || source.split_whitespace().count() > 4 {
+            continue;
+        }
+        if source.chars().any(|ch| matches!(ch, '■' | '•' | '▪')) {
+            continue;
+        }
+        let column = column_count
+            .get(&(cont.page, (cont.left / 4.0).round() as i32))
+            .copied()
+            .unwrap_or(0);
+        // A sub-entry column shares its x across the page. A title wrap does not.
+        if column >= 4 || !baseline_has_toc_page(extraction, cont.page, cont.y, cont.size) {
+            continue;
+        }
+        let Some(host) = lines
+            .iter()
+            .filter(|host| {
+                if host.page != cont.page
+                    || host.index == cont.index
+                    || taken_hosts.contains(&host.index)
+                {
+                    return false;
+                }
+                if host.source.trim().chars().count() < 12
+                    || source_ends_with_page_number(&host.source)
+                {
+                    return false;
+                }
+                if host.source.chars().any(|ch| matches!(ch, '■' | '•' | '▪')) {
+                    return false;
+                }
+                if baseline_has_toc_page(extraction, host.page, host.y, host.size) {
+                    return false;
+                }
+                let size = host.size.max(cont.size).max(1.0);
+                let dy = host.y - cont.y;
+                if dy < size * 0.65 || dy > size * 1.85 {
+                    return false;
+                }
+                let indent = cont.left - host.left;
+                indent >= size * 0.30
+                    && indent <= size * 1.85
+                    && cont.left < host.right - size * 0.4
+            })
+            .min_by(|left, right| (left.y - cont.y).total_cmp(&(right.y - cont.y)))
+        else {
+            continue;
+        };
+        let Some(host_text) = text_of.get(&host.index) else {
+            continue;
+        };
+        let Some(cont_text) = text_of.get(&cont.index) else {
+            continue;
+        };
+        let text = join_wrapped_title(host_text.trim(), cont_text.trim());
+        if text.trim().is_empty() {
+            continue;
+        }
+        taken_hosts.insert(host.index);
+        wraps.insert(
+            host.index,
+            HeadingWrap {
+                continuation: cont.index,
+                text,
+                extra_ids: report.segments[cont.index].glyph_ids.clone(),
+                host_y: host.y,
+                cont_y: cont.y,
+                page: host.page,
+            },
+        );
+    }
+    wraps
+}
+
+/// Fit the joined title on the host line when a slight shrink reaches, and
+/// otherwise wrap every line at the host x. The continuation indent is not
+/// a second column. `extra` is the signed leading followers must absorb:
+/// negative closes an unused wrap line, positive pushes a taller title down.
+fn layout_joined_contents_title(
+    host: &[&Glyph],
+    continuation_ids: &[u32],
+    host_y: f32,
+    cont_y: f32,
+    text: &str,
+    font: &SubsetFont,
+    extraction: &Extraction,
+    resource: &str,
+    skew: f32,
+    metrics: CjkMeasure,
+) -> Option<(Vec<Drawn>, f32)> {
+    let text = text.trim();
+    if host.is_empty() || text.is_empty() {
+        return None;
+    }
+    if text
+        .chars()
+        .any(|ch| !ch.is_whitespace() && !font.glyphs.contains_key(&(ch as u32)))
+    {
+        return None;
+    }
+    let title_x = host
+        .iter()
+        .map(|glyph| glyph_ink_left(glyph))
+        .fold(f32::MAX, f32::min);
+    if !title_x.is_finite() {
+        return None;
+    }
+    let mut sizes: Vec<f32> = host.iter().map(|glyph| glyph.font_size).collect();
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    let title_size = sizes[sizes.len() / 2].max(1.0);
+    let bold = host.iter().all(|glyph| face_style(&glyph.font_name).bold);
+    let level = heading_level(1, title_size, bold, text);
+    let scale = scale_for_heading(level, title_size, metrics);
+    let start = (title_size * scale).max(1.0);
+    let floor = (start * 0.85).max(1.0);
+    let page = host[0].page_index;
+    let media = extraction
+        .pages
+        .iter()
+        .find(|info| info.index == page)
+        .map(|info| info.media_box)
+        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let room = (media[2] - title_x - start * 3.0).max(start * 6.0);
+    let mut size = start;
+    let mut one_line = None;
+    while size + 0.01 >= floor {
+        if measure(text, size, font) <= room + 0.6 {
+            one_line = Some(size);
+            break;
+        }
+        let next = (size * 0.96).max(floor);
+        if (next - size).abs() < 0.01 {
+            break;
+        }
+        size = next;
+    }
+    let (lines, size) = if let Some(size) = one_line {
+        (vec![text.to_string()], size)
+    } else {
+        let size = floor;
+        let wrapped = wrap_text(text, size, room, room, font)?;
+        if wrapped.is_empty() || wrapped.len() > 4 {
+            return None;
+        }
+        (wrapped, size)
+    };
+    let source_step = (host_y - cont_y).abs();
+    let step = source_step.clamp(size * 0.92, size * 1.45);
+    let ys: Vec<f32> = (0..lines.len())
+        .map(|index| host_y - index as f32 * step)
+        .collect();
+    let last = ys[ys.len() - 1];
+    let extra = cont_y - last;
+    let mut ids: Vec<u32> = host.iter().map(|glyph| glyph.id).collect();
+    ids.extend(continuation_ids.iter().copied());
+    ids.sort_unstable();
+    ids.dedup();
+    let color = host[0].fill_color.clone();
+    let drawn = lines
+        .into_iter()
+        .zip(ys)
+        .map(|(line, y)| {
+            let count = line.chars().count();
+            Drawn {
+                page,
+                x: title_x,
+                y,
+                size,
+                color: color.clone(),
+                cids: cids_of(&line, font),
+                resource: resource.to_string(),
+                skew,
+                widths: char_widths(&line, size, font),
+                gaps: vec![0.0; count.saturating_sub(1)],
+                text: line,
+                supers: vec![false; count],
+                sup_scale: 1.0,
+                sup_rise: 0.0,
+                glyph_ids: ids.clone(),
+            }
+        })
+        .collect();
+    Some((drawn, extra))
+}
+
 fn place_segments(
     planned: &[(usize, String)],
     font: &SubsetFont,
@@ -2223,14 +2573,50 @@ fn place_segments(
     succeeded: &mut HashSet<u32>,
     drawn: &mut Vec<Drawn>,
     keep: &mut HashMap<u32, String>,
+    wraps: &HashMap<usize, HeadingWrap>,
+    shifts: &mut Vec<SubentryShift>,
 ) {
+    let skip_continuation: HashSet<usize> = wraps.values().map(|wrap| wrap.continuation).collect();
     for (index, text) in planned {
+        if skip_continuation.contains(index) {
+            continue;
+        }
         let segment = &report.segments[*index];
         let glyphs: Vec<&Glyph> = segment
             .glyph_ids
             .iter()
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
             .collect();
+        if let Some(wrap) = wraps.get(index) {
+            if let Some((lines, extra)) = layout_joined_contents_title(
+                &glyphs,
+                &wrap.extra_ids,
+                wrap.host_y,
+                wrap.cont_y,
+                &wrap.text,
+                font,
+                extraction,
+                resource,
+                skew,
+                metrics,
+            ) {
+                succeeded.extend(segment.glyph_ids.iter().copied());
+                succeeded.extend(wrap.extra_ids.iter().copied());
+                drawn.extend(lines);
+                if extra.abs() > 0.4 {
+                    let mut own_ids = HashSet::new();
+                    own_ids.extend(segment.glyph_ids.iter().copied());
+                    own_ids.extend(wrap.extra_ids.iter().copied());
+                    shifts.push(SubentryShift {
+                        page: wrap.page,
+                        below_y: wrap.cont_y,
+                        delta: extra,
+                        own_ids,
+                    });
+                }
+                continue;
+            }
+        }
         // `ii` translated to `二` fits the folio box and would replace the
         // printed page number. A folio stays the source token.
         if is_margin_folio(&glyphs, extraction) {
@@ -2730,6 +3116,18 @@ struct SubentryShift {
     below_y: f32,
     delta: f32,
     own_ids: HashSet<u32>,
+}
+
+/// A contents title whose page number sits on an indented wrap (`beyond 327`).
+/// The two source lines are separate segments. They are painted as one title
+/// at the first line's x.
+struct HeadingWrap {
+    continuation: usize,
+    text: String,
+    extra_ids: Vec<u32>,
+    host_y: f32,
+    cont_y: f32,
+    page: u32,
 }
 
 #[derive(Clone)]
@@ -4066,9 +4464,9 @@ fn layout_subentry_flow(
                 lines.last_mut()?.push(bullet_piece(run));
                 used += lead;
             } else if used > 0.0 {
-                // The separator stays at the end of this line. The next item
-                // starts the following line at the column, never with a ■.
-                lines.last_mut()?.push(bullet_piece(run));
+                // The source draws ■ only between two items that share a
+                // line. A wrap starts the next item at the column: no
+                // trailing ■ on this line, and no ■ opening the next one.
                 lines.push(Vec::new());
                 used = 0.0;
             }
@@ -4279,8 +4677,8 @@ fn paint_flow_line(
     let bullet_gap = line.size * 0.45;
     let bullet_size = (line.size * 0.42).max(2.5);
     // Every line of the block starts at `left`. A separator sits between
-    // items, or at the end of the line it follows. It does not hang in the
-    // gutter and it does not open the next line.
+    // two items on that same line. It does not hang in the gutter, open
+    // the next line, or dangle after the last item of a wrap.
     let mut x = left;
     let mut previous_bullet = false;
     let mut previous_italic = false;
@@ -5615,11 +6013,121 @@ fn block_is_contents_row(
     }) {
         return true;
     }
-    extraction.glyphs.iter().any(|glyph| {
+    if extraction.glyphs.iter().any(|glyph| {
         glyph.page_index == page
             && (glyph.matrix[5] - block.source_top).abs() <= size * 0.8
             && matches!(&glyph.disposition, Disposition::KeptOriginal { reason } if reason == "toc")
-    })
+    }) {
+        return true;
+    }
+    // `12.3 Handling…` and `Productionizing…` have no page number on the
+    // first line (it sits on the wrap). A toc glyph within 0.8em of
+    // `source_top` misses them, and hole-closing then pulls the heading
+    // by a second leading on top of `apply_subentry_shifts`.
+    let Some((low, high)) = toc_vertical_span(extraction, page) else {
+        return false;
+    };
+    let pad = size * 3.2;
+    block.source_bottom <= high + pad && block.source_top >= low - pad
+}
+
+/// Pages that carry several kept contents marks. Detection is the marks,
+/// not a fixed page range.
+fn is_toc_mark_glyph(glyph: &Glyph) -> bool {
+    !glyph.unicode.trim().is_empty()
+        && matches!(&glyph.disposition, Disposition::KeptOriginal { reason } if reason == "toc")
+}
+
+fn contents_page_indexes(extraction: &Extraction) -> Vec<u32> {
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for glyph in &extraction.glyphs {
+        if is_toc_mark_glyph(glyph) {
+            *counts.entry(glyph.page_index).or_default() += 1;
+        }
+    }
+    let mut pages: Vec<u32> = counts
+        .into_iter()
+        .filter(|(_, count)| *count >= 3)
+        .map(|(page, _)| page)
+        .collect();
+    pages.sort_unstable();
+    pages
+}
+
+fn toc_vertical_span(extraction: &Extraction, page: u32) -> Option<(f32, f32)> {
+    let mut low = f32::MAX;
+    let mut high = f32::MIN;
+    let mut count = 0usize;
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page || !is_toc_mark_glyph(glyph) {
+            continue;
+        }
+        count += 1;
+        low = low.min(glyph.matrix[5]);
+        high = high.max(glyph.matrix[5]);
+    }
+    (count >= 3).then_some((low, high))
+}
+
+/// A taller contents block can push the last row into the footer. Scale that
+/// page's stack from its top so the leading stays even and rows still clear
+/// one another. A page that already fits is left on the source baselines.
+fn fit_contents_stack(drawn: &mut [Drawn], extraction: &Extraction) {
+    for page in contents_page_indexes(extraction) {
+        let media = extraction
+            .pages
+            .iter()
+            .find(|info| info.index == page)
+            .map(|info| info.media_box)
+            .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+        let floor = media[1] + 32.0;
+        let ceiling = media[3] - 28.0;
+        let rows: Vec<usize> = drawn
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.page == page
+                    && !line.text.trim().is_empty()
+                    && line.y >= floor
+                    && line.y <= ceiling
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if rows.len() < 4 {
+            continue;
+        }
+        let top = rows
+            .iter()
+            .map(|index| drawn[*index].y)
+            .fold(f32::MIN, f32::max);
+        let bottom = rows
+            .iter()
+            .map(|index| {
+                let line = &drawn[*index];
+                line.y - line.size * 0.25
+            })
+            .fold(f32::MAX, f32::min);
+        if bottom >= floor {
+            continue;
+        }
+        let span = (top - bottom).max(1.0);
+        let room = (top - floor).max(1.0);
+        let scale = (room / span).clamp(0.72, 1.0);
+        if scale > 0.995 {
+            continue;
+        }
+        for index in rows {
+            let line = &mut drawn[index];
+            line.y = top - (top - line.y) * scale;
+            line.size *= scale;
+            for width in &mut line.widths {
+                *width *= scale;
+            }
+            for gap in &mut line.gaps {
+                *gap *= scale;
+            }
+        }
+    }
 }
 
 /// A shorter translation used to leave the next item on its English baseline,
@@ -10653,7 +11161,7 @@ ET",
                 item("聊天机器人应用聊天机器人", "8"),
             ],
             bullet_ids: vec![1],
-            bullet_color: color,
+            bullet_color: color.clone(),
         };
         let lines = layout_subentry_flow(&run, run.right - run.left, 10.0, &font).expect("flow");
         assert!(lines.len() >= 2, "the run stayed on one line");
@@ -10664,11 +11172,40 @@ ET",
                 "a separator opens the line"
             );
         }
+        for line in &lines {
+            assert!(
+                line.last()
+                    .is_none_or(|piece| piece.kind != FlowKind::Bullet),
+                "a wrap left a trailing separator"
+            );
+        }
+        let short_run = SubentryRun {
+            page: run.page,
+            left: run.left,
+            right: run.right,
+            baselines: vec![500.0],
+            size: run.size,
+            items: vec![item("问答", "4"), item("引擎", "8")],
+            bullet_ids: run.bullet_ids.clone(),
+            bullet_color: run.bullet_color.clone(),
+        };
+        let short = layout_subentry_flow(&short_run, short_run.right - short_run.left, 10.0, &font)
+            .expect("short flow");
+        assert_eq!(
+            short.len(),
+            1,
+            "two short items wrapped into {}",
+            short.len()
+        );
+        let kinds: Vec<_> = short[0].iter().map(|piece| piece.kind).collect();
         assert!(
-            lines
-                .iter()
-                .any(|line| line.iter().any(|piece| piece.kind == FlowKind::Bullet)),
-            "the separator disappeared"
+            kinds.contains(&FlowKind::Bullet),
+            "items on one line lost the separator between them"
+        );
+        assert!(kinds[0] != FlowKind::Bullet, "the separator opens the line");
+        assert!(
+            *kinds.last().unwrap() != FlowKind::Bullet,
+            "the separator trails the line"
         );
         let (placed, extra_tall) = place_subentry_lines(&run, &lines, 10.0);
         let step = placed[0].y - placed[1].y;
@@ -10713,6 +11250,316 @@ ET",
                 .all(|item| item.x > run.left + 1.0),
             "a separator sits left of the column"
         );
+    }
+
+    #[test]
+    fn a_joined_contents_title_stays_on_the_title_x() {
+        let chars: Vec<u32> = "将代理投入生产内存安全防护和超越"
+            .chars()
+            .map(|ch| ch as u32)
+            .collect();
+        let font = subset_ttf(&box_ttf(&chars), &chars).expect("font");
+        let host = [
+            ink_glyph(1, 129.0, 500.0, 12.0, "P"),
+            ink_glyph(2, 141.0, 500.0, 12.0, "a"),
+        ];
+        let host_refs: Vec<&Glyph> = host.iter().collect();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs: Vec::new(),
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let metrics = CjkMeasure::resolve(0.0, 0.0);
+        let (lines, extra) = layout_joined_contents_title(
+            &host_refs,
+            &[9],
+            500.0,
+            485.0,
+            "将代理投入生产内存安全防护和超越",
+            &font,
+            &extraction,
+            "F",
+            0.0,
+            metrics,
+        )
+        .expect("title");
+        assert_eq!(lines.len(), 1, "the title wrapped at full page width");
+        assert!((lines[0].x - 129.0).abs() < 0.2, "title x {}", lines[0].x);
+        assert!(
+            extra < -8.0,
+            "the unused wrap line did not pull the rows below: {extra}"
+        );
+        let narrow = Extraction {
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 250.0, 792.0],
+                rotate: 0,
+            }],
+            ..extraction
+        };
+        let (wrapped, _) = layout_joined_contents_title(
+            &host_refs,
+            &[9],
+            500.0,
+            485.0,
+            "将代理投入生产内存安全防护和超越",
+            &font,
+            &narrow,
+            "F",
+            0.0,
+            metrics,
+        )
+        .expect("wrapped title");
+        assert!(wrapped.len() >= 2, "a narrow title stayed one line");
+        let lefts: Vec<f32> = wrapped.iter().map(|line| line.x).collect();
+        assert!(
+            lefts.iter().all(|x| (*x - 129.0).abs() < 0.2),
+            "wrap left the title x: {lefts:?}"
+        );
+    }
+
+    #[test]
+    fn contents_pages_have_no_overlapping_text() {
+        // Page 0, not 8–17: contents pages are every page with toc marks.
+        let bytes = contents_pdf(
+            b"BT \
+/F1 10 Tf \
+1 0 0 1 177 640 Tm (Designing the router agent) Tj \
+1 0 0 1 310 640 Tm (298) Tj \
+1 0 0 1 340 640 Tm (Routing logic) Tj \
+1 0 0 1 430 640 Tm (298) Tj \
+1 0 0 1 177 628 Tm (Building the multi agent graph) Tj \
+1 0 0 1 340 628 Tm (300) Tj \
+1 0 0 1 370 628 Tm (Trying out the) Tj \
+1 0 0 1 177 616 Tm (router agent) Tj \
+1 0 0 1 240 616 Tm (301) Tj \
+/F1 4 Tf \
+1 0 0 1 328 641 Tm (\x95) Tj \
+1 0 0 1 358 629 Tm (\x95) Tj \
+/F1 10 Tf \
+1 0 0 1 120 596 Tm (12.3 Handling multi agent requests) Tj \
+1 0 0 1 177 580 Tm (component) Tj \
+1 0 0 1 240 580 Tm (302) Tj \
+1 0 0 1 177 568 Tm (Supervisor pattern agents) Tj \
+1 0 0 1 310 568 Tm (302) Tj \
+1 0 0 1 177 520 Tm (Preparing the travel agent for live weather data) Tj \
+1 0 0 1 420 520 Tm (323) Tj \
+1 0 0 1 450 520 Tm (Updating the agent chat loop now) Tj \
+1 0 0 1 177 508 Tm (remote tools) Tj \
+1 0 0 1 250 508 Tm (324) Tj \
+/F1 4 Tf \
+1 0 0 1 438 521 Tm (\x95) Tj \
+/F1 27 Tf \
+1 0 0 1 93 508 Tm (14) Tj \
+/F1 12 Tf \
+1 0 0 1 129 492 Tm (Productionizing agents memory guardrails and) Tj \
+1 0 0 1 141 477 Tm (beyond) Tj \
+1 0 0 1 186 477 Tm (327) Tj \
+/F1 10 Tf \
+1 0 0 1 120 456 Tm (14.1 Memory) Tj \
+1 0 0 1 210 456 Tm (328) Tj \
+ET",
+        );
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let pages = contents_page_indexes(&extraction);
+        assert!(
+            pages.contains(&0),
+            "toc marks on page 0 were ignored: {pages:?}"
+        );
+        assert!(
+            pages.iter().any(|page| *page < 8 || *page > 17),
+            "contents detection was limited to pages 8-17: {pages:?}"
+        );
+        let sources: Vec<String> = segmentation
+            .segments
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Designing") {
+                    "设计"
+                } else if seg.text.contains("Routing") {
+                    "逻辑"
+                } else if seg.text.contains("Building") {
+                    "构图"
+                } else if seg.text.contains("Trying") || seg.text.contains("router agent") {
+                    "试用"
+                } else if seg.text.contains("12.3") {
+                    "12.3 处理多代理请求"
+                } else if seg.text.contains("component") {
+                    "组件"
+                } else if seg.text.contains("Supervisor") {
+                    "监督"
+                } else if seg.text.contains("Preparing") {
+                    "为实时天气数据准备旅行代理并接入远程工具的完整说明文字需要换行"
+                } else if seg.text.contains("Updating") {
+                    "更新智能体聊天循环并结合本地与远程工具进行验证"
+                } else if seg.text.contains("remote") {
+                    "远程"
+                } else if seg.text.contains("Productionizing") {
+                    "将代理投入生产内存安全防护和"
+                } else if seg.text.contains("beyond") {
+                    "超越"
+                } else if seg.text.contains("14.1") {
+                    "14.1 内存"
+                } else {
+                    seg.text.as_str()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated: translated.into(),
+                }
+            })
+            .collect();
+        let font_chars: String = segments.iter().map(|seg| seg.translated.as_str()).collect();
+        let codes: Vec<u32> = format!("{font_chars}■")
+            .chars()
+            .map(|ch| ch as u32)
+            .collect();
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&codes)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let overlap = overlapping_text(&painted, &pages);
+        assert!(overlap.is_none(), "contents text overlaps: {overlap:?}");
+        let heading = painted
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode.contains('处'))
+            .expect("heading");
+        let component = painted
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode.contains('组'))
+            .expect("component");
+        let gap = heading.matrix[5] - component.matrix[5];
+        assert!(
+            (12.0..22.0).contains(&gap),
+            "12.3 and its sub-entry gap is {gap} (heading {} component {})",
+            heading.matrix[5],
+            component.matrix[5]
+        );
+        let title_ys: Vec<f32> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.contains('超') || glyph.unicode.contains('投'))
+            .map(|glyph| glyph.matrix[5])
+            .collect();
+        assert!(!title_ys.is_empty(), "chapter title missing");
+        let top = title_ys.iter().copied().fold(f32::MIN, f32::max);
+        let low = title_ys.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            top - low < 1.5,
+            "chapter title did not fit on one line: {title_ys:?}"
+        );
+        let title_left = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.contains('将'))
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            (title_left - 129.0).abs() < 2.0,
+            "chapter title x={title_left} left the source title x; sources {sources:?}"
+        );
+        for glyph in &painted.glyphs {
+            if glyph.page_index != 0 || glyph.unicode != "■" {
+                continue;
+            }
+            let line: Vec<_> = painted
+                .glyphs
+                .iter()
+                .filter(|other| {
+                    other.page_index == glyph.page_index
+                        && (other.matrix[5] - glyph.matrix[5]).abs() < 3.0
+                        && other.unicode.trim().chars().any(|ch| !is_bullet_char(ch))
+                })
+                .collect();
+            let before = line
+                .iter()
+                .any(|other| other.matrix[4] < glyph.matrix[4] - 0.5);
+            let after = line
+                .iter()
+                .any(|other| other.matrix[4] > glyph.matrix[4] + 0.5);
+            assert!(
+                before && after,
+                "■ at x={} y={} is not between two items",
+                glyph.matrix[4],
+                glyph.matrix[5]
+            );
+        }
+    }
+
+    fn overlapping_text(extraction: &Extraction, pages: &[u32]) -> Option<String> {
+        for page in pages {
+            let glyphs: Vec<&Glyph> = extraction
+                .glyphs
+                .iter()
+                .filter(|glyph| {
+                    glyph.page_index == *page
+                        && !glyph.unicode.trim().is_empty()
+                        && !glyph
+                            .unicode
+                            .trim()
+                            .chars()
+                            .all(|ch| matches!(ch, '.' | '·' | '…'))
+                })
+                .collect();
+            for left in 0..glyphs.len() {
+                for right in (left + 1)..glyphs.len() {
+                    let a = glyphs[left];
+                    let b = glyphs[right];
+                    let dy = (a.matrix[5] - b.matrix[5]).abs();
+                    let size = a.font_size.min(b.font_size).max(1.0);
+                    if dy < size * 0.45 {
+                        continue;
+                    }
+                    if boxes_overlap(a.bbox, b.bbox, -0.6) {
+                        return Some(format!(
+                            "p{page} {:?} @{} vs {:?} @{}",
+                            a.unicode, a.matrix[5], b.unicode, b.matrix[5]
+                        ));
+                    }
+                }
+            }
+        }
+        None
     }
 
     #[test]
