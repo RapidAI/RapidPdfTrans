@@ -1771,6 +1771,234 @@ fn polish(items: Vec<(usize, String)>) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// Parenthetical English glosses (`（agent）`, `（Prompt Engineering）`) are
+/// not part of the Chinese sentence. Acronyms, URLs, and code tokens stay.
+/// A trailing ` at` left when a title was split before a proper name is dropped.
+pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String {
+    // An identity echo is still English. Stripping a parenthesis there would
+    // redraw the source line.
+    if !translated
+        .chars()
+        .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
+    {
+        return translated.to_string();
+    }
+    let mut text = strip_english_glosses(translated);
+    text = text.replace("（莱格链）", "").replace("(莱格链)", "");
+    text = text.replace("中篇（Medium）", "Medium");
+    text = text.replace("中篇(Medium)", "Medium");
+    if source.contains("high-stakes") || source.contains("high stakes") {
+        text = text.replace("高 stakes ", "高风险");
+        text = text.replace("高 stakes", "高风险");
+        text = text.replace("高stakes", "高风险");
+    }
+    text = fix_figure_xref(&text);
+    if source
+        .to_ascii_lowercase()
+        .contains("attributes and properties")
+    {
+        text = text.replace("属性和属性", "属性和特性");
+    }
+    // `DEFINITION` and `NOTE` are callout labels. The model sometimes leaves
+    // the English word, or glues `定义` onto the term without the colon.
+    text = gloss_run_in_label(source, &text);
+    let source_end = source.trim_end();
+    if source_end.ends_with("user") && !source.to_ascii_lowercase().contains("request") {
+        text = text.replace("用户请求", "用户");
+    }
+    if source_end.ends_with(" at") {
+        let trimmed = text.trim_end();
+        if let Some(rest) = trimmed.strip_suffix(" at") {
+            let tail = &text[trimmed.len()..];
+            text = format!("{rest}{tail}");
+        }
+    }
+    text
+}
+
+fn source_starts_with_label(text: &str, label: &str) -> bool {
+    let Some(head) = text.get(..label.len()) else {
+        return false;
+    };
+    head.eq_ignore_ascii_case(label)
+        && text[label.len()..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphabetic())
+}
+
+/// A leading `DEFINITION` or `NOTE` becomes the Chinese callout label.
+fn gloss_run_in_label(source: &str, text: &str) -> String {
+    const LABELS: &[(&str, &str)] = &[
+        ("definition", "定义"),
+        ("note", "注意"),
+        ("warning", "警告"),
+        ("tip", "提示"),
+    ];
+    let source_trim = source.trim_start();
+    let Some((english, han)) = LABELS
+        .iter()
+        .copied()
+        .find(|(english, _)| source_starts_with_label(source_trim, english))
+    else {
+        return text.to_string();
+    };
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix(han) {
+        if rest.starts_with(['：', ':']) {
+            return text.to_string();
+        }
+        return format!("{han}：{rest}");
+    }
+    if source_starts_with_label(trimmed, english) {
+        let rest = trimmed[english.len()..].trim_start_matches([':', '：', ' ']);
+        return format!("{han}：{rest}");
+    }
+    text.to_string()
+}
+
+/// `如1.2图所示` puts the number before 图. The reading order is 如图1.2.
+fn fix_figure_xref(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '如' {
+            let mut cursor = index + 1;
+            let start = cursor;
+            while cursor < chars.len() && chars[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            if cursor > start && cursor < chars.len() && chars[cursor] == '.' {
+                cursor += 1;
+                let minor = cursor;
+                while cursor < chars.len() && chars[cursor].is_ascii_digit() {
+                    cursor += 1;
+                }
+                if cursor > minor && cursor < chars.len() && chars[cursor] == '图' {
+                    out.push_str("如图");
+                    out.extend(chars[start..cursor].iter());
+                    index = cursor + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn strip_english_glosses(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let open = chars[index];
+        let close = match open {
+            '（' => '）',
+            '(' => ')',
+            _ => {
+                out.push(open);
+                index += 1;
+                continue;
+            }
+        };
+        let Some(end) = chars[index + 1..].iter().position(|ch| *ch == close) else {
+            out.push(open);
+            index += 1;
+            continue;
+        };
+        let inner: String = chars[index + 1..index + 1 + end].iter().collect();
+        if let Some(kept) = gloss_replacement(&inner) {
+            if !kept.is_empty() {
+                out.push(open);
+                out.push_str(&kept);
+                out.push(close);
+            }
+            index += end + 2;
+            continue;
+        }
+        out.push(open);
+        index += 1;
+    }
+    out
+}
+
+/// `None` keeps the parentheses. `Some` replaces their contents, and an empty
+/// string drops the pair.
+fn gloss_replacement(inner: &str) -> Option<String> {
+    let inner = inner.trim();
+    if inner.is_empty()
+        || inner.contains("http")
+        || inner.contains("www.")
+        || inner.to_ascii_lowercase().contains("et al")
+        || inner
+            .chars()
+            .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
+    {
+        return None;
+    }
+    // `(Smith, 2020)` is a citation, not a gloss.
+    if inner.chars().filter(|ch| ch.is_ascii_digit()).count() >= 4 {
+        return None;
+    }
+    let words = gloss_words(inner);
+    if words.is_empty() || words.iter().all(|word| gloss_token_stays(word)) {
+        return None;
+    }
+    let single_lower = words.len() == 1
+        && words[0]
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch == '-' || ch == '\'');
+    if !inner.contains(' ') && !single_lower {
+        return None;
+    }
+    let acronyms: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|word| is_gloss_acronym(word))
+        .collect();
+    if acronyms.len() == 1 && inner.contains(' ') {
+        return Some(acronyms[0].to_string());
+    }
+    Some(String::new())
+}
+
+fn gloss_words(inner: &str) -> Vec<&str> {
+    inner
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | '，' | '、' | '/' | ';' | '；'))
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn gloss_token_stays(word: &str) -> bool {
+    if is_gloss_acronym(word) || word.contains('_') || word.contains('.') {
+        return true;
+    }
+    // `PromptTemplate` has a capital after the first letter. `Prompt` does not.
+    let mut chars = word.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_uppercase()
+        && chars.any(|ch| ch.is_ascii_uppercase())
+        && word.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn is_gloss_acronym(word: &str) -> bool {
+    let letters: Vec<char> = word.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    if !(2..=8).contains(&letters.len()) {
+        return false;
+    }
+    let lower = letters.iter().filter(|ch| ch.is_ascii_lowercase()).count();
+    letters[0].is_ascii_uppercase()
+        && lower <= 1
+        && word
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '&')
+}
+
 /// The model sometimes drops a dingbat. The source marker stays in front.
 pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
     if !crate::segment::starts_with_list_marker(source) {
@@ -2130,8 +2358,12 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     if is_personal_name(source) || url_or_email_only(source) {
         return false;
     }
-    let source_letters = latin_letters(source);
-    let translated_letters = latin_letters(translated);
+    // A dingbat the model dropped (` Prompt engineering` → `Prompt engineering`)
+    // is still the English heading. The marker is not part of the sentence.
+    let source_body = strip_leading_marker(source);
+    let translated_body = strip_leading_marker(translated);
+    let source_letters = latin_letters(&source_body);
+    let translated_letters = latin_letters(&translated_body);
     if source_letters >= 40 && translated_letters >= 40 {
         return true;
     }
@@ -2139,7 +2371,21 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     if source_letters >= 8 && ellipsis_stub(translated) {
         return true;
     }
-    translated == source && prose_echo(source)
+    translated_body == source_body && prose_echo(&source_body)
+}
+
+fn strip_leading_marker(text: &str) -> String {
+    let trimmed = text.trim();
+    if !crate::segment::starts_with_list_marker(trimmed) {
+        return trimmed.to_string();
+    }
+    trimmed
+        .trim_start()
+        .chars()
+        .skip(1)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn ellipsis_stub(text: &str) -> bool {
@@ -2940,6 +3186,14 @@ mod tests {
             "PART 1 GETTING STARTED WITH LLMS ",
             "PART 1 GETTING STARTED WITH LLMS "
         ));
+        assert!(needs_english_retry(
+            "\u{f0a1} Prompt engineering",
+            "Prompt engineering"
+        ));
+        assert!(!needs_english_retry(
+            "\u{f0a1} Prompt engineering",
+            "\u{f0a1} 提示词工程"
+        ));
         assert!(!needs_english_retry("RAG", "RAG"));
         assert!(!needs_english_retry("Julie McNamee", "Julie McNamee"));
         assert!(!needs_english_retry("LLM API", "LLM API"));
@@ -3228,6 +3482,56 @@ mod tests {
                 "LLM response had empty message.content (reasoning tokens are ignored)".into(),
             ))
         }
+    }
+
+    #[test]
+    fn english_glosses_drop_and_acronyms_stay() {
+        let text = repair_body_translation(
+            "patterns—engines, chatbots, and agents—and prompt engineering",
+            "模式——引擎、聊天机器人和智能体（agent）——以及提示工程（Prompt Engineering）和检索增强生成（RAG）。",
+        );
+        assert!(!text.contains("agent"), "{text}");
+        assert!(!text.contains("Prompt Engineering"), "{text}");
+        assert!(text.contains("（RAG）"), "{text}");
+        let roles = repair_body_translation(
+            "role-based messages",
+            "基于角色的消息格式（system、user、assistant）",
+        );
+        assert!(roles.contains("system"), "{roles}");
+        let protocol = repair_body_translation(
+            "Model Context Protocol (MCP)",
+            "模型上下文协议（Model Context Protocol，MCP）",
+        );
+        assert_eq!(protocol, "模型上下文协议（MCP）");
+        let stakes = repair_body_translation(
+            "In high-stakes cases, human review remains best.",
+            "在高 stakes 情况下，人工审核仍然最好。",
+        );
+        assert!(stakes.contains("高风险"), "{stakes}");
+        assert!(!stakes.contains(' '), "{stakes}");
+        let xref = repair_body_translation(
+            "as shown in figure 1.2",
+            "此工作流程被称为检索增强生成（RAG），如1.2图所示。",
+        );
+        assert!(xref.contains("如图1.2"), "{xref}");
+        assert!(!xref.contains("如1.2图"), "{xref}");
+        let defined = repair_body_translation(
+            "DEFINITION Retrieval-Augmented Generation (RAG) is a design pattern.",
+            "定义检索增强生成（RAG）是一种设计模式。",
+        );
+        assert!(defined.starts_with("定义："), "{defined}");
+        let kept = repair_body_translation(
+            "DEFINITION Embeddings are vector representations of words.",
+            "DEFINITION 嵌入是词、标记或更大文本单元的向量表示。",
+        );
+        assert!(kept.starts_with("定义：嵌入"), "{kept}");
+        assert!(!kept.contains("DEFINITION"), "{kept}");
+        let note = repair_body_translation(
+            "NOTE Most of the examples in this book use OpenAI models.",
+            "NOTE 由于您将构建基于 LLM 的应用程序。",
+        );
+        assert!(note.starts_with("注意："), "{note}");
+        assert!(!note.contains("NOTE"), "{note}");
     }
 
     #[test]

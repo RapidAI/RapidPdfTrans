@@ -262,6 +262,9 @@ pub fn fit_paragraph(
 pub fn cjk_indent_ems(line_count: usize, source_size: f32, bold: bool, text: &str) -> f32 {
     if is_cjk_caption(text)
         || heading_level(line_count, source_size, bold, text) != HeadingLevel::Body
+        // A one-line bullet is not a paragraph. Indenting it slides the
+        // marker (` You know how to create…` moved 18pt right of its sibling).
+        || crate::segment::starts_with_list_marker(text)
     {
         0.0
     } else if line_count >= 2 || is_one_line_prose(text, source_size, bold) {
@@ -376,7 +379,7 @@ pub(crate) fn fit_cjk_block(
         let first_width = (width - indent).max(size * 0.5);
         // A narrow column can need more lines than `wrap_text` will count at
         // the starting size. That is a reason to shrink, not to keep the English.
-        let Some(lines) = wrap_text(text, size, first_width, width, font) else {
+        let Some(mut lines) = wrap_text(text, size, first_width, width, font) else {
             if size <= floor + 0.01 {
                 return None;
             }
@@ -387,16 +390,30 @@ pub(crate) fn fit_cjk_block(
             size = next;
             continue;
         };
+        // A one-character last line (`组` / `件`) is an orphan. Pull one
+        // character down so the tail is at least two characters. The last
+        // line was one em wide, so two characters still fit the measure.
+        absorb_one_char_tail(&mut lines);
         let gaps = lines.len().saturating_sub(1);
         let within = lines.iter().enumerate().all(|(index, line)| {
             let limit = if index == 0 { first_width } else { width };
             fit_measure(line, size, font) <= limit + 1.0
         });
         let single_source = available <= 0.5;
-        if display && within && lines.len() == 2 && kept_display.is_none() {
+        let tail = lines
+            .last()
+            .map(|line| line.chars().filter(|ch| !ch.is_whitespace()).count())
+            .unwrap_or(0);
+        // A display title must not end on one character (`提示` / `词`).
+        // `display` is only the one-line-source case. A two-line chapter
+        // title has leading between the baselines, and the same orphan.
+        // Two characters (`示` / `词`) still splits 提示词. A short display
+        // title has to stay on one line.
+        let short_title_tail = source_size >= 16.0 && chars_n <= 24 && lines.len() > 1 && tail < 3;
+        if display && within && lines.len() == 2 && kept_display.is_none() && !short_title_tail {
             kept_display = Some((lines.clone(), size, size * 1.05, indent));
         }
-        if within && (!single_source || lines.len() == 1) {
+        if within && (!single_source || lines.len() == 1) && !short_title_tail {
             if gaps == 0 {
                 return Some((lines, size, size * metrics.leading_ratio, indent));
             }
@@ -437,7 +454,7 @@ pub(crate) fn fit_cjk_block(
                 // 1.15 em drops the second line into the next heading.
                 return Some((lines, size, size * 1.0, indent));
             }
-            if within && !single_source && gaps > 0 {
+            if within && !single_source && gaps > 0 && !short_title_tail {
                 let room = available / gaps as f32;
                 if room >= size * 1.05 {
                     return Some((lines, size, room, indent));
@@ -506,6 +523,33 @@ fn line_skips_justification(text: &str) -> bool {
     let mut sticky = vec![false; chars.len().saturating_sub(1)];
     mark_citations(&chars, &mut sticky);
     sticky.into_iter().any(|gap| gap)
+}
+
+/// `组件` must not end as `组` / `件`. One CJK character on the last line
+/// moves down with the character before it.
+fn absorb_one_char_tail(lines: &mut [String]) {
+    if lines.len() < 2 {
+        return;
+    }
+    let last_index = lines.len() - 1;
+    let last_cjk = lines[last_index]
+        .chars()
+        .filter(|ch| is_cjk_body(*ch))
+        .count();
+    if last_cjk == 0 || last_cjk >= 2 {
+        return;
+    }
+    let prev: Vec<char> = lines[last_index - 1].chars().collect();
+    if prev.len() < 3 {
+        return;
+    }
+    let moved = prev[prev.len() - 1];
+    if !is_cjk_body(moved) {
+        return;
+    }
+    lines[last_index - 1] = prev[..prev.len() - 1].iter().collect();
+    let tail = lines[last_index].clone();
+    lines[last_index] = format!("{moved}{tail}");
 }
 
 pub(crate) fn is_cjk_body(ch: char) -> bool {
@@ -1873,5 +1917,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_one_character_tail_is_pulled_onto_two_characters() {
+        let text = "模块化架构与组件";
+        let font = uniform_font(text);
+        // Eight characters at 10pt need 80pt. 70pt leaves one character over.
+        let fitted = fit_cjk_block(
+            text,
+            10.0,
+            1.0,
+            70.0,
+            0.0,
+            40.0,
+            &font,
+            CjkMeasure::resolve(1.0, 1.2),
+        )
+        .expect("fit");
+        let lines = &fitted.0;
+        let tail = lines
+            .last()
+            .unwrap()
+            .chars()
+            .filter(|ch| is_cjk_body(*ch))
+            .count();
+        assert!(tail >= 2, "orphan tail: {lines:?}");
+        let flat: String = lines.iter().flat_map(|line| line.chars()).collect();
+        assert_eq!(flat, text);
     }
 }

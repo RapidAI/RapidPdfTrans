@@ -654,6 +654,10 @@ fn assemble(
     // `to x + y = z.`) was kept as a figure label. It is the next line of
     // the body paragraph above it.
     release_body_wraps(&lines, &mut kept);
+    // A listing is a monospace line. Inline code shares its line with the
+    // sentence, so those words stay in the paragraph. The listing itself is
+    // not translated.
+    kept.extend(listing_glyphs(&lines));
     let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     if !kept_ids.is_empty() {
         lines.retain(|line| {
@@ -754,6 +758,62 @@ fn assemble(
         seg.id = id as u32;
     }
     Segmentation { segments, kept }
+}
+
+/// A line set entirely in a monospace face is a listing. A dingbat or an
+/// arrow in front of that line is the marker, not body text. A sentence that
+/// only borrows a few monospace words keeps those words.
+fn listing_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
+    let mut kept = Vec::new();
+    for line in lines {
+        if !listing_line(line) {
+            continue;
+        }
+        for glyph in &line.glyphs {
+            kept.push((glyph.id, "code".into()));
+        }
+    }
+    kept
+}
+
+fn listing_line(line: &VisualLine<'_>) -> bool {
+    let mut mono = 0usize;
+    let mut other = 0usize;
+    for glyph in &line.glyphs {
+        let letters = letter_count(glyph);
+        if letters == 0 {
+            continue;
+        }
+        if mono_face(&glyph.font_name) {
+            mono += letters;
+        } else {
+            other += letters;
+        }
+    }
+    mono >= 2 && other == 0
+}
+
+fn mono_face(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    [
+        "MONO",
+        "COURIER",
+        "CONSOLAS",
+        "MENLO",
+        "INCONSOLATA",
+        "CASCADIA",
+        "JETBRAINS",
+        "TYPEWRITER",
+        "CMTT",
+        "LMTT",
+        "NIMBUSMON",
+        "OCRA",
+        "OCRB",
+        "OCR-A",
+        "OCR-B",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle))
 }
 
 fn visual_line(glyphs: Vec<&Glyph>) -> VisualLine<'_> {
@@ -1439,8 +1499,14 @@ fn region_interiors(
     for (page, regs) in by_page {
         let (width, height) = page_size(pages, page);
         let unions = figure_unions(&regs, width, height);
+        // Class boxes sit in two columns. A prose callout in the gutter is
+        // inside the diagram but not inside any one box.
+        let body_font = dominant_body_font(lines, page);
+        let span = diagram_span(&unions);
         for line in lines.iter().filter(|line| line.page == page) {
-            if !line_in_figure(line, &unions) {
+            if !line_in_figure(line, &unions, &body_font)
+                && !in_diagram_gutter(line, span, &body_font)
+            {
                 continue;
             }
             for glyph in &line.glyphs {
@@ -1553,14 +1619,100 @@ fn rects_near(a: Rect, b: Rect, gap: f32) -> bool {
     a.x1 + gap >= b.x0 && b.x1 + gap >= a.x0 && a.y1 + gap >= b.y0 && b.y1 + gap >= a.y0
 }
 
-fn line_in_figure(line: &VisualLine<'_>, unions: &[Rect]) -> bool {
+/// Several boxes on one page are one diagram. The span is the drawing,
+/// including the gutter between the columns of boxes.
+fn diagram_span(unions: &[Rect]) -> Option<Rect> {
+    if unions.len() < 4 {
+        return None;
+    }
+    let mut span = unions[0];
+    for rect in &unions[1..] {
+        span = union_rect(span, *rect);
+    }
+    (span.width() >= 160.0 && span.height() >= 100.0).then_some(span)
+}
+
+/// A callout set in a diagram face, sitting between the boxes. Body text
+/// in the column face is not a label, and neither is the caption.
+fn in_diagram_gutter(line: &VisualLine<'_>, span: Option<Rect>, body_font: &str) -> bool {
+    let Some(span) = span else {
+        return false;
+    };
+    if line.toc
+        || caption_kind(&line.text).is_some()
+        || is_running_header(&line.text)
+        || is_footer_line(&line.text)
+        || is_page_folio_text(&line.text)
+        || is_body_barrier(line, body_font)
+        || is_display_heading(line)
+        || is_section_heading(line, body_font)
+        || starts_run_in(&line.text)
+    {
+        return false;
+    }
+    // No body sample on the page: do not guess. A caption that set the
+    // body face stays out because it shares that face.
+    if body_font.is_empty() || same_font_family(&line.font, body_font) {
+        return false;
+    }
+    let center_x = (line.left + line.right) * 0.5;
+    center_x >= span.x0 - 2.0
+        && center_x <= span.x1 + 2.0
+        && line.y >= span.y0 - 2.0
+        && line.y <= span.y1 + 2.0
+}
+
+/// `DEFINITION` and `NOTE` are body callouts. A box around the figure must
+/// not keep the first line in English while the rest of the callout is translated.
+fn starts_run_in(text: &str) -> bool {
+    let trimmed = text
+        .trim()
+        .trim_start_matches(|ch: char| !ch.is_ascii_alphabetic());
+    // `example, a splitter` is a sentence inside a diagram. `DEFINITION`
+    // is the callout label. A lowercase start is not that label.
+    if !trimmed
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+    {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    [
+        "definition",
+        "note",
+        "theorem",
+        "lemma",
+        "proof",
+        "example",
+        "remark",
+        "tip",
+        "warning",
+    ]
+    .iter()
+    .any(|word| {
+        // `notebook` and `examples` are not the callout labels.
+        // `Example, a splitter` is still a sentence.
+        let Some(rest) = lower.strip_prefix(word) else {
+            return false;
+        };
+        rest.chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphabetic())
+            && !rest.starts_with(',')
+    })
+}
+
+fn line_in_figure(line: &VisualLine<'_>, unions: &[Rect], _body_font: &str) -> bool {
     if unions.is_empty()
         || line.toc
         || caption_kind(&line.text).is_some()
         || is_running_header(&line.text)
         || is_footer_line(&line.text)
         || is_page_folio_text(&line.text)
+        || is_display_heading(line)
         || is_body_shape(line)
+        || starts_run_in(&line.text)
     {
         return false;
     }
@@ -1753,6 +1905,7 @@ fn walk_interior(
             caption_line.get(index).copied().unwrap_or(false)
                 || stops_interior(&lines[index], body_font)
                 || is_running_header(&lines[index].text)
+                || is_display_heading(&lines[index])
         }) {
             break;
         }
@@ -1777,17 +1930,55 @@ fn walk_interior(
 /// inside the drawing, so the interior walk stops instead of keeping it.
 fn is_running_header(text: &str) -> bool {
     let lower = text.trim().to_ascii_lowercase();
-    lower == "preprint"
+    if lower == "preprint"
         || lower == "published"
         || lower.starts_with("under review")
         || lower.starts_with("proceedings of")
+    {
+        return true;
+    }
+    // `CHAPTER 1 Introduction…`. A page number may sit on the same line.
+    // `In this chapter` is a sentence, not the running head.
+    let rest = lower.trim_start_matches(|ch: char| ch.is_ascii_digit() || ch.is_whitespace());
+    rest.starts_with("chapter ") || rest == "chapter"
+}
+
+/// A chapter title (`Introduction to AI`) is display type. A rule under it
+/// can union with a drawing and the bounding box then covers the title.
+/// Diagram labels are body size or smaller.
+fn is_display_heading(line: &VisualLine<'_>) -> bool {
+    line.size >= 16.0
+        && line
+            .text
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .count()
+            >= 4
+}
+
+/// Both lines end on the same right edge and are display size. Body lines
+/// share a left margin; a right-aligned title does not.
+fn right_aligned_display_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    let size = upper.size.max(lower.size);
+    if size < 16.0 || (upper.size - lower.size).abs() > size * 0.05 {
+        return false;
+    }
+    if !fonts_can_join(upper, lower) {
+        return false;
+    }
+    (upper.right - lower.right).abs() <= 2.0 && (upper.left - lower.left).abs() > 8.0
 }
 
 fn stops_interior(line: &VisualLine<'_>, body_font: &str) -> bool {
+    // `DEFINITION Retrieval-Augmented…` uses a label face, so it is not a
+    // body barrier, and the walk kept that first line inside the figure.
+    // A wide line in another face is still a diagram annotation; stopping
+    // on width alone cut the sample paper's page-break sentence.
     line.toc
         || caption_kind(&line.text).is_some()
         || is_body_barrier(line, body_font)
         || is_section_heading(line, body_font)
+        || starts_run_in(&line.text)
 }
 
 /// Titles on a contents row are translated even when a table or a box
@@ -1993,19 +2184,35 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
         let hyphen_slot = columns
             .iter()
             .position(|column| column.last().is_some_and(|prev| hyphen_pull(prev, &line)));
+        // A full line that happens to end in a hyphen can sit within 64pt of
+        // an earlier, narrower column. The first match used to claim it
+        // (`thou-` left the definition and joined a label column). Prefer the
+        // closest margin that actually fits.
         let slot = hyphen_slot.or_else(|| {
-            columns.iter().position(|column| {
-                column_anchor(column, line.page).is_some_and(|anchor| {
-                    let distance = (anchor - line.left).abs();
-                    // A wrapped word can start a list-indented line and finish
-                    // back on the column margin. That line sits to the right of
-                    // the margin. A body line to the left of a centered title is
-                    // a different column, even when a hyphen makes the gap look
-                    // like an indent.
-                    let indented = line.left + 1.0 >= anchor;
-                    distance <= 28.0
-                        || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some())
-                }) || column.last().is_some_and(|prev| hanging_pull(prev, &line))
+            let mut best: Option<(usize, f32)> = None;
+            for (index, column) in columns.iter().enumerate() {
+                let Some(anchor) = column_anchor(column, line.page) else {
+                    continue;
+                };
+                let distance = (anchor - line.left).abs();
+                // A wrapped word can start a list-indented line and finish
+                // back on the column margin. That line sits to the right of
+                // the margin. A body line to the left of a centered title is
+                // a different column, even when a hyphen makes the gap look
+                // like an indent.
+                let indented = line.left + 1.0 >= anchor;
+                let fits = distance <= 28.0
+                    || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some());
+                if fits && best.is_none_or(|(_, previous)| distance < previous) {
+                    best = Some((index, distance));
+                }
+            }
+            best.map(|(index, _)| index).or_else(|| {
+                columns.iter().position(|column| {
+                    column.last().is_some_and(|prev| {
+                        hanging_pull(prev, &line) || right_aligned_display_wrap(prev, &line)
+                    })
+                })
             })
         });
         if let Some(slot) = slot {
@@ -2615,6 +2822,11 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     // A monospace phrase at the start of a line is not a new paragraph.
     if !hyphen && !fonts_can_join(upper, lower) {
         return false;
+    }
+    // A chapter title is right-aligned. The second line is longer, so its
+    // left edge sits further left (`Introduction to AI` / `agents and applications`).
+    if !hyphen && right_aligned_display_wrap(upper, lower) {
+        return true;
     }
     if (upper.left - lower.left).abs() > 36.0 && !hyphen {
         return false;
@@ -3894,6 +4106,14 @@ mod tests {
         assert_eq!(segs.len(), 2, "{texts:?}");
     }
 
+    fn box_region(x0: f32, y0: f32, x1: f32, y1: f32) -> crate::glyph::PaintedRegion {
+        crate::glyph::PaintedRegion {
+            page_index: 0,
+            bbox: [x0, y0, x1, y1],
+            kind: "path".into(),
+        }
+    }
+
     fn wide(id: u32, x: f32, y: f32, text: &str, width: f32, size: f32) -> Glyph {
         let mut item = glyph(id, x, y, text, false);
         item.font_size = size;
@@ -4034,19 +4254,26 @@ mod tests {
             10.0,
         );
         other.font_name = "IBMPlexMono-SemiBold".into();
-        let segs = segment_glyphs(&[lead, rest, other]);
-        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        let segs = segment_with(&[lead, rest, other], &SegmentFlags::default());
+        let texts: Vec<_> = segs.segments.iter().map(|seg| seg.text.as_str()).collect();
         assert!(
             texts
                 .iter()
                 .any(|text| text.contains("all evaluated proactive methods")),
             "{texts:?}"
         );
+        // A line set entirely in a monospace face is a listing. It stays
+        // original, and it does not join the roman paragraph above it.
         assert!(
-            texts
-                .iter()
-                .any(|text| text.contains("mono label") && !text.contains("Proactive")),
+            texts.iter().all(|text| !text.contains("mono label")),
             "{texts:?}"
+        );
+        assert!(
+            segs.kept
+                .iter()
+                .any(|(id, reason)| *id == 2 && reason == "code"),
+            "{:?}",
+            segs.kept
         );
     }
 
@@ -4988,6 +5215,52 @@ mod tests {
             .collect();
         assert!(
             texts.iter().any(|text| text.contains("Soundararajan")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_full_hyphenated_line_stays_with_its_own_column() {
+        // A definition line ends in `thou-` and sits 48pt to the right of a
+        // narrow label column. The closest margin is the definition itself.
+        let narrow = block(0, 66.0, 400.0, 80.0, 10.0, "be invoked by other systems");
+        let head = block(
+            1,
+            114.0,
+            220.0,
+            330.0,
+            10.0,
+            "DEFINITION Embeddings are vector representations of words",
+        );
+        let mapped = block(
+            2,
+            114.0,
+            208.0,
+            330.0,
+            10.0,
+            "text units such as sentences or document chunks mapped",
+        );
+        let broken = block(
+            3,
+            114.0,
+            196.0,
+            330.0,
+            10.0,
+            "into a continuous high-dimensional space or thou-",
+        );
+        let rest = block(4, 114.0, 184.0, 330.0, 10.0, "sands of dimensions follow.");
+        let texts: Vec<_> = segment_glyphs(&[narrow, head, mapped, broken, rest])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("thousands")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("invoked") && text.contains("thou")),
             "{texts:?}"
         );
     }
@@ -6383,6 +6656,192 @@ mod tests {
             "hyphen should join across the monospace span: {texts:?}"
         );
         assert!(!joined.contains("in-"), "{texts:?}");
+    }
+
+    #[test]
+    fn a_right_aligned_chapter_title_is_one_segment() {
+        let upper = wide(0, 261.0, 524.0, "Introduction to AI", 213.0, 30.0);
+        let lower = wide(1, 196.0, 492.0, "agents and applications", 278.0, 30.0);
+        let texts: Vec<_> = segment_glyphs(&[upper, lower])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains("Introduction to AI") && texts[0].contains("agents and applications"),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_display_chapter_title_is_not_a_figure_label() {
+        let title = wide(0, 180.0, 524.0, "Introduction to AI", 260.0, 30.0);
+        let label = wide(1, 420.0, 500.0, "LLM", 28.0, 9.0);
+        let regions = [
+            crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [178.0, 481.0, 474.0, 481.3],
+                kind: "path".into(),
+            },
+            crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [395.0, 448.0, 478.0, 600.0],
+                kind: "path".into(),
+            },
+        ];
+        let seg = segment_placed(&[title, label], &SegmentFlags::default(), &regions, &[]);
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Introduction")),
+            "{texts:?} kept={:?}",
+            seg.kept
+        );
+        assert!(
+            seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 1 && reason == "figure"),
+            "{:?}",
+            seg.kept
+        );
+        assert!(
+            !seg.kept.iter().any(|(id, _)| *id == 0),
+            "title was kept: {:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn a_diagram_gutter_callout_stays_in_the_figure() {
+        let mut callout = wide(0, 110.0, 320.0, "Document loaders parse text", 90.0, 9.0);
+        callout.font_name = "HumanistMann521-BoldCondensed".into();
+        let mut body = wide(
+            1,
+            72.0,
+            520.0,
+            "This sentence is long enough to count as ordinary body text in the column today.",
+            360.0,
+            10.0,
+        );
+        body.font_name = "NewBaskerville-Roman".into();
+        let mut aside = wide(2, 120.0, 300.0, "A short aside in the column.", 140.0, 10.0);
+        aside.font_name = "NewBaskerville-Roman".into();
+        // Two strokes per box, far enough apart that the columns do not union.
+        // The callout sits in the gutter between them.
+        let regions = [
+            box_region(40.0, 400.0, 90.0, 430.0),
+            box_region(42.0, 402.0, 88.0, 428.0),
+            box_region(220.0, 400.0, 270.0, 430.0),
+            box_region(222.0, 402.0, 268.0, 428.0),
+            box_region(40.0, 200.0, 90.0, 230.0),
+            box_region(42.0, 202.0, 88.0, 228.0),
+            box_region(220.0, 200.0, 270.0, 230.0),
+            box_region(222.0, 202.0, 268.0, 228.0),
+        ];
+        let seg = segment_placed(
+            &[callout, body, aside],
+            &SegmentFlags::default(),
+            &regions,
+            &[],
+        );
+        assert!(
+            seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 0 && reason == "figure"),
+            "callout was translated: {:?}",
+            seg.kept
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("ordinary body")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("short aside")),
+            "column text inside the span was kept: {texts:?} {:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn a_chapter_running_header_above_a_figure_is_translated() {
+        let mut header = wide(
+            0,
+            80.0,
+            640.0,
+            "CHAPTER 1 Introduction to AI agents and applications",
+            340.0,
+            9.0,
+        );
+        header.font_name = "FranklinGothic-Demi".into();
+        let mut label = wide(1, 120.0, 560.0, "Agent", 40.0, 8.0);
+        label.font_name = "ArialMT".into();
+        let mut caption = wide(
+            2,
+            72.0,
+            480.0,
+            "Figure 1.5 A holiday-planning agent.",
+            280.0,
+            9.0,
+        );
+        caption.font_name = "FranklinGothic-Demi".into();
+        let mut body = wide(
+            3,
+            72.0,
+            700.0,
+            "This sentence is long enough to count as ordinary body text in the column today.",
+            360.0,
+            10.0,
+        );
+        body.font_name = "NewBaskerville-Roman".into();
+        let seg = segment_with(&[body, header, label, caption], &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("CHAPTER 1")),
+            "{texts:?} kept={:?}",
+            seg.kept
+        );
+        assert!(
+            seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 1 && reason == "figure"),
+            "{:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn a_monospace_listing_stays_original_and_the_prose_around_it_does_not() {
+        let before = glyph(
+            0,
+            72.0,
+            500.0,
+            "Enter the following command in the terminal:",
+            false,
+        );
+        let mut listing = glyph(1, 72.0, 484.0, "print(response)", false);
+        listing.font_name = "JetBrainsMonoNL".into();
+        let after = glyph(
+            2,
+            72.0,
+            468.0,
+            "The notebook then shows the model reply.",
+            false,
+        );
+        let seg = segment_with(&[before, listing, after], &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().all(|text| !text.contains("print")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|text| text.contains("terminal")));
+        assert!(texts.iter().any(|text| text.contains("notebook")));
+        assert!(
+            seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 1 && reason == "code"),
+            "{:?}",
+            seg.kept
+        );
     }
 
     #[test]

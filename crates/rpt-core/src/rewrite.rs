@@ -211,6 +211,7 @@ pub fn rewrite_translation(
             &crate::translate::localize_part_heading(&segment.translated),
         );
         let translated = crate::translate::restore_credit_names(&segment.source, &translated);
+        let translated = crate::translate::repair_body_translation(&segment.source, &translated);
         let will_draw = translated != segment.source;
         if !operators_are_private(&glyphs, &owners) {
             // A contents title shares its text operator with the leader dots and
@@ -314,6 +315,19 @@ pub fn rewrite_translation(
         .filter_map(|id| extraction.glyphs.get(by_id[id]))
         .map(|glyph| glyph.unicode.as_str())
         .collect();
+    // An unchanged continuation (`GoDaddy” (https://…)`) is redrawn so a
+    // shorter paragraph above can pull it up. The subset has to contain
+    // those Latin letters (`X` in the URL) or the line stays on the
+    // English baseline and the hole reopens.
+    let unchanged_body_chars: String = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            keep.get(&glyph.id)
+                .is_some_and(|reason| reason == "unchanged")
+        })
+        .map(|glyph| glyph.unicode.as_str())
+        .collect();
     let mut heading_shifts = Vec::new();
     if let Some(font_bytes) = opts.font_bytes.clone() {
         let chars = cover_with_fallbacks(
@@ -324,6 +338,7 @@ pub fn rewrite_translation(
                 })
                 .chain(toc_chars.chars())
                 .chain(echo_chars.chars())
+                .chain(unchanged_body_chars.chars())
                 .chain(subentry_chars.chars())
                 .chain(heading_chars.chars()),
         );
@@ -385,6 +400,7 @@ pub fn rewrite_translation(
                     })
                     .chain(toc_chars.chars())
                     .chain(echo_chars.chars())
+                    .chain(unchanged_body_chars.chars())
                     .chain(subentry_chars.chars())
                     .chain(heading_chars.chars()),
             );
@@ -524,6 +540,18 @@ pub fn rewrite_translation(
         &by_id,
         &embedded,
     ));
+    // `1.4.1` is one glyph per draw. Hole-closing then lifts the title and
+    // leaves the digits on the English baseline, on top of the next paragraph.
+    coalesce_section_indexes(&mut drawn);
+    adopt_unchanged_body_lines(
+        &mut drawn,
+        &mut succeeded,
+        &mut keep,
+        extraction,
+        &by_id,
+        &embedded,
+        &owners,
+    );
     close_column_holes(&mut drawn, extraction, &by_id);
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
     // A 27pt chapter index is kept in the source font (`(3) Tj`). The rows
@@ -5656,6 +5684,15 @@ fn layout_segment(
             block_right = block_right.max(right).min(media[2] - 1.0);
         }
     }
+    // `RAG` is three letters beside `1.4.2`. Fitting the translation to that
+    // ink leaves `检索增强生成` marked tight and the English title in place.
+    // The title column runs to the body margin.
+    if !bilingual && ink.len() == 1 && index_sits_left_of(extraction, &ink[0]) {
+        let room = media[2] - 36.0;
+        if room > block_right + source_size {
+            block_right = room;
+        }
+    }
     // A cover line changes fill where the panel ends. Fit the translation
     // inside that primary run instead of the English tail on the artwork.
     if ink.len() == 1 && source_size >= 16.0 && text.chars().count() <= 48 {
@@ -5731,7 +5768,9 @@ fn layout_segment(
             .into_iter()
             .filter(|line| !line.trim().is_empty())
             .collect()
-    } else if reflow {
+    } else if reflow || level == HeadingLevel::Title {
+        // A chapter title that fits one line stays one line. Spreading it
+        // onto the English baselines splits 智能体.
         lines
     } else {
         spread_to_lines(lines, ink.len())
@@ -5815,13 +5854,31 @@ fn layout_segment(
     // anchoring at the source left leaves a ragged right edge. A contents
     // row shares that right-looking edge only by coincidence (a page number
     // or the end of a long title). Those rows stay at the source left.
-    if !bilingual && ink.len() == 1 && drawn.len() == 1 && !contents_baseline(extraction, &ink[0]) {
-        if let Some(edge) = shared_right_edge(extraction, &ink[0]) {
-            let advance = drawn[0].widths.iter().sum::<f32>() + drawn[0].gaps.iter().sum::<f32>();
-            if advance > 0.0 {
+    // A justified body column also shares a right edge. Sliding a short body
+    // line onto it (`“来自一线的 LLM…` at x=270) opens a hole the column
+    // closer cannot cross, because the line no longer shares a left edge.
+    if !bilingual && source_size >= 14.0 && !drawn.is_empty() {
+        let ink_edge = ink.iter().map(|line| line.right).fold(f32::MIN, f32::max);
+        let shared = ink.iter().all(|line| (line.right - ink_edge).abs() <= 2.0);
+        let left_min = ink.iter().map(|line| line.left).fold(f32::MAX, f32::min);
+        let left_max = ink.iter().map(|line| line.left).fold(f32::MIN, f32::max);
+        let ragged_left = ink.len() >= 2 && left_max - left_min > 8.0;
+        let page_edge =
+            if ink.len() == 1 && drawn.len() == 1 && !contents_baseline(extraction, &ink[0]) {
+                shared_right_edge(extraction, &ink[0])
+            } else {
+                None
+            };
+        if shared && (ragged_left || page_edge.is_some()) {
+            let edge = page_edge.unwrap_or(ink_edge);
+            for item in &mut drawn {
+                let advance = item.widths.iter().sum::<f32>() + item.gaps.iter().sum::<f32>();
+                if advance <= 0.0 {
+                    continue;
+                }
                 let x = edge - advance;
-                if x + 0.4 >= drawn[0].x {
-                    drawn[0].x = x;
+                if x + 0.4 >= item.x && x >= media[0] + 24.0 {
+                    item.x = x;
                 }
             }
         }
@@ -6207,9 +6264,245 @@ fn fit_contents_stack(drawn: &mut [Drawn], extraction: &Extraction) {
     }
 }
 
+fn draw_ink_right(item: &Drawn) -> f32 {
+    item.x + item.widths.iter().sum::<f32>() + item.gaps.iter().sum::<f32>()
+}
+
+fn is_section_atom(item: &Drawn) -> bool {
+    let text = item.text.trim();
+    text.chars().count() == 1 && text.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+/// `1`, `.`, `4`, `.`, `1` are separate echo draws. Join them so the section
+/// index is one block and moves with its title.
+fn coalesce_section_indexes(drawn: &mut Vec<Drawn>) {
+    let mut order: Vec<usize> = (0..drawn.len())
+        .filter(|&index| is_section_atom(&drawn[index]))
+        .collect();
+    order.sort_by(|&left, &right| {
+        drawn[left]
+            .page
+            .cmp(&drawn[right].page)
+            .then_with(|| drawn[right].y.total_cmp(&drawn[left].y))
+            .then_with(|| drawn[left].x.total_cmp(&drawn[right].x))
+    });
+    let mut drop = Vec::new();
+    let mut merged = Vec::new();
+    let mut cursor = 0;
+    while cursor < order.len() {
+        let mut run = vec![order[cursor]];
+        let mut next = cursor + 1;
+        while next < order.len() {
+            let prev = &drawn[*run.last().unwrap()];
+            let item = &drawn[order[next]];
+            if item.page != prev.page || (item.y - prev.y).abs() > 0.8 {
+                break;
+            }
+            // Echoed digits are wider than the source advance, so the next
+            // atom can start inside the previous ink (`1.` ends at 66 and
+            // the following `1` starts at 65). They are still one index
+            // when each origin steps forward by less than an em.
+            let step = item.x - prev.x;
+            let gap = item.x - draw_ink_right(prev);
+            if step < prev.size * 0.15 || step > prev.size * 1.6 || gap > prev.size * 1.2 {
+                break;
+            }
+            run.push(order[next]);
+            next += 1;
+        }
+        let text: String = run.iter().map(|&index| drawn[index].text.trim()).collect();
+        let first = &drawn[run[0]];
+        let heading = is_section_index_text(&text)
+            && drawn.iter().any(|item| {
+                item.page == first.page
+                    && (item.y - first.y).abs() < 1.6
+                    && item.x > first.x + first.size
+                    && item.text.chars().any(is_han_char)
+            });
+        if heading {
+            let mut widths = Vec::new();
+            let mut gaps = Vec::new();
+            let mut cids = Vec::new();
+            let mut ids = Vec::new();
+            for (step, &index) in run.iter().enumerate() {
+                let item = &drawn[index];
+                if step > 0 {
+                    let bridge = (item.x - draw_ink_right(&drawn[run[step - 1]])).max(0.0);
+                    if let Some(last) = gaps.last_mut() {
+                        *last += bridge;
+                    } else {
+                        gaps.push(bridge);
+                    }
+                }
+                widths.extend(item.widths.iter().copied());
+                gaps.extend(item.gaps.iter().copied());
+                cids.extend(item.cids.iter().copied());
+                ids.extend(item.glyph_ids.iter().copied());
+            }
+            let mut item = Drawn {
+                page: first.page,
+                x: first.x,
+                y: first.y,
+                size: first.size,
+                color: first.color.clone(),
+                cids,
+                resource: first.resource.clone(),
+                skew: first.skew,
+                text,
+                glyph_ids: ids,
+                widths,
+                gaps,
+                supers: Vec::new(),
+                sup_scale: first.sup_scale,
+                sup_rise: first.sup_rise,
+            };
+            if item.gaps.len() + 1 != item.widths.len() && item.widths.len() > 1 {
+                item.gaps = vec![0.0; item.widths.len() - 1];
+            }
+            drop.extend(run.iter().copied());
+            merged.push(item);
+        }
+        cursor = next;
+    }
+    if drop.is_empty() {
+        return;
+    }
+    let mut kept = Vec::new();
+    for (index, item) in drawn.drain(..).enumerate() {
+        if !drop.contains(&index) {
+            kept.push(item);
+        }
+    }
+    kept.extend(merged);
+    *drawn = kept;
+}
+
 /// A shorter translation used to leave the next item on its English baseline,
 /// which opened a hole. Pull the next same-column block up until the gap
 /// matches the source gap. A footer, whose source gap is larger, stays put.
+/// A line the model left in Latin (`GoDaddy” (https://…)`) is not a drawn
+/// block, so the column closer stops and the quote sits a line below the
+/// title that moved up. Redraw that one body line. Section numbers, folios,
+/// and short code tokens stay where they are.
+fn adopt_unchanged_body_lines(
+    drawn: &mut Vec<Drawn>,
+    succeeded: &mut HashSet<u32>,
+    keep: &mut HashMap<u32, String>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+) {
+    let already: HashSet<u32> = drawn
+        .iter()
+        .flat_map(|item| item.glyph_ids.iter().copied())
+        .collect();
+    let mut ids: Vec<u32> = keep
+        .iter()
+        .filter(|(id, reason)| reason.as_str() == "unchanged" && !already.contains(id))
+        .map(|(id, _)| *id)
+        .collect();
+    ids.sort_unstable();
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    for id in ids {
+        let Some(&index) = by_id.get(&id) else {
+            continue;
+        };
+        let glyph = &extraction.glyphs[index];
+        let y = glyph.matrix[5];
+        if let Some(line) = lines.iter_mut().find(|line| {
+            let other = &extraction.glyphs[line[0]];
+            other.page_index == glyph.page_index && (other.matrix[5] - y).abs() < 1.2
+        }) {
+            line.push(index);
+        } else {
+            lines.push(vec![index]);
+        }
+    }
+    for mut line in lines {
+        line.sort_by(|&left, &right| {
+            extraction.glyphs[left].matrix[4].total_cmp(&extraction.glyphs[right].matrix[4])
+        });
+        let text: String = line
+            .iter()
+            .map(|&index| extraction.glyphs[index].unicode.as_str())
+            .collect();
+        let trimmed = text.trim();
+        if trimmed.chars().count() < 12
+            || is_section_index_text(trimmed)
+            || bare_page_label(trimmed)
+            || english_body_source(trimmed)
+        {
+            continue;
+        }
+        let sample = &extraction.glyphs[line[0]];
+        let page = sample.page_index;
+        let page_has_han = drawn
+            .iter()
+            .any(|item| item.page == page && item.text.chars().any(is_han_char));
+        if !page_has_han {
+            continue;
+        }
+        let (media_bottom, media_top) = extraction
+            .pages
+            .iter()
+            .find(|info| info.index == page)
+            .map(|info| (info.media_box[1], info.media_box[3]))
+            .unwrap_or((0.0, 800.0));
+        let y = sample.matrix[5];
+        if y > media_top - 48.0 || y < media_bottom + 36.0 {
+            continue;
+        }
+        let glyphs: Vec<&Glyph> = line
+            .iter()
+            .map(|&index| &extraction.glyphs[index])
+            .collect();
+        if !operators_are_private(&glyphs, owners) {
+            continue;
+        }
+        let Some((resource, font)) = embedded.iter().find(|(_, font)| {
+            text.chars()
+                .all(|ch| ch.is_whitespace() || font.glyphs.contains_key(&(ch as u32)))
+        }) else {
+            continue;
+        };
+        let size = glyphs
+            .iter()
+            .map(|glyph| glyph.font_size)
+            .fold(1.0f32, f32::max);
+        let skew = if glyphs
+            .iter()
+            .any(|glyph| face_style(&glyph.font_name).italic)
+        {
+            0.25
+        } else {
+            0.0
+        };
+        let glyph_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+        for id in &glyph_ids {
+            keep.remove(id);
+            succeeded.insert(*id);
+        }
+        drawn.push(Drawn {
+            page,
+            x: sample.matrix[4],
+            y,
+            size,
+            color: sample.fill_color.clone(),
+            cids: cids_of(&text, font),
+            resource: resource.clone(),
+            skew,
+            widths: char_widths(&text, size, font),
+            gaps: vec![0.0; text.chars().count().saturating_sub(1)],
+            text,
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids,
+        });
+    }
+}
+
 fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &HashMap<u32, usize>) {
     let mut pages: Vec<u32> = drawn.iter().map(|line| line.page).collect();
     pages.sort_unstable();
@@ -6353,6 +6646,33 @@ fn block_is_section_index(block: &ColumnBlock, drawn: &[Drawn]) -> bool {
             let text = drawn[*index].text.trim();
             text.is_empty() || text == "■" || is_section_index_text(text)
         })
+}
+
+/// `1.4.2` sits in the margin and `RAG` is the title. The number is not
+/// part of the title segment, so the title's own ink is only three letters.
+fn index_sits_left_of(extraction: &Extraction, line: &InkLine<'_>) -> bool {
+    let Some(sample) = line.glyphs.first() else {
+        return false;
+    };
+    let size = crate::segment::representative_size(&line.glyphs).max(1.0);
+    let mut marks: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            let token = glyph.unicode.trim();
+            !token.is_empty()
+                && glyph.page_index == sample.page_index
+                && (glyph.matrix[5] - line.y).abs() <= size * 0.45
+                && glyph_ink_right(glyph) < line.left - size * 0.15
+                && token.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+        })
+        .collect();
+    if marks.is_empty() {
+        return false;
+    }
+    marks.sort_by(|left, right| glyph_ink_left(left).total_cmp(&glyph_ink_left(right)));
+    let text: String = marks.iter().map(|glyph| glyph.unicode.trim()).collect();
+    is_section_index_text(text.trim())
 }
 
 fn is_section_index_text(text: &str) -> bool {
@@ -7094,7 +7414,7 @@ fn layout_across_pages(
         let bottom = ink[ink.len() - 1].y;
         let page_width = boxes[box_index].width;
         let reflow = column_reflow(level, ink.len(), page_width, source_size, hanging.is_some());
-        let lines = if hanging.is_some() || reflow {
+        let lines = if hanging.is_some() || reflow || level == HeadingLevel::Title {
             lines
         } else {
             spread_to_lines(lines, ink.len())
@@ -10172,6 +10492,15 @@ mod tests {
             cjk_indent_ems(1, 10.0, false, "{xuanzhang826, ltzheng01}@gmail.com"),
             0.0
         );
+        assert_eq!(
+            cjk_indent_ems(
+                1,
+                10.0,
+                false,
+                "■ 您知道如何创建 Python Jupyter Notebook 环境。",
+            ),
+            0.0
+        );
 
         let font = uniform_font(body);
         let metrics = CjkMeasure::resolve(0.90, 1.60);
@@ -12701,6 +13030,91 @@ ET"
         assert!(
             index_y > 280.0 + 1.0,
             "the hole above the section stayed open: y={index_y}"
+        );
+    }
+
+    #[test]
+    fn split_section_digits_move_with_the_title() {
+        // Echoed `1.4.1` is one draw per glyph. Joining them lets the hole
+        // closer treat the index and the title as one row.
+        let size = 10.5;
+        let glyphs = vec![
+            ink_glyph(1, 90.0, 320.0, size, "P"),
+            ink_glyph(10, 70.0, 300.0, size, "1"),
+            ink_glyph(11, 78.0, 300.0, size, "."),
+            ink_glyph(12, 86.0, 300.0, size, "4"),
+            ink_glyph(13, 94.0, 300.0, size, "."),
+            ink_glyph(14, 102.0, 300.0, size, "1"),
+            ink_glyph(20, 120.0, 300.0, size, "P"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(90.0, 360.0, size, "上一节", vec![1]),
+            test_draw(70.0, 300.0, size, "1", vec![10]),
+            test_draw(78.0, 300.0, size, ".", vec![11]),
+            test_draw(86.0, 300.0, size, "4", vec![12]),
+            test_draw(94.0, 300.0, size, ".", vec![13]),
+            test_draw(102.0, 300.0, size, "1", vec![14]),
+            test_draw(120.0, 300.0, size, "提示工程", vec![20]),
+        ];
+        coalesce_section_indexes(&mut drawn);
+        assert!(
+            drawn.iter().any(|item| item.text == "1.4.1"),
+            "digits stayed split: {:?}",
+            drawn
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let index_y = drawn.iter().find(|item| item.text == "1.4.1").unwrap().y;
+        let title_y = drawn.iter().find(|item| item.text == "提示工程").unwrap().y;
+        assert!(
+            (index_y - title_y).abs() < 0.4,
+            "1.4.1 y={index_y} left 提示工程 y={title_y}"
+        );
+        assert!(
+            index_y > 300.0 + 1.0,
+            "the index stayed on the English baseline y={index_y}"
+        );
+    }
+
+    #[test]
+    fn overlapping_section_atoms_still_join() {
+        // The echo face is wider than the source advance, so `1` of `1.1`
+        // starts inside the ink of `1.`. The old gap test split the index
+        // and left `1.1` on the English baseline.
+        let size = 10.8;
+        let mut drawn = vec![
+            test_draw(57.2, 507.8, size, "1", vec![1]),
+            test_draw(62.0, 507.8, size, ".", vec![2]),
+            test_draw(65.5, 507.8, size, "1", vec![3]),
+            test_draw(70.4, 507.8, size, ".", vec![4]),
+            test_draw(74.0, 507.8, size, "1", vec![5]),
+            test_draw(93.2, 507.8, size, "基于大语言模型的应用", vec![6]),
+        ];
+        for item in &mut drawn[..5] {
+            item.widths = vec![size * 0.55];
+        }
+        coalesce_section_indexes(&mut drawn);
+        assert!(
+            drawn.iter().any(|item| item.text == "1.1.1"),
+            "wide digits stayed split: {:?}",
+            drawn
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            drawn.iter().filter(|item| item.text.contains('1')).count(),
+            1
         );
     }
 
