@@ -4857,9 +4857,21 @@ fn split_contents_index<'a>(glyphs: &[&'a Glyph]) -> Option<(Vec<&'a Glyph>, Vec
     let mut cursor = 0;
     while cursor < ordered.len() {
         let token = ordered[cursor].unicode.trim();
-        let index_char = token.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
-            && token.chars().any(|ch| ch.is_ascii_digit());
-        if !index_char {
+        // `1.1` is three glyphs. The dot has no digit, but it still belongs
+        // to the index when another digit follows it. A sentence period
+        // (`1. The`) does not.
+        let mark = !token.is_empty() && token.chars().all(|ch| ch.is_ascii_digit() || ch == '.');
+        let digit = token.chars().any(|ch| ch.is_ascii_digit());
+        let dot_bridge = !digit
+            && token.chars().all(|ch| ch == '.')
+            && !index.is_empty()
+            && ordered.get(cursor + 1).is_some_and(|glyph| {
+                let next = glyph.unicode.trim();
+                !next.is_empty()
+                    && next.chars().any(|ch| ch.is_ascii_digit())
+                    && next.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+            });
+        if !(mark && (digit || dot_bridge)) {
             break;
         }
         index.push(ordered[cursor]);
@@ -5476,6 +5488,10 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
                 blocks.push(block);
             }
         }
+        // `1.3` and `Typical LLM use cases` are two draws of one row. The
+        // index is short, so closing the hole above it used to lift `1.3`
+        // onto the previous line and leave the title behind.
+        merge_section_heading_blocks(&mut blocks, drawn);
         blocks.sort_by(|left, right| right.top.total_cmp(&left.top));
         let mut shift = 0.0f32;
         let mut prev: Option<ColumnBlock> = None;
@@ -5527,6 +5543,78 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
             prev = Some(placed);
         }
     }
+}
+
+fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) {
+    let mut drop = Vec::new();
+    for index in 0..blocks.len() {
+        if drop.contains(&index) || !block_is_section_index(&blocks[index], drawn) {
+            continue;
+        }
+        let Some(mate) = (0..blocks.len()).find(|&other| {
+            other != index
+                && !drop.contains(&other)
+                && !block_is_section_index(&blocks[other], drawn)
+                && !block_is_page_or_leaders(&blocks[other], drawn)
+                && (blocks[other].source_top - blocks[index].source_top).abs() < 1.6
+                && blocks[other].left + 1.0 >= blocks[index].left
+        }) else {
+            continue;
+        };
+        let other = &blocks[mate];
+        let other_indices = other.indices.clone();
+        let other_top = other.top;
+        let other_bottom = other.bottom;
+        let other_left = other.left;
+        let other_source_top = other.source_top;
+        let other_source_bottom = other.source_bottom;
+        let other_size = other.size;
+        let block = &mut blocks[index];
+        block.indices.extend(other_indices);
+        block.top = block.top.max(other_top);
+        block.bottom = block.bottom.min(other_bottom);
+        block.left = block.left.min(other_left);
+        block.source_top = block.source_top.max(other_source_top);
+        block.source_bottom = block.source_bottom.min(other_source_bottom);
+        block.size = block.size.max(other_size);
+        drop.push(mate);
+    }
+    if drop.is_empty() {
+        return;
+    }
+    let mut kept = Vec::new();
+    for (index, block) in blocks.drain(..).enumerate() {
+        if !drop.contains(&index) {
+            kept.push(block);
+        }
+    }
+    *blocks = kept;
+}
+
+fn block_is_section_index(block: &ColumnBlock, drawn: &[Drawn]) -> bool {
+    block
+        .indices
+        .iter()
+        .any(|index| is_section_index_text(&drawn[*index].text))
+        && block.indices.iter().all(|index| {
+            let text = drawn[*index].text.trim();
+            text.is_empty() || text == "■" || is_section_index_text(text)
+        })
+}
+
+fn is_section_index_text(text: &str) -> bool {
+    let text = text.trim();
+    text.contains('.')
+        && text.chars().any(|ch| ch.is_ascii_digit())
+        && text.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+fn block_is_page_or_leaders(block: &ColumnBlock, drawn: &[Drawn]) -> bool {
+    !block.indices.is_empty()
+        && block.indices.iter().all(|index| {
+            let text = drawn[*index].text.trim();
+            bare_page_label(text) || draw_is_leader(&drawn[*index])
+        })
 }
 
 fn column_block(
@@ -10792,12 +10880,8 @@ ET",
 /F3 9.6 Tf 1 0 0 1 96 600 Tm (S) Tj \
 /F3 12 Tf 1 0 0 1 220 600 Tm (........) Tj \
 1 0 0 1 450 600 Tm (1) Tj \
-/F3 11 Tf 1 0 0 1 110 560 Tm (1.1) Tj \
-1 0 0 1 136 560 Tm (Building applications) Tj \
-1 0 0 1 275 560 Tm (19) Tj \
-1 0 0 1 110 530 Tm (2.1) Tj \
-1 0 0 1 136 530 Tm (Running prompts) Tj \
-1 0 0 1 230 530 Tm (28) Tj \
+/F3 11 Tf 1 0 0 1 110 560 Tm [(1.1)-1200(Building applications)-900(19)] TJ \
+1 0 0 1 110 530 Tm [(2.1)-1200(Running prompts)-900(28)] TJ \
 /F3 10 Tf \
 1 0 0 1 180 470 Tm (Engines) Tj \
 1 0 0 1 230 470 Tm (4) Tj \
@@ -10897,6 +10981,47 @@ ET"
         assert!(
             (number_y - title_y).abs() < 1.5,
             "171 y={number_y} left the part title y={title_y}"
+        );
+    }
+
+    #[test]
+    fn a_section_index_stays_on_its_title_when_the_hole_above_closes() {
+        // The line above is one drawn row whose source still reaches the
+        // section. Closing that hole must move `2.2` and the title together.
+        // The index used to be its own block and landed on the line above.
+        let size = 11.0;
+        let glyphs = vec![
+            ink_glyph(1, 180.0, 296.0, size, "E"),
+            ink_glyph(2, 186.0, 296.0, size, "n"),
+            ink_glyph(10, 148.0, 280.0, size, "2"),
+            ink_glyph(11, 154.0, 280.0, size, "."),
+            ink_glyph(12, 158.0, 280.0, size, "2"),
+            ink_glyph(13, 174.0, 280.0, size, "R"),
+            ink_glyph(14, 180.0, 280.0, size, "u"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(180.0, 340.0, size, "环境", vec![1, 2]),
+            test_draw(148.0, 280.0, size, "2.2", vec![10, 11, 12]),
+            test_draw(174.0, 280.0, size, "运行提示", vec![13, 14]),
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let index_y = drawn.iter().find(|item| item.text == "2.2").unwrap().y;
+        let title_y = drawn.iter().find(|item| item.text == "运行提示").unwrap().y;
+        assert!(
+            (index_y - title_y).abs() < 0.4,
+            "2.2 y={index_y} left the title y={title_y}"
+        );
+        assert!(
+            index_y > 280.0 + 1.0,
+            "the hole above the section stayed open: y={index_y}"
         );
     }
 

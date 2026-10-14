@@ -1,18 +1,18 @@
 # Manning pages 1–30 review
 
-Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is the v30 cache. Layout of the contents pages was replayed after the v30 regression. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v32.pdf`. Each contents page (PDF pages 8–17) was checked against the source and against v25.
+Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is the v30 cache. Delivered copy: `/opt/cursor/artifacts/pdfs/manning-p1-30-v35.pdf`. Contents pages (PDF pages 8–17) were compared with the source geometry, not with a right-aligned column.
 
-30/30 still pass alignment, line breaks, and paragraphs. Coverage is complete (`english_body` 0).
+30/30 still pass alignment, line breaks, and paragraphs. Coverage is complete (`english_body` 0; kept 2151, rewritten 35509, total 37660).
 
-A later replay of the same cache (`/opt/cursor/artifacts/pdfs/manning-p1-30-v33.pdf`) matches those contents coordinates: p10 roman numerals at x1=465.3, the continuation `AI 智能体` at x=177.2 with the marker at 169.4, the p11 part row at y=332, the p13 part row at y=409, and p17 page numbers at x1=298.1. Coverage counts are unchanged (kept 2151, rewritten 35509, total 37660).
+The source does not right-align page numbers. Front matter, chapters, and sections put the number one gap after the title (`1.1 Building LLM-based applications and agents 4`). Only part rows use leader dots out to the page edge. v33 and v34 had followed an earlier right-align instruction and are not the source.
 
 ## Root causes fixed
 
 | Defect | Where it showed | Fix |
 | --- | --- | --- |
 | Roman folio painted as Chinese (`ii` → `二`, `vi` → `六`) | p4, p8 | Margin folios stay the source token. |
-| Section and chapter page numbers trailed the shorter Chinese title (v26–v30) | detailed contents, p10–p16 | They share the source contents column again (p10 edge 465.3) and sit on the title baseline. |
-| Front-matter roman numerals trailed the short Chinese title (v31) | p10 `前言 xvi` through `关于封面插图 xxvi` | Those tokens meet the same column edge, x1=465.3, as in v21. |
+| Section and chapter page numbers were parked on a right edge (v32–v34) | detailed contents, p10–p16 | The number sits one gap after the Chinese title. Part rows alone keep leaders and the source edge (p10 `1` at 465.3, p11 `53` at 474.2). |
+| Front-matter roman numerals were parked on that same edge (v32–v34) | p10 `前言 xvi` through `关于封面插图 xxvi` | Titles stay at x=141.2 and the roman token follows the title (`xvi` ends at 176.4, `xxvi` at 215.2). |
 | Title-page lines sized from the small-caps median and left-ragged | p5 | One line of small caps is set at the cap size and shares the source right edge. |
 | `Special Sales Department` left in English | p6 | That label paints as 特别销售部. Role/name colons and the address stack were already on one axis. |
 | Han wrap inserted a space (`检索内容 使用`, `组合成 一个`) | contents | Two Han fragments join with no space. Latin still gets a space. |
@@ -33,8 +33,8 @@ A later replay of the same cache (`/opt/cursor/artifacts/pdfs/manning-p1-30-v33.
 | 7 | Pass | Dedication only. |
 | 8 | Pass | Footer folio stays `vi`. Part leaders share a right edge. Brief-contents chapter numbers stay beside the titles, as in v25 and the source. |
 | 9 | Pass | Running head `简要目录` and `vii` are separate. Appendix rows are one line each. |
-| 10 | Pass | Chapter `1` stays 27pt. `AI 代理和应用简介` is bold with the source italic shear, and its `3` meets the column at 465.3 with `4`, `11`, `19`, `20`, `23`, and `24`. Front matter (`xvi`, `xviii`, `xx`, `xxv`, `xxvi`) meets that same edge; the titles stay at x=141.2. The bullet run fills the column (`…引擎 4 ■ …聊天机器人 7`). The continuation title `AI 智能体` starts at x=177.2, the same origin as `基于`, and the marker hangs at 169.4. `提示工程 20 ■ …` stays inside that indent. |
-| 11 | Pass | Section numbers share the 474.2 column. The part row `第 2 部分 摘要`, its leaders, and `53` share y≈332, matching v25 (v31 had left the leaders and `53` above the title). Chapters 2–4 stay 27pt. |
+| 10 | Pass | Chapter `1` stays at x=105.3, 27pt. `AI 代理和应用简介` is bold with the source italic shear, and `3` follows that title. Section indexes `1.1`–`1.6` share x=138.9 and size 11.2; titles share x=165.2 (source 165.2) with the page number inline (`4` after `代理`, not at 465). Front matter stays at x=141.2 with the roman token inline. Sub-entries share x=177.2, including continuations, and stop short of the part edge. |
+| 11 | Pass | Section indexes `2.1`–`2.6` share x=147.9 and size 11.2 with `3.1`–`4.3`. Titles share x=174.2 (source 174.2), including `2.1 以编程方式运行提示` and `2.2`. `为本章设置环境` and `使用 LangChain 的 PromptTemplate 33` are one line each at x=186.2. The part row keeps leaders and `53` at 474.2. Chapters 2–4 stay 27pt. |
 | 12 | Pass | Chapter `5` is 27pt on its own baseline. Section numbers stay on the column. Packed subentries keep each page number with its title. |
 | 13 | Pass | Section numbers share the column. Chapters 7 and 8 stay 27pt. `第 4 部分 高级 RAG`, the long leaders, and `171` share y≈409, as in v31 and v25. |
 | 14 | Pass | Chapter `10` is 27pt, separate from `10.1`. Section numbers share the page's 445.7 column. Wraps read `检索内容使用重写后的查询` and `组合成一个`. |
@@ -54,6 +54,18 @@ A later replay of the same cache (`/opt/cursor/artifacts/pdfs/manning-p1-30-v33.
 | 28 | Pass | Cover-illustration note. Folio `xxvi` kept. |
 | 29 | Pass | Part opener stacks `第 1` / `部分` the way the source does. |
 | 30 | Pass | Running head `2` and `章节` are separate. Chapter 2 has not started its body yet. |
+
+## v35 contents check
+
+Pages 8–17 were measured against the source word boxes.
+
+- Part rows keep leaders and the source number edge (brief contents 453.1–453.2; detailed contents 465.3 or 474.2 by page). No stray `S` sits in the part 1 dots. The small-caps `S` in `LLMS` stays with the title.
+- Section indexes occupy the source index x (p10 138.9, p11 147.9). The dot in `1.1` is its own glyph, so the title column is the source title x (p10 165.2, p11 174.2), not a word space after the index. Index and title share one baseline and one size (11.2). Closing a hole above a section moves both draws together.
+- Page numbers on front matter, chapters, and sections sit one gap after the title. `3.1`’s `56` is beside the shorter Chinese title, not at the English edge 474.
+- Sub-entry rows use the source left per page (177.2 on even contents pages, 186.2 on odd). Continuation lines use that same x. Wrap stays inside the source run’s ink, short of the part-row edge.
+- `使用 LangChain 的 PromptTemplate 33` is one line. A title wraps only when that column is full. `LangChain的核心对象模型 15` is one line because the Chinese title fits; the English source wraps.
+
+Brief-contents part 3 (`第 3 部分 问答聊天机器人` / `119`) still has a gap where the source draws leader dots. That gap is the same in v34. The number remains at the source edge 453.1.
 
 ## v32 contents check
 
