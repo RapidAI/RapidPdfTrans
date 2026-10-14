@@ -986,7 +986,7 @@ fn inherent_keep(glyph: &Glyph) -> Option<&'static str> {
     if is_math_font(&glyph.font_name) && !is_footnote_symbol(&glyph.unicode) {
         return Some("formula");
     }
-    if glyph.vertical {
+    if glyph.vertical || glyph.sideways() {
         return Some("vertical");
     }
     if glyph.clipped && !glyph.clip_uncertain {
@@ -5070,7 +5070,7 @@ fn is_bullet_char(ch: char) -> bool {
     matches!(
         ch,
         '-' | '–' | '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧'
-    ) || ('\u{F020}'..='\u{F0FF}').contains(&ch)
+    ) || ('\u{E000}'..='\u{F8FF}').contains(&ch)
 }
 
 fn split_styled_line(

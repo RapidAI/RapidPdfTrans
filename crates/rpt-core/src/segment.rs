@@ -600,14 +600,34 @@ fn assemble(
     regions: &[PaintedRegion],
     pages: &[PageInfo],
 ) -> Segmentation {
-    let mut lines: Vec<VisualLine> = raw.into_iter().map(visual_line).collect();
+    // A rotated margin footer shares a baseline with the sentence beside it.
+    // It stays original, and it is not part of that sentence.
+    let mut kept = Vec::new();
+    let mut lines: Vec<VisualLine> = Vec::new();
+    for glyphs in raw {
+        let mut body = Vec::new();
+        for glyph in glyphs {
+            if glyph.sideways() {
+                kept.push((glyph.id, "margin".into()));
+            } else {
+                body.push(glyph);
+            }
+        }
+        if !body.is_empty() {
+            lines.push(visual_line(body));
+        }
+    }
     attach_markers(&mut lines);
     attach_math_scripts(&mut lines);
-    let mut kept = detach_toc_marks(&mut lines);
+    kept.extend(detach_toc_marks(&mut lines));
     kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
     kept.extend(margin_stamps(&lines));
     release_hyphen_continuations(&lines, &mut kept);
+    // A theorem frame is a box, so a short wrap (`version. We write…`,
+    // `to x + y = z.`) was kept as a figure label. It is the next line of
+    // the body paragraph above it.
+    release_body_wraps(&lines, &mut kept);
     let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     if !kept_ids.is_empty() {
         lines.retain(|line| {
@@ -1315,6 +1335,52 @@ fn release_hyphen_continuations(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, S
             }
             for glyph in &lower.glyphs {
                 release.insert(glyph.id);
+            }
+        }
+    }
+    if !release.is_empty() {
+        kept.retain(|(id, _)| !release.contains(id));
+    }
+}
+
+/// A short line inside or just above a frame stays a figure label unless it
+/// is the next line of a body paragraph (`version. We write [N]…`).
+fn release_body_wraps(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
+    let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let mut release = std::collections::HashSet::new();
+    for lower in lines {
+        let lower_kept = lower
+            .glyphs
+            .iter()
+            .filter(|glyph| kept_ids.contains(&glyph.id))
+            .count();
+        if lower.glyphs.is_empty() || lower_kept * 2 <= lower.glyphs.len() {
+            continue;
+        }
+        let figure = lower.glyphs.iter().any(|glyph| {
+            kept.iter()
+                .any(|(id, reason)| *id == glyph.id && reason == "figure")
+        });
+        if !figure {
+            continue;
+        }
+        for upper in lines {
+            if upper.page != lower.page {
+                continue;
+            }
+            let upper_kept = upper
+                .glyphs
+                .iter()
+                .filter(|glyph| kept_ids.contains(&glyph.id))
+                .count();
+            if upper.glyphs.is_empty() || upper_kept * 2 > upper.glyphs.len() {
+                continue;
+            }
+            if continues_paragraph(upper, lower, 0.0) {
+                for glyph in &lower.glyphs {
+                    release.insert(glyph.id);
+                }
+                break;
             }
         }
     }
@@ -2670,7 +2736,7 @@ fn is_list_marker(ch: char) -> bool {
     matches!(
         ch,
         '-' | '–' | '—' | '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧'
-    ) || ('\u{F020}'..='\u{F0FF}').contains(&ch)
+    ) || ('\u{E000}'..='\u{F8FF}').contains(&ch)
 }
 
 /// The marker sits left of the wrapped lines (` Part 1` / `exploring…`,
@@ -7100,6 +7166,133 @@ mod tests {
             seg.kept.iter().any(|(_, reason)| reason == "figure"),
             "{:?}",
             seg.kept
+        );
+    }
+
+    #[test]
+    fn a_sideways_margin_footer_stays_out_of_the_line() {
+        let mut line = paint_word(
+            &mut 0,
+            126.0,
+            573.0,
+            "Added numerous examples suggested via public comments",
+            "TimesNewRomanPSMT",
+        );
+        let mut stamp = glyph(100, 18.0, 575.0, "h", false);
+        stamp.matrix = [0.0, -9.0, 9.0, 0.0, 18.0, 575.0];
+        stamp.font_size = 9.0;
+        line.push(stamp);
+        let texts: Vec<_> = segment_glyphs(&line)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("numerous examples")),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|text| text.contains('h')), "{texts:?}");
+    }
+
+    #[test]
+    fn an_icon_font_bullet_keeps_each_slide_item_separate() {
+        let items = [
+            block(
+                0,
+                48.0,
+                315.0,
+                540.0,
+                30.0,
+                "\u{e902}Why we need to understand our tests",
+            ),
+            block(
+                1,
+                48.0,
+                272.0,
+                370.0,
+                30.0,
+                "\u{e902}What mutation testing is",
+            ),
+            block(
+                2,
+                48.0,
+                230.0,
+                720.0,
+                30.0,
+                "\u{e902}How mutation testing got to practical applicability",
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&items)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert!(
+            texts.iter().all(|text| text.starts_with('\u{e902}')),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_wrap_beside_a_theorem_frame_stays_in_the_paragraph() {
+        let upper = block(
+            0,
+            115.0,
+            235.0,
+            380.0,
+            10.5,
+            "Following is an equivalent finitary",
+        );
+        let wrap = block(1, 115.0, 222.0, 170.0, 10.5, "version. We write the set.");
+        let label = block(2, 200.0, 190.0, 70.0, 10.0, "Retriever");
+        let theorem = block(
+            3,
+            123.0,
+            171.0,
+            360.0,
+            10.5,
+            "then there is a monochromatic solution",
+        );
+        let tail = block(4, 123.0, 158.0, 90.0, 10.5, "to x + y = z.");
+        let regions = vec![
+            crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [115.0, 149.0, 498.0, 213.0],
+                kind: "path".into(),
+            },
+            crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [116.0, 150.0, 497.0, 212.0],
+                kind: "path".into(),
+            },
+        ];
+        let pages = vec![crate::glyph::PageInfo {
+            index: 0,
+            object_id: "1 0".into(),
+            media_box: [0.0, 0.0, 612.0, 792.0],
+            rotate: 0,
+        }];
+        let seg = segment_placed(
+            &[upper, wrap, label, theorem, tail],
+            &SegmentFlags::default(),
+            &regions,
+            &pages,
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("finitary version. We write")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("solution to x + y = z.")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("Retriever")),
+            "{texts:?}"
         );
     }
 

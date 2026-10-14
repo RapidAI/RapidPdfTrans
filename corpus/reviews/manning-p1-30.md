@@ -4,6 +4,8 @@ Sample: pages 1–30 of *AI Agents and Applications* (531×666 pt). Wording is t
 
 30/30 still pass alignment, line breaks, and paragraphs. Coverage is complete (`english_body` 0).
 
+A later replay of the same cache (`/opt/cursor/artifacts/pdfs/manning-p1-30-v33.pdf`) matches those contents coordinates: p10 roman numerals at x1=465.3, the continuation `AI 智能体` at x=177.2 with the marker at 169.4, the p11 part row at y=332, the p13 part row at y=409, and p17 page numbers at x1=298.1. Coverage counts are unchanged (kept 2151, rewritten 35509, total 37660).
+
 ## Root causes fixed
 
 | Defect | Where it showed | Fix |

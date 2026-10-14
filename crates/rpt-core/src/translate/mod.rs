@@ -1605,7 +1605,7 @@ pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
         return translated.to_string();
     }
     let marker = source.trim_start().chars().next().unwrap_or('■');
-    let shown = if ('\u{F020}'..='\u{F0FF}').contains(&marker) {
+    let shown = if ('\u{E000}'..='\u{F8FF}').contains(&marker) {
         '■'
     } else {
         marker

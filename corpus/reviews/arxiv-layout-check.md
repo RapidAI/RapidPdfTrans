@@ -176,3 +176,61 @@ Side-by-side renders:
 | 8–9 | Bibliography, English. AAAI puts it before the appendix. | — | — |
 | 10 | Appendix A is Chinese (`A 推导`, `A.1 从区域特定充分性到`, `前缀条件充分性`). The subscript lead-ins are prose: `将其应用于 A = Yk…`, `由于条件 (X,Bk,B<k) 作为元组是相同的`, and `到 (X,B≤k)，这变为`. Display equations stay math. | was low | lettered appendix; compound title; subscript sentences |
 | 11–17 | Appendices B–E are Chinese. Table cells and display formulas stay English. | was high | bibliography stops at `A Derivations` |
+
+## Textbook, slides, and a Word report
+
+Three openly licensed PDFs. Each translation is coverage-complete (`english_body` 0). Figure interiors, table cells, display equations, and bibliographies stay English. The full Manning book was not translated. A replay of pages 1–30 matches the v32 contents coordinates.
+
+| id | pages | PDF |
+| --- | --- | --- |
+| ocw-18-225-lec01, MIT OCW 18.225 lecture 1, CC BY-NC-SA | 11, letter | `/opt/cursor/artifacts/pdfs/ocw-18-225-lec01-zh.pdf` |
+| fosdem-2024-mutation, CC BY | 61, landscape slides | `/opt/cursor/artifacts/pdfs/fosdem-2024-mutation-zh.pdf` |
+| nist-sp-800-218, public domain | 36, Word report | `/opt/cursor/artifacts/pdfs/nist-sp-800-218-zh.pdf` |
+
+Renders: `/opt/cursor/artifacts/corpus-loop/`.
+
+### Fixes in this change
+
+| defect | where it showed |
+| --- | --- |
+| A text array ended in one content stream and `TJ` began the next, so the lecture text was dropped. | OCW extract |
+| A WinAnsi font declared ToUnicode codespace `<0000> <FFFF>` with 1-byte `bfchar` keys. Pairs of bytes became one character (`Special` → `STp⁓ecial…`). Simple fonts now split one byte at a time. | NIST title page |
+| A Chinese aside that contained `2000` was one unbreakable citation, then one glyph per line. A sticky span wider than the line breaks on an ordinary boundary. | OCW additive-combinatorics paragraph |
+| `version. We write [N]…` and `to x + y = z.` stayed English because a formula on the next line blocked the join. A lowercase prose tail still joins. | OCW page 1 |
+| A short wrap just above a theorem frame (`version. We write…`, `to x + y = z.`) was a figure label. A wrap that continues the body paragraph stays in that paragraph. A diagram label (`Retriever`) stays inside the drawing. | OCW theorem boxes |
+| Icon-font bullets (U+E902) were not list markers, so three agenda items reflowed onto one line. Private-use bullets stay separate items and paint as `■`. | FOSDEM page 4 |
+| `Hi!` wrapped to `你` / `好!`. A title of at most four characters may shrink to half the source size to stay one line. | FOSDEM page 2 |
+| `How Mutation Testing Got Practical` and `Software Engineering Consultant` were restored as personal names. A function word, `versus`, `theorem`, or a word longer than nine letters is a title. `Dustin Archibald` and `Jean-Luc Picard` stay names. | FOSDEM title; OCW `Finitary Versus Infinitary` |
+| Emoji and icon-font pictures (✅, ❌, 👽) and the fi ligature had no CJK glyph, so the line stayed English. They stand in for `✓`, `×`, `•`, and `fi`. | FOSDEM |
+| The rotated footer `This publication is available free of charge from…` shared a baseline with the changelog and the line stayed English. A sideways text matrix is a margin stamp, not part of the sentence. | NIST page 36 |
+
+### ocw-18-225-lec01
+
+| page | findings | severity | fixed |
+| --- | --- | --- | --- |
+| 1 | Body is Chinese, including `有限与无限`, `下面是一个等价的有穷形式。我们记 [N]…`, and `则 x + y = z 存在单色解`. Display formulas stay math. No word box is off the page. | was high | formula tail; theorem-frame wrap; title is not a byline |
+| 2–10 | Body is Chinese. Theorem statements are Chinese. No long English prose run. | — | — |
+| 11 | License line is Chinese. The OCW URL stays a URL. | — | — |
+
+### fosdem-2024-mutation
+
+| page | findings | severity | fixed |
+| --- | --- | --- | --- |
+| 1 | Title is `变异测试如何变得实用`, on three lines, matching the three source lines. `FOSDEM '24` stays Latin. | was high | not a personal name |
+| 2 | `你好!` is one line. `Jan-Jelle Kester` stays Latin. `软件工程顾问` is Chinese. | was medium | one-word title; role is not a name |
+| 4 | Each agenda bullet is its own line (`■为什么我们需要理解我们的测试`, `■什么是变异测试`, `■变异测试如何达到实际适用性`). | was high | icon-font bullet |
+| 20 | Mutation table stays the source operators. The heading `常见突变` is Chinese. | — | table cells |
+| 21 | `■✓ 已杀死` and `■• 存活` are each one line. | was medium | list items; emoji stand-in |
+| 55 | Language names stay Latin. The heading `针对您所选语言的变异测试` is Chinese. | — | — |
+
+### nist-sp-800-218
+
+| page | findings | severity | fixed |
+| --- | --- | --- | --- |
+| 2 | Title and affiliations are Chinese. `Murugiah Souppaya` and `Karen Scarfone` stay Latin. The DOI footer stays English. | was high | one-byte WinAnsi |
+| 9 | Contents page stays English (`Table of Contents`, `1 Introduction`). | low | toc |
+| 10 | Introduction is Chinese, including the superscript note. The rotated footer is still the English DOI line, in the margin. | — | sideways footer |
+| 11 | Nested bullets are Chinese, including the wrap under `物联网（IoT）`. Footnote 2 is Chinese. | — | — |
+| 14 | Practice prose is Chinese. Column headers and `Example 1:` cells stay English. | — | table cells |
+| 29–32 | References stay English. | — | — |
+| 36 | Changelog entries are Chinese (`添加了通过公众意见建议的众多示例`). The DOI footer stays in the margin. | was high | sideways footer no longer joins the line |

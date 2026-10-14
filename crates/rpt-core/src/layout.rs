@@ -352,6 +352,10 @@ pub(crate) fn fit_cjk_block(
         // The name stays one line. 0.50 still clears the panel; a split
         // `R` / `oberto` is worse than a slightly smaller line.
         0.50
+    } else if display && compact {
+        // `Hi!` is one short word. `你好!` at 0.80 wraps to one character
+        // per line. Half the source size still reads on a title slide.
+        0.50
     } else if display {
         0.80
     } else if compact && available <= 0.5 {
@@ -1355,6 +1359,24 @@ mod tests {
             "scheme was left behind: {:?}",
             fitted.0
         );
+    }
+
+    #[test]
+    fn a_one_word_title_stays_on_one_line() {
+        let metrics = CjkMeasure::resolve(0.90, 1.60);
+        let text = "你好!";
+        let fitted = fit_cjk_block(
+            text,
+            63.0,
+            0.90,
+            81.0,
+            0.0,
+            0.0,
+            &mixed_ascii_font(text),
+            metrics,
+        )
+        .expect("title fits");
+        assert_eq!(fitted.0, vec!["你好!".to_string()], "{:?}", fitted.0);
     }
 
     #[test]

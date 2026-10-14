@@ -113,6 +113,18 @@ pub struct Glyph {
     pub source: GlyphSource,
 }
 
+impl Glyph {
+    /// A 90-degree text matrix. Word writes the page footer up the margin
+    /// this way. It is not a horizontal body line.
+    pub fn sideways(&self) -> bool {
+        let m = &self.matrix;
+        m[1].abs() > 1.0
+            && m[2].abs() > 1.0
+            && m[0].abs() <= m[1].abs() * 0.25
+            && m[3].abs() <= m[2].abs() * 0.25
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PageInfo {
     pub index: u32,
