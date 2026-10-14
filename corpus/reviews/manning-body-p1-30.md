@@ -18,6 +18,9 @@ Each translated page was rendered beside the source. Word boxes on all 30 pages 
 | Numbered steps after Figure 1.4 were headings | p9 | A number plus a hanging indent is one body paragraph. The number keeps its source face, colour, and x. Every line of the words shares the hanging indent, with no first-line indent. A heading cannot end on `的` or `，`. |
 | Prerequisite bullets disagreed: one black square, one larger gold square, and two text indents | p28, and the same list shape on the chapter openers | Every dingbat in a list is redrawn from the source glyph, colour, size, and x. Every line of the words starts at the source hanging indent. A wrapped item uses the same mark as a one-line sibling. |
 | `思维链（` left the opening bracket at the end of the line | p28 | An opening bracket cannot end a line. It moves onto the next line with the text it opens. |
+| A shorter paragraph left about five blank lines above the shell listing, and the paragraph under the listing stayed on the English baseline | p28, and the same shape on p29–p30 | Kept code is a block in the column. When the prose above gets shorter, the listing and the following paragraph move up so the gap stays the source gap. A prompt arrow or dingbat on that baseline moves with the code. |
+| `如果对这些任务不熟悉…配置` stopped early, and `（CoT）。…PromptTemplate 和` stopped before `FewShotPromptTemplate` | p28 | A body line that is not the last line of its paragraph is justified out to the column. CJK–CJK gaps may open by up to half an em so the line still reaches the edge ahead of a long Latin word. |
+| Moved listings dropped spaces and the WinAnsi apostrophe in `don’t` | p28–p30 | The redrawn listing uses the source character codes, including spaces and bytes above 127, and keeps a mark that sits on the same baseline. |
 
 ## Accepted
 
@@ -57,6 +60,6 @@ Each translated page was rendered beside the source. Word boxes on all 30 pages 
 | 25 | Pass | Headings `摘要` are short titles, not orphaned body words. |
 | 26 | Pass | Closing prose of the chapter. Footer folio stays the source digit. |
 | 27 | Pass | Chapter title is two lines, `以编程方式` then `执行提示词`, both ending at x=360.5. The giant `2` starts near x=398, so the title does not cross it. The four `本章涵盖` bullets match page 3: x=96.2, size 8.46, words at x=108.2. |
-| 28 | Pass | Both requirement bullets are the same gold square at x=108.8, size 8.46, on the item baseline. Both word lines start at x=120.8. The first paragraph ends `例如思维链` and the next line starts `（CoT）。`. `2.1` and `2.1.1` stay with their headings. |
-| 29 | Pass | Shell listing stays English. The prose around it is Chinese. |
-| 30 | Pass | Python and the `ChatCompletion` dump stay English, including the English string inside the JSON. The surrounding steps are Chinese. |
+| 28 | Pass | Both requirement bullets are the same gold square at x=108.8, size 8.46, on the item baseline. Both word lines start at x=120.8. The first paragraph ends `例如思维链` and the next line starts `（CoT）。`, reaching x=435 (92% of the column) before `FewShotPromptTemplate`. `如果对这些任务不熟悉…配置` reaches the column edge at x=465. The shell line sits 18.8 pt under `入 ch02 文件夹：`, the source gap, and `python -m venv env_ch02` keeps its spaces. `2.1` and `2.1.1` stay with their headings. |
+| 29 | Pass | Shell listing stays English, including the `➥` prompt marks on the `pip` and `jupyter` lines and the spaces in `(env_ch02) C:\…`. The prose around it is Chinese. |
+| 30 | Pass | Python and the `ChatCompletion` dump stay English, including spaces and the apostrophe in `don’t`. The surrounding steps are Chinese. |

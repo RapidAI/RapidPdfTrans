@@ -793,7 +793,7 @@ fn listing_line(line: &VisualLine<'_>) -> bool {
     mono >= 2 && other == 0
 }
 
-fn mono_face(name: &str) -> bool {
+pub(crate) fn mono_face(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     [
         "MONO",

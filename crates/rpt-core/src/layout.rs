@@ -516,12 +516,15 @@ pub(crate) fn justify_gaps(
         return gaps;
     }
     let slack = width - fit_measure(text, size, font);
-    if !(0.4..width * 0.12).contains(&slack) {
+    // A line that already fills the measure, or one that is mostly empty
+    // (a short label), stays as it is. A body line that stopped before a
+    // long Latin word still has to reach the column edge. Half an em is
+    // enough when the only flexible gaps are a short run of CJK.
+    if slack < 0.4 || slack > width * 0.55 {
         return gaps;
     }
-    let extra = slack / slots.len() as f32;
-    // A larger gap reads as letter-spacing. Leave the line ragged instead.
-    if extra > size * 0.03 {
+    let extra = (slack / slots.len() as f32).min(size * 0.50);
+    if extra < 0.05 {
         return gaps;
     }
     for index in slots {

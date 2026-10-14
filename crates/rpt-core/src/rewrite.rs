@@ -553,7 +553,8 @@ pub fn rewrite_translation(
         &embedded,
         &owners,
     );
-    close_column_holes(&mut drawn, extraction, &by_id);
+    let listing_shifts = close_column_holes(&mut drawn, extraction, &by_id);
+    reposition_listings(doc, extraction, &listing_shifts, &mut succeeded)?;
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
     // A 27pt chapter index is kept in the source font (`(3) Tj`). The rows
     // around it move with a taller or shorter sub-entry, and the numeral has
@@ -6512,12 +6513,23 @@ fn split_styled_line(
 
 struct ColumnBlock {
     indices: Vec<usize>,
+    /// A monospace listing left in the source stream. It is not a `Drawn`
+    /// line, so a shorter paragraph above it used to leave the code on the
+    /// English baseline.
+    kept_ids: Vec<u32>,
     top: f32,
     bottom: f32,
     left: f32,
     source_top: f32,
     source_bottom: f32,
     size: f32,
+    listing: bool,
+}
+
+struct ListingShift {
+    page: u32,
+    ids: Vec<u32>,
+    dy: f32,
 }
 
 /// A contents title shares its baseline with a kept page number. Body text
@@ -6897,7 +6909,12 @@ fn adopt_unchanged_body_lines(
     }
 }
 
-fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &HashMap<u32, usize>) {
+fn close_column_holes(
+    drawn: &mut [Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Vec<ListingShift> {
+    let mut shifts = Vec::new();
     let mut pages: Vec<u32> = drawn.iter().map(|line| line.page).collect();
     pages.sort_unstable();
     pages.dedup();
@@ -6921,6 +6938,7 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
                 blocks.push(block);
             }
         }
+        blocks.extend(listing_blocks(drawn, extraction, page));
         // `1.3` and `Typical LLM use cases` are two draws of one row. The
         // index is short, so closing the hole above it used to lift `1.3`
         // onto the previous line and leave the title behind.
@@ -6935,15 +6953,21 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
             // row: a hanging bullet changes the block above by a few points
             // and used to chain the dots onto that block, leaving `171`
             // behind. `seat_inline_page_numbers` moves both with the title.
-            let page_number = block
-                .indices
-                .iter()
-                .all(|index| draw_is_bare_page_number(&drawn[*index], extraction, by_id));
-            let leaders = block
-                .indices
-                .iter()
-                .all(|index| draw_is_leader(&drawn[*index]));
-            if page_number || leaders || block_is_contents_row(&block, drawn, extraction, by_id) {
+            let page_number = !block.listing
+                && block
+                    .indices
+                    .iter()
+                    .all(|index| draw_is_bare_page_number(&drawn[*index], extraction, by_id));
+            let leaders = !block.listing
+                && block
+                    .indices
+                    .iter()
+                    .all(|index| draw_is_leader(&drawn[*index]));
+            if !block.listing
+                && (page_number
+                    || leaders
+                    || block_is_contents_row(&block, drawn, extraction, by_id))
+            {
                 // Contents rows keep the source baseline. A taller or shorter
                 // sub-entry block moves them in `apply_subentry_shifts`, by
                 // one source leading, instead of closing each hole differently.
@@ -6961,7 +6985,16 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
                 // A shorter paragraph used to leave the next block on the
                 // English baseline. Same-baseline marks (a page number beside
                 // its title) have no positive source gap, so they are not pulled.
-                let chained = same_column && source_gap > 0.0 && source_gap < size * 2.6;
+                // A code listing sits one blank line under the prose. The
+                // ordinary 2.6em chain stops short of that gap, so the
+                // listing and everything under it stayed on the English
+                // baseline after the paragraph got shorter.
+                let reach = if prev.listing || block.listing {
+                    size * 4.0
+                } else {
+                    size * 2.6
+                };
+                let chained = same_column && source_gap > 0.0 && source_gap < reach;
                 if chained {
                     // `shift` is the pull already applied above this block.
                     // Only a hole that is still open after that pull is closed.
@@ -6977,12 +7010,20 @@ fn close_column_holes(drawn: &mut [Drawn], extraction: &Extraction, by_id: &Hash
             for index in &block.indices {
                 drawn[*index].y += shift;
             }
+            if block.listing && shift.abs() > 0.4 {
+                shifts.push(ListingShift {
+                    page,
+                    ids: block.kept_ids.clone(),
+                    dy: shift,
+                });
+            }
             let mut placed = block;
             placed.top += shift;
             placed.bottom += shift;
             prev = Some(placed);
         }
     }
+    shifts
 }
 
 fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) {
@@ -7128,13 +7169,228 @@ fn column_block(
     source_ys.sort_by(|left, right| left.total_cmp(right));
     Some(ColumnBlock {
         indices: indices.to_vec(),
+        kept_ids: Vec::new(),
         top,
         bottom,
         left,
         source_top: source_ys[source_ys.len() - 1],
         source_bottom: source_ys[0],
         size,
+        listing: false,
     })
+}
+
+/// Monospace lines that were not redrawn. Each line is its own block so a
+/// shorter paragraph above the listing pulls the code, and the paragraph
+/// under the code, up by the same hole.
+fn listing_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<ColumnBlock> {
+    let mut used = HashSet::new();
+    for line in drawn {
+        if line.page == page {
+            used.extend(line.glyph_ids.iter().copied());
+        }
+    }
+    let mut glyphs: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == page
+                && !used.contains(&glyph.id)
+                && !glyph.invisible
+                && !glyph.sideways()
+                && !glyph.unicode.is_empty()
+                && crate::segment::mono_face(&glyph.font_name)
+        })
+        .collect();
+    glyphs.sort_by(|left, right| {
+        right.matrix[5]
+            .total_cmp(&left.matrix[5])
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let mut lines: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in glyphs {
+        if let Some(line) = lines.last_mut() {
+            if (line[0].matrix[5] - glyph.matrix[5]).abs() < 0.8 {
+                line.push(glyph);
+                continue;
+            }
+        }
+        lines.push(vec![glyph]);
+    }
+    let mut claimed = HashSet::new();
+    lines
+        .into_iter()
+        .map(|line| {
+            let y = line[0].matrix[5];
+            let left = line
+                .iter()
+                .map(|glyph| glyph.matrix[4])
+                .fold(f32::MAX, f32::min);
+            let right = line
+                .iter()
+                .map(|glyph| glyph.matrix[4] + glyph.advance[0].max(0.0))
+                .fold(left, f32::max);
+            let size = line
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max);
+            let mut ids: Vec<u32> = line.iter().map(|glyph| glyph.id).collect();
+            claimed.extend(ids.iter().copied());
+            // A prompt arrow or a dingbat sits on the listing baseline in
+            // another face. It has to move with the code, or it stays on the
+            // English line after the listing closes up.
+            for glyph in &extraction.glyphs {
+                if glyph.page_index != page
+                    || used.contains(&glyph.id)
+                    || claimed.contains(&glyph.id)
+                    || glyph.invisible
+                    || glyph.sideways()
+                    || glyph.unicode.is_empty()
+                    || (glyph.matrix[5] - y).abs() >= 0.8
+                    || glyph.matrix[4] < left - size * 2.5
+                    || glyph.matrix[4] > right + size
+                {
+                    continue;
+                }
+                claimed.insert(glyph.id);
+                ids.push(glyph.id);
+            }
+            ColumnBlock {
+                indices: Vec::new(),
+                kept_ids: ids,
+                top: y,
+                bottom: y,
+                left,
+                source_top: y,
+                source_bottom: y,
+                size,
+                listing: true,
+            }
+        })
+        .collect()
+}
+
+/// Blank a moved listing and draw it again with the original face, at the
+/// closed-up baseline. The source `Tm` is absolute, so the new stream is
+/// appended after the page's graphics state is restored.
+fn reposition_listings(
+    doc: &mut Document,
+    extraction: &Extraction,
+    shifts: &[ListingShift],
+    succeeded: &mut HashSet<u32>,
+) -> Result<()> {
+    if shifts.is_empty() {
+        return Ok(());
+    }
+    let by_id = glyph_index(&extraction.glyphs);
+    let mut by_page: HashMap<u32, Vec<&ListingShift>> = HashMap::new();
+    for shift in shifts {
+        by_page.entry(shift.page).or_default().push(shift);
+    }
+    for (page, page_shifts) in by_page {
+        let mut stream = String::from("BT\n0 Tc 0 Tw 100 Tz 0 TL\n");
+        let mut moved = Vec::new();
+        for shift in page_shifts {
+            let mut glyphs: Vec<&Glyph> = shift
+                .ids
+                .iter()
+                .filter_map(|id| extraction.glyphs.get(by_id[id]))
+                .collect();
+            if glyphs.is_empty() {
+                continue;
+            }
+            glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+            let mut start = 0usize;
+            while start < glyphs.len() {
+                let mut end = start + 1;
+                while end < glyphs.len() && glyphs[end].font_resource == glyphs[start].font_resource
+                {
+                    end += 1;
+                }
+                let run = &glyphs[start..end];
+                start = end;
+                let sample = run[0];
+                if sample.font_resource.is_empty() {
+                    continue;
+                }
+                let literal = pdf_glyph_literal(run);
+                if literal.is_empty() {
+                    continue;
+                }
+                stream.push('/');
+                stream.push_str(&sample.font_resource);
+                stream.push(' ');
+                stream.push_str(&pdf_num(sample.font_size));
+                stream.push_str(" Tf ");
+                stream.push_str(&color_ops(&sample.fill_color));
+                stream.push_str(" 1 0 0 1 ");
+                stream.push_str(&pdf_num(sample.matrix[4]));
+                stream.push(' ');
+                stream.push_str(&pdf_num(sample.matrix[5] + shift.dy));
+                stream.push_str(" Tm (");
+                stream.push_str(&literal);
+                stream.push_str(") Tj\n");
+                moved.extend(run.iter().map(|glyph| glyph.id));
+            }
+        }
+        stream.push_str("ET\n");
+        if moved.is_empty() {
+            continue;
+        }
+        let Some(info) = extraction.pages.iter().find(|info| info.index == page) else {
+            continue;
+        };
+        let Some(page_id) = parse_id(&info.object_id) else {
+            continue;
+        };
+        let stream_id = doc.add_object(Stream::new(Dictionary::new(), stream.into_bytes()));
+        append_contents(doc, page_id, stream_id)?;
+        succeeded.extend(moved);
+    }
+    Ok(())
+}
+
+fn pdf_glyph_literal(glyphs: &[&Glyph]) -> String {
+    if glyphs.iter().all(|glyph| !glyph.char_code.is_empty()) {
+        let bytes: Vec<u8> = glyphs
+            .iter()
+            .flat_map(|glyph| glyph.char_code.iter().copied())
+            .collect();
+        return pdf_bytes(&bytes);
+    }
+    let text: String = glyphs.iter().map(|glyph| glyph.unicode.as_str()).collect();
+    pdf_literal(&text)
+}
+
+fn pdf_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for &byte in bytes {
+        match byte {
+            b'\\' | b'(' | b')' => {
+                out.push('\\');
+                out.push(byte as char);
+            }
+            32..=126 => out.push(byte as char),
+            _ => out.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    out
+}
+
+fn pdf_literal(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\\' | '(' | ')' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            ch if ch.is_ascii() && !ch.is_control() => out.push(ch),
+            ch if (ch as u32) <= 255 => out.push_str(&format!("\\{:03o}", ch as u32)),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn drawn_ink_right(item: &Drawn) -> f32 {
@@ -15220,6 +15476,141 @@ ET",
     }
 
     #[test]
+    fn a_shorter_paragraph_closes_the_gap_above_a_listing() {
+        let bytes = flow_pdf(
+            b"BT /F1 10 Tf \
+1 0 0 1 72 500 Tm (Open the terminal and create a project folder named ch02.) Tj \
+1 0 0 1 72 488 Tm (You can also clone the repository and then move into it.) Tj \
+1 0 0 1 72 476 Tm (Enter the ch02 folder:) Tj \
+/F1 10 Tf \
+1 0 0 1 60 456 Tm (>) Tj \
+/F2 10 Tf \
+1 0 0 1 72 456 Tm (python -m venv env_ch02 don\x92t) Tj \
+/F1 10 Tf \
+1 0 0 1 72 436 Tm (Create and activate a virtual environment with venv now.) Tj \
+ET",
+        );
+        let painted = paint_translation(
+            &bytes,
+            &[
+                (0, "进入ch02文件夹：".into()),
+                (1, "使用venv创建并激活虚拟环境：".into()),
+            ],
+        );
+        let mut rows: Vec<(f32, Vec<(f32, String)>)> = Vec::new();
+        for glyph in &painted.glyphs {
+            if glyph.unicode.is_empty() {
+                continue;
+            }
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|(y, _)| (*y - glyph.matrix[5]).abs() < 0.8)
+            {
+                row.1.push((glyph.matrix[4], glyph.unicode.clone()));
+            } else {
+                rows.push((
+                    glyph.matrix[5],
+                    vec![(glyph.matrix[4], glyph.unicode.clone())],
+                ));
+            }
+        }
+        let mut rows: Vec<(f32, String)> = rows
+            .into_iter()
+            .map(|(y, mut parts)| {
+                parts.sort_by(|left, right| left.0.total_cmp(&right.0));
+                let text: String = parts.into_iter().map(|(_, text)| text).collect();
+                (y, text)
+            })
+            .collect();
+        rows.sort_by(|left, right| right.0.total_cmp(&left.0));
+        let intro = rows.iter().find(|(_, text)| text.contains('进')).unwrap().0;
+        let code_row = rows
+            .iter()
+            .find(|(_, text)| text.contains("python"))
+            .unwrap_or_else(|| panic!("listing missing: {rows:?}"));
+        assert!(
+            code_row.1.contains("python -m venv"),
+            "listing lost its spaces: {}",
+            code_row.1
+        );
+        assert!(
+            code_row.1.contains('>') && (code_row.1.contains('’') || code_row.1.contains('\'')),
+            "listing dropped the prompt mark or the apostrophe: {}",
+            code_row.1
+        );
+        let code = code_row.0;
+        let follow = rows.iter().find(|(_, text)| text.contains('虚')).unwrap().0;
+        let line = 15.0;
+        let source_gap = 20.0;
+        assert!(
+            intro - code <= source_gap + line,
+            "listing gap {:.1} exceeds the source gap plus one line (intro {intro:.1} code {code:.1})",
+            intro - code
+        );
+        assert!(
+            code - follow <= source_gap + line,
+            "paragraph under the listing stayed low: code {code:.1} follow {follow:.1}"
+        );
+        assert!(
+            code > 456.0 + 4.0,
+            "listing stayed on the English baseline {code:.1}"
+        );
+        assert!(
+            follow > 436.0 + 4.0,
+            "paragraph after the listing stayed on the English baseline {follow:.1}"
+        );
+    }
+
+    #[test]
+    fn a_body_line_fills_the_column_before_the_last_line() {
+        // 36 source letters at 5pt set a 180pt column. The translation stops
+        // before `JupyterNotebook`, which does not fit, and the line still
+        // has to reach the column edge.
+        let first = "Read the appendix before continuing.";
+        let content = format!(
+            "BT /F1 10 Tf \
+1 0 0 1 72 700 Tm ({first}) Tj \
+1 0 0 1 72 686 Tm ({first}) Tj ET"
+        );
+        let bytes = contents_pdf(content.as_bytes());
+        let zh = "如果对这些任务不熟悉请查阅附录获取指导并按照JupyterNotebook环境的说明。";
+        let painted = paint_translation(&bytes, &[(0, zh.into())]);
+        let column_right = 72.0 + first.len() as f32 * 5.0;
+        let mut rows: Vec<(f32, f32, f32, String)> = Vec::new();
+        for glyph in &painted.glyphs {
+            if !glyph.unicode.chars().any(is_han_char) && glyph.font_name != "RPTCJK" {
+                continue;
+            }
+            let right = glyph.matrix[4] + glyph.advance[0];
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|(y, _, _, _)| (*y - glyph.matrix[5]).abs() < 0.8)
+            {
+                row.1 = row.1.min(glyph.matrix[4]);
+                row.2 = row.2.max(right);
+                row.3.push_str(&glyph.unicode);
+            } else {
+                rows.push((
+                    glyph.matrix[5],
+                    glyph.matrix[4],
+                    right,
+                    glyph.unicode.clone(),
+                ));
+            }
+        }
+        rows.sort_by(|left, right| right.0.total_cmp(&left.0));
+        assert!(rows.len() >= 2, "the paragraph should wrap: {rows:?}");
+        for (y, left, right, text) in rows.iter().take(rows.len() - 1) {
+            let available = column_right - left;
+            let fill = (right - left) / available;
+            assert!(
+                fill >= 0.90,
+                "line at y={y:.1} fills {fill:.2} of the column ({left:.1}-{right:.1}, edge {column_right:.1}): {text}"
+            );
+        }
+    }
+
+    #[test]
     fn a_gold_bullet_does_not_paint_the_part_text_gold() {
         let bytes = contents_pdf_named(
             b"BT /F1 10 Tf \
@@ -15617,6 +16008,60 @@ ET",
 
     fn contents_pdf(content: &[u8]) -> Vec<u8> {
         contents_pdf_named(content, "Helvetica")
+    }
+
+    fn flow_pdf(content: &[u8]) -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let body = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths.clone(),
+        });
+        let code = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Courier",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", body);
+        fonts.set("F2", code);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.to_vec()));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
     }
 
     fn contents_pdf_named(content: &[u8], font_name: &str) -> Vec<u8> {
