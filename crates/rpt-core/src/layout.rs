@@ -64,6 +64,16 @@ pub fn heading_level(line_count: usize, source_size: f32, bold: bool, text: &str
     if trimmed.is_empty() || is_cjk_caption(trimmed) {
         return HeadingLevel::Body;
     }
+    // A heading is a title, not the middle of a sentence. `最相关的` and a
+    // trailing comma are a list line that was split off its continuation.
+    if ends_mid_sentence(trimmed) {
+        return HeadingLevel::Body;
+    }
+    // `1 The agent sends…` plus the hanging lines under it is one body item.
+    // `1 Introduction` is a single heading line and stays a section.
+    if line_count >= 2 && crate::segment::numbered_item_body(trimmed).is_some() {
+        return HeadingLevel::Body;
+    }
     let chars = trimmed.chars().count();
     let sentence = ends_sentence(trimmed);
     if source_size >= 14.0 && line_count <= 3 && chars < 160 {
@@ -290,6 +300,11 @@ fn ends_sentence(text: &str) -> bool {
         || text.ends_with('?')
         || text.ends_with('？')
         || text.ends_with('！')
+}
+
+/// `的` and `，` close a clause, not a heading.
+fn ends_mid_sentence(text: &str) -> bool {
+    text.ends_with('的') || text.ends_with('，') || text.ends_with(',')
 }
 
 fn is_cjk_caption(text: &str) -> bool {
@@ -1731,6 +1746,36 @@ mod tests {
             heading_level(1, 9.0, false, street),
             HeadingLevel::Body,
             "a street number is not a section heading"
+        );
+        assert_eq!(
+            heading_level(1, 10.0, true, "该智能体向 LLM 发送提示，要求其选择最相关的"),
+            HeadingLevel::Body,
+            "a heading must not end on 的"
+        );
+        assert_eq!(
+            heading_level(
+                1,
+                12.0,
+                true,
+                "该智能体执行查询，收集结果，并发送另一条提示，"
+            ),
+            HeadingLevel::Body,
+            "a heading must not end on a comma"
+        );
+        assert_eq!(
+            heading_level(
+                2,
+                10.0,
+                true,
+                "1 智能体向大语言模型发送一段提示，要求其选择最相关的工具"
+            ),
+            HeadingLevel::Body,
+            "a numbered item with a hanging continuation is not a heading"
+        );
+        assert_eq!(
+            heading_level(1, 11.0, true, "1.1 构建基于大语言模型的应用"),
+            HeadingLevel::Subsection,
+            "a dotted section index stays a heading"
         );
         let street_fit = fit_paragraph(
             street,

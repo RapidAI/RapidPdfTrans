@@ -2789,7 +2789,12 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     }
     // A detailed-contents line already holds several entries (`83 Generating`).
     // Joining the wrap makes one block the Chinese leading cannot fit.
-    if !hyphen && (inline_contents_entry(&upper.text) || inline_contents_entry(&lower.text)) {
+    // `1 The agent…` looks like a contents row (`1 The`). A hanging wrap
+    // under that number is the rest of the item, not the next contents line.
+    if !hyphen
+        && !hanging_numbered_continuation(upper, lower)
+        && (inline_contents_entry(&upper.text) || inline_contents_entry(&lower.text))
+    {
         return false;
     }
     // A display equation keeps its own segment. Joining it onto the prose
@@ -2808,6 +2813,10 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     if dy < size * 0.7 || dy > size * 1.5 {
         return false;
     }
+    // `2 Guided…` is the next numbered item, not the tail of item 1.
+    if !hyphen && numbered_item_body(&lower.text).is_some() {
+        return false;
+    }
     // A broken word stays one paragraph when the next line's math is a
     // little larger. A heading and a footnote are still different lines.
     let size_gap = (upper.size - lower.size).abs();
@@ -2817,6 +2826,11 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
         }
     } else if size_gap > size * 0.2 {
         return false;
+    }
+    // The lead line is a bold coloured face (`1 The agent…`) and the wrap
+    // is body roman, one hanging step to the right. They are one item.
+    if !hyphen && hanging_numbered_continuation(upper, lower) {
+        return true;
     }
     // A bold or italic run-in is the same paragraph as the regular line under it.
     // A monospace phrase at the start of a line is not a new paragraph.
@@ -2999,6 +3013,76 @@ fn is_list_marker(ch: char) -> bool {
         ch,
         '-' | '–' | '—' | '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧'
     ) || ('\u{E000}'..='\u{F8FF}').contains(&ch)
+}
+
+/// `1 The agent sends…` and `1 智能体向…` are numbered items. `1.1 Building`
+/// is a section index. A list number is one or two digits, an optional
+/// closing `.` or `)`, then a word in any script.
+pub(crate) fn numbered_item_body(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index == 0 || index > 2 {
+        return None;
+    }
+    if index < bytes.len() && (bytes[index] == b'.' || bytes[index] == b')') {
+        let after = index + 1;
+        if after < bytes.len() && bytes[after].is_ascii_digit() {
+            return None;
+        }
+        index = after;
+    }
+    if index >= bytes.len() || bytes[index] != b' ' {
+        return None;
+    }
+    let rest = text[index..].trim_start();
+    rest.chars()
+        .next()
+        .filter(|ch| ch.is_alphabetic())
+        .map(|_| rest)
+}
+
+/// The words after a hanging number share one left edge with the lines below.
+fn hanging_numbered_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if numbered_item_body(&upper.text).is_none() || numbered_item_body(&lower.text).is_some() {
+        return false;
+    }
+    if starts_with_list_marker(&lower.text) {
+        return false;
+    }
+    let Some(text_x) = text_after_number_x(upper) else {
+        return false;
+    };
+    let size = upper.size.max(lower.size).max(1.0);
+    (lower.left - text_x).abs() <= (size * 0.55).max(4.0)
+}
+
+/// Left edge of the first word after the item number.
+fn text_after_number_x(line: &VisualLine<'_>) -> Option<f32> {
+    let mut glyphs = line.glyphs.clone();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut saw_number = false;
+    for glyph in &glyphs {
+        let token = glyph.unicode.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if token
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == ')')
+        {
+            saw_number = true;
+            continue;
+        }
+        if !saw_number {
+            return None;
+        }
+        return Some(glyph.matrix[4]);
+    }
+    None
 }
 
 /// The marker sits left of the wrapped lines (` Part 1` / `exploring…`,
@@ -8646,5 +8730,89 @@ mod tests {
                 .any(|text| text.contains("where") && text.contains("reading order prediction")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn a_numbered_hanging_item_stays_one_paragraph() {
+        let mut id = 0u32;
+        let mut lead = paint_word(
+            &mut id,
+            117.2,
+            220.0,
+            "1 The agent sends a prompt to the LLM asking it to choose the most relevant",
+            "FranklinGothic-Demi",
+        );
+        let text_x = lead
+            .iter()
+            .find(|glyph| glyph.unicode == "T")
+            .map(|glyph| glyph.matrix[4])
+            .unwrap();
+        let mut wrap = paint_word(
+            &mut id,
+            text_x,
+            207.0,
+            "tools for the request and the holiday deals databases.",
+            "NewBaskerville-Roman",
+        );
+        let mut next = paint_word(
+            &mut id,
+            117.2,
+            180.0,
+            "2 Guided by a developer prompt that lists the available tools.",
+            "FranklinGothic-Demi",
+        );
+        for glyph in lead
+            .iter_mut()
+            .chain(wrap.iter_mut())
+            .chain(next.iter_mut())
+        {
+            glyph.font_size = 10.0;
+            glyph.matrix[0] = 10.0;
+            glyph.matrix[3] = 10.0;
+        }
+        lead.extend(wrap);
+        lead.extend(next);
+        let texts: Vec<_> = segment_glyphs(&lead)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("1 The agent")
+                    && text.contains("holiday deals")
+                    && !text.contains("2 Guided")
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("2 Guided") && !text.contains("holiday deals")),
+            "{texts:?}"
+        );
+        let joined = texts
+            .iter()
+            .find(|text| text.contains("holiday deals"))
+            .expect("item 1");
+        assert_eq!(
+            crate::layout::heading_level(2, 10.0, true, joined),
+            crate::layout::HeadingLevel::Body,
+            "a numbered item with a hanging continuation is not a heading"
+        );
+        assert_eq!(
+            crate::layout::heading_level(
+                2,
+                10.0,
+                true,
+                "1 The agent sends a prompt asking it to choose tools",
+            ),
+            crate::layout::HeadingLevel::Body,
+            "the first line of a numbered item is not a heading once a continuation follows"
+        );
+        assert_eq!(
+            numbered_item_body("1 智能体向大语言模型发送提示"),
+            Some("智能体向大语言模型发送提示")
+        );
+        assert!(numbered_item_body("1.1 构建基于大语言模型的应用").is_none());
     }
 }

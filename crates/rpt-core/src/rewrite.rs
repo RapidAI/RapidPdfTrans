@@ -210,6 +210,7 @@ pub fn rewrite_translation(
             &segment.source,
             &crate::translate::localize_part_heading(&segment.translated),
         );
+        let translated = crate::translate::restore_list_number(&segment.source, &translated);
         let translated = crate::translate::restore_credit_names(&segment.source, &translated);
         let translated = crate::translate::repair_body_translation(&segment.source, &translated);
         let will_draw = translated != segment.source;
@@ -3131,6 +3132,149 @@ fn ink_line_text(line: &InkLine<'_>) -> String {
     glyphs.iter().map(|glyph| glyph.unicode.as_str()).collect()
 }
 
+struct NumberedItem {
+    marker: String,
+    marker_x: f32,
+    marker_size: f32,
+    marker_color: Color,
+    text_left: f32,
+    text_color: Color,
+}
+
+/// A `1` / `2` item whose wrapped lines share a hanging indent.
+fn numbered_hanging(ink: &[InkLine<'_>]) -> Option<NumberedItem> {
+    if ink.len() < 2 {
+        return None;
+    }
+    let mut glyphs = ink[0].glyphs.clone();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut marker = String::new();
+    let mut marker_color = None;
+    let mut marker_size = 1.0f32;
+    let mut marker_x = ink[0].left;
+    let mut text_x = None;
+    for glyph in &glyphs {
+        let token = glyph.unicode.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let marker_char = token
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == ')');
+        if text_x.is_none() && marker_char {
+            if marker.is_empty() {
+                marker_x = glyph.matrix[4];
+                marker_size = glyph.font_size.max(1.0);
+                marker_color = Some(glyph.fill_color.clone());
+            }
+            marker.push_str(token);
+            continue;
+        }
+        if marker.is_empty() {
+            return None;
+        }
+        text_x = Some(glyph.matrix[4]);
+        break;
+    }
+    let text_x = text_x?;
+    let digits = marker.chars().filter(|ch| ch.is_ascii_digit()).count();
+    if digits == 0 || digits > 2 || marker_has_minor_number(&marker) {
+        return None;
+    }
+    let text_left = ink[1..]
+        .iter()
+        .map(|line| line.left)
+        .fold(f32::MAX, f32::min);
+    let size = marker_size.max(1.0);
+    if (text_left - text_x).abs() > (size * 0.55).max(4.0) {
+        return None;
+    }
+    let shift = text_left - marker_x;
+    if !(size * 0.35..=size * 3.0).contains(&shift) {
+        return None;
+    }
+    let marker_color = marker_color?;
+    let text_color = ink[1..]
+        .iter()
+        .flat_map(|line| line.glyphs.iter())
+        .find(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .map(|glyph| glyph.fill_color.clone())
+        .unwrap_or_else(Color::black);
+    Some(NumberedItem {
+        marker,
+        marker_x,
+        marker_size,
+        marker_color,
+        text_left,
+        text_color,
+    })
+}
+
+/// `1.1` is a section index. `1.` is a list number with a closing dot.
+fn marker_has_minor_number(marker: &str) -> bool {
+    let bytes = marker.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b'.'
+            && bytes
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_digit())
+    })
+}
+
+/// Two source title lines. Keep a short Latin lead (`AI`) on the first
+/// line so the Chinese word that follows stays whole.
+fn split_display_title(text: &str, count: usize) -> Vec<String> {
+    let trimmed = text.trim();
+    if count == 2 {
+        if let Some((lead, rest)) = trimmed.split_once(' ') {
+            let rest = rest.trim();
+            if !lead.is_empty()
+                && lead.chars().count() <= 12
+                && rest.chars().filter(|ch| !ch.is_whitespace()).count() >= 3
+            {
+                return vec![lead.to_string(), rest.to_string()];
+            }
+        }
+    }
+    spread_to_lines(vec![trimmed.to_string()], count)
+}
+
+/// A tall narrow path in the right margin: the giant chapter numeral.
+fn decorative_numeral_left(extraction: &Extraction, page: u32, y: f32, size: f32) -> Option<f32> {
+    let page_width = extraction
+        .pages
+        .iter()
+        .find(|info| info.index == page)
+        .map(|info| info.media_box[2] - info.media_box[0])
+        .unwrap_or(600.0);
+    let mut best: Option<f32> = None;
+    for region in extraction
+        .regions
+        .iter()
+        .filter(|region| region.page_index == page && region.kind == "path")
+    {
+        let x0 = region.bbox[0].min(region.bbox[2]);
+        let x1 = region.bbox[0].max(region.bbox[2]);
+        let y0 = region.bbox[1].min(region.bbox[3]);
+        let y1 = region.bbox[1].max(region.bbox[3]);
+        let width = x1 - x0;
+        let height = y1 - y0;
+        if !(40.0..=140.0).contains(&width) || height < 100.0 || height < width * 1.2 {
+            continue;
+        }
+        if x0 < page_width * 0.55 {
+            continue;
+        }
+        let top = y + size;
+        let bottom = y - size * 2.2;
+        if y1 < bottom || y0 > top {
+            continue;
+        }
+        best = Some(best.map_or(x0, |current| current.min(x0)));
+    }
+    best
+}
+
 /// How far a list's wrapped lines sit to the right of the marker.
 fn list_outdent(ink: &[InkLine<'_>], size: f32) -> Option<f32> {
     if ink.len() < 2 || size <= 0.0 {
@@ -5703,14 +5847,48 @@ fn layout_segment(
     }
     let available = (top_y - bottom_y).max(0.0);
     let bold = paragraph_is_bold(&ink);
-    let level = heading_level(ink.len(), source_size, bold, text);
-    let hanging = list_outdent(&ink, source_size);
+    let numbered = numbered_hanging(&ink);
+    let mut level = heading_level(ink.len(), source_size, bold, text);
+    if numbered.is_some() {
+        level = HeadingLevel::Body;
+    }
+    let hanging = if numbered.is_some() {
+        None
+    } else {
+        list_outdent(&ink, source_size)
+    };
     let mut indent_ems = cjk_indent_ems(ink.len(), source_size, bold, text);
     // A list marker hangs left of the wrapped lines. Continuations share one
     // indent; the marker line outdents by that same amount.
     if let Some(shift) = hanging {
         block_left = (block_left + shift).min(block_right - source_size.max(1.0));
         indent_ems = -(shift / source_size.max(1.0));
+    }
+    // A numbered item keeps the source number in the margin. Every line of
+    // the words shares the hanging indent, with no first-line indent.
+    let body_text;
+    let text = if let Some(item) = &numbered {
+        block_left = item.text_left.min(block_right - source_size.max(1.0));
+        indent_ems = 0.0;
+        body_text = crate::segment::numbered_item_body(text)
+            .unwrap_or(text)
+            .to_string();
+        body_text.as_str()
+    } else {
+        text
+    };
+    // A giant chapter numeral is a path on the right. The title stops before
+    // it instead of running through the stem.
+    let numeral_left = if source_size >= 14.0 {
+        decorative_numeral_left(extraction, page, top_y, source_size)
+    } else {
+        None
+    };
+    if let Some(limit) = numeral_left {
+        let clearance = limit - source_size * 0.35;
+        if clearance > block_left + source_size * 4.0 {
+            block_right = block_right.min(clearance);
+        }
     }
     let scale = scale_for_heading(level, source_size, metrics);
     let fit_box = |left: f32, right: f32| {
@@ -5726,7 +5904,7 @@ fn layout_segment(
             metrics,
         )
     };
-    let (block_left, block_right, lines, size, leading, indent) =
+    let (block_left, block_right, lines, mut size, leading, indent) =
         if let Some((lines, size, leading, indent)) = fit_box(block_left, block_right) {
             (block_left, block_right, lines, size, leading, indent)
         } else if let Some((left, right)) =
@@ -5770,12 +5948,23 @@ fn layout_segment(
             .collect()
     } else if reflow || level == HeadingLevel::Title {
         // A chapter title that fits one line stays one line. Spreading it
-        // onto the English baselines splits 智能体.
-        lines
+        // onto the English baselines splits 智能体. A title that only fit by
+        // shrinking into a chapter numeral is split back onto the source
+        // baselines at the source size, and the right edge stays clear of
+        // that numeral.
+        let start_size = (source_size * scale).max(1.0);
+        if numeral_left.is_some() && ink.len() >= 2 && lines.len() == 1 && size + 0.4 < start_size {
+            size = start_size;
+            // Break after the Latin lead (`AI` / `智能体及应用简介`) so a
+            // midpoint split does not cut 智能体.
+            split_display_title(&lines[0], ink.len())
+        } else {
+            lines
+        }
     } else {
         spread_to_lines(lines, ink.len())
     };
-    if hanging.is_some() || reflow {
+    if hanging.is_some() || reflow || numbered.is_some() {
         // Reflow replaces the source lines. A stray cover glyph at the source
         // size is the mixed-size glitch inside the paragraph.
         absorbed.extend(glyphs.iter().map(|glyph| glyph.id));
@@ -5819,9 +6008,13 @@ fn layout_segment(
     if last_y < media[1] - 0.5 || origin_y > media[3] {
         return None;
     }
-    let text_color = list_run_colors(&ink)
-        .map(|(_, text_color)| text_color)
-        .unwrap_or_else(|| ink[0].glyphs[0].fill_color.clone());
+    let text_color = if let Some(item) = &numbered {
+        item.text_color.clone()
+    } else {
+        list_run_colors(&ink)
+            .map(|(_, text_color)| text_color)
+            .unwrap_or_else(|| ink[0].glyphs[0].fill_color.clone())
+    };
     let count = lines.len();
     let glyph_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
     let mut drawn: Vec<Drawn> = lines
@@ -5870,17 +6063,53 @@ fn layout_segment(
                 None
             };
         if shared && (ragged_left || page_edge.is_some()) {
-            let edge = page_edge.unwrap_or(ink_edge);
+            let mut edge = page_edge.unwrap_or(ink_edge);
+            if let Some(limit) = numeral_left {
+                let clearance = limit - source_size * 0.35;
+                if clearance > media[0] + 36.0 {
+                    edge = edge.min(clearance);
+                }
+            }
             for item in &mut drawn {
                 let advance = item.widths.iter().sum::<f32>() + item.gaps.iter().sum::<f32>();
                 if advance <= 0.0 {
                     continue;
                 }
                 let x = edge - advance;
-                if x + 0.4 >= item.x && x >= media[0] + 24.0 {
+                // A title line that still crosses the chapter numeral moves
+                // left onto that cleared edge. Other lines only move right,
+                // so a short line is not pulled off its column.
+                let crosses_numeral = numeral_left.is_some() && item.x + advance > edge + 0.4;
+                if (x + 0.4 >= item.x || crosses_numeral) && x >= media[0] + 24.0 {
                     item.x = x;
                 }
             }
+        }
+    }
+    if let Some(item) = &numbered {
+        if let Some(host) = drawn.first() {
+            let marker = item.marker.clone();
+            let widths = char_widths(&marker, item.marker_size, font);
+            drawn.insert(
+                0,
+                Drawn {
+                    page,
+                    x: item.marker_x,
+                    y: host.y,
+                    size: item.marker_size,
+                    color: item.marker_color.clone(),
+                    cids: cids_of(&marker, font),
+                    resource: resource.to_string(),
+                    skew: 0.0,
+                    widths,
+                    gaps: Vec::new(),
+                    text: marker,
+                    supers: Vec::new(),
+                    sup_scale: 1.0,
+                    sup_rise: 0.0,
+                    glyph_ids: glyph_ids.clone(),
+                },
+            );
         }
     }
     let mut drawn = restyle_list_lines(drawn, &ink, font);
@@ -13116,6 +13345,200 @@ ET"
             drawn.iter().filter(|item| item.text.contains('1')).count(),
             1
         );
+    }
+
+    #[test]
+    fn a_chapter_title_stops_before_the_giant_numeral() {
+        // Both source lines share a right edge past a numeral whose left
+        // sits inside the full-size Chinese second line. The title has to
+        // move left to clear it.
+        let bytes = contents_pdf(
+            b"0.8 0.8 0.8 rg 350 480 80 160 re f \
+BT /F1 24 Tf \
+1 0 0 1 310 600 Tm (Introduction to AI) Tj \
+1 0 0 1 250 568 Tm (agents and applications) Tj \
+ET",
+        );
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| TranslatedSegment {
+                id: seg.id,
+                page_index: seg.page_index,
+                glyph_ids: seg.glyph_ids.clone(),
+                source: seg.text.clone(),
+                translated: "AI 智能体及应用简介".into(),
+            })
+            .collect();
+        let font = box_ttf(
+            &"AI 智能体及应用简介"
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut han = 0;
+        for glyph in painted.glyphs.iter().filter(|glyph| {
+            glyph.unicode.chars().any(is_han_char) || glyph.font_name.contains("RPT")
+        }) {
+            han += 1;
+            let right = glyph.bbox[0].max(glyph.bbox[2]);
+            assert!(
+                right < 350.0,
+                "title ink enters the numeral: {:?} x={:.1} right={right:.1}",
+                glyph.unicode,
+                glyph.matrix[4]
+            );
+        }
+        assert!(han > 0, "the title was not drawn");
+        assert!(
+            painted.plain_text().contains("智能体"),
+            "the title split 智能体: {}",
+            painted.plain_text()
+        );
+        let zhi = painted
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "智")
+            .expect("智");
+        assert!(
+            zhi.matrix[4] < 250.0,
+            "the long title line stays on the source left and crosses the numeral: x={}",
+            zhi.matrix[4]
+        );
+    }
+
+    #[test]
+    fn a_numbered_item_paints_its_number_once() {
+        let bytes = contents_pdf(
+            b"BT /F1 10 Tf \
+0.8 0.651 0.349 rg \
+1 0 0 1 117.2 220 Tm (1 The agent sends a prompt) Tj \
+0.15 g \
+1 0 0 1 127.2 207 Tm (tools for the request.) Tj \
+ET",
+        );
+        let translated = "1 智能体向大语言模型发送一段提示，要求其选择最相关的工具和假日数据库。";
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| TranslatedSegment {
+                id: seg.id,
+                page_index: seg.page_index,
+                glyph_ids: seg.glyph_ids.clone(),
+                source: seg.text.clone(),
+                translated: if seg.text.contains("The agent") {
+                    translated.into()
+                } else {
+                    seg.text.clone()
+                },
+            })
+            .collect();
+        assert!(
+            segments
+                .iter()
+                .any(|seg| seg.source.contains("The agent") && seg.source.contains("tools")),
+            "the hanging item was split: {:?}",
+            segments
+                .iter()
+                .map(|seg| seg.source.as_str())
+                .collect::<Vec<_>>()
+        );
+        let font = box_ttf(&translated.chars().map(|ch| ch as u32).collect::<Vec<_>>());
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(font),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let ones: Vec<_> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "1")
+            .collect();
+        assert_eq!(ones.len(), 1, "the item number was repeated: {ones:?}");
+        assert!(
+            (ones[0].matrix[4] - 117.2).abs() < 1.0,
+            "number x {}",
+            ones[0].matrix[4]
+        );
+        assert_eq!(ones[0].fill_color.components[0], 0.8);
+        let han: Vec<_> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().any(is_han_char))
+            .collect();
+        assert!(!han.is_empty(), "the item body was not drawn");
+        let mut baselines: Vec<f32> = Vec::new();
+        for glyph in &han {
+            assert!(
+                glyph.fill_color.space == "DeviceGray",
+                "body kept the number colour: {:?}",
+                glyph.fill_color
+            );
+            if !baselines.iter().any(|y| (y - glyph.matrix[5]).abs() < 0.6) {
+                baselines.push(glyph.matrix[5]);
+            }
+        }
+        assert!(baselines.len() >= 2, "the item stayed on one line");
+        for y in baselines {
+            let left = han
+                .iter()
+                .filter(|glyph| (glyph.matrix[5] - y).abs() < 0.6)
+                .map(|glyph| glyph.matrix[4])
+                .fold(f32::MAX, f32::min);
+            assert!(
+                (left - 127.2).abs() < 2.0,
+                "line at y={y:.1} starts at {left:.1}, not the hanging indent"
+            );
+        }
     }
 
     fn test_draw(x: f32, y: f32, size: f32, text: &str, glyph_ids: Vec<u32>) -> Drawn {

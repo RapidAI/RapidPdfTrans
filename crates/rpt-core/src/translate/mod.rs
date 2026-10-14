@@ -1775,6 +1775,12 @@ fn polish(items: Vec<(usize, String)>) -> Vec<(usize, String)> {
 /// not part of the Chinese sentence. Acronyms, URLs, and code tokens stay.
 /// A trailing ` at` left when a title was split before a proper name is dropped.
 pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String {
+    // `CHAPTER` alone became `第` on a blank verso. A lone label with no
+    // title stays as the source drew it. A numbered part opener (`PART 1`
+    // → `第 1 部分`) is a real heading and is left alone.
+    if retain_lone_label(source, translated) {
+        return source.to_string();
+    }
     // An identity echo is still English. Stripping a parenthesis there would
     // redraw the source line.
     if !translated
@@ -1997,6 +2003,68 @@ fn is_gloss_acronym(word: &str) -> bool {
         && word
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '&')
+}
+
+/// `CHAPTER` / `PART` with no title words. A following number is allowed
+/// (`CHAPTER 2`) but a title (`CHAPTER 1 Introduction`) is not.
+fn lone_label_fragment(source: &str) -> bool {
+    let parts: Vec<&str> = source.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 2 {
+        return false;
+    }
+    let label = |word: &str| {
+        let lower = word.to_ascii_lowercase();
+        lower == "chapter" || lower == "part"
+    };
+    let number = |word: &str| word.chars().all(|ch| ch.is_ascii_digit()) && !word.is_empty();
+    match parts.as_slice() {
+        [only] => label(only),
+        [first, second] => (label(first) && number(second)) || (number(first) && label(second)),
+        _ => false,
+    }
+}
+
+/// One CJK character, ignoring spaces. `第 1 部分` is a heading, not this.
+fn single_cjk_block(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    chars.len() == 1 && is_cjk_char(chars[0])
+}
+
+/// Keep the source when a lone CHAPTER/PART label would become one character,
+/// and when the label has no number at all (`CHAPTER` on a blank verso).
+fn retain_lone_label(source: &str, translated: &str) -> bool {
+    if !lone_label_fragment(source) {
+        return false;
+    }
+    let bare = !source.chars().any(|ch| ch.is_ascii_digit());
+    bare || single_cjk_block(translated)
+}
+
+/// A numbered item keeps its source number when the model translates only
+/// the words (`The agent…` → `该智能体…`).
+pub(crate) fn restore_list_number(source: &str, translated: &str) -> String {
+    let source_trim = source.trim();
+    let Some(body) = crate::segment::numbered_item_body(source_trim) else {
+        return translated.to_string();
+    };
+    let prefix_len = source_trim.len() - body.len();
+    let marker = source_trim[..prefix_len].trim();
+    if marker.is_empty() {
+        return translated.to_string();
+    }
+    let translated_trim = translated.trim_start();
+    if translated_trim.starts_with(marker) {
+        return translated.to_string();
+    }
+    if translated_trim
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return translated.to_string();
+    }
+    let lead = &translated[..translated.len() - translated_trim.len()];
+    format!("{lead}{marker} {translated_trim}")
 }
 
 /// The model sometimes drops a dingbat. The source marker stays in front.
@@ -3473,6 +3541,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.segments[0].translated, "第 4 部分 高级 RAG ");
+    }
+
+    #[test]
+    fn a_lone_chapter_label_does_not_become_one_character() {
+        assert_eq!(repair_body_translation("CHAPTER ", "第"), "CHAPTER ");
+        assert_eq!(repair_body_translation("PART", "部"), "PART");
+        assert_eq!(repair_body_translation("CHAPTER 2", "第"), "CHAPTER 2");
+        assert_eq!(repair_body_translation("PART 1", "第 1 部分"), "第 1 部分");
+        assert_eq!(
+            repair_body_translation(
+                "CHAPTER 1 Introduction to AI agents and applications",
+                "第1章 AI 智能体与应用简介",
+            ),
+            "第1章 AI 智能体与应用简介"
+        );
     }
 
     struct AlwaysEmpty;
