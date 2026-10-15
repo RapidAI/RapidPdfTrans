@@ -619,7 +619,7 @@ pub fn rewrite_translation(
     // `Related problems.` is bold and its own segment. Laying it out in the
     // English heading's narrow box paints 相关问题。 on top of the paragraph.
     // The heading and the body are one line: bold label, then the sentence.
-    reflow_bold_run_ins(&mut drawn, extraction, &by_id, &embedded);
+    reflow_bold_run_ins(&mut drawn, extraction, &by_id, &embedded, &mut stack_shifts);
     absorb_inline_fences(&mut succeeded, extraction);
     let y_before: Vec<f32> = drawn.iter().map(|line| line.y).collect();
     let listing_shifts = close_column_holes(&mut drawn, extraction, &by_id);
@@ -7606,7 +7606,7 @@ fn run_in_label_indent(
 
 /// ⟦N⟧ is one formula. Two digits name that formula, then one ideographic
 /// space marks the hole. Layout deletes both and draws the original glyphs
-/// into a gap of `formula_ink_width` points. The marker's own font advances
+/// into a gap of `formula_hole_width` points. The marker's own font advances
 /// are not the gap: a 9pt subscript must not reserve a full em.
 fn expand_stack_placeholders(
     text: &str,
@@ -7639,7 +7639,7 @@ fn expand_stack_placeholders(
         if let Ok(index) = after[..end].parse::<usize>() {
             if index <= 99 {
                 if let Some(ids) = stacks.get(index) {
-                    holes.insert(index, formula_ink_width(ids, glyphs, &by_id));
+                    holes.insert(index, formula_hole_width(ids, glyphs, &by_id, body));
                     out.push_str(&format!("{index:02}"));
                     out.push('\u{3000}');
                     rest = &after[end + '⟧'.len_utf8()..];
@@ -7662,24 +7662,79 @@ fn glyph_index_refs(glyphs: &[&Glyph]) -> HashMap<u32, usize> {
         .collect()
 }
 
-/// Ink width of a formula, from its leftmost origin to the rightmost pen.
-/// The hole reserves this many points. It does not grow with the Chinese em.
-fn formula_ink_width(ids: &[u32], glyphs: &[&Glyph], by_id: &HashMap<u32, usize>) -> f32 {
-    let mut left = f32::MAX;
-    let mut right = f32::MIN;
-    for id in ids {
-        let Some(glyph) = by_id.get(id).and_then(|index| glyphs.get(*index)) else {
-            continue;
-        };
-        left = left.min(glyph.matrix[4].min(glyph.bbox[0]));
-        let pen = glyph.matrix[4] + glyph.advance[0].max(0.0);
-        right = right.max(glyph.bbox[2].max(glyph.matrix[4]).max(pen));
-    }
-    if left.is_finite() && right > left {
-        right - left
+/// The math's own width. A glyph's advance often includes the gap before the
+/// next mark; that gap is not part of the hole, or the following `+` and
+/// `=` are pushed out a second time.
+fn glyph_paint_right(glyph: &Glyph) -> f32 {
+    let origin = glyph.matrix[4];
+    let em = glyph.bbox[0].max(glyph.bbox[2]).max(origin);
+    let pen = origin + glyph.advance[0].max(0.0);
+    if glyph.advance[0] > 0.0 {
+        em.min(pen)
     } else {
-        0.0
+        em
     }
+}
+
+/// Width the placeholder must reserve. A hat or subscript seated on the
+/// letter before the hole only needs the ink that sticks past that letter.
+/// Reserving the fragment's full width leaves `将 q̂ 视为` and `ν(det Q̂*) =`
+/// with a gap where the accent was shifted left.
+fn formula_hole_width(
+    ids: &[u32],
+    glyphs: &[&Glyph],
+    by_id: &HashMap<u32, usize>,
+    body: f32,
+) -> f32 {
+    let members: Vec<&Glyph> = ids
+        .iter()
+        .filter_map(|id| by_id.get(id).map(|index| glyphs[*index]))
+        .collect();
+    if members.is_empty() {
+        return 0.0;
+    }
+    let left = members
+        .iter()
+        .map(|glyph| glyph.matrix[4])
+        .fold(f32::MAX, f32::min);
+    let right = members
+        .iter()
+        .map(|glyph| glyph_paint_right(glyph))
+        .fold(f32::MIN, f32::max);
+    if !left.is_finite() || right <= left {
+        return 0.0;
+    }
+    if script_fragment(&members, body) {
+        if let Some(base) = external_script_base(&members, glyphs, ids, body) {
+            return (right - glyph_paint_right(base)).max(0.0);
+        }
+    }
+    right - left
+}
+
+/// The letter a script fragment sits on, when that letter stayed in the
+/// words. The rightmost host under the fragment is `Q` in `detQ` plus a hat.
+fn external_script_base<'a>(
+    members: &[&Glyph],
+    glyphs: &[&'a Glyph],
+    ids: &[u32],
+    body: f32,
+) -> Option<&'a Glyph> {
+    let left = members
+        .iter()
+        .map(|glyph| glyph.matrix[4])
+        .fold(f32::MAX, f32::min);
+    glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| {
+            !ids.contains(&glyph.id)
+                && glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+                && glyph.font_size > body * 0.75
+                && glyph.matrix[4] >= left - body * 1.15
+                && glyph.matrix[4] <= left + body * 0.45
+        })
+        .max_by(|left_glyph, right_glyph| left_glyph.matrix[4].total_cmp(&right_glyph.matrix[4]))
 }
 
 /// Replace each numbered hole with a rigid move of that formula's glyphs.
@@ -9398,6 +9453,7 @@ fn reflow_bold_run_ins(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
     embedded: &[(String, SubsetFont)],
+    shifts: &mut [ListingShift],
 ) {
     if drawn.is_empty() {
         return;
@@ -9417,12 +9473,13 @@ fn reflow_bold_run_ins(
     }
     let keys: Vec<Vec<u32>> = groups.keys().cloned().collect();
     let mut used = HashSet::new();
-    let mut plans: Vec<(Vec<usize>, Vec<Drawn>)> = Vec::new();
+    // drop indices, replacement lines, body glyph ids, slide, first baseline
+    let mut plans: Vec<(Vec<usize>, Vec<Drawn>, Vec<u32>, f32, f32)> = Vec::new();
     for key in &keys {
         if used.contains(key) {
             continue;
         }
-        let Some((body_key, lines)) =
+        let Some((body_key, lines, slide, first_y)) =
             compose_bold_run_in(key, &groups, drawn, extraction, by_id, embedded)
         else {
             continue;
@@ -9433,15 +9490,31 @@ fn reflow_bold_run_ins(
         let mut drop = groups.get(key).cloned().unwrap_or_default();
         drop.extend(groups.get(&body_key).cloned().unwrap_or_default());
         used.insert(key.clone());
-        used.insert(body_key);
-        plans.push((drop, lines));
+        used.insert(body_key.clone());
+        plans.push((drop, lines, body_key, slide, first_y));
     }
     if plans.is_empty() {
         return;
     }
+    // A shorter Chinese label (`引理 4.1.`) used to leave the statement at
+    // the English x. The formula was seated on that same baseline, so it
+    // takes the same step left.
+    for (_, _, body_key, slide, first_y) in &plans {
+        if *slide >= -0.4 {
+            continue;
+        }
+        for shift in shifts.iter_mut() {
+            if (shift.host_y - *first_y).abs() > 0.8 {
+                continue;
+            }
+            if shift.ids.iter().any(|id| body_key.contains(id)) {
+                shift.dx += *slide;
+            }
+        }
+    }
     let mut drop = HashSet::new();
     let mut added = Vec::new();
-    for (indices, lines) in plans {
+    for (indices, lines, _, _, _) in plans {
         drop.extend(indices);
         added.extend(lines);
     }
@@ -9462,7 +9535,7 @@ fn compose_bold_run_in(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
     embedded: &[(String, SubsetFont)],
-) -> Option<(Vec<u32>, Vec<Drawn>)> {
+) -> Option<(Vec<u32>, Vec<Drawn>, f32, f32)> {
     let head_glyphs = ids_glyphs(head_key, extraction, by_id);
     if !bold_run_in_glyphs(&head_glyphs) {
         return None;
@@ -9613,12 +9686,19 @@ fn compose_bold_run_in(
                 width,
             ));
         }
+        // The statement already clears the label, but a shorter label must
+        // not leave a hole. Slide only this baseline; a wrapped continuation
+        // still starts at the column edge.
+        let slide = (head_end - first_left).min(0.0);
         for line in &body_lines {
             let mut kept = (*line).clone();
             kept.glyph_ids = ids.clone();
+            if slide < -0.4 && (line.y - first_y).abs() <= 0.8 {
+                kept.x += slide;
+            }
             painted.push(kept);
         }
-        return Some((body_key, painted));
+        return Some((body_key, painted, slide, first_y));
     }
     let share = head_width + gap + paint * 2.0 <= width;
     let (head_wrapped, body_wrapped, first_shift) = if share {
@@ -9679,7 +9759,7 @@ fn compose_bold_run_in(
             measure_width,
         ));
     }
-    Some((body_key, painted))
+    Some((body_key, painted, 0.0, first_y))
 }
 
 /// Slices on one baseline with a hole between them. The formula was already
@@ -10282,14 +10362,28 @@ fn carry_formula_with_line(drawn: &[Drawn], y_before: &[f32], shifts: &mut [List
         if !shift.host_y.is_finite() {
             continue;
         }
-        let Some((index, _)) = drawn.iter().enumerate().find(|(index, line)| {
-            line.page == shift.page
-                && (y_before[*index] - shift.host_y).abs() <= 0.6
-                && shift.ids.iter().any(|id| line.glyph_ids.contains(id))
-        }) else {
+        let mut best: Option<(usize, f32)> = None;
+        for (index, line) in drawn.iter().enumerate() {
+            if line.page != shift.page {
+                continue;
+            }
+            if !shift.ids.iter().any(|id| line.glyph_ids.contains(id)) {
+                continue;
+            }
+            let distance = (y_before[index] - shift.host_y).abs();
+            if distance > line.size.max(1.0) * 0.7 {
+                continue;
+            }
+            if best.is_none_or(|(_, previous)| distance < previous) {
+                best = Some((index, distance));
+            }
+        }
+        let Some((index, _)) = best else {
             continue;
         };
-        shift.dy += drawn[index].y - y_before[index];
+        // `dy` was `host_y - anchor`. The line may already have moved before
+        // the column pull, so the added step is from the seated baseline.
+        shift.dy += drawn[index].y - shift.host_y;
     }
 }
 
@@ -11506,7 +11600,7 @@ fn column_block(
     if right < left {
         right = left + size;
     }
-    let mut source_ys = Vec::new();
+    let mut source_glyphs = Vec::new();
     for id in &drawn[indices[0]].glyph_ids {
         let Some(&index) = by_id.get(id) else {
             continue;
@@ -11515,10 +11609,24 @@ fn column_block(
         if glyph.page_index != page || glyph.unicode.trim().is_empty() {
             continue;
         }
-        source_ys.push(glyph.matrix[5]);
+        source_glyphs.push(glyph);
     }
-    if source_ys.is_empty() {
+    if source_glyphs.is_empty() {
         return None;
+    }
+    // A prime or hat a few points above the words is not the line's top.
+    // Counting it opens a false hole and lifts `+` off `µ(Q) + µ(H)`.
+    let body = source_glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    let mut source_ys: Vec<f32> = source_glyphs
+        .iter()
+        .filter(|glyph| glyph.font_size > body * 0.84 && !is_math_accent_char(glyph.unicode.trim()))
+        .map(|glyph| glyph.matrix[5])
+        .collect();
+    if source_ys.is_empty() {
+        source_ys = source_glyphs.iter().map(|glyph| glyph.matrix[5]).collect();
     }
     source_ys.sort_by(|left, right| left.total_cmp(right));
     Some(ColumnBlock {
@@ -12193,8 +12301,11 @@ fn sink_math_subscripts(lines: &mut Vec<Drawn>, glyphs: &[&Glyph], font: &Subset
         let sink_set: HashSet<usize> = sink.iter().copied().collect();
         for index in &sink {
             let sub_size = (line.size * 0.62).max(0.5);
-            let sub_w = (line.widths[*index] * 0.65).max(sub_size * 0.4);
             let text = chars[*index].to_string();
+            let sub_w = char_widths(&text, sub_size, font)
+                .first()
+                .copied()
+                .unwrap_or(sub_size * 0.5);
             let cids = if line.cids.len() == chars.len() {
                 vec![line.cids[*index]]
             } else {
@@ -12226,16 +12337,31 @@ fn sink_math_subscripts(lines: &mut Vec<Drawn>, glyphs: &[&Glyph], font: &Subset
         }
         let sub_width = |index: usize| {
             let sub_size = (line.size * 0.62).max(0.5);
-            (line.widths[index] * 0.65).max(sub_size * 0.4)
+            let text = chars[index].to_string();
+            char_widths(&text, sub_size, font)
+                .first()
+                .copied()
+                .unwrap_or(sub_size * 0.5)
         };
         let mut gaps = Vec::new();
         for pair in kept.windows(2) {
             let mut gap = 0.0;
+            let mut sunk_any = false;
             for index in pair[0]..pair[1] {
                 if sink_set.contains(&index) {
                     gap += sub_width(index);
+                    sunk_any = true;
                 }
                 gap += line.gaps.get(index).copied().unwrap_or(0.0);
+            }
+            // The sunk digit's ink used to run through the comma (`e₁，`).
+            let punct = chars[pair[1]].is_ascii_punctuation()
+                || matches!(
+                    chars[pair[1]],
+                    '，' | '。' | '、' | '；' | '：' | '！' | '？'
+                );
+            if sunk_any && punct {
+                gap += line.size * 0.12;
             }
             gaps.push(gap);
         }
@@ -17203,6 +17329,141 @@ mod tests {
     }
 
     #[test]
+    fn a_script_fragment_hole_is_the_overhang_past_its_base() {
+        let mut q = ink_glyph(1, 100.0, 200.0, 10.0, "q");
+        q.bbox = [100.0, 198.0, 105.0, 208.0];
+        q.advance = [8.0, 0.0];
+        let mut hat = ink_glyph(2, 101.0, 204.0, 9.0, "\u{f8f8}");
+        hat.font_name = "LMMathExtension10".into();
+        hat.bbox = [101.0, 202.0, 106.0, 210.0];
+        hat.advance = [5.5, 0.0];
+        let mut sub = ink_glyph(3, 105.0, 197.0, 7.0, "x");
+        sub.font_name = "LMMathItalic8".into();
+        sub.bbox = [105.0, 195.0, 109.0, 203.0];
+        sub.advance = [6.0, 0.0];
+        let glyphs = vec![q, hat, sub];
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let by_id = super::glyph_index_refs(&refs);
+        let width = super::formula_hole_width(&[2, 3], &refs, &by_id, 10.0);
+        assert!(
+            (width - 4.0).abs() < 0.2,
+            "script hole reserved {width:.2}, expected the 4pt overhang past q"
+        );
+        let mut paren = ink_glyph(4, 200.0, 200.0, 10.0, ")");
+        paren.bbox = [200.0, 198.0, 204.0, 208.0];
+        paren.advance = [8.0, 0.0];
+        let plain = vec![paren];
+        let plain_refs: Vec<&Glyph> = plain.iter().collect();
+        let plain_ids = super::glyph_index_refs(&plain_refs);
+        let plain_width = super::formula_hole_width(&[4], &plain_refs, &plain_ids, 10.0);
+        assert!(
+            (plain_width - 4.0).abs() < 0.2,
+            "trailing advance was reserved as hole padding: {plain_width:.2}"
+        );
+    }
+
+    #[test]
+    fn a_prime_does_not_raise_the_column_baseline() {
+        let mut word = ink_glyph(1, 72.0, 168.2, 10.9, "T");
+        word.bbox = [72.0, 166.0, 80.0, 176.0];
+        let mut prime = ink_glyph(2, 360.0, 172.2, 8.0, "′");
+        prime.font_name = "LMMathSymbols8".into();
+        prime.bbox = [360.0, 170.0, 363.0, 178.0];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs: vec![word, prime],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let line = Drawn {
+            page: 0,
+            x: 72.0,
+            y: 168.2,
+            size: 10.9,
+            color: Color::black(),
+            cids: vec![1],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: "请求之后的新势满足".into(),
+            glyph_ids: vec![1, 2],
+            widths: vec![10.0],
+            gaps: Vec::new(),
+            supers: vec![false],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let block =
+            super::column_block(&[line], &[0], 0, &extraction, &by_id).expect("column block");
+        assert!(
+            (block.source_top - 168.2).abs() < 0.2,
+            "prime raised source_top to {:.2}",
+            block.source_top
+        );
+        assert!((block.source_bottom - 168.2).abs() < 0.2);
+    }
+
+    #[test]
+    fn a_sunk_subscript_leaves_room_before_the_comma() {
+        let mut glyphs = Vec::new();
+        for index in 0..10 {
+            glyphs.push(ink_glyph(
+                index,
+                72.0 + index as f32 * 6.0,
+                400.0,
+                10.0,
+                "a",
+            ));
+        }
+        glyphs.push(ink_glyph(20, 90.0, 397.0, 6.0, "1"));
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let mut map = HashMap::new();
+        map.insert('e' as u32, (1, 600));
+        map.insert('1' as u32, (2, 500));
+        map.insert('，' as u32, (3, 1000));
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: map,
+        };
+        let mut lines = vec![Drawn {
+            page: 0,
+            x: 100.0,
+            y: 400.0,
+            size: 10.0,
+            color: Color::black(),
+            cids: vec![1, 2, 3],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: "e1，".into(),
+            glyph_ids: vec![1],
+            widths: vec![6.0, 6.0, 10.0],
+            gaps: vec![0.0, 0.0],
+            supers: vec![false, false, false],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        }];
+        super::sink_math_subscripts(&mut lines, &refs, &font);
+        let host = lines
+            .iter()
+            .find(|line| line.text.contains('，'))
+            .expect("comma line");
+        assert_eq!(host.text, "e，");
+        let gap = host.gaps.first().copied().unwrap_or(0.0);
+        let sub = 10.0 * 0.62 * 0.5 + 10.0 * 0.12;
+        assert!(
+            gap + 0.05 >= sub,
+            "comma gap {gap:.2} overlaps a subscript that needs {sub:.2}"
+        );
+    }
+
+    #[test]
     fn math_glyphs_count_as_text_overlap() {
         let mut formula = ink_glyph(0, 100.0, 400.0, 10.0, "μ");
         formula.font_name = "LMMathItalic10".into();
@@ -18560,7 +18821,7 @@ mod tests {
             ),
         ];
         let embedded = vec![("BOLD".into(), head_font), ("REG".into(), body_font)];
-        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded);
+        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded, &mut Vec::new());
         let head = drawn
             .iter()
             .find(|line| line.text.contains('相'))
@@ -18697,22 +18958,72 @@ mod tests {
             ),
         ];
         let embedded = vec![("BOLD".into(), head_font), ("REG".into(), body_font)];
-        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded);
+        let mut shifts = vec![
+            ListingShift {
+                page: 0,
+                ids: vec![body_ids[0]],
+                dx: 10.0,
+                dy: 0.0,
+                host_y: 400.0,
+            },
+            ListingShift {
+                page: 0,
+                ids: vec![body_ids[0]],
+                dx: 4.0,
+                dy: 0.0,
+                host_y: 380.0,
+            },
+        ];
+        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded, &mut shifts);
+        let head = drawn
+            .iter()
+            .find(|line| line.text.contains('引'))
+            .expect("label");
+        let first = drawn
+            .iter()
+            .find(|line| line.text.contains('请'))
+            .expect("statement");
         let plus = drawn
             .iter()
             .find(|line| line.text.contains('+'))
             .expect("plus");
+        let period = drawn
+            .iter()
+            .find(|line| line.text.contains('。'))
+            .expect("period");
+        let head_ink = head.x + head.widths.iter().sum::<f32>() + head.gaps.iter().sum::<f32>();
         assert!(
-            (plus.x - 280.0).abs() < 0.6,
-            "reflow pulled the plus into the formula: x {:.1} text {:?}",
-            plus.x,
-            plus.text
+            (first.x - (head_ink + 4.0)).abs() < 1.0,
+            "statement did not follow the label: label ends {:.1}, statement {:.1}",
+            head_ink,
+            first.x
         );
         assert!(
-            drawn
-                .iter()
-                .any(|line| line.text.contains('。') && (line.x - 320.0).abs() < 0.6),
-            "the period left the end of the formula"
+            first.x + 1.0 < 160.0,
+            "statement stayed at the English x {:.1}",
+            first.x
+        );
+        assert!(
+            (plus.x - first.x - 120.0).abs() < 0.6,
+            "plus left its offset from the statement: plus {:.1} statement {:.1}",
+            plus.x,
+            first.x
+        );
+        assert!(
+            (period.x - plus.x - 40.0).abs() < 0.6,
+            "the period left the end of the formula: period {:.1} plus {:.1}",
+            period.x,
+            plus.x
+        );
+        let slide = first.x - 160.0;
+        assert!(
+            (shifts[0].dx - (10.0 + slide)).abs() < 0.6,
+            "formula on the statement baseline did not follow the label, dx {}",
+            shifts[0].dx
+        );
+        assert!(
+            (shifts[1].dx - 4.0).abs() < 0.01,
+            "a formula on the next line was slid with the label"
         );
     }
 
@@ -18845,7 +19156,7 @@ mod tests {
             ),
         ];
         let embedded = vec![("BOLD".into(), head_font), ("REG".into(), body_font)];
-        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded);
+        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded, &mut Vec::new());
         let head = drawn
             .iter()
             .find(|line| line.text.contains('随'))
@@ -18963,7 +19274,7 @@ mod tests {
             ),
         ];
         let embedded = vec![("BOLD".into(), head_font), ("REG".into(), body_font)];
-        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded);
+        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded, &mut Vec::new());
         let head = drawn
             .iter()
             .find(|line| line.text.contains('随'))
