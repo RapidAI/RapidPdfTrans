@@ -32,6 +32,7 @@ Copy every placeholder token of the form ⟦N⟧ exactly, including the brackets
 Do not copy context_before or context_after into the output. \
 Preserve punctuation that belongs to the segment. \
 When a segment is a comma-separated list of topics and names, translate descriptive topics into {dst} and keep product, project, language, and organization names in their original Latin spelling. \
+Every comma-separated item must appear in the output, in the same order. Do not drop or merge items. Copy parenthetical acronyms such as (RTC) and (SBOM) unchanged. \
 Return one object per input id. Do not merge, drop, or invent ids.",
         src = language_name(source_lang),
         dst = language_name(target_lang),
@@ -65,6 +66,7 @@ Reply with JSON only, no markdown, in exactly this shape: \
 The text value must be {dst}. Do not return the English source. \
 Keep numbers, URLs, and personal names in their original Latin spelling. \
 In a comma-separated list, translate descriptive topics and keep product, project, language, and organization names in Latin. \
+Every list item and every Latin proper noun from the source must appear in the output. \
 Copy every ⟦N⟧ placeholder unchanged. Do not add notes or explanations."
     )
 }
@@ -83,6 +85,7 @@ Reply with JSON only, no markdown, in exactly this shape: \
 Write {dst} with no space between Chinese characters and no repeated word. \
 Add a full stop only where the source ends a sentence. \
 Translate descriptive English into {dst}. Keep URLs, numbers, and Latin personal names unchanged. \
+If the source is a comma-separated list, every item must appear, and Latin proper nouns such as RISC-V, Rust, and (SBOM) must be copied unchanged. \
 Copy every ⟦N⟧ placeholder unchanged. Do not add notes."
     )
 }

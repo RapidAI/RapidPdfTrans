@@ -31,7 +31,9 @@ use crate::layout::{
     LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
-use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
+use crate::translate::{
+    comma_list_incomplete, BilingualLayout, OutputMode, TranslateReport,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct RewriteOptions {
@@ -148,8 +150,20 @@ pub fn rewrite_translation(
         .iter()
         .any(|segment| segment.translated.chars().any(is_han_char));
     let prompt_samples = prompt_sample_flags(report, extraction, &by_id);
+    // A binomial or a stacked formula cannot be reflowed as characters.
+    // The paragraph stays in the original glyphs, in order, instead of
+    // painting Chinese over `µ(G) = min` and a floating superscript.
+    let math_blocks = math_block_segments(report, extraction, &by_id);
     for (index, segment) in report.segments.iter().enumerate() {
         if segment.glyph_ids.is_empty() {
+            continue;
+        }
+        if math_blocks.contains(&index) {
+            for id in &segment.glyph_ids {
+                if !extraction.glyphs[by_id[id]].disposition.is_final() {
+                    keep.insert(*id, "math-block".into());
+                }
+            }
             continue;
         }
         let segment_glyphs: Vec<&Glyph> = segment
@@ -230,6 +244,15 @@ pub fn rewrite_translation(
         {
             for id in &segment.glyph_ids {
                 keep.insert(*id, "english-body".into());
+            }
+            continue;
+        }
+        // A devroom list that dropped `RISC-V` or a run of topics is not
+        // painted. The missing names would otherwise be blanked with the
+        // shared text operator.
+        if comma_list_incomplete(&segment.source, &translated) {
+            for id in &segment.glyph_ids {
+                keep.insert(*id, "incomplete-list".into());
             }
             continue;
         }
@@ -990,6 +1013,144 @@ fn import_object(
     let mapped = remap_object(dst, src, object, map)?;
     dst.set_object(new_id, mapped);
     Ok(new_id)
+}
+
+struct MathSpan {
+    page: u32,
+    top: f32,
+    bottom: f32,
+    left: f32,
+    right: f32,
+    size: f32,
+    structural: bool,
+}
+
+/// Segments whose inline formula is a stack (a binomial, `µ(G) = min` on
+/// its own row, `z^{−d(x,y)}`). Reflowing the words and leaving the glyphs
+/// where they were paints Chinese through the formula. The whole run stays
+/// in the original order.
+fn math_block_segments(
+    report: &TranslateReport,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> HashSet<usize> {
+    let mut spans = Vec::with_capacity(report.segments.len());
+    let mut seeds = Vec::new();
+    for (index, segment) in report.segments.iter().enumerate() {
+        let glyphs: Vec<&Glyph> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extraction.glyphs.get(by_id[id]))
+            .collect();
+        let Some(span) = math_span(&glyphs) else {
+            spans.push(None);
+            continue;
+        };
+        if span.structural {
+            seeds.push(index);
+        }
+        spans.push(Some(span));
+    }
+    let mut keep = vec![false; report.segments.len()];
+    let mut queue = seeds;
+    for index in &queue {
+        keep[*index] = true;
+    }
+    while let Some(index) = queue.pop() {
+        let Some(origin) = spans[index].as_ref() else {
+            continue;
+        };
+        for (other, span) in spans.iter().enumerate() {
+            if keep[other] {
+                continue;
+            }
+            let Some(span) = span else {
+                continue;
+            };
+            if math_spans_chain(origin, span) {
+                keep[other] = true;
+                queue.push(other);
+            }
+        }
+    }
+    keep.into_iter()
+        .enumerate()
+        .filter(|(_, marked)| *marked)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn math_span(glyphs: &[&Glyph]) -> Option<MathSpan> {
+    if glyphs.is_empty() {
+        return None;
+    }
+    let page = glyphs[0].page_index;
+    let mut top = f32::MIN;
+    let mut bottom = f32::MAX;
+    let mut left = f32::MAX;
+    let mut right = f32::MIN;
+    let mut size = 1.0f32;
+    let mut math_ys = Vec::new();
+    let mut math = 0usize;
+    let mut letters = 0usize;
+    for glyph in glyphs {
+        top = top.max(glyph.matrix[5]);
+        bottom = bottom.min(glyph.matrix[5]);
+        left = left.min(glyph.matrix[4].min(glyph.bbox[0]));
+        right = right.max(glyph.bbox[2].max(glyph.matrix[4]));
+        size = size.max(glyph.font_size);
+        letters += glyph
+            .unicode
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic() && inherent_keep(glyph) != Some("formula"))
+            .count();
+        if inherent_keep(glyph) == Some("formula") {
+            math += 1;
+            math_ys.push(glyph.matrix[5]);
+        }
+    }
+    if !top.is_finite() {
+        return None;
+    }
+    math_ys.sort_by(|left, right| left.total_cmp(right));
+    let stack = math_ys
+        .last()
+        .zip(math_ys.first())
+        .map(|(high, low)| high - low)
+        .unwrap_or(0.0);
+    let size = size.max(1.0);
+    // A subscript is about a quarter of an em. A binomial or a formula row
+    // spans more, or the line is the formula itself.
+    let stacked = math >= 3 && stack > size * 0.55;
+    let shard = math >= 3 && (letters < 8 || math > letters) && letters < 48;
+    Some(MathSpan {
+        page,
+        top,
+        bottom,
+        left,
+        right,
+        size,
+        structural: stacked || shard,
+    })
+}
+
+fn math_spans_chain(left: &MathSpan, right: &MathSpan) -> bool {
+    if left.page != right.page {
+        return false;
+    }
+    let size = left.size.max(right.size).max(1.0);
+    let gap = if left.bottom > right.top {
+        left.bottom - right.top
+    } else if right.bottom > left.top {
+        right.bottom - left.top
+    } else {
+        0.0
+    };
+    if gap > size * 1.45 {
+        return false;
+    }
+    let overlap = left.right.min(right.right) - left.left.max(right.left);
+    overlap > size * 2.0
 }
 
 /// A sentence that contains a symbol (`edge ij with c > 0`) is body text.
@@ -6592,14 +6753,32 @@ fn layout_segment(
     // inside the original box.
     if !bilingual && centered_list_ink(&ink) {
         let axis = centered_list_axis(&ink);
-        for line in &mut drawn {
-            if line.text.trim().is_empty() {
-                continue;
-            }
+        let body: Vec<usize> = drawn
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| !line.text.trim().is_empty())
+            .map(|(index, _)| index)
+            .collect();
+        for index in &body {
+            let line = &mut drawn[*index];
             line.gaps.fill(0.0);
             let advance = line.widths.iter().sum::<f32>();
             if advance > 0.0 && axis.is_finite() {
                 line.x = axis - advance * 0.5;
+            }
+        }
+        // Spread a shorter translation across the source box so the list
+        // still fills the slide instead of leaving a ragged tail.
+        if body.len() >= 2 {
+            let src_top = ink.iter().map(|line| line.y).fold(f32::MIN, f32::max);
+            let src_bottom = ink.iter().map(|line| line.y).fold(f32::MAX, f32::min);
+            let src_span = src_top - src_bottom;
+            let size = drawn[body[0]].size.max(1.0);
+            let step = src_span / (body.len() - 1) as f32;
+            if src_span > size * (body.len() as f32) * 0.9 && step <= size * 2.2 {
+                for (slot, index) in body.iter().enumerate() {
+                    drawn[*index].y = src_top - slot as f32 * step;
+                }
             }
         }
     }
@@ -8054,6 +8233,13 @@ fn reflow_prompt_chain(
     Some((at, painted, ids))
 }
 
+/// One blank line between paragraphs is about two leadings, just over
+/// 2.6em of the body size. `工作函数和 WFA` stayed on the English baseline
+/// because the source gap was 29pt and the old reach stopped at 28pt.
+pub(crate) fn body_hole_reach(size: f32) -> f32 {
+    size.max(1.0) * 3.4
+}
+
 fn close_column_holes(
     drawn: &mut [Drawn],
     extraction: &Extraction,
@@ -8165,7 +8351,7 @@ fn close_column_holes(
                 let reach = if prev.listing || block.listing {
                     size * 4.0
                 } else {
-                    size * 2.6
+                    body_hole_reach(size)
                 };
                 let chained = same_column && source_gap > 0.0 && source_gap < reach;
                 let drawn_gap = prev.bottom - (block.top + shift);
@@ -12676,6 +12862,99 @@ mod tests {
                 resource_name: Some("F1".into()),
             },
         }
+    }
+
+    #[test]
+    fn one_blank_line_is_inside_the_hole_reach() {
+        // k-server page 4: the related-work paragraph ends about 29pt above
+        // "Work functions and the WFA." A 2.6em reach left that gap open.
+        assert!(29.0 < super::body_hole_reach(10.9));
+        assert!(29.0 < super::body_hole_reach(9.8));
+    }
+
+    #[test]
+    fn a_stacked_formula_keeps_the_surrounding_paragraph() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut push = |x: f32, y: f32, text: &str, font: &str| {
+            let mut glyph = ink_glyph(id, x, y, 10.0, text);
+            glyph.font_name = font.into();
+            glyphs.push(glyph);
+            id += 1;
+        };
+        for (index, ch) in "We use a potential".chars().enumerate() {
+            push(72.0 + index as f32 * 5.0, 700.0, &ch.to_string(), "LMRoman10");
+        }
+        for (index, ch) in ["k", "+", "1", "2"].iter().enumerate() {
+            let y = if *ch == "2" { 692.0 } else { 706.0 };
+            push(200.0 + index as f32 * 6.0, y, ch, "LMMathItalic10");
+        }
+        for (index, ch) in "dimensional vector".chars().enumerate() {
+            push(240.0 + index as f32 * 5.0, 700.0, &ch.to_string(), "LMRoman10");
+        }
+        push(72.0, 400.0, "Unrelated paragraph about servers.", "LMRoman10");
+        drop(push);
+        let near: Vec<u32> = glyphs.iter().filter(|glyph| glyph.id != id - 1).map(|glyph| glyph.id).collect();
+        let far_id = id - 1;
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let report = crate::translate::TranslateReport {
+            segments: vec![
+                crate::translate::TranslatedSegment {
+                    id: 0,
+                    page_index: 0,
+                    glyph_ids: near,
+                    source: "We use a potential".into(),
+                    translated: "我们使用势".into(),
+                },
+                crate::translate::TranslatedSegment {
+                    id: 1,
+                    page_index: 0,
+                    glyph_ids: vec![far_id],
+                    source: "Unrelated paragraph about servers.".into(),
+                    translated: "无关段落".into(),
+                },
+            ],
+            calls: 0,
+            cache_hits: 0,
+        };
+        let blocks = super::math_block_segments(&report, &extraction, &by_id);
+        assert!(blocks.contains(&0), "the stacked formula was reflowed");
+        assert!(!blocks.contains(&1), "a distant paragraph was kept as math");
+    }
+
+    #[test]
+    fn math_glyphs_count_as_text_overlap() {
+        let mut formula = ink_glyph(0, 100.0, 400.0, 10.0, "μ");
+        formula.font_name = "LMMathItalic10".into();
+        formula.bbox = [100.0, 396.0, 148.0, 414.0];
+        let mut word = ink_glyph(1, 112.0, 386.0, 10.0, "项");
+        word.bbox = [112.0, 384.0, 132.0, 402.0];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs: vec![formula, word],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let hit = overlapping_text(&extraction, &[0]);
+        assert!(hit.is_some(), "a math glyph overlapping text was ignored: {hit:?}");
     }
 
     #[test]

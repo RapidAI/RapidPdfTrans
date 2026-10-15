@@ -845,6 +845,7 @@ pub(crate) fn wrap_text(
             // this line. A URL stays sticky and is not cut.
             end = pull_latin_prefix(&chars, &sticky, start, end, fitted, limit, size, font);
             end = prefer_enumeration_break(&chars, &sticky, start, end);
+            end = prefer_list_delimiter(&chars, &sticky, start, end);
         }
         let mut line_end = end;
         while line_end > start && chars[line_end - 1].is_whitespace() {
@@ -869,8 +870,68 @@ pub(crate) fn wrap_text(
             return None;
         }
     }
+    let mut lines = lines;
+    snap_line_compounds(&mut lines, max_width, size, font);
     let lines = move_opening_brackets(lines);
     Some(lines).filter(|lines| !lines.is_empty())
+}
+
+/// A centered name list breaks after `、` so an item stays on one line.
+/// The break still has to leave the line mostly full.
+fn prefer_list_delimiter(chars: &[char], sticky: &[bool], start: usize, end: usize) -> usize {
+    if end <= start + 1 || end > chars.len() {
+        return end;
+    }
+    let marks = chars[start..end]
+        .iter()
+        .filter(|ch| **ch == '、' || **ch == '，')
+        .count();
+    if marks == 0 {
+        return end;
+    }
+    let mut alt = end;
+    while alt > start + 1 {
+        alt -= 1;
+        let mark = chars[alt - 1] == '、' || chars[alt - 1] == '，';
+        if mark && can_break_at(chars, sticky, alt) && (alt - start) * 5 >= (end - start) * 3 {
+            return alt;
+        }
+    }
+    end
+}
+
+/// `量子|计算` moves onto one line. The dictionary hit is the same one a
+/// page break already uses.
+fn snap_line_compounds(lines: &mut Vec<String>, width: f32, size: f32, font: &SubsetFont) {
+    if lines.len() < 2 || width <= 0.0 {
+        return;
+    }
+    let mut index = 0usize;
+    while index + 1 < lines.len() {
+        let upcoming: Vec<char> = lines[index + 1].chars().collect();
+        let before: Vec<char> = lines[index].chars().collect();
+        let mut slot = vec![lines[index].clone()];
+        if !retreat_compound_boundary(&mut slot, &upcoming, width, size, font) {
+            index += 1;
+            continue;
+        }
+        let after: Vec<char> = slot[0].chars().collect();
+        if after.len() > before.len() {
+            let pulled = after.len() - before.len();
+            if pulled > upcoming.len() {
+                index += 1;
+                continue;
+            }
+            lines[index] = slot[0].clone();
+            lines[index + 1] = upcoming[pulled..].iter().collect();
+        } else if after.len() < before.len() {
+            let extra: String = before[after.len()..].iter().collect();
+            lines[index] = slot[0].clone();
+            lines[index + 1] = format!("{extra}{}", lines[index + 1]);
+        }
+        index += 1;
+    }
+    lines.retain(|line| !line.trim().is_empty());
 }
 
 fn char_advance(ch: char, size: f32, font: &SubsetFont) -> f32 {
@@ -1665,6 +1726,8 @@ const CJK_COMPOUNDS: &[&str] = &[
     "但是",
     "其中",
     "词元",
+    "量子计算",
+    "量子",
 ];
 
 enum CompoundSnap {
@@ -1867,6 +1930,22 @@ mod tests {
             units_per_em: 1000,
             glyphs,
         }
+    }
+
+    #[test]
+    fn a_centered_list_breaks_on_the_delimiter_and_keeps_a_compound() {
+        let text = "无线电、量子计算、铁路、存储";
+        let font = cover_font(text);
+        let lines = wrap_text(text, 10.0, 50.0, 50.0, &font).expect("wrap");
+        let joined = lines.join("|");
+        assert!(
+            lines.iter().all(|line| !line.ends_with('量') && !line.starts_with('子')),
+            "量子 was split: {joined}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains('、')),
+            "the list did not break on a delimiter: {joined}"
+        );
     }
 
     #[test]

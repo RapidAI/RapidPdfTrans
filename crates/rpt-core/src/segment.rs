@@ -887,6 +887,76 @@ fn centered_comma_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -
         && lower_text.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
+/// The paragraph is already a centered comma list, and this line sits on the
+/// same axis. Two lines of similar length have left edges within an em, which
+/// is also how a first-line indent looks, so the ordinary join drops the line.
+/// The lines already in the paragraph wander, and their midpoints do not.
+fn centered_list_keeps(current: &[VisualLine<'_>], lower: &VisualLine<'_>) -> bool {
+    if !centered_comma_block(current) {
+        return false;
+    }
+    let Some(upper) = current.last() else {
+        return false;
+    };
+    if upper.page != lower.page {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    if (upper.size - lower.size).abs() > size * 0.2 {
+        return false;
+    }
+    let dy = upper.y - lower.y;
+    if dy < size * 0.7 || dy > size * 1.5 {
+        return false;
+    }
+    let upper_text = upper.text.trim_end();
+    if upper_text.ends_with('.') || upper_text.ends_with('?') || upper_text.ends_with('!') {
+        return false;
+    }
+    let axis = centered_block_axis(current);
+    let lower_mid = (lower.left + lower.right) * 0.5;
+    (lower_mid - axis).abs() <= size * 2.5
+        && lower.text.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+/// Midpoints agree and left edges wander. A left-aligned paragraph fails the
+/// left-edge test, so an indented sentence is not pulled in.
+fn centered_comma_block(lines: &[VisualLine<'_>]) -> bool {
+    if lines.len() < 2 {
+        return false;
+    }
+    let commas: usize = lines.iter().map(|line| line.text.matches(',').count()).sum();
+    if commas < 4 {
+        return false;
+    }
+    let size = lines
+        .iter()
+        .map(|line| line.size)
+        .fold(1.0f32, f32::max)
+        .max(1.0);
+    let mut left_min = f32::MAX;
+    let mut left_max = f32::MIN;
+    let mut mid_min = f32::MAX;
+    let mut mid_max = f32::MIN;
+    for line in lines {
+        left_min = left_min.min(line.left);
+        left_max = left_max.max(line.left);
+        let mid = (line.left + line.right) * 0.5;
+        mid_min = mid_min.min(mid);
+        mid_max = mid_max.max(mid);
+    }
+    left_max - left_min > size * 1.2 && mid_max - mid_min <= size * 3.0
+}
+
+fn centered_block_axis(lines: &[VisualLine<'_>]) -> f32 {
+    let mut mids: Vec<f32> = lines
+        .iter()
+        .map(|line| (line.left + line.right) * 0.5)
+        .collect();
+    mids.sort_by(|left, right| left.total_cmp(right));
+    mids[mids.len() / 2]
+}
+
 /// Per-block OCR score. A low-quality block is not translated and not
 /// painted. A title page whose scan is only partly read (a real title plus
 /// `3jOV£9rOIit`) keeps the photograph: every text block on that page goes.
@@ -968,6 +1038,12 @@ fn title_scan_with_partial_ocr(
 /// `The ideas are expressed` is readable. `3jOV£9rOIit` and `POBUtfttCO` are not.
 fn ocr_line_low_quality(text: &str) -> bool {
     if text.contains("://") || text.contains('@') || text.contains("www.") {
+        return false;
+    }
+    // A born-digital formula (`µ(G) = min`, `−d(x,y)`, `1≤i`) is not a scan
+    // misread. Dropping it left the glyphs in place while the sentence
+    // around them was translated on top.
+    if formula_line(text) {
         return false;
     }
     let tokens: Vec<&str> = text
@@ -1134,6 +1210,24 @@ fn junk_ocr_token(token: &str) -> bool {
         return true;
     }
     consonant_run(&chars) >= 4 && !plain_word_case(&chars)
+}
+
+/// Greek, a micro sign, or a math operator. Scan garbage uses `£`, not `µ`.
+/// The operator itself (`−`, `≤`) is not a junk symbol.
+fn formula_line(text: &str) -> bool {
+    let math = text.chars().any(math_formula_char);
+    let junk = text
+        .chars()
+        .any(|ch| junk_ocr_symbol(ch) && !math_formula_char(ch));
+    math && !junk
+}
+
+fn math_formula_char(ch: char) -> bool {
+    ch == 'µ'
+        || ch == 'μ'
+        || ('\u{0370}'..='\u{03FF}').contains(&ch)
+        || ('\u{2200}'..='\u{22FF}').contains(&ch)
+        || ('\u{2070}'..='\u{209F}').contains(&ch)
 }
 
 fn junk_ocr_symbol(ch: char) -> bool {
@@ -3067,6 +3161,7 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
             if current
                 .last()
                 .is_some_and(|prev| continues_paragraph(prev, &line, measure))
+                || centered_list_keeps(&current, &line)
             {
                 current.push(line);
             } else {
@@ -3474,6 +3569,11 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
         return false;
     };
     if lower.page != upper.page + 1 {
+        return false;
+    }
+    // A centered devroom list fills its own slide. The next slide's list is
+    // not the rest of this sentence, even when a line starts with `and`.
+    if centered_comma_block(prev) {
         return false;
     }
     // A contents row already carries its page number. The next page's next
@@ -9392,6 +9492,43 @@ mod tests {
     }
 
     #[test]
+    fn a_centered_list_stays_one_paragraph_when_a_line_barely_shifts() {
+        // FOSDEM page 14. Consecutive centered lines of similar length sit
+        // within an em, which the indent test used to treat as a new paragraph.
+        // The next page's list must not be stitched on because it starts with
+        // `and`.
+        let rows = [
+            (0u32, 0u32, 40.0, 500.0, 640.0, "Microkernel and OS, Modern Email, Monitoring and,"),
+            (1, 0, 28.0, 476.0, 664.0, "Observability, Mozilla, MySQL, Network, Nix and NixOS,"),
+            (2, 0, 20.0, 452.0, 680.0, "Open Media, Open Research, Open Source Design,"),
+            (3, 0, 8.0, 428.0, 704.0, "PostgreSQL, Python, Quantum Computing, Radio, Railways"),
+            (4, 0, 20.0, 404.0, 680.0, "and Open Transport, Real Time Communications (RTC), RISC-V,"),
+            (5, 0, 12.0, 380.0, 696.0, "Robotics and Simulation, Rust, Security, (SBOM), Swift,"),
+            (6, 1, 22.0, 500.0, 676.0, "and Open Transport, RISC-V, Rust, Security, Swift,"),
+        ];
+        let mut glyphs = Vec::new();
+        for (id, page, x, y, width, text) in rows {
+            let mut item = glyph(id, x, y, text, false);
+            item.page_index = page;
+            item.font_size = 20.0;
+            item.bbox = [x, y, x + width, y + 16.0];
+            item.advance = [width, 0.0];
+            glyphs.push(item);
+        }
+        let segs = segment_glyphs(&glyphs);
+        let page0: Vec<_> = segs.iter().filter(|seg| seg.page_index == 0).collect();
+        assert_eq!(page0.len(), 1, "{:?}", page0.iter().map(|seg| &seg.text).collect::<Vec<_>>());
+        assert!(
+            page0[0].text.contains("RISC-V") && page0[0].text.contains("Railways"),
+            "{}",
+            page0[0].text
+        );
+        let page1: Vec<_> = segs.iter().filter(|seg| seg.page_index == 1).collect();
+        assert_eq!(page1.len(), 1, "the next slide was stitched onto this list");
+        assert!(page1[0].text.contains("RISC-V"), "{}", page1[0].text);
+    }
+
+    #[test]
     fn a_partial_ocr_title_keeps_the_image_and_a_bad_block_is_dropped() {
         let mut glyphs = Vec::new();
         let mut title = glyph(0, 80.0, 500.0, "Constraints of Public Utilities", false);
@@ -9441,6 +9578,12 @@ mod tests {
         assert!(
             !ocr_line_low_quality("GKP24, CP26].") && !ocr_line_low_quality("[BBN10]"),
             "a citation key was scored as OCR"
+        );
+        assert!(
+            !ocr_line_low_quality("µ(G) = min ν(det(g)). The term")
+                && !ocr_line_low_quality("−d(x,y)")
+                && !ocr_line_low_quality("1≤i<···<i"),
+            "a formula line was scored as OCR"
         );
         let seg = segment_placed(&glyphs, &SegmentFlags::default(), &regions, &pages);
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();

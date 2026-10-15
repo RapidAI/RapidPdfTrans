@@ -1353,6 +1353,150 @@ fn flaw_count(source: &str, translated: &str) -> usize {
         + usize::from(extra_sentence_end(source, translated))
         + usize::from(residual_english(translated))
         + usize::from(leftover_source_word(source, translated))
+        + usize::from(comma_list_incomplete(source, translated))
+}
+
+/// A comma list dropped a topic or a proper noun (`RISC-V`, `(SBOM)`, `Rust`).
+/// Painting the short translation blanks the missing lines when they share
+/// the text operator.
+pub(crate) fn comma_list_incomplete(source: &str, translated: &str) -> bool {
+    let source = source.trim();
+    if source.matches(',').count() < 6 || !translated.chars().any(is_cjk_char) {
+        return false;
+    }
+    let source_items = list_items(source, &[',']);
+    if source_items.len() < 6 {
+        return false;
+    }
+    let translated_items = list_items(translated, &[',', '、', '，']);
+    if translated_items.len() + 1 < source_items.len() {
+        return true;
+    }
+    proper_nouns(source).any(|noun| !contains_latin_token(translated, &noun))
+}
+
+fn list_items<'a>(text: &'a str, marks: &[char]) -> Vec<&'a str> {
+    text.split(|ch| marks.contains(&ch))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn proper_nouns(source: &str) -> impl Iterator<Item = String> {
+    let mut nouns = Vec::new();
+    for token in source.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '、' | '，'))
+    {
+        let token = token.trim_matches(|ch: char| {
+            matches!(ch, '(' | ')' | '（' | '）' | '[' | ']' | '.' | '"' | '\'')
+        });
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(noun) = kept_latin_token(token) {
+            nouns.push(noun);
+        }
+    }
+    // `(RTC)` and `(SBOM)` stay even when the surrounding words are translated.
+    let chars: Vec<char> = source.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '(' && chars[index] != '（' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < chars.len() && chars[end] != ')' && chars[end] != '）' {
+            end += 1;
+        }
+        let inner: String = chars[start..end].iter().collect();
+        for token in inner.split_whitespace() {
+            if let Some(noun) = kept_latin_token(token) {
+                nouns.push(noun);
+            }
+        }
+        index = end.saturating_add(1);
+    }
+    nouns.into_iter()
+}
+
+const KEPT_NAMES: &[&str] = &[
+    "Ada", "Go", "Java", "Mozilla", "Nix", "Python", "Rust", "Swift",
+];
+
+fn kept_latin_token(token: &str) -> Option<String> {
+    let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' | '/' ));
+    if token.len() < 2 {
+        return None;
+    }
+    if KEPT_NAMES.iter().any(|name| *name == token) {
+        return Some(token.to_string());
+    }
+    if token.contains('.') && token.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return Some(token.to_string());
+    }
+    if token.contains('/') && token.chars().any(|ch| ch.is_ascii_uppercase()) {
+        return Some(token.to_string());
+    }
+    if let Some((left, right)) = token.split_once('-') {
+        let side = |part: &str| {
+            part.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        };
+        let generic = left.eq_ignore_ascii_case("image")
+            || left.eq_ignore_ascii_case("low")
+            || left.eq_ignore_ascii_case("open")
+            || left.eq_ignore_ascii_case("real");
+        if side(left) && side(right) && !generic {
+            return Some(token.to_string());
+        }
+    }
+    let letters: String = token.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    if letters.len() >= 3 && letters.chars().all(|ch| ch.is_ascii_uppercase()) {
+        return Some(letters);
+    }
+    // `APIs` keeps `API`. A trailing plural s is not part of the acronym.
+    if letters.len() >= 4
+        && letters.chars().rev().skip(1).all(|ch| ch.is_ascii_uppercase())
+        && letters.ends_with('s')
+    {
+        return Some(letters[..letters.len() - 1].to_string());
+    }
+    let chars: Vec<char> = letters.chars().collect();
+    let internal = chars.windows(2).any(|pair| {
+        (pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+            || (pair[0].is_ascii_uppercase() && pair[1].is_ascii_uppercase())
+    }) && chars.iter().any(|ch| ch.is_ascii_lowercase());
+    if internal && chars.len() >= 3 {
+        return Some(token.chars().filter(|ch| c_is_noun_char(*ch)).collect());
+    }
+    None
+}
+
+fn c_is_noun_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '/'
+}
+
+fn contains_latin_token(text: &str, noun: &str) -> bool {
+    if noun.is_empty() {
+        return true;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let needle: Vec<char> = noun.chars().collect();
+    if needle.len() > chars.len() {
+        return false;
+    }
+    for start in 0..=chars.len() - needle.len() {
+        if chars[start..start + needle.len()] != needle[..] {
+            continue;
+        }
+        let before = start > 0 && chars[start - 1].is_ascii_alphanumeric();
+        let after = start + needle.len() < chars.len()
+            && chars[start + needle.len()].is_ascii_alphanumeric();
+        if !before && !after {
+            return true;
+        }
+    }
+    false
 }
 
 fn repair_translation(source: &str, translated: &str) -> String {
@@ -3645,6 +3789,16 @@ mod tests {
             "第 2 部分 摘要 "
         ));
         assert!(translation_flaw("The The MCP ", "该 该 MCP "));
+        let list = "Ada, Rust, RISC-V, Security, Retrocomputing, Software Bill of Materials (SBOM), Swift, WebAssembly, Go";
+        let complete = "Ada、Rust、RISC-V、安全、复古计算、软件物料清单（SBOM）、Swift、WebAssembly、Go";
+        assert!(
+            !comma_list_incomplete(list, complete),
+            "a complete devroom list was rejected"
+        );
+        assert!(
+            comma_list_incomplete(list, "Ada、Rust、安全、Swift、Go"),
+            "a list that dropped RISC-V and SBOM was accepted"
+        );
         assert_eq!(repair_translation("The The MCP ", "该 该 MCP "), "该 MCP");
         assert_eq!(
             repair_translation("PART 4 ADVANCED RAG ", "第 4 部分 高级 检索增强生成 "),

@@ -67,7 +67,13 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
 fn failed_body_reason(reason: &str) -> bool {
     matches!(
         reason,
-        "missing-glyph" | "overflow" | "untranslated" | "no-font" | "no-stream" | "english-body"
+        "missing-glyph"
+            | "overflow"
+            | "untranslated"
+            | "no-font"
+            | "no-stream"
+            | "english-body"
+            | "incomplete-list"
     )
 }
 
