@@ -1661,6 +1661,24 @@
       "ci": false
     },
     {
+      "id": "arxiv-2410.22360",
+      "url": "https://arxiv.org/pdf/2410.22360",
+      "source": "arxiv",
+      "title": "ArxivDIGESTables: Synthesizing Scientific Literature into Tables using Language Models",
+      "license": "http://creativecommons.org/licenses/by/4.0/ (arXiv; PDF not committed)",
+      "sha256": "bb5c112655f8be1aa998a9cb7c935b0e6ce20913513b6dd147400f3623c45ad4",
+      "bytes": 1871544,
+      "pages": 21,
+      "tags": [
+        "arxiv",
+        "cs",
+        "nlp",
+        "latex",
+        "two-column"
+      ],
+      "ci": false
+    },
+    {
       "id": "arxiv-2610.03702",
       "url": "https://arxiv.org/pdf/2610.03702.pdf",
       "source": "arxiv",

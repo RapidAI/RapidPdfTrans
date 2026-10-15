@@ -7,6 +7,7 @@ Three new documents, each a different layout. Translated English to Chinese on c
 | arxiv-2609.15979, The k-server conjecture is true | 18, letter, Latin Modern | `/opt/cursor/artifacts/pdfs/arxiv-2609.15979-zh.pdf` |
 | fosdem-2025-welcome | 36, landscape 720×405 | `/opt/cursor/artifacts/pdfs/fosdem-2025-welcome-zh.pdf` |
 | lafollette-illusion-1924 | first 12 of 52, OCR text layer | `/opt/cursor/artifacts/pdfs/lafollette-1924-p1-12-zh.pdf` |
+| arxiv-2410.22360, ArxivDIGESTables | 21, A4, two-column | `/opt/cursor/artifacts/pdfs/arxiv-2410.22360-zh.pdf` |
 
 `arxiv-2609.15979` was already in `corpus/manifest.json`. The FOSDEM 2025 deck and the LaFollette OCR text layer were added there (URL, license, sha256). Manning body slices stayed regression-only: `rpt-core` lib tests, including the definition join, the NOTE callout, and the listing annotation, still pass (345 passed, 1 ignored).
 
@@ -129,8 +130,16 @@ Page 9. `对于具有方形对角块的矩阵` and `固定有限标签集 … N 
 
 Pages 5–8 and 10–13. Formula paragraphs are Chinese around the holes (`引理 2.2`, `引理 2.3`, the valuation sentences). A display line that is only the formula stays in the source glyphs (`f = Σ f_a z^a` on page 5, the two `ExtCost` lines and `(28)` on page 13). Pages 14–17 stay an English bibliography. Pages 2–3, 6, and 18 are Chinese around the formulas. `随机化 k-服务器` on page 5 is Chinese, with `O(log k)` and `Ω(log² k)` in the sentence.
 
+## arXiv:2410.22360
+
+`rpt-core` lib tests: 383 passed, 1 ignored. Coverage on the export is `complete: true`, `english_body: 0`. The paper is in `corpus/manifest.json` (CC BY 4.0, sha256 `bb5c112655f8be1aa998a9cb7c935b0e6ce20913513b6dd147400f3623c45ad4`). Export: `/opt/cursor/artifacts/pdfs/arxiv-2410.22360-zh.pdf`.
+
+A chart label drawn on top of a body line at a different size is peeled off, so page 4’s right column reads as Chinese (`物理学、定量生物学、统计学`) and the figure banners (`Highest quality`, `Filter out misformatted tables`) stay on the artwork. A caption word space before small caps is not a column gutter, so `表 2：ARXIVDIGESTABLES 列中的方面类型。` is painted. A one-line bullet longer than 30 letters is not chained into the formula: page 6’s scoring list is Chinese, and `ϕ(ai)=ϕ(aj) and 0 otherwise` stays source. Pages 3, 9, and 13 body prose are Chinese, including `A.2 高质量数据过滤器` and `表 6：高质量数据集中所代表的研究领域。` The JSON example and the prompts stay English. `References` in the right column opens on the author roster (`OpenAI Josh Achiam…`, `Ojas Ahuja…`); pages 10–12 stay an English bibliography, and the left-column Limitations section stays Chinese. The next page’s left column continues the bibliography. `A Data Processing` stops the section.
+
+Manning stays regression-only. The same suite includes the definition join, the NOTE callout, and the listing annotation. The full book was not translated.
+
 ## Left open
 
 - The scan’s invisible OCR layer is still in the content stream, so a text extract of the LaFollette cover and of page 2 still shows the old characters. The painted cover does not.
 - Lemma 3.2 item 3's block-diagonal display does not fit its inline hole and covers the proof line.
-- arXiv:2410.22360 still has English prose echoes on pages 3, 6, 9, and 13.
+- On arXiv:2410.22360 page 13, `Below is an example instance from` is a short lead-in under the body threshold. The rest of that sentence is Chinese (`为清晰起见，部分键已改写，值已省略`), and the JSON beside it stays source.

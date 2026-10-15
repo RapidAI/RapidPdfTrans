@@ -1040,6 +1040,8 @@ struct MathSpan {
     right: f32,
     size: f32,
     structural: bool,
+    /// Alphabetic glyphs. A multi-line paragraph is prose, not a formula shard.
+    letters: usize,
     /// Left edge of the topmost baseline. An indent here starts a paragraph.
     head_left: f32,
     /// Left edge of the segment. Continuation lines sit on this margin.
@@ -1231,6 +1233,7 @@ fn math_span(glyphs: &[&Glyph]) -> Option<MathSpan> {
         right,
         size: body,
         structural: stacked || shard,
+        letters,
         head_left,
         margin_left: left,
     })
@@ -2438,7 +2441,21 @@ fn math_spans_chain(left: &MathSpan, right: &MathSpan) -> bool {
     if !below.structural && below.head_left > above.margin_left + size * 0.55 {
         return false;
     }
+    // `Alignment Framework…` sits one line under `ϕ(aim) = ϕ(ajr)`. The
+    // formula is the seed. The paragraph is several lines of prose, and
+    // chaining it left the section in English.
+    if prose_paragraph(left) || prose_paragraph(right) {
+        return false;
+    }
     true
+}
+
+fn prose_paragraph(span: &MathSpan) -> bool {
+    // One line is enough. `Exact Match, which assigns a score of 1 if` is 32
+    // letters on a single baseline, and a height check left it in the block.
+    // `4 The potential…` (26) and the body line under it (27) still have to
+    // chain through to the display, or the heading is painted onto it.
+    !span.structural && span.letters > 30
 }
 
 /// A sentence that contains a symbol (`edge ij with c > 0`) is body text.
@@ -4282,6 +4299,12 @@ fn segment_crosses_column(glyphs: &[&Glyph], neighbors: &[&Glyph], size: f32) ->
         if *gap <= hard && crate::segment::piece_ends_with_page_number(left) {
             return false;
         }
+        // `Table 2: Types of aspects in` then a wide space before small caps.
+        // Segmentation keeps that space inside the caption. Layout must too,
+        // or the caption is left in English as an overflow.
+        if crate::segment::gap_inside_caption(left, *gap, size) {
+            return false;
+        }
         // An inline formula leaves a hole on this baseline where the
         // subscript sits. A column gutter is empty above and below too.
         let right_edge = ordered[index].bbox[0].max(ordered[index].bbox[2]);
@@ -4290,7 +4313,10 @@ fn segment_crosses_column(glyphs: &[&Glyph], neighbors: &[&Glyph], size: f32) ->
         let filled = neighbors.iter().any(|glyph| {
             let x = (glyph.bbox[0] + glyph.bbox[2]) * 0.5;
             let dy = (glyph.matrix[5] - y).abs();
-            x > right_edge + 0.5 && x < left_edge - 0.5 && dy > size * 0.12 && dy < size * 1.25
+            // Small caps sit a point off the body baseline, inside the hole
+            // of `ARXIVDIGESTABLES`. A subscript is lower. Either one fills
+            // the hole. A column gutter is empty.
+            x > right_edge + 0.5 && x < left_edge - 0.5 && dy > 0.35 && dy < size * 1.25
         });
         !filled
     })
@@ -4352,6 +4378,11 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         '\u{2309}' | '\u{230B}' => &[']'],
         // `67.4 ∼ 118%`. The Song face has no tilde operator.
         '\u{223C}' | '\u{223D}' => &['~'],
+        // Greek phi symbol and the modifier circumflex in `MSˆ2`. The Song
+        // face has φ and ^, and one missing mark used to leave the paragraph
+        // in English.
+        '\u{03D5}' => &['φ', 'f'],
+        '\u{02C6}' => &['^'],
         '\u{2018}' | '\u{2019}' | '\u{201A}' => &['\''],
         '\u{201C}' | '\u{201D}' | '\u{201E}' => &['"'],
         '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2009}' => &[' '],
@@ -14694,8 +14725,76 @@ mod tests {
     }
 
     #[test]
+    fn a_multiline_prose_paragraph_is_not_chained_into_a_formula() {
+        // `ϕ(aim) = ϕ(ajr)` sits one line from Alignment Framework. The
+        // formula stays a block. The paragraph is several lines of prose.
+        let formula = super::MathSpan {
+            page: 0,
+            top: 360.0,
+            bottom: 350.0,
+            left: 72.0,
+            right: 288.0,
+            size: 10.0,
+            structural: true,
+            letters: 8,
+            head_left: 72.0,
+            margin_left: 72.0,
+        };
+        let prose = super::MathSpan {
+            page: 0,
+            top: 348.0,
+            bottom: 280.0,
+            left: 72.0,
+            right: 288.0,
+            size: 10.0,
+            structural: false,
+            letters: 200,
+            head_left: 72.0,
+            margin_left: 72.0,
+        };
+        let shard = super::MathSpan {
+            page: 0,
+            top: 348.0,
+            bottom: 348.0,
+            left: 72.0,
+            right: 200.0,
+            size: 10.0,
+            structural: false,
+            letters: 12,
+            head_left: 72.0,
+            margin_left: 72.0,
+        };
+        let bullet = super::MathSpan {
+            page: 0,
+            top: 336.0,
+            bottom: 336.0,
+            left: 72.0,
+            right: 288.0,
+            size: 10.0,
+            structural: false,
+            letters: 44,
+            head_left: 72.0,
+            margin_left: 72.0,
+        };
+        assert!(
+            !super::math_spans_chain(&formula, &prose),
+            "the prose paragraph joined the formula"
+        );
+        assert!(
+            !super::math_spans_chain(&formula, &bullet),
+            "the scoring bullet joined the formula"
+        );
+        assert!(
+            super::math_spans_chain(&formula, &shard),
+            "a one-line formula fragment was released"
+        );
+    }
+
+    #[test]
     fn a_similar_to_tilde_has_an_ascii_stand_in() {
         assert_eq!(coverage_fallbacks('\u{223C}'), &['~']);
+        assert_eq!(coverage_fallbacks('\u{03D5}'), &['φ', 'f']);
+        assert_eq!(coverage_fallbacks('\u{02C6}'), &['^']);
     }
 
     struct InkRow {
@@ -16467,6 +16566,43 @@ mod tests {
             paragraph_style(&refs).italic,
             "{:?}",
             paragraph_style(&refs)
+        );
+    }
+
+    #[test]
+    fn a_caption_word_space_before_small_caps_is_not_a_column() {
+        // `Table 2: Types of aspects in` then 12.6pt before `ARXIV`. That
+        // space is just over 1.25em. It stays inside the caption.
+        let mut glyphs = Vec::new();
+        let mut x = 306.0f32;
+        let mut id = 0u32;
+        for ch in "Table 2: Types of aspects in".chars() {
+            if ch == ' ' {
+                x += 3.2;
+                continue;
+            }
+            let mut glyph = math_glyph(id, x, 253.3, &ch.to_string(), false);
+            glyph.font_size = 10.0;
+            glyph.matrix = [10.0, 0.0, 0.0, 10.0, x, 253.3];
+            glyph.bbox = [x, 253.3, x + 4.2, 261.3];
+            glyphs.push(glyph);
+            id += 1;
+            x += 4.2;
+        }
+        x += 12.6;
+        for ch in "ARXIV".chars() {
+            let mut glyph = math_glyph(id, x, 253.3, &ch.to_string(), false);
+            glyph.font_size = 8.0;
+            glyph.matrix = [8.0, 0.0, 0.0, 8.0, x, 253.3];
+            glyph.bbox = [x, 253.3, x + 4.2, 260.0];
+            glyphs.push(glyph);
+            id += 1;
+            x += 4.2;
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        assert!(
+            !segment_crosses_column(&refs, &refs, 10.0),
+            "the caption space is not a gutter"
         );
     }
 

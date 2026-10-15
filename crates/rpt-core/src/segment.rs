@@ -202,7 +202,101 @@ fn finish_line(mut line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             .min(a.bbox[2])
             .total_cmp(&b.bbox[0].min(b.bbox[2]))
     });
-    split_columns(line)
+    peel_stacked_labels(line)
+        .into_iter()
+        .flat_map(split_columns)
+        .collect()
+}
+
+/// A chart annotation shares the body baseline and is drawn on top of a word
+/// (`Physics,` under `Highest`, `83.75%` over `Statistics`). Sorting by x
+/// then writes `PhysicsH,ighest`. The label is a different size, overlaps the
+/// word, and sits a fraction of an em off its baseline. A subscript is one
+/// or two glyphs, so a run shorter than four stays in the line.
+fn peel_stacked_labels(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
+    if line.len() < 8 {
+        return vec![line];
+    }
+    let mut sizes: Vec<f32> = line
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .filter(|size| *size >= 1.0)
+        .collect();
+    if sizes.is_empty() {
+        return vec![line];
+    }
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    let body = sizes[sizes.len() / 2].max(1.0);
+    let prose: Vec<&Glyph> = line
+        .iter()
+        .copied()
+        .filter(|glyph| {
+            let ratio = glyph.font_size / body;
+            (0.85..=1.15).contains(&ratio)
+        })
+        .collect();
+    if prose.len() < 8 {
+        return vec![line];
+    }
+    let off_size = |glyph: &Glyph| {
+        let ratio = glyph.font_size / body;
+        ratio >= 1.2 || ratio <= 0.72
+    };
+    let overlaps_body = |glyph: &Glyph| {
+        prose.iter().any(|other| {
+            let left = glyph_left(glyph).max(glyph_left(other));
+            let right = glyph_right(glyph).min(glyph_right(other));
+            right - left > 0.4 && (glyph.matrix[5] - other.matrix[5]).abs() > body * 0.1
+        })
+    };
+    let mut candidates: Vec<usize> = line
+        .iter()
+        .enumerate()
+        .filter(|(_, glyph)| off_size(glyph))
+        .map(|(index, _)| index)
+        .collect();
+    candidates.sort_by(|&left, &right| glyph_left(line[left]).total_cmp(&glyph_left(line[right])));
+    let mut stacked = vec![false; line.len()];
+    let mut index = 0usize;
+    while index < candidates.len() {
+        let mut end = index + 1;
+        while end < candidates.len() {
+            let gap = glyph_left(line[candidates[end]]) - glyph_right(line[candidates[end - 1]]);
+            if gap > body * 1.25 {
+                break;
+            }
+            end += 1;
+        }
+        let overlapping = candidates[index..end]
+            .iter()
+            .filter(|slot| overlaps_body(line[**slot]))
+            .count();
+        if overlapping >= 4 {
+            for slot in &candidates[index..end] {
+                stacked[*slot] = true;
+            }
+        }
+        index = end;
+    }
+    if !stacked.iter().any(|marked| *marked) {
+        return vec![line];
+    }
+    let prose_line: Vec<&Glyph> = line
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !stacked[*index])
+        .map(|(_, glyph)| *glyph)
+        .collect();
+    let labels: Vec<&Glyph> = line
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| stacked[*index])
+        .map(|(_, glyph)| *glyph)
+        .collect();
+    if prose_line.len() < 8 || labels.is_empty() {
+        return vec![line];
+    }
+    vec![prose_line, labels]
 }
 
 /// Split one baseline where a gap is a column gutter rather than a word space.
@@ -272,8 +366,7 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         let trailing_word = gap <= hard && right_w < size * 8.0 && left_w >= size * 12.0;
         // "Table 1." then a one-em space is the caption sentence, not the
         // other column. The hard gap still splits a label from a real column.
-        let caption_label =
-            gap <= hard && left_w < size * 12.0 && caption_kind(&line_text(&current)).is_some();
+        let caption_label = gap_inside_caption(&current, gap, size);
         let column_gap = (gap > hard || gap > trigger) && !trailing_word && !caption_label;
         // Two full columns on one baseline can leave only ~1.2em. Em boxes
         // overlap, so the median gap is 0 and the trigger rises to 1.25em,
@@ -315,7 +408,36 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             && gap >= size * 2.0
             && gap + 0.05 >= largest
             && (second <= 0.05 || gap >= second * 2.0);
-        if (column_gap || tight_column || table_cell || column_stub || gutter_digit)
+        // The last line of each column shares a baseline. The right piece is
+        // `with 44,617 tables.`, `challenges:`, or the caption wrap
+        // `columns.`, and the gutter is ~16pt, so it used to look like a
+        // justified tail of the left column. One column is about 20em, so a
+        // 24em span already includes the gutter.
+        let two_column_tail = line.len() >= 40
+            && span >= size * 24.0
+            && left_w >= size * 16.0
+            && right_w >= size * 3.0
+            && gap >= size * 1.25
+            && gap + 0.05 >= largest
+            && (second <= 0.05 || gap >= second * 2.0);
+        // `references column, {` The brace is the left edge of a listing in
+        // the next column. A one-glyph tail used to look like a justified space.
+        let lone_mark = gap >= size * 1.15
+            && left_w >= size * 8.0
+            && line[index..]
+                .iter()
+                .all(|glyph| {
+                    let token = glyph.unicode.trim();
+                    !token.is_empty()
+                        && token.chars().all(|ch| matches!(ch, '{' | '}' | '[' | ']' | '(' | ')'))
+                });
+        if (column_gap
+            || tight_column
+            || table_cell
+            || column_stub
+            || two_column_tail
+            || lone_mark
+            || gutter_digit)
             && !current.is_empty()
             && !crumb
         {
@@ -353,6 +475,16 @@ fn narrow_page_crumb(piece: &[&Glyph]) -> bool {
         return false;
     }
     piece_ends_with_page_number(piece)
+}
+
+/// A word space inside `Table 2: …` is not the other column. The hard gap
+/// still splits a short label from a real column.
+pub(crate) fn gap_inside_caption(left: &[&Glyph], gap: f32, size: f32) -> bool {
+    if left.is_empty() {
+        return false;
+    }
+    let hard = (size * 2.0).max(24.0);
+    gap <= hard && piece_width(left) < size * 12.0 && caption_kind(&line_text(left)).is_some()
 }
 
 fn piece_width(piece: &[&Glyph]) -> f32 {
@@ -3882,10 +4014,16 @@ fn caption_line_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if (upper.size - lower.size).abs() > size * 0.35 {
         return false;
     }
+    // `columns.` is the caption's own wrap. The other column's body line
+    // (`in the types of aspects…`) is one leading lower and also starts in
+    // lowercase, but it sits on the left margin.
+    if lower.left + size * 0.4 < upper.left - size {
+        return false;
+    }
     let next = lower.text.trim_start();
     !sentence_end(upper.text.trim_end())
         && next.starts_with(|ch: char| ch.is_ascii_lowercase())
-        && lower.text.chars().filter(|ch| ch.is_alphabetic()).count() >= 8
+        && lower.text.chars().filter(|ch| ch.is_alphabetic()).count() >= 6
 }
 
 fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: f32) -> bool {
@@ -5084,6 +5222,193 @@ mod tests {
             segs.iter().map(|s| &s.text).collect::<Vec<_>>()
         );
         assert!(segs[0].text.contains('b'));
+    }
+
+    #[test]
+    fn a_lone_brace_at_the_column_edge_splits_off() {
+        // `references column, {` The brace is the listing in the next column.
+        let mut glyphs = Vec::new();
+        for index in 0..30 {
+            let x = 70.0 + index as f32 * 5.5;
+            let mut item = glyph(index as u32, x, 611.0, "a", false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 611.0];
+            item.bbox = [x, 611.0, x + 4.8, 619.0];
+            glyphs.push(item);
+        }
+        let x = 70.0 + 30.0 * 5.5 + 15.0;
+        let mut brace = glyph(100, x, 611.0, "{", false);
+        brace.font_size = 10.0;
+        brace.matrix = [10.0, 0.0, 0.0, 10.0, x, 611.0];
+        brace.bbox = [x, 611.0, x + 5.0, 619.0];
+        glyphs.push(brace);
+        let segs = segment_glyphs(&glyphs);
+        assert!(
+            segs.iter().any(|segment| segment.text.contains('{') && !segment.text.contains('a')),
+            "{:?}",
+            segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
+        );
+        assert!(
+            segs.iter().any(|segment| segment.text.contains('a') && !segment.text.contains('{')),
+            "{:?}",
+            segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn digest_page4_chart_labels_leave_the_prose() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/cache/arxiv-2410.22360.pdf");
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract_with(&crate::extract::ExtractOptions::default());
+        let seg = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let hits: Vec<_> = seg
+            .segments
+            .iter()
+            .filter(|item| item.page_index == 3 && item.text.contains("Physics"))
+            .map(|item| item.text.clone())
+            .collect();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            !hits[0].contains("igQ") && !hits[0].contains("H,ig") && !hits[0].contains("83.75"),
+            "{}",
+            hits[0]
+        );
+        assert!(
+            hits[0].contains("Physics") && hits[0].contains("Quantitative") || hits[0].contains("Quantita"),
+            "{}",
+            hits[0]
+        );
+        let caption = seg
+            .segments
+            .iter()
+            .find(|item| item.text.contains("Table 2:"))
+            .expect("table 2 caption");
+        assert!(
+            !caption.text.contains("types of aspects represented"),
+            "{}",
+            caption.text
+        );
+        assert!(
+            caption.text.contains("columns"),
+            "caption wrap dropped: {}",
+            caption.text
+        );
+        assert!(
+            !hits[0].contains("Table 2"),
+            "{}",
+            hits[0]
+        );
+    }
+
+    #[test]
+    fn a_chart_label_on_the_prose_does_not_interleave() {
+        // `Highest` is painted over `Physics,`. One line used to read
+        // `PhysicsH,ighest`.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut cursor = 300.0f32;
+        for ch in "Physics, Quantita".chars() {
+            let mut item = glyph(id, cursor, 400.0, &ch.to_string(), false);
+            id += 1;
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, cursor, 400.0];
+            let width = if ch == ' ' { 3.0 } else { 5.0 };
+            item.bbox = [cursor, 398.0, cursor + width, 408.0];
+            glyphs.push(item);
+            cursor += width;
+        }
+        cursor = 332.0;
+        for ch in "Highest".chars() {
+            let mut item = glyph(id, cursor, 401.2, &ch.to_string(), false);
+            id += 1;
+            item.font_size = 13.0;
+            item.matrix = [13.0, 0.0, 0.0, 13.0, cursor, 401.2];
+            item.bbox = [cursor, 399.0, cursor + 7.0, 412.0];
+            glyphs.push(item);
+            cursor += 7.0;
+        }
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Physics") && !text.contains('H')),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Highest") && !text.contains("Physics")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_one_word_right_column_splits_on_a_17pt_gutter() {
+        // `can be` | `challenges:` The right piece is under 6em, and the
+        // line still spans both columns.
+        let mut glyphs = Vec::new();
+        for index in 0..42 {
+            let x = 71.0 + index as f32 * 5.2;
+            let mut item = glyph(index as u32, x, 471.0, "a", false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 471.0];
+            item.bbox = [x, 471.0, x + 4.6, 479.0];
+            glyphs.push(item);
+        }
+        let right = 71.0 + 42.0 * 5.2 + 17.0;
+        for index in 0..11 {
+            let x = right + index as f32 * 5.0;
+            let mut item = glyph(100 + index as u32, x, 471.0, "b", false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 471.0];
+            item.bbox = [x, 471.0, x + 4.5, 479.0];
+            glyphs.push(item);
+        }
+        let segs = segment_glyphs(&glyphs);
+        assert_eq!(
+            segs.len(),
+            2,
+            "{:?}",
+            segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_short_right_column_tail_splits_on_a_16pt_gutter() {
+        // `collected a` | `with 44,617 tables.` The gutter is 16pt and the
+        // right piece is shorter than a column, but the line spans both.
+        let mut glyphs = Vec::new();
+        for index in 0..42 {
+            let x = 71.0 + index as f32 * 5.2;
+            let mut item = glyph(index as u32, x, 69.0, "a", false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 69.0];
+            item.bbox = [x, 69.0, x + 4.6, 77.0];
+            glyphs.push(item);
+        }
+        let right = 71.0 + 42.0 * 5.2 + 16.0;
+        for index in 0..14 {
+            let x = right + index as f32 * 5.2;
+            let mut item = glyph(100 + index as u32, x, 69.0, "b", false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 69.0];
+            item.bbox = [x, 69.0, x + 4.6, 77.0];
+            glyphs.push(item);
+        }
+        let segs = segment_glyphs(&glyphs);
+        assert_eq!(
+            segs.len(),
+            2,
+            "{:?}",
+            segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
+        );
     }
 
     #[test]

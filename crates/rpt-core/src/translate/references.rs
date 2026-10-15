@@ -149,6 +149,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
     let mut selected: HashSet<usize> = HashSet::new();
     let mut in_refs = false;
     let mut refs_x: Option<f32> = None;
+    let mut refs_page: Option<u32> = None;
     let mut streak_from: Option<usize> = None;
     let mut streak_entries = 0usize;
     let mut streak_gap = 0usize;
@@ -172,6 +173,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
                 if bibliography_follows(&order, &placed, &tops, pos) {
                     in_refs = true;
                     refs_x = Some(line.x);
+                    refs_page = Some(line.page);
                     selected.insert(line.seg_index);
                     streak_from = None;
                     streak_entries = 0;
@@ -192,6 +194,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
                     in_refs = true;
                     let start = streak_from.unwrap_or(pos);
                     refs_x = Some(placed[order[start]].x);
+                    refs_page = Some(placed[order[start]].page);
                     for &idx in &order[start..=pos] {
                         let earlier = &placed[idx];
                         if !is_running_header(&placed, &tops, earlier) {
@@ -208,12 +211,16 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
                     streak_gap = 0;
                 }
             }
-        } else if refs_x.is_some_and(|anchor| line.x < anchor - 96.0) {
-            // The heading is in the right column. Body beside it, including
-            // the conclusion under a floating table, is not a reference.
+        } else if refs_page.is_some_and(|page| line.page == page)
+            && refs_x.is_some_and(|anchor| line.x < anchor - 96.0)
+        {
+            // The heading is in the right column. Body beside it on that
+            // page is not a reference. The next page's left column is the
+            // continuation, so the guard does not follow the section there.
         } else if is_section_break(text) {
             in_refs = false;
             refs_x = None;
+            refs_page = None;
             streak_from = None;
             streak_entries = 0;
             streak_gap = 0;
@@ -514,10 +521,18 @@ fn bibliography_follows(
     tops: &HashMap<u32, f32>,
     pos: usize,
 ) -> bool {
+    let heading = &placed[order[pos]];
     let mut looked = 0usize;
+    let mut roster = 0usize;
     for &placed_index in order.iter().skip(pos + 1) {
         let line = &placed[placed_index];
         if is_running_header(placed, tops, line) {
+            continue;
+        }
+        // The heading sits in the right column. The left column is body.
+        // Reading order emits that column first, and a sentence there would
+        // close the section before the author list is seen.
+        if line.page == heading.page && (line.x - heading.x).abs() > 96.0 {
             continue;
         }
         let text = line.text.trim();
@@ -531,8 +546,21 @@ fn bibliography_follows(
             }
             continue;
         }
-        if is_reference_entry(text) || looks_author_year_start(text) {
+        if is_reference_entry(text) || looks_author_year_start(text) || roster_bearing_year(text)
+        {
             return true;
+        }
+        // `OpenAI Josh Achiam, …` wraps, and `and` appears on the year line.
+        // That is still the bibliography. A sentence is not.
+        if author_roster(text) {
+            if contains_year(text) {
+                return true;
+            }
+            roster += 1;
+            if roster >= 8 {
+                return false;
+            }
+            continue;
         }
         if is_section_break(text) || prose_sentence(text) {
             return false;
@@ -543,6 +571,55 @@ fn bibliography_follows(
         }
     }
     false
+}
+
+/// `Ojas Ahuja, Jiacheng Xu, Akshay Gupta, Kevin`. Names, commas, and
+/// `and` / `et al.`. A lowercase word is a sentence, not a roster.
+fn author_roster(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.chars().count() < 8 {
+        return false;
+    }
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() < 3 {
+        return false;
+    }
+    let mut names = 0usize;
+    let mut other = 0usize;
+    for word in &words {
+        let bare: String = word
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .collect();
+        if bare.is_empty() {
+            continue;
+        }
+        let lower = bare.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "and" | "et" | "al" | "eds" | "ed" | "jr" | "sr"
+        ) {
+            continue;
+        }
+        if bare.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+            names += 1;
+        } else {
+            other += 1;
+        }
+    }
+    names >= 2 && other == 0 && (trimmed.contains(',') || trimmed.contains('，'))
+}
+
+/// `…, and Red Avila et al. 2023. Gpt-4 technical report.`
+/// The names stop at the year. The title after it may be lowercase.
+fn roster_bearing_year(text: &str) -> bool {
+    let Some(at) = find_year(text) else {
+        return false;
+    };
+    let head = text[..at]
+        .trim()
+        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':'));
+    author_roster(head)
 }
 
 fn prose_sentence(text: &str) -> bool {
@@ -1046,6 +1123,104 @@ mod tests {
         let kept = text_of(&glyphs, &ids);
         assert!(kept.contains("Smith"), "{kept}");
         assert!(!kept.contains("layout"), "{kept}");
+        line(
+            &mut glyphs,
+            &mut id,
+            1,
+            72.0,
+            700.0,
+            "Hope, T. (2022). Scaling creative inspiration.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(kept.contains("Hope"), "{kept}");
+        assert!(!kept.contains("layout"), "{kept}");
+    }
+
+    #[test]
+    fn an_author_roster_under_references_includes_the_wrapped_names() {
+        // The year sits on a later line, and `and` is in the roster.
+        // The left column beside the heading stays translatable.
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            640.0,
+            "Study stays here.",
+        );
+        line(&mut glyphs, &mut id, 0, 306.0, 660.0, "References");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            306.0,
+            640.0,
+            "OpenAI Josh Achiam, Steven Adler, Sandhini Agarwal,",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            306.0,
+            626.0,
+            "Shyamal Anadkat, and Red Avila et al. 2023. Gpt-4 technical report.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            306.0,
+            600.0,
+            "Ojas Ahuja, Jiacheng Xu, Akshay Gupta, Kevin",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(kept.contains("Ojas"), "{kept}");
+        assert!(kept.contains("OpenAI"), "{kept}");
+        assert!(!kept.contains("Study"), "{kept}");
+    }
+
+    #[test]
+    fn digest_page10_author_list_is_a_reference() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/cache/arxiv-2410.22360.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract_with(&crate::extract::ExtractOptions::default());
+        let ids = reference_glyph_ids(&extraction.glyphs);
+        let seg = segment_glyphs(&extraction.glyphs);
+        let ojas = seg
+            .iter()
+            .find(|item| item.page_index == 9 && item.text.contains("Ojas Ahuja"))
+            .expect("ojas line");
+        assert!(
+            ojas.glyph_ids.iter().all(|id| ids.contains(id)),
+            "not a reference: {}",
+            ojas.text
+        );
+        let appendix = seg.iter().find(|item| item.text.contains("XML-formatted tables"));
+        if let Some(appendix) = appendix {
+            assert!(
+                appendix.glyph_ids.iter().all(|id| !ids.contains(id)),
+                "appendix swallowed: {}",
+                appendix.text
+            );
+        }
+        let body = seg
+            .iter()
+            .find(|item| item.page_index == 9 && item.text.contains("We only study"));
+        if let Some(body) = body {
+            assert!(
+                body.glyph_ids.iter().all(|id| !ids.contains(id)),
+                "left column swallowed: {}",
+                body.text
+            );
+        }
     }
 
     #[test]
