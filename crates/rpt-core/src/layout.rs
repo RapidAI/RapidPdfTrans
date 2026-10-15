@@ -736,6 +736,9 @@ pub(crate) fn wrap_text(
 ) -> Option<Vec<String>> {
     let chars: Vec<char> = text.chars().collect();
     let sticky = sticky_after(&chars);
+    let item_heads = (0..chars.len())
+        .filter(|&index| enumerated_item_at(&chars, index))
+        .count();
     let mut lines = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
@@ -746,7 +749,14 @@ pub(crate) fn wrap_text(
         };
         let mut end = start;
         let mut width = 0.0f32;
+        let mut item_break = false;
         while end < chars.len() {
+            // `股票2：` is the next enumerated item. It starts its own line
+            // even when the previous item still has room on this measure.
+            if item_heads >= 2 && end > start && enumerated_item_at(&chars, end) {
+                item_break = true;
+                break;
+            }
             let advance = char_advance(chars[end], size, font);
             if end > start && width + advance > limit {
                 // A closing comma or period may hang past the measure once.
@@ -760,7 +770,7 @@ pub(crate) fn wrap_text(
         }
         if end == start {
             end = (start + 1).min(chars.len());
-        } else if end < chars.len() {
+        } else if end < chars.len() && !item_break {
             // Break at the rightmost legal point. Jumping back to the previous
             // ASCII space throws away CJK that already fit after a citation.
             let fitted = end;
@@ -913,6 +923,21 @@ fn capitalized_word(chars: &[char], start: usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// `股票2：` after the digits and the full-width colon. A bare `股票市场` is not an item.
+fn enumerated_item_at(chars: &[char], index: usize) -> bool {
+    if chars.get(index) != Some(&'股') || chars.get(index + 1) != Some(&'票') {
+        return false;
+    }
+    let mut cursor = index + 2;
+    if !chars.get(cursor).is_some_and(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    while chars.get(cursor).is_some_and(|ch| ch.is_ascii_digit()) {
+        cursor += 1;
+    }
+    matches!(chars.get(cursor), Some('：'))
 }
 
 /// `使用 LangChain、LangGraph 和 MCP` breaks after `、`, not before `和`.
@@ -2137,6 +2162,23 @@ mod tests {
             long_lines.len() <= 8 && long_lines.iter().all(|line| line.chars().count() >= 4),
             "a sticky span wider than the line became one character: {long_lines:?}"
         );
+    }
+
+    #[test]
+    fn enumerated_stock_items_each_start_a_line() {
+        let text = "股票2：英伟达：销售额正受到大语言模型消费者需求的推动股票3：GX石油：得益于可再生能源的增长，碳基能源的需求正在下降";
+        let font = uniform_font(text);
+        let width = measure(text, 10.0, &font);
+        let lines = wrap_text(text, 10.0, width, width, &font).expect("wrap");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("股票2：") && !lines[0].contains("股票3"),
+            "{lines:?}"
+        );
+        assert!(lines[1].starts_with("股票3："), "{lines:?}");
+        let single = "股票1：苹果：新款iPhone的发布取得了成功";
+        let one = wrap_text(single, 10.0, 400.0, 400.0, &uniform_font(single)).unwrap();
+        assert_eq!(one, vec![single.to_string()]);
     }
 
     #[test]

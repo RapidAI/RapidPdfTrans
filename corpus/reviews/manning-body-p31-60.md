@@ -2,7 +2,7 @@
 
 Sample: printed pages 31–60 of *AI Agents and Applications*. That span is PDF pages 59–88 of the full book. The 30-page slice is 531×636.572 pt. Source slice: `/opt/cursor/artifacts/pdfs/manning-body-p31-60-source.pdf`. Translation: `/opt/cursor/artifacts/pdfs/manning-body-p31-60.pdf`.
 
-Pages 1–30 are `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` (also `manning-body-p1-30-v6.pdf`). This slice is `manning-body-p31-60-v3.pdf`.
+Pages 1–30 are `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` (also `manning-body-p1-30-v7.pdf`). This slice is `manning-body-p31-60-v4.pdf`.
 
 Coverage is complete (`english_body` 0; kept 10090, rewritten 50937, total 61027). Body text is Noto Serif CJK SC Light. Headings are a heavier CJK face and larger than the body. Figure interiors, table cells, and monospace listings stay English. Captions are translated. Paragraphs use a 2em first-line indent. CJK–CJK justification stays within 0.15em.
 
@@ -10,13 +10,17 @@ Each translated page was compared with the source. Painted advance boxes do not 
 
 ## Fixes in this pass
 
-Prompt examples on printed pages 34–50 use one label axis and one content x. A decorative answer quote stays the source width and sits left of the answer. Checked on the v3 export: 0 overlaps between a 22pt quote and a Han glyph, `Tj100` count 0, and every hanging `说明：` / `文本：` / `输出：` / `指令：` ends on the same right edge (span under 2pt) with a full-width colon.
+Hanging prompt labels match the source: no colon, one shared right edge, a slightly smaller sans (0.85 of the sample size, box height 7.25 against a body of 8.53), and the sample text at the source content x. Checked on the v4 export: `Tj100` count 0, 0 overlaps between a quote taller than 12 pt and another word, and every hanging label on a page ends on the same right edge (span 0).
 
 | Defect | Where it showed | Fix |
 | --- | --- | --- |
-| The 22pt answer quote overlapped the first characters, or a second copy of the mark sat inside the line | p34 `文本应被归类`, p35 `科技` / `历史`, p39 `Java` | A full-width CJK quote is scaled with `Tz` to the source advance (about 10pt) and the scale is reset on its own line. A translation that still opens with the mark drops that character; the source glyph is the only quote. |
-| `说明：`, `文本`, and `输出：` sat on different axes, and `文本` had no colon | p34–p50, including title-case `Text` on p39 | Labels share the source small-caps right edge. Every known label, including title-case `Text`, is `文本：` and the body starts at the source content x (117.2 or 126.2), including continuations. |
-| `尤利乌斯·凯撒…他在` broke early, and a blank gap sat before the next example | p35 | The lowercase continuation joins the short line, which now runs 126.2–450.4. The following block moves up to the source gap (`现在` ends at y=130.1, the next `说明：` starts at y=143.1). |
+| Labels were painted with a full-width colon, and `OUTPUT FORMAT` split at the space so the body started under `FORMAT` | p34–p50, p49 `输出格式` | The painted label is the stem only (`说明`, `文本`, `输出`, `指令`, `角色设定`, `背景`, `输入`, `语气`, `输出格式`). The longest known label is taken, so `OUTPUT FORMAT` stays one label through `FORMAT`. On p49 that label ends at x=120.2 and `请以两段形式呈现文本` starts at x=126.2. |
+| `Text` in the third sentiment example was `文字` | p35 green dress | `TEXT` is always `文本`. `说明` and `指令` stay as the model wrote them. A content-line `Examples:` stays `示例：` at the content x (p46, x=117.2). Callouts stay `定义：` / `注意：`. |
+| `Stock 2` and `Stock 3` shared a line, and the heads mixed `股票 2` with `股票 3:` | p35 | Each `股票N：` starts its own line at the content x. The three reports sit at y=508.8, 522.2, and 535.6, all x=126.2, and the digits stay on the item baseline. |
+
+## Previous pass
+
+A decorative answer quote stays the source width and sits left of the answer. The Julius line is one run, x=126.2–450.4. `现在` ends at y=130.1 and the next `说明` starts at y=144.1.
 
 ## Earlier in this slice
 
@@ -48,13 +52,13 @@ Prompt examples on printed pages 34–50 use one label axis and one content x. A
 | 31 | Pass | `2.2 使用 LangChain 运行提示词` stays with the section index. The shell sample under it is English. The following prose is Chinese. |
 | 32 | Pass | Running head is `第2章 以编程方式执行提示词`. Body opens in Chinese. The `➥` shell lines stay English and share the code baseline. |
 | 33 | Pass | `2.3 提示模板`. The monospace aqueduct sample stays English. The prose around it is Chinese. |
-| 34 | Pass | `说明：` and `文本：` share the right edge x=111.2. The headphone sentence and the answer start at x=117.2. The 22pt quote is x=102.2–112.3 and does not touch `文本应被归类`. |
-| 35 | Pass | `说明：` / `文本：` / `输出：` share x=120.2. `科技` and `历史` start at x=126.2, clear of the quote at x=111.2–121.3. The Julius line is one run, x=126.2–450.4. The gap after `现在` is about 13pt. |
+| 34 | Pass | `说明` and `文本` share the right edge x=111.2, box height 7.25, no colon. The headphone sentence and the answer start at x=117.2. The quote is x=102.2–112.3 and does not touch `文本应被归类`. |
+| 35 | Pass | `说明` / `文本` / `输出` / `指令` share x=120.2. `科技`, `历史`, `中立`, and `顾客买了一条绿色的裙子` start at x=126.2, clear of the quote at x=111.2–121.3. The third example’s label is `文本`, not `文字`. The Julius line is one run, x=126.2–450.4. `股票1：`, `股票2：`, and `股票3：` are three lines at x=126.2. |
 | 36 | Pass | The sentiment table inside the sample stays English. The `OUTPUT` lead is translated with the sentence. |
 | 37 | Pass | The Rolex bullets are one gold square at x=126.2, size 8.46. The words share the hanging indent. |
 | 38 | Pass | The sample paragraphs are Chinese. No leftover English body. |
-| 39 | Pass | Title-case `Text` paints as `文本：` ending at x=120.1, with `Java` at x=126.2. The answer quote stays at x=111.2 and is not repeated inside `1、4、64、和`. |
-| 40 | Pass | Caption `表 2.1 提示词类型及示例` is Chinese. The example column stays English, including the Rolex and Omega bullets. `2.5 详细推理` shares the heading baseline. The one-shot block is `指令：` and `示例：` at the source indent. |
+| 39 | Pass | Title-case `Text` paints as `文本` ending at x=120.1, with `Java` at x=126.2. The answer quote stays at x=111.2 and is not repeated inside `1、4、64、和`. |
+| 40 | Pass | Caption `表 2.1 提示词类型及示例` is Chinese. The example column stays English, including the Rolex and Omega bullets. `2.5 详细推理` shares the heading baseline. The one-shot block is hanging `指令` and `示例` (no colon) ending at x=111.1, body at x=117.2. |
 | 41 | Pass | `2.5.2 双样本学习` shares the heading baseline. The revised prompt discussion is Chinese. |
 | 42 | Pass | The palindrome example is Chinese. The code fence, where present, stays English. |
 | 43 | Pass | ChatGPT’s reply in the sample is Chinese. The page does not open with a leftover English sentence. |
@@ -63,7 +67,7 @@ Prompt examples on printed pages 34–50 use one label axis and one content x. A
 | 46 | Pass | `2.5.6 思维链` shares the heading baseline. The CoT explanation is Chinese. |
 | 47 | Pass | Table 2.2 cells stay English. The shaded box is Chinese: `超越思维链`, then 思维树 and 思维线程, with the arXiv URL intact. |
 | 48 | Pass | `(续)` continues the box in Chinese. The ThoT bullet is 思维线程, not 思维链. The list marks in the body lists share x and size within each list. |
-| 49 | Pass | `2.6 提示结构`. The structure bullets are one gold square. |
+| 49 | Pass | `2.6 提示结构`. `角色设定`, `背景`, `输入`, `语气`, and `输出格式` share the right edge x=120.2 (height 7.25, no colon). `请以两段形式呈现文本，每段均为5行。` starts at x=126.2. The structure bullets are one gold square. |
 | 50 | Pass | The sample tags are whole tokens: `<指令>`, `<输入>`, `<语气>`, `<输出格式>`. The seven link bullets are the same Wingdings mark at x=108.8, size 8.46. `Summary` is not glued onto the GitHub URL. |
 | 51 | Pass | `摘要` is the chapter close. Every summary bullet is the same mark at x=117.8. |
 | 52 | Pass | Running head only, plus the license line. |

@@ -1822,6 +1822,7 @@ pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String 
     // the English word, or glues `定义` onto the term without the colon.
     text = gloss_run_in_label(source, &text);
     text = normalize_prompt_sample(source, &text);
+    text = unify_enumerated_item_heads(&text);
     let source_end = source.trim_end();
     if source_end.ends_with("user") && !source.to_ascii_lowercase().contains("request") {
         text = text.replace("用户请求", "用户");
@@ -1933,7 +1934,11 @@ pub(crate) fn normalize_prompt_sample(source: &str, translated: &str) -> String 
     for alias in aliases {
         if let Some(rest) = strip_han_prompt_label(&body, alias) {
             body = rest.to_string();
-            label = alias;
+            // `TEXT` is one glossary term. `说明` and `指令` both occur on the
+            // same page, so an instruction keeps the word the model chose.
+            if han != "文本" {
+                label = alias;
+            }
             break;
         }
     }
@@ -2032,6 +2037,67 @@ fn strip_han_prompt_label<'a>(text: &'a str, alias: &str) -> Option<&'a str> {
 
 fn is_han_prompt(ch: char) -> bool {
     ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+}
+
+/// `股票 2:` and `股票1：` are the same item head. The painted form is
+/// `股票2：` (no space, full-width colon), matching the first stock line.
+pub(crate) fn unify_enumerated_item_heads(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(next) = stock_item_head(&chars, index) {
+            let digits: String = chars[next.digits_at..next.digits_end].iter().collect();
+            out.push_str("股票");
+            out.push_str(&digits);
+            out.push('：');
+            index = next.after;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+struct StockHead {
+    digits_at: usize,
+    digits_end: usize,
+    after: usize,
+}
+
+/// `股票`, optional space, digits, optional space, then a colon.
+fn stock_item_head(chars: &[char], index: usize) -> Option<StockHead> {
+    if chars.get(index) != Some(&'股') || chars.get(index + 1) != Some(&'票') {
+        return None;
+    }
+    let mut cursor = index + 2;
+    while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+        cursor += 1;
+    }
+    let digits_at = cursor;
+    while chars.get(cursor).is_some_and(|ch| ch.is_ascii_digit()) {
+        cursor += 1;
+    }
+    if cursor == digits_at {
+        return None;
+    }
+    let digits_end = cursor;
+    while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+        cursor += 1;
+    }
+    if !matches!(chars.get(cursor), Some('：' | ':' | '﹕')) {
+        return None;
+    }
+    cursor += 1;
+    while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+        cursor += 1;
+    }
+    Some(StockHead {
+        digits_at,
+        digits_end,
+        after: cursor,
+    })
 }
 
 /// A run of six or more source words left inside a Chinese sentence is the
@@ -3983,6 +4049,12 @@ mod tests {
         );
         assert!(text.starts_with("文本：耳机"), "{text}");
         assert!(!text.contains("TEXT"), "{text}");
+        let dress = repair_body_translation(
+            "TEXT The customer bought a green dress",
+            "文字顾客买了一条绿色的裙子",
+        );
+        assert!(dress.starts_with("文本：顾客"), "{dress}");
+        assert!(!dress.contains("文字"), "{dress}");
         let instruction = repair_body_translation(
             "INSTRUCTION Classify the following text into one of these categories: history, tech, gardening.",
             "说明：将以下文本归类到其中一个类别：历史、科技、园艺。",
@@ -4010,6 +4082,25 @@ mod tests {
         assert_eq!(
             repair_body_translation("</Input> <Tone>", "</Input> <Tone>"),
             "</输入> <语气>"
+        );
+        let stocks = repair_body_translation(
+            "Stock 2: Nvidia: sales are being propelled Stock 3: GX oil: demand is dropping",
+            "股票 2: 英伟达：销售额正受到推动 股票 3: GX石油：需求正在下降",
+        );
+        assert!(
+            stocks.contains("股票2：英伟达") && stocks.contains("股票3：GX石油"),
+            "{stocks}"
+        );
+        assert!(
+            !stocks.contains("股票 2") && !stocks.contains("股票 3"),
+            "{stocks}"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "Stock 1: Apple: the launch of the new iPhone has been a success",
+                "股票1：苹果：新款iPhone的发布取得了成功",
+            ),
+            "股票1：苹果：新款iPhone的发布取得了成功"
         );
     }
 

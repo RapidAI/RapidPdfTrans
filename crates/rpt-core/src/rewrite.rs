@@ -7515,7 +7515,7 @@ fn close_column_holes(
                 // margin. Both are still the same listing.
                 // An indented code continuation starts well to the right of
                 // the line above it. A prompt label hangs to the left of the
-                // paragraph it follows (`说明：` at 74, `现在…` at 120).
+                // paragraph it follows (`说明` at 74, `现在…` at 120).
                 // Left edges differ; the column is the overlapping span.
                 let same_column = blocks_share_column(prev, &block, size);
                 // A shorter paragraph used to leave the next block on the
@@ -8936,15 +8936,33 @@ fn run_in_label(ink: &[InkLine<'_>]) -> Option<RunIn> {
     let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
     sizes.sort_by(|left, right| left.total_cmp(right));
     let body = sizes[sizes.len() * 3 / 4].max(1.0);
-    let mut at = None;
-    for index in 1..glyphs.len().min(24) {
-        let prev = glyphs[index - 1];
-        // Word spacing on `Text Java` is stored in the last letter's advance,
-        // so the visual edge is the ink. A blank still uses the advance.
-        let prev_right = glyph_ink_right(prev);
-        let gap = glyphs[index].matrix[4] - prev_right;
-        if gap > body * 0.45 {
-            at = Some(index);
+    // `OUTPUT FORMAT` has a word space before the body gap. Take the longest
+    // known label so that space does not become the split.
+    let mut at = known_run_in_end(&glyphs, body);
+    if at.is_none() {
+        at = hanging_gap_end(&glyphs, body);
+    }
+    // A long label can sit almost against the body. The body is then the
+    // full-size letter after the small caps.
+    if at.is_none() {
+        let mut seen_small = false;
+        for index in 1..glyphs.len().min(24) {
+            let size = glyphs[index].font_size;
+            if size <= body * 0.85 {
+                seen_small = true;
+                continue;
+            }
+            if !seen_small || size < body * 0.9 {
+                continue;
+            }
+            let word: String = glyphs[..index]
+                .iter()
+                .flat_map(|glyph| glyph.unicode.chars())
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .collect();
+            if known_prompt_label(&word) {
+                at = Some(index);
+            }
             break;
         }
     }
@@ -9058,22 +9076,89 @@ fn shared_prompt_axis(extraction: &Extraction, page: u32, run: &RunIn) -> Prompt
 
 fn known_prompt_label(word: &str) -> bool {
     let upper = word.to_ascii_uppercase();
-    matches!(
-        upper.as_str(),
-        "INSTRUCTION"
-            | "TEXT"
-            | "OUTPUT"
-            | "EXAMPLE"
-            | "PERSONA"
-            | "CONTEXT"
-            | "INPUT"
-            | "TONE"
-            | "OUTPUTFORMAT"
-    )
+    prompt_label_names().iter().any(|label| *label == upper)
 }
 
-/// Labels share the source small-caps right edge. The colon is full-width
-/// on every label, and the prose stays at the source body x.
+fn prompt_label_names() -> &'static [&'static str] {
+    &[
+        "OUTPUTFORMAT",
+        "INSTRUCTION",
+        "EXAMPLE",
+        "PERSONA",
+        "CONTEXT",
+        "OUTPUT",
+        "INPUT",
+        "TEXT",
+        "TONE",
+    ]
+}
+
+/// Longest known label at the start of the line, when a gap or a small-caps
+/// size step shows that the next glyph is the body.
+fn known_run_in_end(glyphs: &[&Glyph], body: f32) -> Option<usize> {
+    let mut letters = String::new();
+    let mut best = None;
+    for (index, glyph) in glyphs.iter().enumerate().take(22) {
+        let extra: String = glyph
+            .unicode
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .collect();
+        if extra.is_empty() {
+            continue;
+        }
+        let next = format!("{letters}{extra}");
+        let upper = next.to_ascii_uppercase();
+        let extends = prompt_label_names()
+            .iter()
+            .any(|label| label.starts_with(&upper));
+        if !extends {
+            break;
+        }
+        letters = next;
+        if known_prompt_label(&letters) {
+            best = Some(index + 1);
+        }
+    }
+    let mut at = best?;
+    while at < glyphs.len()
+        && !glyphs[at]
+            .unicode
+            .chars()
+            .any(|ch| ch.is_ascii_alphabetic())
+    {
+        at += 1;
+    }
+    if at >= glyphs.len() || at < 3 {
+        return None;
+    }
+    let prev_right = glyph_ink_right(glyphs[at - 1]);
+    let gap = glyphs[at].matrix[4] - prev_right;
+    let size_step = glyphs[at].font_size >= body * 0.9 && glyphs[at - 1].font_size <= body * 0.85;
+    if gap > body * 0.15 || size_step {
+        Some(at)
+    } else {
+        None
+    }
+}
+
+fn hanging_gap_end(glyphs: &[&Glyph], body: f32) -> Option<usize> {
+    for index in 1..glyphs.len().min(24) {
+        let prev_right = glyph_ink_right(glyphs[index - 1]);
+        let gap = glyphs[index].matrix[4] - prev_right;
+        if gap > body * 0.45 {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// Source small caps are 7.6pt beside 9.5pt body. Chinese has no small-caps
+/// face, so the label is the same sans at this fraction of the sample size.
+const PROMPT_LABEL_SCALE: f32 = 0.85;
+
+/// Labels share the source small-caps right edge. The source draws no colon
+/// after the label, and the prose stays at the source body x.
 fn fit_run_in_label(
     label: &str,
     column: &PromptColumn,
@@ -9084,13 +9169,9 @@ fn fit_run_in_label(
     let stem = label
         .trim()
         .trim_end_matches(['：', ':', '﹕', ' ', '\u{00A0}']);
-    let text = if stem.chars().any(is_han_char) {
-        format!("{stem}：")
-    } else {
-        stem.to_string()
-    };
+    let text = stem.to_string();
     let margin = 40.0f32;
-    let mut paint = size;
+    let mut paint = (size * PROMPT_LABEL_SCALE).max(1.0);
     let place = |paint: f32| -> f32 {
         let width = measure(&text, paint, font);
         if column.right_aligned {
@@ -10003,6 +10084,16 @@ fn superscript_mask(text: &str) -> Vec<bool> {
         // `第4章`, `第4 章`, `第1–2章`, and `章节3–5` are body text.
         // `张轩1` has no Han after it and is not a range.
         if han_wraps_number(&chars, start, index) || chapter_range_digit(&chars, start) {
+            continue;
+        }
+        // `股票2：` is an item head. The digit sits between Han and a colon,
+        // so it is not the affiliation mark `张轩1`.
+        if start > 0
+            && is_han_char(chars[start - 1])
+            && chars
+                .get(index)
+                .is_some_and(|ch| matches!(ch, '：' | ':' | '﹕'))
+        {
             continue;
         }
         let prev = start.checked_sub(1).map(|slot| chars[slot]);
@@ -11111,6 +11202,8 @@ mod tests {
         assert!(cjk[2] && cjk[4], "{cjk:?}");
         let chapter = superscript_mask("第4章从线性链过渡");
         assert!(chapter.iter().all(|flag| !flag), "{chapter:?}");
+        let stocks = superscript_mask("股票2：英伟达股票3：GX石油");
+        assert!(stocks.iter().all(|flag| !flag), "{stocks:?}");
         let spaced = superscript_mask("第4 章构建");
         assert!(spaced.iter().all(|flag| !flag), "{spaced:?}");
         let range = superscript_mask("第1–2章概述");
@@ -16906,13 +16999,72 @@ ET",
         (right - left).max(0.0) * (top - bottom).max(0.0)
     }
 
-    fn margin_colon_rights(painted: &Extraction) -> Vec<f32> {
-        painted
+    fn hanging_label_rights(painted: &Extraction, body_x: f32) -> Vec<f32> {
+        let mut rows: Vec<Vec<&Glyph>> = Vec::new();
+        for glyph in &painted.glyphs {
+            if !glyph.unicode.chars().any(is_han_char) {
+                continue;
+            }
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|row| (row[0].matrix[5] - glyph.matrix[5]).abs() < 1.5)
+            {
+                row.push(glyph);
+            } else {
+                rows.push(vec![glyph]);
+            }
+        }
+        let mut rights = Vec::new();
+        for mut row in rows {
+            row.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+            let mut label_right = None;
+            for glyph in row {
+                if glyph.matrix[4] >= body_x - 1.5 {
+                    break;
+                }
+                let right = glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]);
+                if right >= body_x - 1.0 {
+                    label_right = None;
+                    break;
+                }
+                label_right = Some(right);
+            }
+            if let Some(right) = label_right {
+                rights.push(right);
+            }
+        }
+        rights
+    }
+
+    fn assert_prompt_labels_have_no_colon(painted: &Extraction, body_x: f32) {
+        let colon = painted.glyphs.iter().find(|glyph| {
+            matches!(glyph.unicode.as_str(), "：" | ":") && glyph.matrix[4] < body_x - 1.0
+        });
+        assert!(
+            colon.is_none(),
+            "prompt label painted a colon at x={:.1}",
+            colon.map(|glyph| glyph.matrix[4]).unwrap_or(0.0)
+        );
+    }
+
+    fn assert_label_smaller_than_body(painted: &Extraction, label: &str, body: &str) {
+        let label_size = painted
             .glyphs
             .iter()
-            .filter(|glyph| glyph.unicode == "：" && glyph.matrix[4] < 116.0)
-            .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
-            .collect()
+            .filter(|glyph| glyph.unicode == label)
+            .min_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]))
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .font_size;
+        let body_size = painted
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == body)
+            .unwrap_or_else(|| panic!("missing {body}"))
+            .font_size;
+        assert!(
+            label_size < body_size * 0.92 && label_size > body_size * 0.75,
+            "label {label_size:.2} is not slightly smaller than body {body_size:.2}"
+        );
     }
 
     #[test]
@@ -16979,20 +17131,14 @@ ET",
             (example_body - body_x).abs() < 2.0,
             "sample bodies do not share an x: {body_x:.1} vs {example_body:.1}"
         );
-        let colon_rights = margin_colon_rights(&painted);
+        assert_prompt_labels_have_no_colon(&painted, body_x);
+        assert_label_smaller_than_body(&painted, "指", "求");
+        let rights = hanging_label_rights(&painted, body_x);
+        let span = rights.iter().copied().fold(0.0f32, f32::max)
+            - rights.iter().copied().fold(f32::MAX, f32::min);
         assert!(
-            colon_rights.len() >= 2,
-            "prompt labels lost the full-width colon: {colon_rights:?}"
-        );
-        let colon_span = colon_rights.iter().copied().fold(0.0f32, f32::max)
-            - colon_rights.iter().copied().fold(f32::MAX, f32::min);
-        assert!(
-            colon_span < 1.5,
-            "label colons are not on one axis: {colon_rights:?}"
-        );
-        assert!(
-            colon_rights.iter().all(|right| *right < body_x - 2.0),
-            "colon crossed the body: {colon_rights:?} body {body_x:.1}"
+            rights.len() >= 2 && span < 1.5,
+            "label edges are not on one axis: {rights:?}"
         );
         assert_no_glyph_overlap(&painted);
     }
@@ -17170,17 +17316,16 @@ ET",
             "example body started at {body_x:.1}"
         );
         assert!(body_x > label_x + 8.0, "label and body collapsed");
-        let colon_rights = margin_colon_rights(&painted);
+        assert_prompt_labels_have_no_colon(&painted, body_x);
+        assert_label_smaller_than_body(&painted, "文", "耳");
+        let rights = hanging_label_rights(&painted, body_x);
         assert!(
-            colon_rights.len() >= 2,
-            "说明 and 文本 need full-width colons, got {colon_rights:?}"
+            rights.len() >= 2,
+            "说明 and 文本 should both hang: {rights:?}"
         );
-        let colon_span = colon_rights.iter().copied().fold(0.0f32, f32::max)
-            - colon_rights.iter().copied().fold(f32::MAX, f32::min);
-        assert!(
-            colon_span < 1.5,
-            "说明 and 文本 colons are not on one axis: {colon_rights:?}"
-        );
+        let span = rights.iter().copied().fold(0.0f32, f32::max)
+            - rights.iter().copied().fold(f32::MAX, f32::min);
+        assert!(span < 1.5, "说明 and 文本 are not on one axis: {rights:?}");
         assert_no_glyph_overlap(&painted);
     }
 
@@ -17193,16 +17338,21 @@ ET",
             axis: 111.0,
             text_x: 117.0,
         };
-        let (instruction, _, instruction_x) = fit_run_in_label("说明", &column, 117.0, 9.0, &font);
-        let (text, _, text_x) = fit_run_in_label("文本", &column, 117.0, 9.0, &font);
-        assert!(instruction.ends_with('：'), "{instruction}");
-        assert!(text.ends_with('：'), "{text}");
-        assert!(!instruction.contains(':') && !text.contains(':'));
-        let instruction_right = instruction_x + measure(&instruction, 9.0, &font);
-        let text_right = text_x + measure(&text, 9.0, &font);
+        let (instruction, instruction_size, instruction_x) =
+            fit_run_in_label("说明：", &column, 117.0, 9.0, &font);
+        let (text, text_size, text_x) = fit_run_in_label("文本", &column, 117.0, 9.0, &font);
+        assert_eq!(instruction, "说明");
+        assert_eq!(text, "文本");
+        assert!(
+            (instruction_size - 9.0 * PROMPT_LABEL_SCALE).abs() < 0.05,
+            "label size {instruction_size} is not the small-caps analog"
+        );
+        assert!((text_size - instruction_size).abs() < 0.05);
+        let instruction_right = instruction_x + measure(&instruction, instruction_size, &font);
+        let text_right = text_x + measure(&text, text_size, &font);
         assert!(
             (instruction_right - 111.0).abs() < 0.2 && (text_right - instruction_right).abs() < 0.2,
-            "colons at {instruction_right:.2} and {text_right:.2}"
+            "label edges at {instruction_right:.2} and {text_right:.2}"
         );
         assert!(instruction_right < 117.0 - 2.0);
     }
@@ -17313,7 +17463,7 @@ ET",
             vec![1, 2],
         );
         body.widths = vec![8.0; body.text.chars().count()];
-        let mut label = test_draw(74.0, 310.0, size, "说明：", vec![10]);
+        let mut label = test_draw(74.0, 310.0, size, "说明", vec![10]);
         label.widths = vec![8.0; label.text.chars().count()];
         let mut prose = test_draw(126.0, 310.0, size, "将以下文本归类到其中一个类别", vec![10]);
         prose.widths = vec![8.0; prose.text.chars().count()];
@@ -17321,7 +17471,7 @@ ET",
         answer.widths = vec![8.0; answer.text.chars().count()];
         let mut drawn = vec![body, label, prose, answer];
         let shifts = close_column_holes(&mut drawn, &extraction, &by_id);
-        let label_y = drawn.iter().find(|item| item.text == "说明：").unwrap().y;
+        let label_y = drawn.iter().find(|item| item.text == "说明").unwrap().y;
         assert!(
             label_y > 310.0 + 8.0,
             "the hanging label stayed on the English baseline at y={label_y}"
@@ -17493,20 +17643,22 @@ ET",
             (java_x - 126.0).abs() < 4.0,
             "Java left the source body x: {java_x:.1}"
         );
-        let colon_rights = margin_colon_rights(&painted);
+        assert_prompt_labels_have_no_colon(&painted, java_x);
+        assert_label_smaller_than_body(&painted, "令", "把");
+        let rights = hanging_label_rights(&painted, java_x);
         assert!(
-            colon_rights.len() >= 2,
-            "指令 and 文本 need colons, got {colon_rights:?}"
+            rights.len() >= 2,
+            "指令 and 文本 should both hang: {rights:?}"
         );
-        let colon_span = colon_rights.iter().copied().fold(0.0f32, f32::max)
-            - colon_rights.iter().copied().fold(f32::MAX, f32::min);
+        let span = rights.iter().copied().fold(0.0f32, f32::max)
+            - rights.iter().copied().fold(f32::MAX, f32::min);
         assert!(
-            colon_span < 1.5,
-            "title-case 文本 is not on the label axis: {colon_rights:?}"
+            span < 1.5,
+            "title-case 文本 is not on the label axis: {rights:?}"
         );
         assert!(
-            colon_rights.iter().all(|right| *right < java_x - 2.0),
-            "colon crossed Java: {colon_rights:?} java {java_x:.1}"
+            rights.iter().all(|right| *right < java_x - 2.0),
+            "label crossed Java: {rights:?} java {java_x:.1}"
         );
         let class_x = class_x.expect("分类");
         let class_label = class_label.expect("文本分类");
@@ -17514,6 +17666,94 @@ ET",
             (class_x - class_label).abs() < 12.0,
             "Text classification was split into a hanging label: 文 {class_label:.1} 分 {class_x:.1}"
         );
+        assert_no_glyph_overlap(&painted);
+    }
+
+    #[test]
+    fn output_format_stays_a_label_when_it_touches_the_body() {
+        // FORMAT ends 2pt before Present. A gap test misses it; the small-caps
+        // size change is what marks the label.
+        let bytes = contents_pdf_named(
+            b"BT \
+/F1 9.5 Tf 1 0 0 1 66 400 Tm (O) Tj \
+/F1 7.6 Tf 1 0 0 1 72 400 Tm (UTPUT FORMAT) Tj \
+/F1 9.5 Tf 1 0 0 1 120 400 Tm (Present the text in two paragraphs.) Tj \
+ET",
+            "FranklinGothic-Book",
+        );
+        let painted = paint_translation(&bytes, &[(0, "输出格式：请以两段形式呈现文本。".into())]);
+        let mut label_right = 0.0f32;
+        let mut body_x = None;
+        let mut label_size = None;
+        let mut body_size = None;
+        for glyph in &painted.glyphs {
+            if glyph.unicode == "式" && glyph.font_size < 8.0 {
+                label_right = label_right.max(glyph.bbox[0].max(glyph.bbox[2]));
+                label_size = Some(glyph.font_size);
+            }
+            if glyph.unicode == "请" {
+                body_x = Some(glyph.matrix[4]);
+                body_size = Some(glyph.font_size);
+            }
+            if glyph.unicode == "：" && glyph.matrix[4] < 130.0 {
+                panic!("输出格式 painted a colon at x={:.1}", glyph.matrix[4]);
+            }
+        }
+        let body_x = body_x.expect("missing body");
+        assert!(
+            (body_x - 120.0).abs() < 4.0,
+            "body left the source x: {body_x:.1}"
+        );
+        assert!(
+            label_right < body_x - 1.5,
+            "label right {label_right:.1} crossed the body at {body_x:.1}"
+        );
+        let (label_size, body_size) = (label_size.unwrap(), body_size.unwrap());
+        assert!(
+            label_size < body_size * 0.92,
+            "label {label_size:.2} is not smaller than body {body_size:.2}"
+        );
+        assert_no_glyph_overlap(&painted);
+    }
+
+    #[test]
+    fn stock_reports_keep_one_line_per_item() {
+        let first = "Stock 2: Nvidia: sales are being propelled by consumer demand on large language models.";
+        let second =
+            "Stock 3: GX oil: demand of carbon based energy is dropping thanks to renewable sources.";
+        let content = format!(
+            "BT \
+/F1 9.5 Tf 1 0 0 1 126 400 Tm ({first}) Tj \
+/F1 9.5 Tf 1 0 0 1 126 386 Tm ({second}) Tj \
+ET"
+        );
+        let bytes = contents_pdf_named(content.as_bytes(), "FranklinGothic-Book");
+        let painted = paint_translation(
+            &bytes,
+            &[(
+                0,
+                "股票 2: 英伟达：销售额正受到大语言模型消费者需求的推动 股票 3: GX石油：得益于可再生能源的增长，碳基能源的需求正在下降"
+                    .into(),
+            )],
+        );
+        let mut heads: Vec<(f32, f32)> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "股")
+            .map(|glyph| (glyph.matrix[4], glyph.matrix[5]))
+            .collect();
+        heads.sort_by(|left, right| right.1.total_cmp(&left.1));
+        assert_eq!(heads.len(), 2, "stock heads: {heads:?}");
+        assert!(
+            (heads[0].1 - heads[1].1).abs() > 8.0,
+            "股票2 and 股票3 share a line: {heads:?}"
+        );
+        assert!(
+            heads.iter().all(|(x, _)| (*x - 126.0).abs() < 4.0),
+            "an item left the source x: {heads:?}"
+        );
+        let ascii_colon = painted.glyphs.iter().any(|glyph| glyph.unicode == ":");
+        assert!(!ascii_colon, "a stock head kept an ASCII colon");
         assert_no_glyph_overlap(&painted);
     }
 
