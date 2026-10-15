@@ -25,9 +25,10 @@ use crate::extract::Extraction;
 use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSources, SubsetFont};
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
-    char_widths, cids_of, cjk_indent_ems, fit_cjk_block, heading_level, is_cjk_body, justify_gaps,
-    justify_wrapped_line, measure, pack_into_slots, pack_narrow_tail, prompt_line_is_full,
-    scale_for_heading, spread_to_lines, wrap_text, CjkMeasure, HeadingLevel, LineSlots,
+    char_widths, cids_of, cjk_indent_ems, fit_cjk_block_with, heading_level, is_cjk_body,
+    justify_gaps, justify_wrapped_line, measure, pack_into_slots, pack_narrow_tail,
+    prompt_line_is_full, scale_for_heading, spread_to_lines, wrap_text, CjkMeasure, HeadingLevel,
+    LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
@@ -6045,9 +6046,10 @@ fn layout_segment(
         body_text.as_str()
     } else if let Some(lead) = callout.as_ref() {
         if let Some((label, rest)) = split_callout_han(text) {
-            let gap = (lead.text_x - block_left).max(0.0);
-            let scale = scale_for_heading(HeadingLevel::Body, source_size, metrics).max(0.5);
-            indent_ems = gap / (source_size * scale).max(1.0);
+            // The body starts at the source x beside the label. Later lines
+            // use the callout's left edge. The offset is in points, so a
+            // smaller size does not slide the first line back under 注意.
+            indent_ems = 0.0;
             callout_paint = Some((label, lead.label_color.clone(), lead.label_x));
             body_text = rest;
         } else {
@@ -6078,9 +6080,13 @@ fn layout_segment(
         }
     }
     let scale = scale_for_heading(level, source_size, metrics);
+    let callout_indent = callout.as_ref().and_then(|lead| {
+        callout_paint.as_ref()?;
+        Some((lead.text_x - block_left).max(0.0))
+    });
     let fit_box = |left: f32, right: f32| {
         let width = (right - left).max(source_size);
-        fit_cjk_block(
+        fit_cjk_block_with(
             text,
             source_size,
             scale,
@@ -6089,6 +6095,7 @@ fn layout_segment(
             available,
             font,
             metrics,
+            callout_indent,
         )
     };
     let (block_left, block_right, lines, mut size, leading, indent) =
@@ -6231,7 +6238,13 @@ fn layout_segment(
             // actually fills the measure is squared. An item that owns the
             // whole line (`股票2：` before `股票3：`) never is.
             let mut justify = justify_wrapped_line(&lines, index);
-            if prompt_sample && !prompt_line_is_full(line, size, limit, font) {
+            // A prompt line, and a callout line, is justified only when the
+            // slack fits inside the 0.15em cap. Stretching a short line up
+            // to that cap letter-spaces `请注意，在完整的《白鲸》` without
+            // reaching the margin.
+            if (prompt_sample || callout_paint.is_some())
+                && !prompt_line_is_full(line, size, limit, font)
+            {
                 justify = false;
             }
             let line = line.clone();
@@ -9103,7 +9116,12 @@ fn callout_lead_ink(ink: &[InkLine<'_>]) -> Option<CalloutLead> {
     if !is_callout_word(&word) || split >= glyphs.len() {
         return None;
     }
-    let text_x = glyphs[split].matrix[4];
+    // The gap after `NOTE` is often a space glyph. The sentence starts at
+    // the first word, not at that space.
+    let body = glyphs[split..]
+        .iter()
+        .find(|glyph| glyph.unicode.chars().any(|ch| !ch.is_whitespace()))?;
+    let text_x = body.matrix[4];
     let label_x = glyphs
         .iter()
         .map(|glyph| glyph.matrix[4])
@@ -9116,7 +9134,7 @@ fn callout_lead_ink(ink: &[InkLine<'_>]) -> Option<CalloutLead> {
         .find(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
         .map(|glyph| glyph.fill_color.clone())
         .unwrap_or_else(Color::black);
-    let body_color = glyphs[split].fill_color.clone();
+    let body_color = body.fill_color.clone();
     let label_size = glyphs[..split]
         .iter()
         .map(|glyph| glyph.font_size)
@@ -9144,13 +9162,23 @@ fn callout_word_prefix(word: &str) -> bool {
 }
 
 /// `定义：正文` keeps the colon on the label. The body is what gets reflowed.
+/// `请注意，正文` is the same label: `请` and the comma are not part of the body.
 fn split_callout_han(text: &str) -> Option<(String, String)> {
     let trimmed = text.trim_start();
+    let peeled = trimmed
+        .strip_prefix('请')
+        .map(str::trim_start)
+        .filter(|rest| {
+            ["定义", "注意", "警告", "提示"]
+                .iter()
+                .any(|han| rest.starts_with(han))
+        })
+        .unwrap_or(trimmed);
     for han in ["定义", "注意", "警告", "提示"] {
-        let Some(rest) = trimmed.strip_prefix(han) else {
+        let Some(rest) = peeled.strip_prefix(han) else {
             continue;
         };
-        let rest = rest.trim_start_matches(['：', ':', '﹕', ' ', '\u{00A0}']);
+        let rest = rest.trim_start_matches(['：', ':', '﹕', '，', ',', ' ', '\u{00A0}']);
         if rest.is_empty() {
             return None;
         }
@@ -17626,6 +17654,137 @@ ET",
                 "一个|词 across pages: {left:?} | {right:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_note_callout_puts_the_label_at_the_source_x_and_does_not_letter_space() {
+        let (label, body) = split_callout_han("请注意，在完整的《白鲸》文本上运行。").unwrap();
+        assert_eq!(label, "注意：");
+        assert_eq!(body, "在完整的《白鲸》文本上运行。");
+        assert!(split_callout_han("注意，创建结构良好的提示词。")
+            .unwrap()
+            .1
+            .starts_with("创建"));
+
+        let blue = Color::rgb(0.2, 0.35, 0.55);
+        let gray = Color::gray(0.2);
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut place =
+            |glyphs: &mut Vec<Glyph>, x: f32, y: f32, size: f32, text: &str, color: &Color| {
+                let mut cursor = x;
+                for ch in text.chars() {
+                    let width = size * 0.48;
+                    let mut glyph = ink_glyph(id, cursor, y, size, &ch.to_string());
+                    glyph.fill_color = color.clone();
+                    glyph.bbox = [cursor, y - 2.0, cursor + width, y + size * 0.75];
+                    glyph.advance = [width, 0.0];
+                    glyphs.push(glyph);
+                    id += 1;
+                    cursor += width;
+                }
+                cursor
+            };
+        // NOTE sits in the margin. The sentence starts 10pt later, under the
+        // column-gap trigger, and wrapped lines come back to the label edge.
+        place(&mut glyphs, 114.0, 560.0, 8.0, "NOTE", &blue);
+        let text_x = 140.0f32;
+        // A space in the label gap must not become the body x.
+        let _ = place(&mut glyphs, 132.0, 560.0, 10.0, " ", &gray);
+        let _ = place(
+            &mut glyphs,
+            text_x,
+            560.0,
+            10.0,
+            "Keep in mind that running this sample gets expensive today indeed",
+            &gray,
+        );
+        for y in [546.0, 532.0, 518.0] {
+            let _ = place(
+                &mut glyphs,
+                114.0,
+                y,
+                10.0,
+                "the following line of this note stays flush with the label edge",
+                &gray,
+            );
+        }
+        let text = "请注意，在完整的《白鲸》文本上运行代码可能会比较昂贵。提供的 MobyDickFileNameIsLong 文件很短所以这一段还要继续写完几行说明。";
+        let mut cmap = std::collections::HashMap::new();
+        for (cid, ch) in (1u16..).zip(text.chars()) {
+            cmap.insert(ch as u32, (cid, 1000));
+        }
+        let font = crate::font::SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: cmap,
+        };
+        let extraction = Extraction {
+            coordinate_space: "pdf",
+            pages: Vec::new(),
+            glyphs: Vec::new(),
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let drawn = layout_segment(
+            &refs,
+            text,
+            &font,
+            &extraction,
+            false,
+            "F",
+            0.0,
+            CjkMeasure::resolve(0.90, 1.60),
+        )
+        .expect("note callout lays out");
+        let label = drawn
+            .iter()
+            .find(|line| line.text.starts_with("注意"))
+            .expect("label");
+        assert_eq!(label.color, blue);
+        assert!((label.x - 114.0).abs() < 1.0, "label x {}", label.x);
+        let body: Vec<_> = drawn
+            .iter()
+            .filter(|line| !line.text.starts_with("注意"))
+            .collect();
+        assert!(body.len() >= 2, "callout kept {} lines", body.len());
+        assert!(
+            (body[0].x - 140.0).abs() < 1.5,
+            "body x {} text {}",
+            body[0].x,
+            body[0].text
+        );
+        assert_eq!(body[0].color, gray);
+        assert!(
+            !body[0].text.starts_with('请') && !body[0].text.starts_with("注意"),
+            "label stayed in the body: {}",
+            body[0].text
+        );
+        for line in body.iter().skip(1) {
+            assert_eq!(line.color, gray);
+            assert!(
+                (line.x - 114.0).abs() < 1.5,
+                "continuation indent x={} text={}",
+                line.x,
+                line.text
+            );
+        }
+        let cap = body[0].size * 0.15 + 0.02;
+        for line in &body {
+            assert!(
+                line.gaps.iter().all(|gap| *gap <= cap),
+                "gap exceeded {cap:.2} on {}: {:?}",
+                line.text,
+                line.gaps
+            );
+        }
+        assert!(
+            body[0].gaps.iter().all(|gap| *gap == 0.0),
+            "short note line was letter-spaced: {} {:?}",
+            body[0].text,
+            body[0].gaps
+        );
     }
 
     #[test]

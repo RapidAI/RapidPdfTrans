@@ -348,6 +348,32 @@ pub(crate) fn fit_cjk_block(
     font: &SubsetFont,
     metrics: CjkMeasure,
 ) -> Option<(Vec<String>, f32, f32, f32)> {
+    fit_cjk_block_with(
+        text,
+        source_size,
+        scale,
+        width,
+        indent_ems,
+        available,
+        font,
+        metrics,
+        None,
+    )
+}
+
+/// Like [`fit_cjk_block`], but `fixed_indent` is a point offset that does not
+/// shrink when the type size does. A callout body starts at the source x.
+pub(crate) fn fit_cjk_block_with(
+    text: &str,
+    source_size: f32,
+    scale: f32,
+    width: f32,
+    indent_ems: f32,
+    available: f32,
+    font: &SubsetFont,
+    metrics: CjkMeasure,
+    fixed_indent: Option<f32>,
+) -> Option<(Vec<String>, f32, f32, f32)> {
     let start = (source_size * scale).max(1.0);
     // A paragraph that already fits stays at `start`. A narrow column, or a
     // one-line source, may shrink to 0.62 of the English size before the
@@ -390,7 +416,7 @@ pub(crate) fn fit_cjk_block(
     // does not.
     let mut kept_display: Option<(Vec<String>, f32, f32, f32)> = None;
     loop {
-        let indent = size * indent_ems;
+        let indent = fixed_indent.unwrap_or(size * indent_ems);
         let first_width = (width - indent).max(size * 0.5);
         // A narrow column can need more lines than `wrap_text` will count at
         // the starting size. That is a reason to shrink, not to keep the English.

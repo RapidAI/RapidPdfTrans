@@ -2251,6 +2251,8 @@ fn source_starts_with_label(text: &str, label: &str) -> bool {
 }
 
 /// A leading `DEFINITION` or `NOTE` becomes the Chinese callout label.
+/// `请注意，…` folds the label into the sentence. The label is still `注意：`,
+/// and the comma that followed it is not part of the body.
 fn gloss_run_in_label(source: &str, text: &str) -> String {
     const LABELS: &[(&str, &str)] = &[
         ("definition", "定义"),
@@ -2267,17 +2269,30 @@ fn gloss_run_in_label(source: &str, text: &str) -> String {
         return text.to_string();
     };
     let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix(han) {
-        if rest.starts_with(['：', ':']) {
+    let candidate = trimmed
+        .strip_prefix('请')
+        .map(str::trim_start)
+        .filter(|rest| rest.starts_with(han))
+        .unwrap_or(trimmed);
+    if let Some(rest) = candidate.strip_prefix(han) {
+        let rest = trim_callout_punct(rest);
+        if rest.is_empty() {
             return text.to_string();
         }
         return format!("{han}：{rest}");
     }
     if source_starts_with_label(trimmed, english) {
-        let rest = trimmed[english.len()..].trim_start_matches([':', '：', ' ']);
+        let rest = trim_callout_punct(&trimmed[english.len()..]);
+        if rest.is_empty() {
+            return text.to_string();
+        }
         return format!("{han}：{rest}");
     }
     text.to_string()
+}
+
+fn trim_callout_punct(text: &str) -> &str {
+    text.trim_start_matches(['：', ':', '﹕', '，', ',', ' ', '\u{00A0}'])
 }
 
 /// `如1.2图所示` puts the number before 图. The reading order is 如图1.2.
@@ -4043,6 +4058,24 @@ mod tests {
         );
         assert!(note.starts_with("注意："), "{note}");
         assert!(!note.contains("NOTE"), "{note}");
+        let folded = repair_body_translation(
+            "NOTE Keep in mind that running the code on the full Moby Dick text can get expensive.",
+            "请注意，在完整的《白鲸》文本上运行代码可能会比较昂贵。",
+        );
+        assert_eq!(
+            folded,
+            "注意：在完整的《白鲸》文本上运行代码可能会比较昂贵。"
+        );
+        let comma = repair_body_translation(
+            "NOTE Creating a well-structured prompt with defined sections helps.",
+            "注意，创建结构良好的提示词。",
+        );
+        assert_eq!(comma, "注意：创建结构良好的提示词。");
+        let prose = repair_body_translation(
+            "Please note that the file is shorter.",
+            "请注意，这个文件更短。",
+        );
+        assert_eq!(prose, "请注意，这个文件更短。");
         let text = repair_body_translation(
             "TEXT Headphones provide immersive audio experiences for music lovers and gamers alike.",
             "TEXT耳机为音乐爱好者和游戏玩家提供沉浸式音频体验。",
