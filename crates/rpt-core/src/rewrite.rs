@@ -7639,7 +7639,10 @@ fn expand_stack_placeholders(
         if let Ok(index) = after[..end].parse::<usize>() {
             if index <= 99 {
                 if let Some(ids) = stacks.get(index) {
-                    holes.insert(index, formula_hole_width(ids, glyphs, &by_id, body));
+                    holes.insert(
+                        index,
+                        formula_hole_width(ids, glyphs, &by_id, body, seat_letter_before(&out)),
+                    );
                     out.push_str(&format!("{index:02}"));
                     out.push('\u{3000}');
                     rest = &after[end + '⟧'.len_utf8()..];
@@ -7680,11 +7683,24 @@ fn glyph_paint_right(glyph: &Glyph) -> f32 {
 /// letter before the hole only needs the ink that sticks past that letter.
 /// Reserving the fragment's full width leaves `将 q̂ 视为` and `ν(det Q̂*) =`
 /// with a gap where the accent was shifted left.
+/// The alphabetic character immediately before a hole, skipping one space.
+/// `q⟦0⟧` seats the fragment on `q`. `⟦1⟧⟦2⟧` draws the second fragment at
+/// the hole, so it still needs its full ink.
+fn seat_letter_before(text: &str) -> Option<char> {
+    let mut chars = text.chars().rev();
+    let mut ch = chars.next()?;
+    if ch.is_whitespace() {
+        ch = chars.next()?;
+    }
+    ch.is_ascii_alphabetic().then_some(ch)
+}
+
 fn formula_hole_width(
     ids: &[u32],
     glyphs: &[&Glyph],
     by_id: &HashMap<u32, usize>,
     body: f32,
+    seat_letter: Option<char>,
 ) -> f32 {
     let members: Vec<&Glyph> = ids
         .iter()
@@ -7706,7 +7722,10 @@ fn formula_hole_width(
     }
     if script_fragment(&members, body) {
         if let Some(base) = external_script_base(&members, glyphs, ids, body) {
-            return (right - glyph_paint_right(base)).max(0.0);
+            let base_letter = base.unicode.chars().find(|ch| ch.is_ascii_alphabetic());
+            if seat_letter.is_some() && seat_letter == base_letter {
+                return (right - glyph_paint_right(base)).max(0.0);
+            }
         }
     }
     right - left
@@ -16607,10 +16626,7 @@ mod tests {
                 .fold(f32::MAX, f32::min);
             let math_right = members
                 .iter()
-                .map(|glyph| {
-                    let pen = glyph.matrix[4] + glyph.advance[0].max(0.0);
-                    glyph.bbox[2].max(glyph.matrix[4]).max(pen)
-                })
+                .map(|glyph| super::glyph_paint_right(glyph))
                 .fold(left, f32::max)
                 + shift.dx;
             let hole = left + shift.dx;
@@ -17253,7 +17269,7 @@ mod tests {
                 let Some(glyph) = extracted.glyphs.get(by_id[id]) else {
                     continue;
                 };
-                let x1 = glyph.bbox[2].max(glyph.matrix[4] + glyph.advance[0].max(0.0)) + shift.dx;
+                let x1 = super::glyph_paint_right(glyph) + shift.dx;
                 right = right.max(x1);
             }
             assert!(
@@ -17344,10 +17360,15 @@ mod tests {
         let glyphs = vec![q, hat, sub];
         let refs: Vec<&Glyph> = glyphs.iter().collect();
         let by_id = super::glyph_index_refs(&refs);
-        let width = super::formula_hole_width(&[2, 3], &refs, &by_id, 10.0);
+        let width = super::formula_hole_width(&[2, 3], &refs, &by_id, 10.0, Some('q'));
         assert!(
             (width - 4.0).abs() < 0.2,
             "script hole reserved {width:.2}, expected the 4pt overhang past q"
+        );
+        let full = super::formula_hole_width(&[2, 3], &refs, &by_id, 10.0, None);
+        assert!(
+            (full - 8.0).abs() < 0.2,
+            "a fragment with no base letter reserved {full:.2}, expected the full 8pt ink"
         );
         let mut paren = ink_glyph(4, 200.0, 200.0, 10.0, ")");
         paren.bbox = [200.0, 198.0, 204.0, 208.0];
@@ -17355,7 +17376,7 @@ mod tests {
         let plain = vec![paren];
         let plain_refs: Vec<&Glyph> = plain.iter().collect();
         let plain_ids = super::glyph_index_refs(&plain_refs);
-        let plain_width = super::formula_hole_width(&[4], &plain_refs, &plain_ids, 10.0);
+        let plain_width = super::formula_hole_width(&[4], &plain_refs, &plain_ids, 10.0, None);
         assert!(
             (plain_width - 4.0).abs() < 0.2,
             "trailing advance was reserved as hole padding: {plain_width:.2}"
