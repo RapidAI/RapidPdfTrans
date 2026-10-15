@@ -9,6 +9,10 @@ repository.workspace = true
 
 [lib]
 name = "rapidpdftrans"
+# The shared library is requested with `cargo rustc -- --crate-type cdylib`
+# (see packaging/package_sdk.py). Leaving cdylib out of this list keeps a
+# normal workspace build from writing librapidpdftrans.so, which is also the
+# filename of the rpt-python extension module.
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]

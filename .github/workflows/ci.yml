@@ -23,15 +23,29 @@ jobs:
       - name: Test
         run: cargo test --workspace
       - name: Release artifacts
-        run: cargo build -p rpt-ffi -p rpt-cli -p rpt-python --release
-      - name: C++ smoke
+        run: |
+          # cdylib is not in the package crate-type: rpt-python owns that filename
+          # during a workspace build. Ask rustc for it here, then smoke it
+          # before the Python module overwrites librapidpdftrans.so.
+          cargo rustc -p rpt-ffi --release -- --crate-type cdylib
+          so=$(ls -1t target/release/deps/librapidpdftrans-*.so | head -1)
+          cp -a "$so" target/release/librapidpdftrans.so
+          cargo build -p rpt-cli --release
+      - name: C++ static smoke
         run: |
           g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
             target/release/librapidpdftrans.a -ldl -lm -lpthread -lgcc_s \
             -o /tmp/rpt-cpp-smoke
           /tmp/rpt-cpp-smoke testdata/hello.pdf
+      - name: C++ shared smoke
+        run: |
+          g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
+            -L target/release -lrapidpdftrans -Wl,-rpath,"$PWD/target/release" \
+            -o /tmp/rpt-cpp-shared-smoke
+          /tmp/rpt-cpp-shared-smoke testdata/hello.pdf
       - name: Python smoke
         run: |
+          cargo build -p rpt-python --release
           cp target/release/librapidpdftrans.so /tmp/rapidpdftrans.so
           PYTHONPATH=/tmp python3 bindings/python/smoke.py testdata/hello.pdf
       - name: Go smoke

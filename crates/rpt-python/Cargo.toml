@@ -13,5 +13,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rpt-core = { path = "../rpt-core" }
-pyo3.workspace = true
+# abi3-py310: one wheel per platform loads on CPython 3.10 and newer.
+# Free-threaded builds (3.13t/3.14t) cannot load an abi3 wheel; those
+# interpreters are not part of the wheel matrix.
+pyo3 = { workspace = true, features = ["abi3-py310"] }
 serde_json.workspace = true

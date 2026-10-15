@@ -50,6 +50,15 @@ g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
   target/release/librapidpdftrans.a -ldl -lm -lpthread -lgcc_s -o smoke
 ```
 
+The C shared library is the same package, requested explicitly so a workspace build does not overwrite the Python module (both use the filename `librapidpdftrans.so`):
+
+```bash
+cargo rustc -p rpt-ffi --release -- --crate-type cdylib
+# Linux: target/release/librapidpdftrans.so
+# macOS: target/release/librapidpdftrans.dylib
+# Windows: target/release/rapidpdftrans.dll
+```
+
 Go (from `bindings/go`, after the release static library exists):
 
 ```bash
@@ -57,6 +66,12 @@ go test ./...
 ```
 
 `rpt_save` translates the open document and writes a PDF. It returns -1, and does not create the file, when `RPT_LLM_API_KEY` is unset.
+
+## Prebuilt packages
+
+`.github/workflows/sdk.yml` archives the headers, the shared library, and the static library for each platform, with a CMake config and a Unix pkg-config file. `.github/workflows/wheels.yml` builds CPython 3.10+ abi3 wheels with cibuildwheel (one wheel per platform loads on CPython 3.10 and newer). Both workflows run on pull requests, `workflow_dispatch`, and tags `v*`. Pull requests upload build artifacts only. A tag whose name matches `workspace.package.version` in `Cargo.toml` (`v0.1.0` for version `0.1.0`) attaches the archives and wheels to a GitHub Release.
+
+32-bit macOS is not built: there is no hosted runner for it, and current CPython does not ship a 32-bit macOS installer. musllinux wheels are built for x86_64 and aarch64. Rust does not publish a host compiler for `i686-unknown-linux-musl` or `armv7-unknown-linux-musleabihf`, and cibuildwheel compiles inside that container. Intel macOS uses `macos-15-intel`; GitHub no longer provides `macos-13`. PyPI trusted publishing is sketched in `wheels.yml` and left disabled until this repository has a trusted publisher.
 
 ## Translator
 

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["maturin>=1.9.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rapidpdftrans"
+description = "Format-preserving PDF translation"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "RapidAI" }]
+requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Text Processing",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/RapidAI/RapidPdfTrans"
+Repository = "https://github.com/RapidAI/RapidPdfTrans"
+
+[tool.maturin]
+manifest-path = "crates/rpt-python/Cargo.toml"
+module-name = "rapidpdftrans"
+bindings = "pyo3"
+# abi3-py310 is enabled on rpt-python, so each platform produces one
+# cp310-abi3 wheel that loads on CPython 3.10 and newer.
+strip = true
+
+# Wheels are built by cibuildwheel (.github/workflows/wheels.yml).
+# `build = cp310-*` compiles once per platform; the abi3 tag covers newer
+# CPython. Free-threaded interpreters are outside this selector.
+#
+# Not built, and why:
+# - 32-bit macOS: no GitHub runner, and current CPython does not ship a
+#   32-bit macOS installer. Rust still lists i686-apple-darwin, but the
+#   wheels cannot be produced or tested here.
+# - musllinux i686 and musllinux armv7l: cibuildwheel compiles inside the
+#   target container, and Rust does not publish a host rustc for
+#   i686-unknown-linux-musl or armv7-unknown-linux-musleabihf.
+[tool.cibuildwheel]
+build = ["cp310-*"]
+skip = ["*-musllinux_i686", "*-musllinux_armv7l"]
+test-command = "python {project}/bindings/python/smoke.py {project}/testdata/hello.pdf"
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+before-all = "sh packaging/cibw-before-all-linux.sh"
+environment = { RUSTUP_TOOLCHAIN = "stable", MATURIN_PEP517_ARGS = "--locked", CARGO_TERM_COLOR = "always" }
+
+[tool.cibuildwheel.macos]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0", MATURIN_PEP517_ARGS = "--locked", CARGO_TERM_COLOR = "always" }
+
+[tool.cibuildwheel.windows]
+environment = { MATURIN_PEP517_ARGS = "--locked", CARGO_TERM_COLOR = "always" }
