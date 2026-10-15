@@ -848,12 +848,12 @@ pub(crate) fn wrap_text(
             end = prefer_list_delimiter(&chars, &sticky, start, end);
         }
         let mut line_end = end;
-        while line_end > start && chars[line_end - 1].is_whitespace() {
+        while line_end > start && is_break_space(chars[line_end - 1]) {
             line_end -= 1;
         }
         if line_end == start {
             start = end.max(start + 1);
-            while start < chars.len() && chars[start].is_whitespace() {
+            while start < chars.len() && is_break_space(chars[start]) {
                 start += 1;
             }
             continue;
@@ -861,7 +861,7 @@ pub(crate) fn wrap_text(
         let line: String = chars[start..line_end].iter().collect();
         lines.push(line);
         start = end;
-        while start < chars.len() && chars[start].is_whitespace() {
+        while start < chars.len() && is_break_space(chars[start]) {
             start += 1;
         }
         // A full page is well under this. The cap only stops a degenerate
@@ -949,7 +949,7 @@ fn snap_line_compounds(lines: &mut Vec<String>, width: f32, size: f32, font: &Su
         }
         index += 1;
     }
-    lines.retain(|line| !line.trim().is_empty());
+    lines.retain(|line| line.chars().any(|ch| ch == '\u{3000}' || !ch.is_whitespace()));
 }
 
 fn char_advance(ch: char, size: f32, font: &SubsetFont) -> f32 {
@@ -991,6 +991,7 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
 
 /// A run of ideographic spaces stands in for a stacked formula. Splitting
 /// it puts half the hole on the next line and the binomial has nowhere to sit.
+/// The two digits in front of the run are the formula's index.
 fn mark_reserved_gaps(chars: &[char], sticky: &mut [bool]) {
     let mut index = 0usize;
     while index < chars.len() {
@@ -1002,14 +1003,22 @@ fn mark_reserved_gaps(chars: &[char], sticky: &mut [bool]) {
         while index < chars.len() && chars[index] == '\u{3000}' {
             index += 1;
         }
-        if index - start >= 2 {
-            for boundary in start..index.saturating_sub(1) {
-                if let Some(flag) = sticky.get_mut(boundary) {
-                    *flag = true;
-                }
+        let mut glue_from = start;
+        if start >= 2 && chars[start - 1].is_ascii_digit() && chars[start - 2].is_ascii_digit() {
+            glue_from = start - 2;
+        }
+        for boundary in glue_from..index.saturating_sub(1) {
+            if let Some(flag) = sticky.get_mut(boundary) {
+                *flag = true;
             }
         }
     }
+}
+
+/// An ordinary wrap space. An ideographic space is a formula hole and stays
+/// on the line even when it is the last mark.
+fn is_break_space(ch: char) -> bool {
+    ch.is_whitespace() && ch != '\u{3000}'
 }
 
 /// `词元` and `一个词` stay on one line. They can overlap (`其中一个词元`),
@@ -1830,7 +1839,9 @@ fn retreat_compound_boundary(
                 return false;
             }
             let line: String = last_chars[..last_chars.len() - count].iter().collect();
-            let line = line.trim_end().to_string();
+            let line = line
+                .trim_end_matches(|ch: char| is_break_space(ch))
+                .to_string();
             if line.is_empty() {
                 return false;
             }
