@@ -1407,13 +1407,26 @@ pub(crate) fn comma_list_incomplete(source: &str, translated: &str) -> bool {
 
 /// `Energy, Legal and Policy, Rust, RISC-V` is a topic list. A paragraph
 /// that stops for a sentence is not, even when it cites six papers.
+/// A sentence that names several products (`OpenAI, Google, and Amazon`)
+/// has long clauses around those commas. A topic list's items are short.
 fn topic_comma_list(source: &str) -> bool {
     if source.matches(',').count() < 6 {
         return false;
     }
     let stops =
         source.matches(". ").count() + source.matches(".\n").count() + source.matches("? ").count();
-    stops < 2
+    if stops >= 2 {
+        return false;
+    }
+    let items = list_items(source, &[',']);
+    if items.len() < 6 {
+        return false;
+    }
+    let short = items
+        .iter()
+        .filter(|item| item.split_whitespace().count() <= 4)
+        .count();
+    short * 4 >= items.len() * 3
 }
 
 fn list_items<'a>(text: &'a str, marks: &[char]) -> Vec<&'a str> {
@@ -3962,6 +3975,20 @@ mod tests {
                 "内核、法律与政策、LibreOffice、LLVM、Rust、Swift、WebAssembly、Go"
             ),
             "a ligature in LibreOffice was treated as a different name"
+        );
+        assert!(
+            !comma_list_incomplete(
+                " There has been a surge of interest in AI agents, with major players such as OpenAI, Google, and Amazon, as well as independent developers such as LangChain, LlamaIndex, and Pydantic, all releasing agent SDKs to encourage broader adoption of the approach.",
+                "对 AI 智能体的兴趣激增，OpenAI、Google 和 Amazon 等主要厂商，以及 LangChain、LlamaIndex 和 Pydantic 等独立开发者，纷纷发布了智能体 SDK，以推动该方法的更广泛采用。"
+            ),
+            "a sentence that names several products was treated as a devroom list"
+        );
+        assert!(
+            !comma_list_incomplete(
+                "Model purpose—For general tasks such as summarization, translation, or classification, most mainstream models (GPT, Gemini, Claude, Llama, Mistral) work well. For specialized needs such as code generation, choose models fine-tuned for that domain—for instance, Meta's Code Llama or Claude Code.",
+                "模型用途——对于摘要、翻译或分类等通用任务，大多数主流模型（GPT、Gemini、Claude、Llama、Mistral）都能表现出色。"
+            ),
+            "a bullet that lists models inside one sentence was held back"
         );
         assert_eq!(repair_translation("The The MCP ", "该 该 MCP "), "该 MCP");
         assert_eq!(

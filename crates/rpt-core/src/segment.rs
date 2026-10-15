@@ -1075,12 +1075,34 @@ fn centered_comma_block(lines: &[VisualLine<'_>]) -> bool {
     let mut left_max = f32::MIN;
     let mut mid_min = f32::MAX;
     let mut mid_max = f32::MIN;
+    let mut right_min = f32::MAX;
+    let mut right_max = f32::MIN;
     for line in lines {
         left_min = left_min.min(line.left);
         left_max = left_max.max(line.left);
+        right_min = right_min.min(line.right);
+        right_max = right_max.max(line.right);
         let mid = (line.left + line.right) * 0.5;
         mid_min = mid_min.min(mid);
         mid_max = mid_max.max(mid);
+    }
+    // A first-line indent moves only the opening line. The rest of a justified
+    // paragraph shares the left margin. A centered list keeps moving that edge.
+    if lines.len() >= 3 {
+        let mut body_min = f32::MAX;
+        let mut body_max = f32::MIN;
+        for line in lines.iter().skip(1) {
+            body_min = body_min.min(line.left);
+            body_max = body_max.max(line.left);
+        }
+        if body_max - body_min <= size * 0.45 {
+            return false;
+        }
+    }
+    // Two justified lines share the right edge. The indent is about an em, so
+    // the left edges differ by less than the wander of a centered list.
+    if right_max - right_min <= size * 0.6 && left_max - left_min <= size * 2.5 {
+        return false;
     }
     left_max - left_min > size * 1.2 && mid_max - mid_min <= size * 3.0
 }
@@ -8399,6 +8421,96 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("Summarizing") && !text.contains("word. For example")),
             "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_indented_comma_paragraph_is_not_a_centered_list() {
+        // A first-line indent of about one em, four commas, and a shared right
+        // edge used to look like a centered topic list. The next page then
+        // could not finish `hands-on experience`.
+        let rows = [
+            (
+                0u32,
+                0u32,
+                84.0,
+                120.0,
+                316.0,
+                "In this book, we'll focus on LangGraph, LangChain's framework.",
+            ),
+            (
+                1,
+                0,
+                72.0,
+                106.0,
+                328.0,
+                "LangGraph provides classes, along with ready-to-use tools, so",
+            ),
+            (
+                2,
+                0,
+                72.0,
+                92.0,
+                328.0,
+                "you don't have to reinvent the wheel or gain hands-on",
+            ),
+            (
+                3,
+                1,
+                72.0,
+                700.0,
+                328.0,
+                "experience building advanced agents in practice.",
+            ),
+        ];
+        let mut glyphs = Vec::new();
+        for (id, page, x, y, width, text) in rows {
+            let mut item = glyph(id, x, y, text, false);
+            item.page_index = page;
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, y];
+            item.bbox = [x, y, x + width, y + 10.0];
+            item.advance = [width, 0.0];
+            glyphs.push(item);
+        }
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("hands-on experience building")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn manning_hands_on_continues_on_the_next_page() {
+        let path = std::path::Path::new("/opt/cursor/artifacts/pdfs/manning-body-p1-30-source.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(path).unwrap();
+        let extraction = doc.extract_with(&crate::extract::ExtractOptions {
+            max_pages: Some(12),
+            ..crate::extract::ExtractOptions::default()
+        });
+        let seg = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let hit = seg
+            .segments
+            .iter()
+            .find(|item| item.text.contains("hands-on"))
+            .expect("hands-on sentence");
+        assert!(
+            hit.text.contains("experience building"),
+            "page break cut the sentence: {}",
+            hit.text
         );
     }
 
