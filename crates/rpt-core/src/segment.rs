@@ -862,6 +862,9 @@ fn detach_junk_ocr_pages(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> 
 /// that ends with a comma does not share this midpoint test: its next line
 /// starts at the same left edge, which the ordinary join already accepts.
 fn centered_comma_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if upper.page != lower.page {
+        return false;
+    }
     let size = upper.size.max(lower.size).max(1.0);
     if (upper.size - lower.size).abs() > size * 0.2 {
         return false;
@@ -1447,7 +1450,7 @@ fn assemble(
                                 && !has_year(&next.text)
                         })
                     });
-                buf = first.text.clone();
+                buf = trim_slide_pad(&first.text).to_string();
                 buf_ids.extend(first.glyphs.iter().map(|glyph| glyph.id));
                 // "Obstacle 1: … inconsistent." is its own italic line. The
                 // roman explanation under it is the body.
@@ -1458,21 +1461,21 @@ fn assemble(
         }
         for line in lines {
             if buf.trim().is_empty() {
-                buf = line.text.clone();
+                buf = trim_slide_pad(&line.text).to_string();
                 buf_ids.extend(line.glyphs.iter().map(|glyph| glyph.id));
                 continue;
             }
+            let incoming = trim_slide_pad(line.text.trim_start());
             let piece = if url_continues(&buf, &line.text) {
-                format!("{}{}", buf.trim_end(), line.text.trim_start())
+                format!("{}{}", buf.trim_end(), incoming)
             } else if let Some(stem) = soft_hyphen_stem(&buf) {
-                let rest = line.text.trim_start();
-                if rest.starts_with(|ch: char| ch.is_ascii_alphanumeric()) {
-                    join_hyphenated_word(stem, rest)
+                if incoming.starts_with(|ch: char| ch.is_ascii_alphanumeric()) {
+                    join_hyphenated_word(stem, incoming)
                 } else {
-                    format!("{} {}", buf.trim_end(), line.text.trim_start())
+                    format!("{} {}", buf.trim_end(), incoming)
                 }
             } else {
-                format!("{} {}", buf.trim_end(), line.text.trim_start())
+                format!("{} {}", buf.trim_end(), incoming)
             };
             if piece.chars().count() > LONG_LINE && sentence_end(&buf) {
                 flush(&mut segments, &mut buf_ids, &mut buf);
@@ -1823,15 +1826,52 @@ fn glyph_right(glyph: &Glyph) -> f32 {
     glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4])
 }
 
+/// Leading and trailing spaces do not move the line's edges. A line that is
+/// only spaces keeps every glyph, so an empty pad still has a position.
+fn ink_glyphs<'a>(glyphs: &[&'a Glyph]) -> Vec<&'a Glyph> {
+    let mut start = 0usize;
+    let mut end = glyphs.len();
+    while start < end && glyph_is_space(glyphs[start]) {
+        start += 1;
+    }
+    while end > start && glyph_is_space(glyphs[end - 1]) {
+        end -= 1;
+    }
+    if start == end {
+        glyphs.to_vec()
+    } else {
+        glyphs[start..end].to_vec()
+    }
+}
+
+fn glyph_is_space(glyph: &Glyph) -> bool {
+    !glyph.unicode.is_empty() && glyph.unicode.chars().all(char::is_whitespace)
+}
+
+/// A slides box pads the last line with spaces out to the frame. One trailing
+/// space is a word space and stays, so a saved sentence still matches.
+fn trim_slide_pad(text: &str) -> &str {
+    let end = text.trim_end();
+    if text.len() - end.len() > 2 {
+        end
+    } else {
+        text
+    }
+}
+
 fn line_bounds(glyphs: &[&Glyph]) -> Option<(f32, f32, f32, f32)> {
     if glyphs.is_empty() {
         return None;
     }
-    let left = glyphs
+    // A slides text box pads the last line with spaces. Those advances run
+    // past the page and pull the midpoint off the centered axis, so the line
+    // looks like a new paragraph and the topics on it are painted separately.
+    let ink = ink_glyphs(glyphs);
+    let left = ink
         .iter()
         .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
         .fold(f32::MAX, f32::min);
-    let right = glyphs
+    let right = ink
         .iter()
         .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]))
         .fold(left, f32::max);
@@ -3108,7 +3148,16 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
         // an earlier, narrower column. The first match used to claim it
         // (`thou-` left the definition and joined a label column). Prefer the
         // closest margin that actually fits.
-        let slot = hyphen_slot.or_else(|| {
+        // The last short line of a centered list (`Matrix.org Foundation`)
+        // shares the title's left edge. That match used to claim it before
+        // the comma-list test, so the line was translated on its own and the
+        // topics above it stayed a different paragraph.
+        let list_slot = columns.iter().position(|column| {
+            column
+                .last()
+                .is_some_and(|prev| centered_comma_continuation(prev, &line))
+        });
+        let slot = hyphen_slot.or(list_slot).or_else(|| {
             let mut best: Option<(usize, f32)> = None;
             for (index, column) in columns.iter().enumerate() {
                 let Some(anchor) = column_anchor(column, line.page) else {
@@ -3130,9 +3179,7 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
             best.map(|(index, _)| index).or_else(|| {
                 columns.iter().position(|column| {
                     column.last().is_some_and(|prev| {
-                        hanging_pull(prev, &line)
-                            || right_aligned_display_wrap(prev, &line)
-                            || centered_comma_continuation(prev, &line)
+                        hanging_pull(prev, &line) || right_aligned_display_wrap(prev, &line)
                     })
                 })
             })
@@ -9526,6 +9573,64 @@ mod tests {
         let page1: Vec<_> = segs.iter().filter(|seg| seg.page_index == 1).collect();
         assert_eq!(page1.len(), 1, "the next slide was stitched onto this list");
         assert!(page1[0].text.contains("RISC-V"), "{}", page1[0].text);
+    }
+
+    #[test]
+    fn a_padded_last_line_and_a_short_centered_tail_stay_in_the_list() {
+        // FOSDEM page 14. The last line is padded with spaces out past the
+        // page, and page 13's last item sits on the title's left edge.
+        let rows = [
+            (0u32, 40.0, 500.0, 460.0, "Microkernel and OS, Modern Email, Monitoring and,"),
+            (1, 28.0, 476.0, 444.0, "Observability, Mozilla, MySQL, Network, Nix and NixOS,"),
+            (2, 8.0, 452.0, 484.0, "PostgreSQL, Python, Quantum Computing, Radio, Railways"),
+            (3, 8.0, 428.0, 484.0, "(SBOM), Software Defined Storage, Swift, Tool the"),
+            (4, 26.0, 404.0, 448.0, "Docs, Virtualization and Cloud, WebAssembly,"),
+        ];
+        let mut glyphs = Vec::new();
+        let mut next = 0u32;
+        for (id, x, y, width, text) in rows {
+            let mut item = glyph(id, x, y, text, false);
+            item.font_size = 20.0;
+            item.bbox = [x, y, x + width, y + 16.0];
+            item.advance = [width, 0.0];
+            glyphs.push(item);
+            next = id + 1;
+        }
+        for index in 0..12 {
+            let x = 500.0 + index as f32 * 40.0;
+            let mut space = glyph(next, x, 404.0, " ", false);
+            space.font_size = 20.0;
+            space.bbox = [x, 404.0, x + 36.0, 420.0];
+            space.advance = [36.0, 0.0];
+            glyphs.push(space);
+            next += 1;
+        }
+        let mut title = glyph(next, 199.0, 640.0, "Schedule - Devrooms", false);
+        title.font_size = 36.0;
+        title.bbox = [199.0, 640.0, 520.0, 676.0];
+        title.advance = [321.0, 0.0];
+        glyphs.push(title);
+        next += 1;
+        let mut tail = glyph(next, 196.0, 380.0, "Matrix.org Foundation and Community", false);
+        tail.font_size = 20.0;
+        // Same midpoint as the list (250), and the same left edge as the title.
+        tail.bbox = [196.0, 380.0, 304.0, 400.0];
+        tail.advance = [108.0, 0.0];
+        glyphs.push(tail);
+        let segs = segment_glyphs(&glyphs);
+        let body: Vec<_> = segs
+            .iter()
+            .filter(|seg| seg.text.contains("Railways") || seg.text.contains("Matrix.org"))
+            .collect();
+        assert_eq!(
+            body.len(),
+            1,
+            "{:?}",
+            segs.iter().map(|seg| seg.text.as_str()).collect::<Vec<_>>()
+        );
+        assert!(body[0].text.contains("WebAssembly"), "{}", body[0].text);
+        assert!(body[0].text.contains("Matrix.org"), "{}", body[0].text);
+        assert!(!body[0].text.ends_with("   "), "{}", body[0].text);
     }
 
     #[test]

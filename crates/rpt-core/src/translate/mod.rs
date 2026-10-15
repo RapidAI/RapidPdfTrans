@@ -829,8 +829,12 @@ fn load_checkpoint(
         if let Some(done) = cache.get(&seg.text) {
             // A cached echo of a body paragraph is not a translation. Leave it
             // for the model, which retries once when the reply is still English.
+            // A list that dropped `RISC-V` or `(SBOM)` is the same kind of miss.
             // A Chinese paragraph with one extra full stop is still the
             // translation. Sending it again can replace it with the English.
+            if comma_list_incomplete(&seg.text, done) {
+                continue;
+            }
             let chinese = cjk_count(done) >= 8;
             if !chinese
                 && (needs_english_retry(&seg.text, done) || translation_flaw(&seg.text, done))
@@ -1361,7 +1365,9 @@ fn flaw_count(source: &str, translated: &str) -> usize {
 /// the text operator.
 pub(crate) fn comma_list_incomplete(source: &str, translated: &str) -> bool {
     let source = source.trim();
-    if source.matches(',').count() < 6 || !translated.chars().any(is_cjk_char) {
+    // A sentence with citation commas (`[BLS92, BCLL21, CL22]`) is not a
+    // devroom list. Those lists have almost no sentence stops.
+    if !topic_comma_list(source) || !translated.chars().any(is_cjk_char) {
         return false;
     }
     let source_items = list_items(source, &[',']);
@@ -1375,6 +1381,18 @@ pub(crate) fn comma_list_incomplete(source: &str, translated: &str) -> bool {
     proper_nouns(source).any(|noun| !contains_latin_token(translated, &noun))
 }
 
+/// `Energy, Legal and Policy, Rust, RISC-V` is a topic list. A paragraph
+/// that stops for a sentence is not, even when it cites six papers.
+fn topic_comma_list(source: &str) -> bool {
+    if source.matches(',').count() < 6 {
+        return false;
+    }
+    let stops = source.matches(". ").count()
+        + source.matches(".\n").count()
+        + source.matches("? ").count();
+    stops < 2
+}
+
 fn list_items<'a>(text: &'a str, marks: &[char]) -> Vec<&'a str> {
     text.split(|ch| marks.contains(&ch))
         .map(str::trim)
@@ -1383,12 +1401,14 @@ fn list_items<'a>(text: &'a str, marks: &[char]) -> Vec<&'a str> {
 }
 
 fn proper_nouns(source: &str) -> impl Iterator<Item = String> {
+    let source = fold_ligatures(source);
     let mut nouns = Vec::new();
     for token in source.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '、' | '，'))
     {
         let token = token.trim_matches(|ch: char| {
-            matches!(ch, '(' | ')' | '（' | '）' | '[' | ']' | '.' | '"' | '\'')
+            matches!(ch, '(' | ')' | '（' | '）' | '[' | ']' | '.' | '"' | '\'' | '’')
         });
+        let token = token.strip_suffix("'s").unwrap_or(token);
         if token.is_empty() {
             continue;
         }
@@ -1411,6 +1431,13 @@ fn proper_nouns(source: &str) -> impl Iterator<Item = String> {
         }
         let inner: String = chars[start..end].iter().collect();
         for token in inner.split_whitespace() {
+            let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' ));
+            if (3..=8).contains(&token.len())
+                && token.chars().all(|ch| ch.is_ascii_uppercase())
+            {
+                nouns.push(token.to_string());
+                continue;
+            }
             if let Some(noun) = kept_latin_token(token) {
                 nouns.push(noun);
             }
@@ -1424,8 +1451,16 @@ const KEPT_NAMES: &[&str] = &[
     "Ada", "Go", "Java", "Mozilla", "Nix", "Python", "Rust", "Swift",
 ];
 
+fn fold_ligatures(text: &str) -> String {
+    text.replace('ﬁ', "fi")
+        .replace('ﬂ', "fl")
+        .replace('ﬀ', "ff")
+        .replace('ﬃ', "ffi")
+        .replace('ﬄ', "ffl")
+}
+
 fn kept_latin_token(token: &str) -> Option<String> {
-    let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' | '/' ));
+    let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' ));
     if token.len() < 2 {
         return None;
     }
@@ -1435,51 +1470,56 @@ fn kept_latin_token(token: &str) -> Option<String> {
     if token.contains('.') && token.chars().any(|ch| ch.is_ascii_alphabetic()) {
         return Some(token.to_string());
     }
-    if token.contains('/') && token.chars().any(|ch| ch.is_ascii_uppercase()) {
-        return Some(token.to_string());
-    }
-    if let Some((left, right)) = token.split_once('-') {
-        let side = |part: &str| {
-            part.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+    // `CAD/CAM` stays. `Embedded/IoT` is a phrase and is translated.
+    if let Some((left, right)) = token.split_once('/') {
+        let abbrev = |part: &str| {
+            (2..=8).contains(&part.len())
+                && part.chars().any(|ch| ch.is_ascii_uppercase())
+                && !part.chars().any(|ch| ch.is_ascii_lowercase())
         };
-        let generic = left.eq_ignore_ascii_case("image")
-            || left.eq_ignore_ascii_case("low")
-            || left.eq_ignore_ascii_case("open")
-            || left.eq_ignore_ascii_case("real");
-        if side(left) && side(right) && !generic {
+        if abbrev(left) && abbrev(right) {
             return Some(token.to_string());
         }
     }
-    let letters: String = token.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
-    if letters.len() >= 3 && letters.chars().all(|ch| ch.is_ascii_uppercase()) {
-        return Some(letters);
+    // `RISC-V` and `DC-ROMA` stay. `Component-Based` and `Image-Based` do not:
+    // both sides are English words, and the translation is Chinese.
+    if let Some((left, right)) = token.split_once('-') {
+        let mark = |part: &str| {
+            (part.len() >= 2 && part.chars().all(|ch| ch.is_ascii_uppercase()))
+                || part.chars().any(|ch| ch.is_ascii_digit())
+        };
+        if mark(left) || mark(right) {
+            return Some(token.to_string());
+        }
     }
-    // `APIs` keeps `API`. A trailing plural s is not part of the acronym.
-    if letters.len() >= 4
-        && letters.chars().rev().skip(1).all(|ch| ch.is_ascii_uppercase())
-        && letters.ends_with('s')
+    // `WHY2025` is the whole token. Stripping it to `WHY` misses the year.
+    if token.len() >= 4
+        && token.chars().any(|ch| ch.is_ascii_digit())
+        && token.chars().any(|ch| ch.is_ascii_uppercase())
+        && token.chars().all(|ch| ch.is_ascii_alphanumeric())
     {
-        return Some(letters[..letters.len() - 1].to_string());
+        return Some(token.to_string());
     }
+    if token.contains('-') || token.contains('/') {
+        return None;
+    }
+    let letters: String = token.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
     let chars: Vec<char> = letters.chars().collect();
     let internal = chars.windows(2).any(|pair| {
         (pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
             || (pair[0].is_ascii_uppercase() && pair[1].is_ascii_uppercase())
     }) && chars.iter().any(|ch| ch.is_ascii_lowercase());
-    if internal && chars.len() >= 3 {
-        return Some(token.chars().filter(|ch| c_is_noun_char(*ch)).collect());
+    if internal && chars.len() >= 3 && letters.len() == token.chars().count() {
+        return Some(token.to_string());
     }
     None
-}
-
-fn c_is_noun_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '/'
 }
 
 fn contains_latin_token(text: &str, noun: &str) -> bool {
     if noun.is_empty() {
         return true;
     }
+    let text = fold_ligatures(text);
     let chars: Vec<char> = text.chars().collect();
     let needle: Vec<char> = noun.chars().collect();
     if needle.len() > chars.len() {
@@ -2586,8 +2626,9 @@ fn math_word(word: &str) -> bool {
         }
     }
     if word.chars().all(|ch| ch.is_ascii_digit() || math_mark(ch))
-        && word.chars().any(|ch| ch.is_ascii_digit())
+        && word.chars().any(|ch| ch.is_ascii_digit() || math_mark(ch))
     {
+        // `(k + 1)` splits into `k`, `+`, `1`. The operator is the formula.
         return true;
     }
     // `k`, `n`, `∆`, `k²`. A Latin word such as `against` has more than one letter.
@@ -3448,6 +3489,11 @@ mod tests {
             powers.contains("(log n log² k)") && powers.contains("(log ∆ log³ k)"),
             "{powers}"
         );
+        let binomial = repair_body_translation(
+            "k-server on a (k + 1)-point metric",
+            "在 (k + 1) 点度量上的 k 服务器",
+        );
+        assert!(binomial.contains("(k + 1)"), "{binomial}");
         let gloss = repair_body_translation(
             "algorithms (against oblivious adversaries) exist",
             "算法（against oblivious adversaries）存在",
@@ -3798,6 +3844,27 @@ mod tests {
         assert!(
             comma_list_incomplete(list, "Ada、Rust、安全、Swift、Go"),
             "a list that dropped RISC-V and SBOM was accepted"
+        );
+        assert!(
+            !comma_list_incomplete(
+                "Microkernel and Component-Based OS, Modern Email, Nix and NixOS, Open Hardware and CAD/CAM, PostgreSQL, Python, Rust, RISC-V",
+                "微内核与基于组件的操作系统，现代电子邮件，Nix 与 NixOS，开源硬件与 CAD/CAM，PostgreSQL，Python，Rust，RISC-V"
+            ),
+            "a translated hyphenated topic was treated as a missing name"
+        );
+        assert!(
+            !comma_list_incomplete(
+                "The k-server problem is related to paging. It belongs to task systems [BLS92, BCLL21, CL22, BCR23, BMC26] and more. Papers cover traversal [FFK+98, BCR25].",
+                "k-服务器问题与分页相关。它属于任务系统 [BLS92, BCLL21, CL22, BCR23, BMC26]。论文涉及遍历 [FFK+98, BCR25]。"
+            ),
+            "citation commas were treated as a devroom list"
+        );
+        assert!(
+            !comma_list_incomplete(
+                "Kernel, Legal and Policy, LibreOﬃce, LLVM, Rust, Swift, WebAssembly, Go",
+                "内核、法律与政策、LibreOffice、LLVM、Rust、Swift、WebAssembly、Go"
+            ),
+            "a ligature in LibreOffice was treated as a different name"
         );
         assert_eq!(repair_translation("The The MCP ", "该 该 MCP "), "该 MCP");
         assert_eq!(

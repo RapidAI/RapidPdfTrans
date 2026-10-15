@@ -100,8 +100,33 @@ The devroom list is Chinese, centered, with product and project names left in La
 - Page 5. `前言`.
 - Pages 7–12. Chapters 1 and 2 in Chinese, including `商业利益得到保障` territory and the Hoan quotation.
 
+## Owner pass: devroom list and the binomial paragraph
+
+`rpt-core` lib tests: 362 passed, 1 ignored. Coverage on both exports is `complete: true`, `english_body: 0`.
+
+| id | PDF |
+| --- | --- |
+| arxiv-2609.15979 | `/opt/cursor/artifacts/pdfs/arxiv-2609.15979-zh.pdf` |
+| fosdem-2025-welcome | `/opt/cursor/artifacts/pdfs/fosdem-2025-welcome-zh.pdf` |
+
+A centered comma list whose last line is padded with spaces out past the page stays one paragraph, and the pad is not part of the midpoint. After the line bounds are recomputed, the Chinese is centered on that axis and spread from the source top baseline to the source bottom. A topic list (six or more commas, fewer than two sentence stops) is incomplete when a kept name, a camel-case token, a parenthetical acronym, or an item is missing; a cached incomplete list is translated again. A real two-sided stack (a binomial, pieces both above and below the nearby full-size baseline) keeps that paragraph in the original glyphs, in order. A lone period split off that paragraph stays `.`. `(k + 1)` stays inside the parentheses. Italic `k` on successive lines still translates with the paragraph. Glyph overlap still counts a math-italic glyph.
+
+### FOSDEM pages 13–14, then the other 34
+
+Page 13 is one centered paragraph, mids at 360, baselines from y=83 to y=323. It includes Ada, GraphQL, OpenAPI, AsyncAPI, DNS, eBPF, Go, HPC, JavaScript, LibreOffice, LLVM, and Matrix.org 基金会与社区. Topic words are Chinese (`能源`, `法律与政策`, `机密计算`).
+
+Page 14 is one centered paragraph, every line mid 360.1, including the short line `开放源设计、开放源固件、BMC 和 Bootloader`. Baselines run y=83 to y=275 in even 32pt steps. The source items are all present: Mozilla, MySQL, Nix, NixOS, CAD/CAM, BMC, Bootloader, PostgreSQL, Python, `量子计算`, RTC, RISC-V, Rust, SBOM, Swift, WebAssembly, Web 性能, and `文档工具化` for Tool the Docs.
+
+Pages 1–6, 8, 10–11, 17–30, and 32–36 are the Chinese slides from the previous pass (page 9 has no text). Pages 15–16 are centered name lists: product names stay Latin, and the punctuation is Chinese. Pages 7, 12, and 31 still paint English echoes (`IPv6-only`, the schedule counts, `Thanks` / `All volunteers`).
+
+### k-server, all 18 pages
+
+Page 4 opens with the binomial paragraph in the original English, in order: `µ(G) = min…`, `k+1` over `2`, and `Q = [z^{−d(x,y)} qx qy]`. It ends `using z .` The following prose is Chinese, including `Ψt ≤ (k + 1)wt(X)` and `在 (k + 1) 点度量上`, and `[CK19, GKP24, CP26]`. The gap before `工作函数和 WFA` is the source 29pt paragraph gap. Section 1.3 is Chinese. `Plücker` is one word.
+
+Pages 14–17 stay an English bibliography. Pages 1, 6, and 18 are Chinese around the formulas. Pages 2–3 and 5–13 keep a stacked-formula paragraph in English when the paragraph itself contains the stack (the definition on page 2, the determinant expansion on page 12); the surrounding prose is Chinese. `随机化 k-服务器` on page 5 is Chinese, with `O(log k)` and `Ω(log² k)` in the sentence.
+
 ## Left open
 
 - The scan’s invisible OCR layer is still in the content stream, so a text extract of the cover and of page 2 still shows the old characters. The painted cover does not.
-- k-server page 1 has one crushed line pair in the opening paragraph, and a few formula lines still mix an English word with the math.
-- FOSDEM page 14 breaks the devroom list into two centered chunks.
+- k-server page 1 has one crushed line pair in the opening paragraph. A paragraph that contains a real two-sided stack stays English instead of being reflowed around placeholder glyphs.
+- FOSDEM pages 7, 12, and 31 still paint English echoes. Page 28 wraps `真实` as `流感是真` / `实存在的`.
