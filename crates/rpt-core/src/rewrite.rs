@@ -7721,7 +7721,7 @@ fn formula_hole_width(
         return 0.0;
     }
     if script_fragment(&members, body) {
-        if let Some(base) = external_script_base(&members, glyphs, ids, body) {
+        if let Some(base) = external_script_base(&members, glyphs, ids, body, seat_letter) {
             let base_letter = base.unicode.chars().find(|ch| ch.is_ascii_alphabetic());
             if seat_letter.is_some() && seat_letter == base_letter {
                 return (right - glyph_paint_right(base)).max(0.0);
@@ -7738,12 +7738,16 @@ fn external_script_base<'a>(
     glyphs: &[&'a Glyph],
     ids: &[u32],
     body: f32,
+    seat_letter: Option<char>,
 ) -> Option<&'a Glyph> {
     let left = members
         .iter()
         .map(|glyph| glyph.matrix[4])
         .fold(f32::MAX, f32::min);
-    glyphs
+    let mut ys: Vec<f32> = members.iter().map(|glyph| glyph.matrix[5]).collect();
+    ys.sort_by(|left_y, right_y| left_y.total_cmp(right_y));
+    let anchor_y = ys[ys.len() / 2];
+    let mut candidates: Vec<&Glyph> = glyphs
         .iter()
         .copied()
         .filter(|glyph| {
@@ -7752,8 +7756,24 @@ fn external_script_base<'a>(
                 && glyph.font_size > body * 0.75
                 && glyph.matrix[4] >= left - body * 1.15
                 && glyph.matrix[4] <= left + body * 0.45
+                && (glyph.matrix[5] - anchor_y).abs() <= body * 0.7
         })
-        .max_by(|left_glyph, right_glyph| left_glyph.matrix[4].total_cmp(&right_glyph.matrix[4]))
+        .collect();
+    if let Some(letter) = seat_letter {
+        if let Some(matched) = candidates
+            .iter()
+            .copied()
+            .filter(|glyph| glyph.unicode.chars().any(|ch| ch == letter))
+            .max_by(|left_glyph, right_glyph| {
+                left_glyph.matrix[4].total_cmp(&right_glyph.matrix[4])
+            })
+        {
+            return Some(matched);
+        }
+    }
+    candidates
+        .sort_by(|left_glyph, right_glyph| left_glyph.matrix[4].total_cmp(&right_glyph.matrix[4]));
+    candidates.pop()
 }
 
 /// Replace each numbered hole with a rigid move of that formula's glyphs.
@@ -12380,7 +12400,7 @@ fn sink_math_subscripts(lines: &mut Vec<Drawn>, glyphs: &[&Glyph], font: &Subset
                     '，' | '。' | '、' | '；' | '：' | '！' | '？'
                 );
             if sunk_any && punct {
-                gap += line.size * 0.12;
+                gap += line.size * 0.22;
             }
             gaps.push(gap);
         }
@@ -17357,7 +17377,12 @@ mod tests {
         sub.font_name = "LMMathItalic8".into();
         sub.bbox = [105.0, 195.0, 109.0, 203.0];
         sub.advance = [6.0, 0.0];
-        let glyphs = vec![q, hat, sub];
+        // A letter on the next line sits under the hat in x. It must not
+        // become the base, or the hole keeps the fragment's full width.
+        let mut below = ink_glyph(5, 104.0, 186.0, 10.0, "c");
+        below.bbox = [104.0, 184.0, 110.0, 194.0];
+        below.advance = [6.0, 0.0];
+        let glyphs = vec![q, hat, sub, below];
         let refs: Vec<&Glyph> = glyphs.iter().collect();
         let by_id = super::glyph_index_refs(&refs);
         let width = super::formula_hole_width(&[2, 3], &refs, &by_id, 10.0, Some('q'));
@@ -17477,7 +17502,7 @@ mod tests {
             .expect("comma line");
         assert_eq!(host.text, "e，");
         let gap = host.gaps.first().copied().unwrap_or(0.0);
-        let sub = 10.0 * 0.62 * 0.5 + 10.0 * 0.12;
+        let sub = 10.0 * 0.62 * 0.5 + 10.0 * 0.22;
         assert!(
             gap + 0.05 >= sub,
             "comma gap {gap:.2} overlaps a subscript that needs {sub:.2}"
