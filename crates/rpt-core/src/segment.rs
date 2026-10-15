@@ -2705,7 +2705,12 @@ fn line_in_figure(line: &VisualLine<'_>, unions: &[Rect], _body_font: &str) -> b
                 x >= rect.x0 - 6.0 && x <= rect.x1 + 6.0 && y >= rect.y0 - 6.0 && y <= rect.y1 + 6.0
             })
             .count();
-        let above = line.y > rect.y1
+        // An 11pt icon under a lead-in (`Below` over a bullet image) is not
+        // the figure the sentence belongs to. A caption above a real drawing
+        // is still inside that drawing.
+        let tiny = rect.width() < 24.0 && rect.height() < 24.0;
+        let above = !tiny
+            && line.y > rect.y1
             && line.y <= rect.y1 + line.size * 2.4
             && line.left >= rect.x0 - 8.0
             && line.right <= rect.x1 + 24.0;
@@ -8249,6 +8254,25 @@ mod tests {
             .kept
             .iter()
             .any(|(id, reason)| *id == 2 && reason == "figure"));
+    }
+
+    #[test]
+    fn a_word_above_a_tiny_image_is_not_figure_ink() {
+        let mut word = glyph(0, 70.87, 96.15, "Below", false);
+        word.font_size = 10.91;
+        word.bbox = [70.87, 93.0, 96.0, 107.0];
+        word.advance = [25.0, 0.0];
+        let line = visual_line(vec![&word]);
+        let icon = Rect::new(70.87, 80.61, 81.77, 91.52);
+        assert!(
+            !line_in_figure(&line, &[icon], "Nimbus"),
+            "a lead-in over an 11pt icon was kept as a figure"
+        );
+        let drawing = Rect::new(70.0, 40.0, 280.0, 90.0);
+        assert!(
+            line_in_figure(&line, &[drawing], "Nimbus"),
+            "a short label above a real drawing was translated"
+        );
     }
 
     #[test]

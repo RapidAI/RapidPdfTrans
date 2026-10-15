@@ -158,12 +158,27 @@ pub fn rewrite_translation(
             continue;
         }
         if math_blocks.contains(&index) && !segment.translated.contains('⟦') {
-            for id in &segment.glyph_ids {
-                if !extraction.glyphs[by_id[id]].disposition.is_final() {
-                    keep.insert(*id, "math-block".into());
+            let clause = formula_clause_text(&segment.source, &segment.translated);
+            let mut held_math = false;
+            if clause.is_some() {
+                for id in &segment.glyph_ids {
+                    let glyph = &extraction.glyphs[by_id[id]];
+                    if is_math_font(&glyph.font_name) && !glyph.disposition.is_final() {
+                        keep.insert(*id, "math-block".into());
+                        held_math = true;
+                    }
                 }
             }
-            continue;
+            // The formula operators stay. The roman clause (`and 0 otherwise`)
+            // is a different operator and is drawn below.
+            if clause.is_none() || !held_math {
+                for id in &segment.glyph_ids {
+                    if !extraction.glyphs[by_id[id]].disposition.is_final() {
+                        keep.insert(*id, "math-block".into());
+                    }
+                }
+                continue;
+            }
         }
         // The period after `using z` is its own segment. Translating it paints
         // `。` on the English formula paragraph that was left in order.
@@ -199,6 +214,9 @@ pub fn rewrite_translation(
                         {
                             false
                         }
+                        // Held back so an `otherwise` clause can replace the
+                        // roman words without reflowing the formula.
+                        Some("math-block") => false,
                         Some(_) => true,
                         None => false,
                     }
@@ -243,6 +261,13 @@ pub fn rewrite_translation(
         let translated = crate::translate::repair_body_translation(&segment.source, &translated);
         let translated = if prompt_samples.get(index).copied().unwrap_or(false) {
             crate::translate::unmix_prompt_line(&segment.source, &translated)
+        } else {
+            translated
+        };
+        // `ϕ(a_i^m) = ϕ(a_j^r) and 0 otherwise.` The formula stays. The
+        // clause is what the line was echoing in English.
+        let translated = if math_blocks.contains(&index) {
+            formula_clause_text(&segment.source, &translated).unwrap_or(translated)
         } else {
             translated
         };
@@ -331,7 +356,13 @@ pub fn rewrite_translation(
             }
         }
         planned.push((index, translated));
-        rewrite_ids.extend(segment.glyph_ids.iter().copied());
+        rewrite_ids.extend(
+            segment
+                .glyph_ids
+                .iter()
+                .copied()
+                .filter(|id| !keep.get(id).is_some_and(|reason| reason == "math-block")),
+        );
     }
 
     let heading_wraps = if overlay {
@@ -1134,6 +1165,25 @@ fn math_block_segments(
             !numbered_heading_line(&segment.source, &glyphs)
         })
         .collect()
+}
+
+/// `and 0 otherwise` on a formula line. The math stays in its own operators.
+/// The clause is the Han tail (`，否则为 0。`).
+fn formula_clause_text(source: &str, translated: &str) -> Option<String> {
+    let has_otherwise = source
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|word| word.eq_ignore_ascii_case("otherwise"));
+    if !has_otherwise {
+        return None;
+    }
+    let chars: Vec<char> = translated.chars().collect();
+    let han = chars.iter().position(|ch| is_han_char(*ch))?;
+    let mut start = han;
+    if start > 0 && matches!(chars[start - 1], '，' | ',') {
+        start -= 1;
+    }
+    let clause: String = chars[start..].iter().collect();
+    (!clause.is_empty()).then_some(clause)
 }
 
 /// `4 The potential and its increase at a request`. A body line that happens
@@ -2966,7 +3016,7 @@ fn plain_echo_siblings(
             if other.unicode.trim().is_empty() || translatable.contains(id) {
                 continue;
             }
-            if glyph_stays_with_operator(other, keep) {
+            if glyph_stays_with_operator(other, keep) && !figure_punctuation(other, keep) {
                 return None;
             }
             echoes.push(*id);
@@ -3007,6 +3057,26 @@ fn sibling_will_draw(
         }
     }
     false
+}
+
+/// `{` of a JSON example is drawn as figure ink and shares the sentence
+/// operator. The sentence still translates; the brace is painted back.
+fn figure_punctuation(glyph: &Glyph, keep: &HashMap<u32, String>) -> bool {
+    let text = glyph.unicode.trim();
+    let Some(ch) = text.chars().next() else {
+        return false;
+    };
+    if text.chars().count() != 1 || !ch.is_ascii_punctuation() {
+        return false;
+    }
+    let reason = keep
+        .get(&glyph.id)
+        .map(String::as_str)
+        .or(match &glyph.disposition {
+            Disposition::KeptOriginal { reason } => Some(reason.as_str()),
+            _ => None,
+        });
+    reason == Some("figure")
 }
 
 fn glyph_stays_with_operator(glyph: &Glyph, keep: &HashMap<u32, String>) -> bool {
@@ -4361,7 +4431,15 @@ fn place_segments(
             .glyph_ids
             .iter()
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
+            .filter(|glyph| {
+                !keep
+                    .get(&glyph.id)
+                    .is_some_and(|reason| reason == "math-block")
+            })
             .collect();
+        if glyphs.is_empty() {
+            continue;
+        }
         if let Some(wrap) = wraps.get(index) {
             if let Some((lines, extra)) = layout_joined_contents_title(
                 &glyphs,
@@ -4422,7 +4500,7 @@ fn place_segments(
                         }
                     }
                 }
-                succeeded.extend(segment.glyph_ids.iter().copied());
+                succeeded.extend(glyphs.iter().map(|glyph| glyph.id));
                 drawn.extend(lines);
             }
             None => {
@@ -10461,6 +10539,40 @@ fn carry_formula_with_line(drawn: &[Drawn], y_before: &[f32], shifts: &mut [List
     }
 }
 
+/// A short clause drawn beside a formula that stayed in the source face.
+/// `，否则为 0。` sits on `ϕ(a)=ϕ(a)`; closing the hole above the clause
+/// lifts it off that formula. A paragraph that redraws its own math is
+/// not this case: those glyphs are already in the block.
+fn clause_sits_on_kept_formula(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    page: u32,
+) -> bool {
+    let size = block.size.max(1.0);
+    if block.right - block.left > size * 8.0 {
+        return false;
+    }
+    let mut used = HashSet::new();
+    for index in &block.indices {
+        used.extend(drawn[*index].glyph_ids.iter().copied());
+    }
+    let math = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == page
+                && !used.contains(&glyph.id)
+                && !glyph.invisible
+                && is_math_font(&glyph.font_name)
+                && (glyph.matrix[5] - block.source_top).abs() <= size * 0.35
+                && glyph.matrix[4] < block.left
+                && glyph.matrix[4] > block.left - size * 12.0
+        })
+        .count();
+    math >= 4
+}
+
 fn close_column_holes(
     drawn: &mut [Drawn],
     extraction: &Extraction,
@@ -10579,6 +10691,15 @@ fn close_column_holes(
                     body_hole_reach(size)
                 };
                 let chained = same_column && source_gap > 0.0 && source_gap < reach;
+                // `下面` and `是` are one lead-in. Resetting the pull on the
+                // second word left `下面` in the hole and the rest of the
+                // sentence on the English baseline.
+                let same_baseline = !prev.listing
+                    && !block.listing
+                    && (prev.source_top - block.source_top).abs() <= size * 0.45
+                    && block.left > prev.left
+                    && block.left - prev.left < size * 8.0
+                    && block.left < prev.right + size * 4.0;
                 let drawn_gap = prev.bottom - (block.top + shift);
                 if chained {
                     // `shift` is the pull already applied above this block.
@@ -10586,6 +10707,8 @@ fn close_column_holes(
                     if drawn_gap > source_gap + 1.0 {
                         extra = drawn_gap - source_gap;
                     }
+                } else if same_baseline {
+                    extra = 0.0;
                 } else {
                     shift = 0.0;
                 }
@@ -10631,10 +10754,20 @@ fn close_column_holes(
                 hold_scripts = false;
             }
             shift += extra;
+            // `，否则为 0。` is the roman tail of `ϕ(a)=ϕ(a)`. Pulling that
+            // tail closed a hole and left the formula on the old baseline.
+            // The pull still applies to the paragraph under the formula.
+            let applied = if shift.abs() > 0.4
+                && clause_sits_on_kept_formula(&block, drawn, extraction, page)
+            {
+                0.0
+            } else {
+                shift
+            };
             for index in &block.indices {
-                drawn[*index].y += shift;
+                drawn[*index].y += applied;
             }
-            if !block.listing && shift.abs() > 0.4 {
+            if !block.listing && applied.abs() > 0.4 {
                 let quotes =
                     quotes_hanging_beside(&block, extraction, page, &used_ids, &claimed_quotes);
                 if !quotes.is_empty() {
@@ -10643,7 +10776,7 @@ fn close_column_holes(
                         page,
                         ids: quotes,
                         dx: 0.0,
-                        dy: shift,
+                        dy: applied,
                         host_y: f32::NAN,
                     });
                 }
@@ -14522,6 +14655,11 @@ fn superscript_mask(text: &str) -> Vec<bool> {
             // rises: a digit follows the star.
             let solid = |ch: char| !ch.is_whitespace() && !is_mark_star(ch);
             let next = chars.iter().skip(index + 1).copied().find(|ch| solid(*ch));
+            // `在§6中` and `（§3）` are section references. `张轩∗1` still rises.
+            if chars[index] == '§' && next.is_some_and(|ch| ch.is_ascii_alphanumeric()) {
+                index += 1;
+                continue;
+            }
             let prev = chars[..index].iter().rev().copied().find(|ch| solid(*ch));
             let han_word = next.is_some_and(is_han_char)
                 || (prev.is_some_and(is_han_char) && !next.is_some_and(|ch| ch.is_ascii_digit()));
@@ -16043,6 +16181,94 @@ mod tests {
             released.contains(&2),
             "releasing the heading reflowed the display"
         );
+    }
+
+    #[test]
+    fn an_otherwise_clause_on_a_formula_is_not_kept_as_math() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut push = |x: f32, y: f32, text: &str, font: &str| {
+            let mut glyph = ink_glyph(id, x, y, 10.0, text);
+            glyph.font_name = font.into();
+            glyphs.push(glyph);
+            id += 1;
+        };
+        // Ten formula glyphs, nine roman letters. The line is a math shard
+        // unless the otherwise clause releases it.
+        for (index, ch) in "φ(a)=φ(a)+k".chars().enumerate() {
+            push(
+                40.0 + index as f32 * 8.0,
+                400.0,
+                &ch.to_string(),
+                "LMMathItalic10",
+            );
+        }
+        for (index, ch) in "otherwise".chars().enumerate() {
+            push(
+                140.0 + index as f32 * 6.0,
+                400.0,
+                &ch.to_string(),
+                "LMRoman10",
+            );
+        }
+        for (index, ch) in ["Q", "=", "z", "q"].iter().enumerate() {
+            push(72.0 + index as f32 * 8.0, 200.0, ch, "LMMathItalic10");
+        }
+        drop(push);
+        let clause: Vec<u32> = glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[5] > 300.0)
+            .map(|glyph| glyph.id)
+            .collect();
+        let display: Vec<u32> = glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[5] < 300.0)
+            .map(|glyph| glyph.id)
+            .collect();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let report = crate::translate::TranslateReport {
+            segments: vec![
+                crate::translate::TranslatedSegment {
+                    id: 0,
+                    page_index: 0,
+                    glyph_ids: clause,
+                    source: "phi = phi and 0 otherwise.".into(),
+                    translated: "phi = phi，否则为 0。".into(),
+                },
+                crate::translate::TranslatedSegment {
+                    id: 1,
+                    page_index: 0,
+                    glyph_ids: display,
+                    source: "Q = z q".into(),
+                    translated: "Q = z q".into(),
+                },
+            ],
+            calls: 0,
+            cache_hits: 0,
+        };
+        let blocks = super::math_block_segments(&report, &extraction, &by_id);
+        assert!(
+            blocks.contains(&0),
+            "the formula around the otherwise clause was reflowed"
+        );
+        assert_eq!(
+            super::formula_clause_text(&report.segments[0].source, &report.segments[0].translated)
+                .as_deref(),
+            Some("，否则为 0。")
+        );
+        assert!(blocks.contains(&1), "the display equation was reflowed");
     }
 
     #[test]
@@ -18117,6 +18343,14 @@ mod tests {
         assert_eq!(raised.iter().filter(|flag| **flag).count(), 3);
         let cjk_star = superscript_mask("张轩∗1");
         assert!(cjk_star[2] && cjk_star[3], "{cjk_star:?}");
+        let section = superscript_mask("最后，在§6中，我们");
+        assert!(
+            section.iter().all(|flag| !flag),
+            "a section sign was raised: {section:?}"
+        );
+        assert!(superscript_mask("任务（§3）和实现（§A.1）")
+            .iter()
+            .all(|flag| !flag));
         let markdown = superscript_mask("该序列为**奇异**。");
         assert!(markdown.iter().all(|flag| !flag), "{markdown:?}");
         assert!(superscript_mask("定理8.18").iter().all(|flag| !flag));

@@ -1994,6 +1994,19 @@ fn is_function_word(word: &str) -> bool {
             | "overview"
             | "chapter"
             | "section"
+            // Table headers, not bylines. `Challenge Type`, `Overly Specific`,
+            // `Complex Aspects`, and `Computer Science` are title case.
+            | "challenge"
+            | "type"
+            | "overly"
+            | "specific"
+            | "complex"
+            | "aspects"
+            | "computer"
+            | "science"
+            | "quantitative"
+            | "biology"
+            | "finance"
     )
 }
 
@@ -3625,6 +3638,27 @@ mod tests {
         assert_eq!(
             restore_credit_names("Business Interests Safe", "商业利益得到保障"),
             "商业利益得到保障"
+        );
+        assert!(!whole_line_is_personal_name("Challenge Type"));
+        assert!(!whole_line_is_personal_name("Overly Specific"));
+        assert!(!whole_line_is_personal_name("Complex Aspects"));
+        assert!(!whole_line_is_personal_name("Computer Science"));
+        assert!(!whole_line_is_personal_name("Quantitative Biology"));
+        assert_eq!(
+            restore_credit_names("Challenge Type", "挑战类型"),
+            "挑战类型"
+        );
+        assert_eq!(
+            restore_credit_names("Overly Specific", "过于具体"),
+            "过于具体"
+        );
+        assert_eq!(
+            restore_credit_names("Complex Aspects", "复杂方面"),
+            "复杂方面"
+        );
+        assert_eq!(
+            restore_credit_names("Computer Science", "计算机科学"),
+            "计算机科学"
         );
         assert_eq!(
             restore_credit_names("Executive Summary", "执行摘要"),
