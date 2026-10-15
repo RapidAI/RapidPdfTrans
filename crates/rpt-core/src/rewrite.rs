@@ -1114,7 +1114,72 @@ fn math_block_segments(
         .enumerate()
         .filter(|(_, marked)| *marked)
         .map(|(index, _)| index)
+        .filter(|&index| {
+            let segment = &report.segments[index];
+            let glyphs: Vec<&Glyph> = segment
+                .glyph_ids
+                .iter()
+                .filter_map(|id| extraction.glyphs.get(by_id[id]))
+                .collect();
+            // The chain reaches `4 The potential…` through the paragraph
+            // under it. That heading is one bold line; painting it in place
+            // does not move it onto the binomial.
+            !numbered_heading_line(&segment.source, &glyphs)
+        })
         .collect()
+}
+
+/// `4 The potential and its increase at a request`. A body line that happens
+/// to start with a digit is not bold and is not one short line.
+fn numbered_heading_line(text: &str, glyphs: &[&Glyph]) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.contains('⟦') || text.chars().count() > 80 {
+        return false;
+    }
+    if text.ends_with('.') || text.ends_with('。') {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index == 0 || index > 2 {
+        return false;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    if bytes.get(index).is_none_or(|byte| !byte.is_ascii_whitespace()) {
+        return false;
+    }
+    let rest = text[index..].trim_start();
+    if rest.is_empty() || rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let visible: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    if visible.is_empty() {
+        return false;
+    }
+    let size = visible.iter().map(|glyph| glyph.font_size).fold(1.0f32, f32::max);
+    let top = visible.iter().map(|glyph| glyph.matrix[5]).fold(f32::MIN, f32::max);
+    let bottom = visible.iter().map(|glyph| glyph.matrix[5]).fold(f32::MAX, f32::min);
+    if top - bottom > size * 0.45 {
+        return false;
+    }
+    let bold = visible.iter().all(|glyph| face_style(&glyph.font_name).bold);
+    bold || size >= 12.0
 }
 
 fn math_span(glyphs: &[&Glyph]) -> Option<MathSpan> {
@@ -7078,6 +7143,25 @@ fn small_caps_cap_size(sizes: &[f32]) -> Option<f32> {
     Some(large)
 }
 
+/// A section heading that opens on the body margin is left-aligned. A short
+/// line that merely ends where the heading ends is not a title-page cluster,
+/// and sliding the heading to that edge paints it over the formula.
+fn line_sits_on_body_margin(extraction: &Extraction, line: &InkLine<'_>) -> bool {
+    let Some(page) = line.glyphs.first().map(|glyph| glyph.page_index) else {
+        return false;
+    };
+    let size = crate::segment::representative_size(&line.glyphs).max(1.0);
+    let pieces = page_text_pieces(extraction, page);
+    let margin = pieces
+        .iter()
+        .filter(|piece| {
+            piece.right - piece.left >= size * 12.0 && (piece.right - line.right).abs() > size
+        })
+        .map(|piece| piece.left)
+        .fold(f32::MAX, f32::min);
+    margin.is_finite() && (line.left - margin).abs() <= 3.0
+}
+
 fn shared_right_edge(extraction: &Extraction, line: &InkLine<'_>) -> Option<f32> {
     let page = line.glyphs.first()?.page_index;
     let size = crate::segment::representative_size(&line.glyphs).max(1.0);
@@ -8175,12 +8259,15 @@ fn layout_segment(
         // on the left. Body text never reaches this size.
         let left_slop = if source_size >= 16.0 { 3.0 } else { 8.0 };
         let ragged_left = ink.len() >= 2 && left_max - left_min > left_slop;
-        let page_edge =
-            if ink.len() == 1 && drawn.len() == 1 && !contents_baseline(extraction, &ink[0]) {
-                shared_right_edge(extraction, &ink[0])
-            } else {
-                None
-            };
+        let page_edge = if ink.len() == 1
+            && drawn.len() == 1
+            && !contents_baseline(extraction, &ink[0])
+            && !line_sits_on_body_margin(extraction, &ink[0])
+        {
+            shared_right_edge(extraction, &ink[0])
+        } else {
+            None
+        };
         if shared && (ragged_left || page_edge.is_some()) {
             let mut edge = page_edge.unwrap_or(ink_edge);
             if let Some(limit) = numeral_left {
@@ -9830,6 +9917,7 @@ fn close_column_holes(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
 ) -> Vec<ListingShift> {
+    let original_y: Vec<f32> = drawn.iter().map(|line| line.y).collect();
     let mut shifts = Vec::new();
     let mut pages: Vec<u32> = drawn.iter().map(|line| line.page).collect();
     pages.sort_unstable();
@@ -9875,6 +9963,9 @@ fn close_column_holes(
         let mut claimed_quotes = HashSet::new();
         let mut shift = 0.0f32;
         let mut prev: Option<ColumnBlock> = None;
+        // Set when a heading refuses an inherited pull. The next paragraph's
+        // few points of `extra` are its own superscript, not a hole.
+        let mut hold_scripts = false;
         let mut placed_lines: Vec<PlacedListing> = Vec::new();
         for block in blocks {
             // A column page number sits to the right of its title. It is not
@@ -9958,6 +10049,37 @@ fn close_column_holes(
                     let want = source_gap.max(size * 1.05);
                     extra += drawn_gap - want;
                 }
+            }
+            // A numbered heading inherits a pull that only closes empty
+            // space (`1 引言` follows the shorter abstract). It does not
+            // inherit a pull that would carry it across a formula the
+            // paragraph above left behind: that paints `4 请求时的势及其增量`
+            // onto U∗/0W and drags the next paragraph off n+1/k+1.
+            let proposed = shift + extra;
+            let column_right = prev
+                .as_ref()
+                .map(|item| item.right)
+                .unwrap_or(block.right)
+                .max(block.right);
+            if block_is_numbered_heading(&block, drawn, extraction, by_id)
+                && heading_pull_crosses_script(
+                    &block,
+                    proposed,
+                    column_right,
+                    drawn,
+                    &original_y,
+                    extraction,
+                    by_id,
+                )
+            {
+                shift = 0.0;
+                extra = 0.0;
+                hold_scripts = true;
+            } else if hold_scripts {
+                if extra.abs() < block.size.max(1.0) * 0.7 {
+                    extra = 0.0;
+                }
+                hold_scripts = false;
             }
             shift += extra;
             for index in &block.indices {
@@ -10827,6 +10949,89 @@ fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) 
         }
     }
     *blocks = kept;
+}
+
+/// The formula is drawn on the paragraph's pre-close baseline. Closing
+/// the hole moves the paragraph and leaves U∗ where it was. A heading
+/// that inherits the same pull lands on that formula.
+fn heading_pull_crosses_script(
+    block: &ColumnBlock,
+    proposed: f32,
+    column_right: f32,
+    drawn: &[Drawn],
+    original_y: &[f32],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    if proposed.abs() <= block.size.max(1.0) * 0.4 || block.indices.is_empty() {
+        return false;
+    }
+    let src = block.top;
+    let dest = src + proposed;
+    let lo = src.min(dest);
+    let hi = src.max(dest);
+    let page = drawn[block.indices[0]].page;
+    let mut own = HashSet::new();
+    for index in &block.indices {
+        own.extend(drawn[*index].glyph_ids.iter().copied());
+    }
+    for (index, line) in drawn.iter().enumerate() {
+        if line.page != page || block.indices.contains(&index) {
+            continue;
+        }
+        let origin = original_y[index];
+        if origin <= lo + 0.5 || origin >= hi - 0.5 {
+            continue;
+        }
+        let mut body = line.size;
+        for id in &line.glyph_ids {
+            if let Some(glyph) = by_id.get(id).and_then(|slot| extraction.glyphs.get(*slot)) {
+                body = body.max(glyph.font_size);
+            }
+        }
+        let body = body.max(1.0);
+        for id in &line.glyph_ids {
+            let Some(glyph) = by_id.get(id).and_then(|slot| extraction.glyphs.get(*slot)) else {
+                continue;
+            };
+            if own.contains(&glyph.id) || glyph.unicode.trim().is_empty() {
+                continue;
+            }
+            let dy = (glyph.matrix[5] - origin).abs();
+            let script = dy > 1.6 && dy < body && glyph.font_size <= body * 0.88;
+            let in_column = glyph.matrix[4] >= block.left - 4.0
+                && glyph.matrix[4] <= column_right + body;
+            if script && in_column {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn block_is_numbered_heading(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    if block.listing || block.indices.is_empty() {
+        return false;
+    }
+    let text: String = block
+        .indices
+        .iter()
+        .map(|index| drawn[*index].text.as_str())
+        .collect();
+    let mut glyphs = Vec::new();
+    for index in &block.indices {
+        for id in &drawn[*index].glyph_ids {
+            if let Some(glyph) = by_id.get(id).and_then(|slot| extraction.glyphs.get(*slot)) {
+                glyphs.push(glyph);
+            }
+        }
+    }
+    numbered_heading_line(text.trim(), &glyphs)
 }
 
 fn block_is_section_index(block: &ColumnBlock, drawn: &[Drawn]) -> bool {
@@ -14900,9 +15105,139 @@ mod tests {
         let blocks = super::math_block_segments(&report, &extraction, &by_id);
         assert!(
             blocks.contains(&0),
-            "the heading across the placeholder was reflowed onto the binomial"
+            "a regular line that starts with a digit was released"
         );
         assert!(blocks.contains(&2), "the display equation was reflowed");
+        // The synthetic heading is regular roman at body size. The paper's
+        // section head is bold, which is what releases it.
+        let mut bold_glyphs = extraction.glyphs.clone();
+        for glyph in &mut bold_glyphs {
+            if glyph.matrix[5] > 394.0 {
+                glyph.font_name = "LMRoman12-Bold".into();
+            }
+        }
+        let bold_report = crate::translate::TranslateReport {
+            segments: report.segments.clone(),
+            calls: 0,
+            cache_hits: 0,
+        };
+        let by_bold = glyph_index(&bold_glyphs);
+        let extraction_bold = Extraction {
+            glyphs: bold_glyphs,
+            ..extraction
+        };
+        let released = super::math_block_segments(&bold_report, &extraction_bold, &by_bold);
+        assert!(
+            !released.contains(&0),
+            "a bold section heading was kept as a math block"
+        );
+        assert!(released.contains(&2), "releasing the heading reflowed the display");
+    }
+
+    #[test]
+    fn a_numbered_heading_stays_above_its_paragraph() {
+        // The paragraph above the heading is pulled up off its formula. The
+        // heading's own source gap is only one leading, so it used to inherit
+        // that pull and land on U∗. The next paragraph then left n+1/k+1.
+        // U∗ is a script on the paragraph line, inside the inherited pull.
+        let mut formula = ink_glyph(2, 340.0, 470.0, 10.0, "U");
+        formula.font_name = "LMMathItalic10".into();
+        let mut script = ink_glyph(4, 80.0, 424.0, 7.0, "∗");
+        script.font_name = "LMMathSymbols8".into();
+        let mut heading = ink_glyph(10, 72.0, 400.0, 14.3, "4");
+        heading.font_name = "LMRoman12-Bold".into();
+        let glyphs = vec![
+            ink_glyph(1, 72.0, 500.0, 10.0, "A"),
+            ink_glyph(3, 72.0, 430.0, 10.0, "W"),
+            formula,
+            script,
+            heading,
+            ink_glyph(20, 72.0, 378.0, 10.0, "F"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(72.0, 500.0, 10.0, "上文", vec![1]),
+            test_draw(72.0, 430.0, 10.0, "块上三角", vec![3, 2, 4]),
+            test_draw(72.0, 400.0, 14.3, "4 请求时的势及其增量", vec![10]),
+            test_draw(91.0, 378.0, 10.0, "固定有限标签集", vec![20]),
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let heading_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('4'))
+            .unwrap()
+            .y;
+        let body_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('固'))
+            .unwrap()
+            .y;
+        assert!(
+            (heading_y - 400.0).abs() < 0.5,
+            "the heading left its baseline: {heading_y}"
+        );
+        assert!(
+            (body_y - 378.0).abs() < 0.5,
+            "the paragraph under the heading moved: {body_y}"
+        );
+    }
+
+    #[test]
+    fn a_numbered_heading_still_closes_a_hole_above_it() {
+        // `1 引言` follows the shorter abstract. Nothing is left in the
+        // gap, so the heading keeps the pull. Freezing every numbered
+        // heading reopened that hole.
+        let mut tall = ink_glyph(2, 340.0, 470.0, 10.0, "U");
+        tall.font_name = "LMMathItalic10".into();
+        let mut heading = ink_glyph(10, 72.0, 400.0, 14.3, "1");
+        heading.font_name = "LMRoman12-Bold".into();
+        let glyphs = vec![
+            ink_glyph(1, 72.0, 500.0, 10.0, "A"),
+            ink_glyph(3, 72.0, 430.0, 10.0, "W"),
+            tall,
+            heading,
+            ink_glyph(20, 72.0, 378.0, 10.0, "F"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(72.0, 500.0, 10.0, "上文", vec![1]),
+            test_draw(72.0, 430.0, 10.0, "摘要收短", vec![3, 2]),
+            test_draw(72.0, 400.0, 14.3, "1 引言", vec![10]),
+            test_draw(91.0, 378.0, 10.0, "服务器问题由", vec![20]),
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let heading_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('1'))
+            .unwrap()
+            .y;
+        let body_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('服'))
+            .unwrap()
+            .y;
+        assert!(
+            (heading_y - 440.0).abs() < 0.5,
+            "the heading dropped a pull that closed an empty hole: {heading_y}"
+        );
+        assert!(
+            (body_y - 418.0).abs() < 0.5,
+            "the paragraph under the heading left the heading: {body_y}"
+        );
     }
 
     #[test]

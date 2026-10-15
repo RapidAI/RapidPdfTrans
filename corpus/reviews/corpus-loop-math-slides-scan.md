@@ -102,7 +102,7 @@ The devroom list is Chinese, centered, with product and project names left in La
 
 ## Owner pass: column fill and the binomial paragraph
 
-`rpt-core` lib tests: 372 passed, 1 ignored. Coverage on both exports is `complete: true`, `english_body: 0`.
+`rpt-core` lib tests: 374 passed, 1 ignored. Coverage on both exports is `complete: true`, `english_body: 0`.
 
 | id | PDF |
 | --- | --- |
@@ -111,7 +111,7 @@ The devroom list is Chinese, centered, with product and project names left in La
 
 A prose `，` stays on the line unless the break already keeps 90% of the fitted span. A name list (two or more `、`) may still break at `、` from 60%. A parenthetical that wraps bracket keys (`（例如参见 Speyer … [SS04] 以及 … [MS15]）`) is prose and wraps; `(Smith et al., 2020)` stays one token. The ragged page-4 lines (`例如，` / `然而，` / `[DW92] 表明，` / `进一步扩展`) came from those two breaks, not from the binomial keep.
 
-The binomial is one placeholder in the sentence (`一个` ⟦k+1 over 2⟧ `维`). Inline math stays in the translation (`µ(G) = min…`, `(k + 1)`). A display equation on the far side of that paragraph still freezes the heading: cutting the walk painted `4 请求时的势及其增量` onto the U∗/0W stack. A slide bullet is not OCR garbage. A centered comma list is not the next line of the previous slide. `真实` is one compound. A citation `+` is not its own baseline.
+The binomial is one placeholder in the sentence (`一个` ⟦k+1 over 2⟧ `维`). Inline math stays in the translation (`µ(G) = min…`, `(k + 1)`). The page 9 section heading is painted in place. A numbered heading still follows a pull that only closes empty space (`1 引言` stays with the shorter abstract). It does not inherit a pull that would cross a formula the paragraph above left on its old baseline. A slide bullet is not OCR garbage. A centered comma list is not the next line of the previous slide. `真实` is one compound. A citation `+` is not its own baseline.
 
 ### FOSDEM, all 36 pages
 
@@ -125,12 +125,12 @@ Page 4. The opening paragraph is Chinese. The stack sits between `一个` and `�
 
 Page 1. Body lines are 13.5pt apart. `许多最初为` over `服务器位于` is that same leading. `[DEH+17]` does not open a gap.
 
-Page 9. `对于具有方形对角块的矩阵` and `固定有限标签集 … N ×` are Chinese, with `n+1` over `2` and `k+1` over `2` in the sentence. The heading `4 The potential and its increase at a request` stays the source English on its own baseline (x=72). Lemma 3.2 items 1 and 2 are Chinese with the original `µ(AG)` and `µ(F)` glyphs. Item 3 is Chinese; the block-diagonal display (`G_1,…,G_s` and the sum) is wider than the hole and sits on the proof line. The proof is Chinese (`每个所选行列式都乘以 detA`). A repeated `⟦0⟧` is drawn the second time as the formula's unicode, so that paragraph is no longer left in English.
+Page 9. `对于具有方形对角块的矩阵` and `固定有限标签集 … N ×` are Chinese, with `n+1` over `2` and `k+1` over `2` on that line (pdftotext y=483.6 beside N at y=486.4). The section heading is `4 请求时的势及其增量`, bold, 13.8pt, at x=72 and y=458.6, on the source baseline. U∗/0W stays at y≈400, x≈339. Lemma 3.2 items 1 and 2 are Chinese with the original `µ(AG)` and `µ(F)` glyphs. Item 3 is Chinese; the block-diagonal display (`G_1,…,G_s` and the sum) is wider than the hole and sits on the proof line. The proof is Chinese (`每个所选行列式都乘以 detA`). A repeated `⟦0⟧` is drawn the second time as the formula's unicode, so that paragraph is no longer left in English.
 
 Pages 5–8 and 10–13. Formula paragraphs are Chinese around the holes (`引理 2.2`, `引理 2.3`, the valuation sentences). A display line that is only the formula stays in the source glyphs (`f = Σ f_a z^a` on page 5, the two `ExtCost` lines and `(28)` on page 13). Pages 14–17 stay an English bibliography. Pages 2–3, 6, and 18 are Chinese around the formulas. `随机化 k-服务器` on page 5 is Chinese, with `O(log k)` and `Ω(log² k)` in the sentence.
 
 ## Left open
 
 - The scan’s invisible OCR layer is still in the content stream, so a text extract of the LaFollette cover and of page 2 still shows the old characters. The painted cover does not.
-- Lemma 3.2 item 3's block-diagonal display does not fit its inline hole and covers the proof line. Painting the page 9 heading still moves it onto the binomial, so that heading stays in the source glyphs.
+- Lemma 3.2 item 3's block-diagonal display does not fit its inline hole and covers the proof line.
 - arXiv:2410.22360 still has English prose echoes on pages 3, 6, 9, and 13.
