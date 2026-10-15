@@ -1837,27 +1837,37 @@ fn script_bases<'a>(
         })
         .collect();
     candidates.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
-    let wide = right - left > body * 1.3;
-    if !wide {
-        let best = candidates
+    // Each script sits on its own letter. `e_i e_j` is one cluster of two
+    // subscripts; keeping only the left `e` leaves `j` in the hole and the
+    // right `e` in the words (`e_i j e`).
+    let mut picked: Vec<&Glyph> = Vec::new();
+    for id in scripts {
+        let Some(script) = glyphs.iter().copied().find(|glyph| glyph.id == *id) else {
+            continue;
+        };
+        let Some(base) = candidates
             .iter()
             .copied()
             .filter(|glyph| {
-                glyph.matrix[4] <= left + body * 0.25 && glyph.matrix[4] >= left - body * 0.85
+                let dx = script.matrix[4] - glyph.matrix[4];
+                dx >= -body * 0.2 && dx <= body * 0.95
             })
-            .max_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
-        return best.into_iter().collect();
+            .max_by(|left_glyph, right_glyph| {
+                left_glyph.matrix[4].total_cmp(&right_glyph.matrix[4])
+            })
+        else {
+            continue;
+        };
+        if picked.iter().all(|glyph| glyph.id != base.id) {
+            picked.push(base);
+        }
     }
-    let mut picked: Vec<&Glyph> = candidates
-        .iter()
-        .copied()
-        .filter(|glyph| {
-            let x = glyph.matrix[4];
-            x >= left - body * 0.95 && x <= right + body * 0.08
-        })
-        .collect();
+    picked.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
     // `min` sits just left of its limit. Walk back across the word, not
     // across the equation.
+    if right - left <= body * 1.3 {
+        return picked;
+    }
     let mut guard = 0;
     while guard < 5 {
         guard += 1;
@@ -10576,7 +10586,7 @@ fn close_column_holes(
                 .unwrap_or(block.right)
                 .max(block.right);
             if block_is_numbered_heading(&block, drawn, extraction, by_id)
-                && heading_pull_crosses_script(
+                && (heading_pull_crosses_script(
                     &block,
                     proposed,
                     column_right,
@@ -10584,7 +10594,7 @@ fn close_column_holes(
                     &original_y,
                     extraction,
                     by_id,
-                )
+                ) || heading_leaves_display_below(&block, proposed, page, extraction))
             {
                 shift = 0.0;
                 extra = 0.0;
@@ -11465,6 +11475,42 @@ fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) 
         }
     }
     *blocks = kept;
+}
+
+/// A display under the heading (`Q = [z q q]`) stays in the source stream.
+/// Pulling `4 请求时的势及其增量` up leaves that display on the English
+/// baseline and the heading in the hole above it.
+fn heading_leaves_display_below(
+    block: &ColumnBlock,
+    proposed: f32,
+    page: u32,
+    extraction: &Extraction,
+) -> bool {
+    let size = block.size.max(1.0);
+    if proposed <= size * 0.4 || block.indices.is_empty() {
+        return false;
+    }
+    let reach = size * 8.0;
+    let mut bands: HashMap<i32, usize> = HashMap::new();
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page
+            || glyph.invisible
+            || glyph.unicode.trim().is_empty()
+            || !is_math_font(&glyph.font_name)
+        {
+            continue;
+        }
+        let below = block.source_top - glyph.matrix[5];
+        if below < size * 0.8 || below > reach {
+            continue;
+        }
+        if glyph.matrix[4] < block.left - size || glyph.matrix[4] > block.left + size * 28.0 {
+            continue;
+        }
+        let band = (glyph.matrix[5] * 2.0).round() as i32;
+        *bands.entry(band).or_default() += 1;
+    }
+    bands.values().any(|count| *count >= 4)
 }
 
 /// The formula is drawn on the paragraph's pre-close baseline. Closing
@@ -16116,6 +16162,67 @@ mod tests {
     }
 
     #[test]
+    fn a_display_under_a_heading_keeps_the_heading_on_its_baseline() {
+        // Section 4 sits above `Q = [z q q]`. Closing the hole above the
+        // heading used to leave that display on the English baseline.
+        let mut tall = ink_glyph(2, 340.0, 470.0, 10.0, "U");
+        tall.font_name = "LMMathItalic10".into();
+        let mut heading = ink_glyph(10, 72.0, 400.0, 14.3, "4");
+        heading.font_name = "LMRoman12-Bold".into();
+        let mut display = Vec::new();
+        for (index, (x, text)) in [80.0, 100.0, 120.0, 140.0]
+            .into_iter()
+            .zip(["Q", "=", "z", "q"])
+            .enumerate()
+        {
+            let mut glyph = ink_glyph(30 + index as u32, x, 330.0, 10.0, text);
+            glyph.font_name = "LMMathItalic10".into();
+            display.push(glyph);
+        }
+        let mut glyphs = vec![
+            ink_glyph(1, 72.0, 500.0, 10.0, "A"),
+            ink_glyph(3, 72.0, 430.0, 10.0, "W"),
+            tall,
+            heading,
+            ink_glyph(20, 72.0, 378.0, 10.0, "F"),
+        ];
+        glyphs.extend(display);
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(72.0, 500.0, 10.0, "上文", vec![1]),
+            test_draw(72.0, 430.0, 10.0, "摘要收短", vec![3, 2]),
+            test_draw(72.0, 400.0, 14.3, "4 请求时的势及其增量", vec![10]),
+            test_draw(91.0, 378.0, 10.0, "固定有限标签集", vec![20]),
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let heading_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('4'))
+            .unwrap()
+            .y;
+        let body_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('固'))
+            .unwrap()
+            .y;
+        assert!(
+            (heading_y - 400.0).abs() < 0.5,
+            "the heading left the display behind: {heading_y}"
+        );
+        assert!(
+            (body_y - 378.0).abs() < 0.5,
+            "the paragraph under the heading moved off the display: {body_y}"
+        );
+    }
+
+    #[test]
     fn a_citation_plus_is_not_its_own_baseline() {
         let mut glyphs = Vec::new();
         let mut id = 0u32;
@@ -17063,7 +17170,12 @@ mod tests {
             .iter()
             .filter_map(|id| extracted.glyphs.get(by_id[id]))
             .collect();
-        let let_text = "设 ⟦0⟧ 是 Q 的底部坐标块，由满足 2 ⟦2⟧ 的行 ⟦1⟧e 组成：";
+        assert!(
+            !let_line.text.contains("⟧e"),
+            "the second e of e_i e_j stayed in the words: {}",
+            let_line.text
+        );
+        let let_text = "设 ⟦0⟧ 是 Q 的底部坐标块，由满足 2 ⟦2⟧ 的行 ⟦1⟧ 组成：";
         let mut let_points: Vec<u32> = let_text
             .chars()
             .map(|ch| ch as u32)
@@ -17100,7 +17212,32 @@ mod tests {
                 .map(|line| line.text.as_str())
                 .collect::<Vec<_>>()
         );
-        let _ = lift_stack_placeholders(&mut let_drawn, &let_glyphs, &let_font);
+        let let_shifts =
+            lift_stack_placeholders(&mut let_drawn, &let_glyphs, &let_font).expect("let holes");
+        let row_shift = let_shifts.iter().find(|shift| {
+            shift.ids.iter().any(|id| {
+                extracted
+                    .glyphs
+                    .get(by_id[id])
+                    .is_some_and(|glyph| glyph.unicode == "j" && glyph.font_size < 9.0)
+            })
+        });
+        let row_shift = row_shift.expect("e_i e_j hole");
+        let bases: Vec<&Glyph> = row_shift
+            .ids
+            .iter()
+            .filter_map(|id| extracted.glyphs.get(by_id[id]))
+            .filter(|glyph| glyph.unicode == "e" && glyph.font_size > 9.0)
+            .collect();
+        assert_eq!(bases.len(), 2, "e_i e_j kept only one e: {bases:?}");
+        assert!(
+            let_drawn.iter().all(|line| line.text.trim() != "e"),
+            "a stray e was painted beside e_i e_j: {:?}",
+            let_drawn
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+        );
         let view = page
             .iter()
             .find(|segment| segment.text.contains("View q"))
