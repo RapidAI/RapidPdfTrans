@@ -1426,7 +1426,19 @@ fn topic_comma_list(source: &str) -> bool {
         .iter()
         .filter(|item| item.split_whitespace().count() <= 4)
         .count();
-    short * 4 >= items.len() * 3
+    if short * 4 < items.len() * 3 {
+        return false;
+    }
+    // `13, 1331, 121, 73` is a sentence listing numbers, not a topic list.
+    let numeric = items
+        .iter()
+        .filter(|item| {
+            let token = item.split_whitespace().last().unwrap_or("");
+            token.chars().any(|ch| ch.is_ascii_digit())
+                && !token.chars().any(|ch| ch.is_ascii_alphabetic())
+        })
+        .count();
+    numeric * 2 < items.len()
 }
 
 fn list_items<'a>(text: &'a str, marks: &[char]) -> Vec<&'a str> {
@@ -3989,6 +4001,13 @@ mod tests {
                 "模型用途——对于摘要、翻译或分类等通用任务，大多数主流模型（GPT、Gemini、Claude、Llama、Mistral）都能表现出色。"
             ),
             "a bullet that lists models inside one sentence was held back"
+        );
+        assert!(
+            !comma_list_incomplete(
+                "The palindromes in the sequence 13, 1331, 121, 73, 99, 56, 232, and 7 are 1331, 121, 232, and 7. To find their sum:",
+                "序列 13、1331、121、73、99、56、232 和 7 中的回文数是 1331、121、232 和 7。为了求它们的和："
+            ),
+            "a sentence listing numbers was treated as a devroom list"
         );
         assert_eq!(repair_translation("The The MCP ", "该 该 MCP "), "该 MCP");
         assert_eq!(

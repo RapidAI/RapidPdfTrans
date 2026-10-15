@@ -4090,8 +4090,9 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     let next = lower.text.trim_start();
     // `GPT-` / `2` and `MetaMath-` / `7B` are one token. A contents row is
     // `83 Generating` only when the line above is not finishing that token.
+    // A prompt answer hangs a quote on the wrap (`palin-` / `“ dromes`).
     let hyphen = soft_hyphen_stem(&upper.text).is_some()
-        && next.starts_with(|ch: char| ch.is_ascii_alphanumeric());
+        && (next.starts_with(|ch: char| ch.is_ascii_alphanumeric()) || quoted_hyphen_tail(next));
     // Two contents titles stay apart. A lowercase wrap under a title that
     // has the baseline to itself (`Q&A` / `engines`) is still that title.
     // A right-hand title returning to the left indent is a different entry.
@@ -4640,6 +4641,21 @@ pub(crate) fn is_inline_math_symbol(text: &str) -> bool {
     )
 }
 
+/// `“ dromes` finishes `palin-`. The quote is the prompt mark, not a new sentence.
+fn quoted_hyphen_tail(text: &str) -> bool {
+    let rest = text.trim_start();
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !matches!(first, '“' | '”' | '"' | '‘' | '’') {
+        return false;
+    }
+    chars
+        .find(|ch| !ch.is_whitespace())
+        .is_some_and(|ch| ch.is_ascii_alphanumeric())
+}
+
 fn soft_hyphen_stem(text: &str) -> Option<&str> {
     let trimmed = text.trim_end();
     let mut chars = trimmed.chars();
@@ -4796,12 +4812,10 @@ fn hanging_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
 fn hyphen_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
     let shift = line.left - prev.left;
     let size = prev.size.max(line.size).max(1.0);
+    let tail = line.text.trim_start();
     prev.page == line.page
         && soft_hyphen_stem(&prev.text).is_some()
-        && line
-            .text
-            .trim_start()
-            .starts_with(|ch: char| ch.is_ascii_alphabetic())
+        && (tail.starts_with(|ch: char| ch.is_ascii_alphabetic()) || quoted_hyphen_tail(tail))
         // The continuation may hang a little to the right, or step back
         // onto the column margin. A wide math gap can leave the hyphen on
         // the right half of the line, so the step back is more than 64pt.
@@ -8482,6 +8496,79 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("hands-on experience building")),
             "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_hyphen_joins_when_the_next_line_opens_with_a_quote() {
+        // The prompt mark is 22pt and sits on the wrap. The body median stays
+        // 9.5pt, so the broken word is still the next line.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let paint =
+            |glyphs: &mut Vec<Glyph>, id: &mut u32, x: f32, y: f32, size: f32, text: &str| {
+                let mut cursor = x;
+                for ch in text.chars() {
+                    let width = if ch == ' ' { size * 0.3 } else { size * 0.5 };
+                    let mut item = glyph(*id, cursor, y, &ch.to_string(), false);
+                    *id += 1;
+                    item.font_size = size;
+                    item.matrix = [size, 0.0, 0.0, size, cursor, y];
+                    item.bbox = [cursor, y, cursor + width, y + size];
+                    item.advance = [width, 0.0];
+                    cursor += width;
+                    glyphs.push(item);
+                }
+            };
+        paint(
+            &mut glyphs,
+            &mut id,
+            117.2,
+            157.9,
+            9.48,
+            "I apologize for the previous oversight. Let's sum the palin-",
+        );
+        paint(&mut glyphs, &mut id, 102.2, 146.5, 21.96, "“");
+        paint(
+            &mut glyphs,
+            &mut id,
+            117.2,
+            146.5,
+            9.48,
+            "dromes in this sequence: 13, 1331, and 7.",
+        );
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("palin-") && text.contains("dromes")),
+            "{texts:?}"
+        );
+        let path =
+            std::path::Path::new("/opt/cursor/artifacts/pdfs/manning-body-p31-60-source.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(path).unwrap();
+        let extraction = doc.extract();
+        let placed = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let hit = placed
+            .segments
+            .iter()
+            .find(|item| item.text.contains("apologize"))
+            .expect("apology");
+        assert!(
+            hit.text.contains("palin-") && hit.text.contains("dromes in this sequence"),
+            "{}",
+            hit.text
         );
     }
 

@@ -9,7 +9,7 @@ Three new documents, each a different layout. Translated English to Chinese on c
 | lafollette-illusion-1924 | first 12 of 52, OCR text layer | `/opt/cursor/artifacts/pdfs/lafollette-1924-p1-12-zh.pdf` |
 | arxiv-2410.22360, ArxivDIGESTables | 21, A4, two-column | `/opt/cursor/artifacts/pdfs/arxiv-2410.22360-zh.pdf` |
 
-`arxiv-2609.15979` was already in `corpus/manifest.json`. The FOSDEM 2025 deck and the LaFollette OCR text layer were added there (URL, license, sha256). Manning body slices stayed regression-only: `rpt-core` lib tests, including the definition join, the NOTE callout, and the listing annotation, still pass (397 passed, 1 ignored).
+`arxiv-2609.15979` was already in `corpus/manifest.json`. The FOSDEM 2025 deck and the LaFollette OCR text layer were added there (URL, license, sha256). Manning body slices were replayed on this main (400 passed, 1 ignored).
 
 ## Fixes
 
@@ -136,7 +136,11 @@ Pages 5–8 and 10–13. Formula paragraphs are Chinese around the holes (`引�
 
 A chart label drawn on top of a body line at a different size is peeled off, so page 4’s right column reads as Chinese (`物理学、定量生物学、统计学`) and the figure banners (`Highest quality`, `Filter out misformatted tables`) stay on the artwork. A caption word space before small caps is not a column gutter, so `表 2：ARXIVDIGESTABLES 列中的方面类型。` is painted. A one-line bullet longer than 30 letters is not chained into the formula: page 6’s scoring list is Chinese. The formula stays in the source face, and the English tail is the clause on that baseline: `ϕ(a)=ϕ(a)，否则为 0。` at y=222.1, with `m`/`r` above and `i`/`j` below. Page 3’s `§6` stays on the sentence baseline (`最后，在§6中`), and the footnote expansion is `文档信息收集与科学表格抽取`. Page 9’s table headers are `挑战类型`, `描述`, `复杂方面`, and `过于具体`. Page 13’s lead-in is `下面是一个示例实例来自` at y=96.2; an 11pt icon under the first word is not figure ink. `计算机科学` is Chinese beside `1985`. The other field names in that table stay source (`Physics`, `Statistics`, `Math`, and the quantitative rows) because the cells were not segments. The JSON example and the prompts stay English. `References` in the right column opens on the author roster (`OpenAI Josh Achiam…`, `Ojas Ahuja…`); pages 10–12 stay an English bibliography, and the left-column Limitations section stays Chinese. The next page’s left column continues the bibliography. `A Data Processing` stops the section.
 
-Manning stays regression-only. The same suite (397 passed, 1 ignored) includes the definition join, the NOTE callout, and the listing annotation. The full book was not translated. The Manning source is not in `corpus/cache`, so this pass did not replay the body slices.
+Manning body slices were replayed on this main from the saved translations. Both exports are `complete: true`, `english_body: 0`. Pages 1–30: 63324 glyphs, kept 7134, rewritten 56190. Pages 31–60: 61027 glyphs, kept 10241, rewritten 50786. `rpt-core` lib tests: 400 passed, 1 ignored. The full book was not translated. The slices are not in `corpus/cache`. Exports: `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` and `/opt/cursor/artifacts/pdfs/manning-body-p31-60.pdf`.
+
+A first-line indent of one em is not a centered topic list, so `hands-on experience` stays one sentence across the page. A prompt quote on the wrap (`palin-` / `“ dromes`) stays in that word’s column. A sentence that names products, or a sentence that lists numbers, is not a devroom list, so those lines are painted.
+
+Page 29: `提示：` at x=114.2 and the sentence at x=136.6. Page 30: the NOTE label at x=105.2 and the body at x=135.9. Pages 56–57: `定义` at x=105.2 and the body at x=159.4; the next page continues at x=114.2. Page 57: the NOTE label at x=114.2 and the body at x=144.9. Page 60: the listing notes sit on the code lines, `拆分链` at y=129.8 x=254.22, `映射链` at y=119.6 x=316.08, `归约链` at y=109.4 x=257.94, each 9pt and 10.2pt apart.
 
 ## k-server holes and hats
 
