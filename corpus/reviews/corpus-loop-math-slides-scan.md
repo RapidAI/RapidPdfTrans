@@ -122,7 +122,7 @@ Page 7 is Chinese (`网络`, `仅 IPv6`, `修好你的 bug`, NAT64/DNS64). Page 
 
 ### k-server, all 18 pages
 
-Page 4. The opening paragraph is Chinese. The stack sits between `一个` and `维`, numerator `k+1` over `2`. Superscripts and subscripts keep the source glyph size and offset: `q` is 9.7pt with `x` at 7.1pt below it, `z` is 9.7pt with `−d(x,y)` at 7.5pt above it, and `g` carries `i` at 7.1pt with a nested `1` at 5.3pt. Each formula is a numbered hole (`00` plus ideographic spaces). Adjacent holes no longer collapse into one run, and a hole at the end of a line is not trimmed. Section 1.3 and the run-in paragraphs fill the column: measured body lines are 90–103% of the 468pt measure except paragraph-final lines (`分别在引理 5.1…`, `表示）。`, `无限服务器问题…`, `[Sit14] 的候选方案。`, `M♮-凹函数…[Mur03]。`). `例如，分页`, `然而，`, and `[DW92] 表明` are full lines. The Plücker sentence continues through `（例如参见 Speyer 和 Sturmfels` and breaks at 96% of the column. `Plücker` is one word. `(k + 1)` stays inside the parentheses.
+Page 4. The opening paragraph is Chinese. The stack sits between `一个` and `维`, numerator `k+1` over `2`. Superscripts and subscripts keep the source glyph size and offset: `q` is 9.7pt with `x` at 7.1pt below it, `z` is 9.7pt with `−d(x,y)` at 7.5pt above it, and `g` carries `i` at 7.1pt with a nested `1` at 5.3pt. Each formula hole is the math ink width in points, from the leftmost origin to the rightmost pen, and that width is what wrap, fit, justification, and paint share. Adjacent holes no longer collapse into one run, and a hole at the end of a line is not trimmed. Section 1.3 and the run-in paragraphs fill the column: measured body lines are 90–103% of the 468pt measure except paragraph-final lines (`分别在引理 5.1…`, `表示）。`, `无限服务器问题…`, `[Sit14] 的候选方案。`, `M♮-凹函数…[Mur03]。`). `例如，分页`, `然而，`, and `[DW92] 表明` are full lines. The Plücker sentence continues through `（例如参见 Speyer 和 Sturmfels` and breaks at 96% of the column. `Plücker` is one word. `(k + 1)` stays inside the parentheses.
 
 Page 1. Body lines are 13.5pt apart. `许多最初为` over `服务器位于` is that same leading. `[DEH+17]` does not open a gap.
 
@@ -137,6 +137,18 @@ Pages 5–8 and 10–13. Formula paragraphs are Chinese around the holes (`引�
 A chart label drawn on top of a body line at a different size is peeled off, so page 4’s right column reads as Chinese (`物理学、定量生物学、统计学`) and the figure banners (`Highest quality`, `Filter out misformatted tables`) stay on the artwork. A caption word space before small caps is not a column gutter, so `表 2：ARXIVDIGESTABLES 列中的方面类型。` is painted. A one-line bullet longer than 30 letters is not chained into the formula: page 6’s scoring list is Chinese, and `ϕ(ai)=ϕ(aj) and 0 otherwise` stays source. Pages 3, 9, and 13 body prose are Chinese, including `A.2 高质量数据过滤器` and `表 6：高质量数据集中所代表的研究领域。` The JSON example and the prompts stay English. `References` in the right column opens on the author roster (`OpenAI Josh Achiam…`, `Ojas Ahuja…`); pages 10–12 stay an English bibliography, and the left-column Limitations section stays Chinese. The next page’s left column continues the bibliography. `A Data Processing` stops the section.
 
 Manning stays regression-only. The same suite includes the definition join, the NOTE callout, and the listing annotation. The full book was not translated.
+
+## k-server holes and hats
+
+`rpt-core` lib tests: 386 passed, 1 ignored. Coverage on `/opt/cursor/artifacts/pdfs/arxiv-2609.15979-zh.pdf` is `complete: true`, `english_body: 0`. The file has no `■`, U+FFFD, or `.notdef`.
+
+Page 4. The opening paragraph’s holes are the math width, so the line continues after `q_x`, `q_y`, `(i,j)`, and `索引`. Non-final lines fill at least 90% of the 468pt column. Nothing crosses x=540. `表示）` stays on the paragraph’s last line, and `z^{−d(x,y)}` stays inside the column.
+
+Page 9. The heading `4 请求时的势及其增量` is still bold at x=72, y=458.6.
+
+Page 10. Latin Modern `\widehat` (U+F8F8) is part of the formula hole, so `Q̂`, `Ĥ`, and `µ(Q̂)` are the original glyphs. The coordinate-family paragraph is one Chinese block: `K^k` and `K^{k−1}` keep their superscripts, non-final lines fill the column, and the lines do not overlap. `将向量 h ∈ K^k 乘以 e_1` is Chinese. Lemma 4.1 and lemma 4.2 are one line each (`请求之前的旧势满足 Ψ ≤ µ(Q̂) + µ(H)`, `请求之后的新势满足 Ψ′ ≥ µ(Q̂) + µ(Ĥ)`).
+
+Page 11. A one-line formula paragraph used to stamp its last character onto the math, because the coverage box measured a hole as two digits and an ideographic space. The box now uses the laid-out width, so `写出` no longer sits on `q̂_y`.
 
 ## Left open
 

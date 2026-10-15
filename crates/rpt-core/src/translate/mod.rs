@@ -726,7 +726,8 @@ fn prepare_segments(
         &extraction.regions,
         &extraction.pages,
     );
-    let segments = crate::rewrite::merge_stacked_paragraphs(segmentation.segments, &extraction.glyphs);
+    let segments =
+        crate::rewrite::merge_stacked_paragraphs(segmentation.segments, &extraction.glyphs);
     // A formula the segmenter dropped (`µ(G) = min`) is absorbed into the
     // placeholder paragraph. Marking it kept here makes the later pending
     // mark abort, and the original glyphs stay under the Chinese.
@@ -1410,9 +1411,8 @@ fn topic_comma_list(source: &str) -> bool {
     if source.matches(',').count() < 6 {
         return false;
     }
-    let stops = source.matches(". ").count()
-        + source.matches(".\n").count()
-        + source.matches("? ").count();
+    let stops =
+        source.matches(". ").count() + source.matches(".\n").count() + source.matches("? ").count();
     stops < 2
 }
 
@@ -1426,10 +1426,14 @@ fn list_items<'a>(text: &'a str, marks: &[char]) -> Vec<&'a str> {
 fn proper_nouns(source: &str) -> impl Iterator<Item = String> {
     let source = fold_ligatures(source);
     let mut nouns = Vec::new();
-    for token in source.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '、' | '，'))
+    for token in
+        source.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '、' | '，'))
     {
         let token = token.trim_matches(|ch: char| {
-            matches!(ch, '(' | ')' | '（' | '）' | '[' | ']' | '.' | '"' | '\'' | '’')
+            matches!(
+                ch,
+                '(' | ')' | '（' | '）' | '[' | ']' | '.' | '"' | '\'' | '’'
+            )
         });
         let token = token.strip_suffix("'s").unwrap_or(token);
         if token.is_empty() {
@@ -1454,10 +1458,8 @@ fn proper_nouns(source: &str) -> impl Iterator<Item = String> {
         }
         let inner: String = chars[start..end].iter().collect();
         for token in inner.split_whitespace() {
-            let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' ));
-            if (3..=8).contains(&token.len())
-                && token.chars().all(|ch| ch.is_ascii_uppercase())
-            {
+            let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';'));
+            if (3..=8).contains(&token.len()) && token.chars().all(|ch| ch.is_ascii_uppercase()) {
                 nouns.push(token.to_string());
                 continue;
             }
@@ -1483,11 +1485,11 @@ fn fold_ligatures(text: &str) -> String {
 }
 
 fn kept_latin_token(token: &str) -> Option<String> {
-    let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' ));
+    let token = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';'));
     if token.len() < 2 {
         return None;
     }
-    if KEPT_NAMES.iter().any(|name| *name == token) {
+    if KEPT_NAMES.contains(&token) {
         return Some(token.to_string());
     }
     if token.contains('.') && token.chars().any(|ch| ch.is_ascii_alphabetic()) {
@@ -1526,7 +1528,10 @@ fn kept_latin_token(token: &str) -> Option<String> {
     if token.contains('-') || token.contains('/') {
         return None;
     }
-    let letters: String = token.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    let letters: String = token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
     let chars: Vec<char> = letters.chars().collect();
     let internal = chars.windows(2).any(|pair| {
         (pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
@@ -2642,7 +2647,10 @@ fn math_word(word: &str) -> bool {
     }
     // `log2`, `log²`, `logn`, `log^2`. The superscript is the exponent, not a gloss.
     if let Some(rest) = word.get(3..) {
-        if word.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case("log")) {
+        if word
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("log"))
+        {
             return rest
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || math_mark(ch));
@@ -3521,10 +3529,7 @@ mod tests {
             "algorithms (against oblivious adversaries) exist",
             "算法（against oblivious adversaries）存在",
         );
-        assert!(
-            !gloss.contains("against"),
-            "{gloss}"
-        );
+        assert!(!gloss.contains("against"), "{gloss}");
     }
 
     #[test]
@@ -3727,9 +3732,10 @@ mod tests {
             "the formula glyph was marked again: {:?}",
             ex.glyphs[0].disposition
         );
-        assert!(ex.glyphs[1..]
-            .iter()
-            .all(|glyph| matches!(glyph.disposition, Disposition::TranslatedPendingRewrite { .. })));
+        assert!(ex.glyphs[1..].iter().all(|glyph| matches!(
+            glyph.disposition,
+            Disposition::TranslatedPendingRewrite { .. }
+        )));
         assert!(report.segments[0].translated.contains('⟦'));
     }
 
@@ -3892,7 +3898,8 @@ mod tests {
         ));
         assert!(translation_flaw("The The MCP ", "该 该 MCP "));
         let list = "Ada, Rust, RISC-V, Security, Retrocomputing, Software Bill of Materials (SBOM), Swift, WebAssembly, Go";
-        let complete = "Ada、Rust、RISC-V、安全、复古计算、软件物料清单（SBOM）、Swift、WebAssembly、Go";
+        let complete =
+            "Ada、Rust、RISC-V、安全、复古计算、软件物料清单（SBOM）、Swift、WebAssembly、Go";
         assert!(
             !comma_list_incomplete(list, complete),
             "a complete devroom list was rejected"

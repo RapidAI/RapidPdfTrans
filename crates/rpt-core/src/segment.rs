@@ -424,13 +424,13 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // the next column. A one-glyph tail used to look like a justified space.
         let lone_mark = gap >= size * 1.15
             && left_w >= size * 8.0
-            && line[index..]
-                .iter()
-                .all(|glyph| {
-                    let token = glyph.unicode.trim();
-                    !token.is_empty()
-                        && token.chars().all(|ch| matches!(ch, '{' | '}' | '[' | ']' | '(' | ')'))
-                });
+            && line[index..].iter().all(|glyph| {
+                let token = glyph.unicode.trim();
+                !token.is_empty()
+                    && token
+                        .chars()
+                        .all(|ch| matches!(ch, '{' | '}' | '[' | ']' | '(' | ')'))
+            });
         if (column_gap
             || tight_column
             || table_cell
@@ -1050,8 +1050,7 @@ fn centered_list_keeps(current: &[VisualLine<'_>], lower: &VisualLine<'_>) -> bo
     }
     let axis = centered_block_axis(current);
     let lower_mid = (lower.left + lower.right) * 0.5;
-    (lower_mid - axis).abs() <= size * 2.5
-        && lower.text.chars().any(|ch| ch.is_ascii_alphabetic())
+    (lower_mid - axis).abs() <= size * 2.5 && lower.text.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
 /// Midpoints agree and left edges wander. A left-aligned paragraph fails the
@@ -1060,7 +1059,10 @@ fn centered_comma_block(lines: &[VisualLine<'_>]) -> bool {
     if lines.len() < 2 {
         return false;
     }
-    let commas: usize = lines.iter().map(|line| line.text.matches(',').count()).sum();
+    let commas: usize = lines
+        .iter()
+        .map(|line| line.text.matches(',').count())
+        .sum();
     if commas < 4 {
         return false;
     }
@@ -1146,7 +1148,9 @@ fn title_scan_with_partial_ocr(
     }
     let prose = page_lines
         .iter()
-        .filter(|&&index| !ocr_line_low_quality(&lines[index].text) && prose_ocr_sentence(&lines[index].text))
+        .filter(|&&index| {
+            !ocr_line_low_quality(&lines[index].text) && prose_ocr_sentence(&lines[index].text)
+        })
         .count();
     if prose >= 4 {
         return false;
@@ -1209,7 +1213,10 @@ fn ocr_line_low_quality(text: &str) -> bool {
         .iter()
         .filter(|token| ocr_garbage_token(token))
         .count();
-    let dictionary = tokens.iter().filter(|token| dictionary_token(token)).count();
+    let dictionary = tokens
+        .iter()
+        .filter(|token| dictionary_token(token))
+        .count();
     let ratio = dictionary as f32 / tokens.len() as f32;
     if tokens.len() == 1 && junk == 1 && tokens[0].chars().count() >= 4 {
         return true;
@@ -1281,7 +1288,10 @@ fn dictionary_token(token: &str) -> bool {
     if junk_ocr_token(token) {
         return false;
     }
-    let bare: String = token.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    let bare: String = token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
     if bare.len() < 2 {
         return false;
     }
@@ -1290,12 +1300,10 @@ fn dictionary_token(token: &str) -> bool {
         return true;
     }
     let chars: Vec<char> = bare.chars().collect();
-    chars.iter().any(|ch| {
-        matches!(
-            ch.to_ascii_lowercase(),
-            'a' | 'e' | 'i' | 'o' | 'u' | 'y'
-        )
-    }) && consonant_run(&chars) < 5
+    chars
+        .iter()
+        .any(|ch| matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y'))
+        && consonant_run(&chars) < 5
 }
 
 const COMMON_WORDS: &[&str] = &[
@@ -1393,8 +1401,23 @@ fn junk_ocr_symbol(ch: char) -> bool {
 fn list_mark(ch: char) -> bool {
     matches!(
         ch,
-        '●' | '○' | '•' | '◦' | '▪' | '▫' | '▸' | '►' | '‣' | '∙' | '◉' | '◎' | '◆' | '◇'
-            | '■' | '★' | '☆' | '·'
+        '●' | '○'
+            | '•'
+            | '◦'
+            | '▪'
+            | '▫'
+            | '▸'
+            | '►'
+            | '‣'
+            | '∙'
+            | '◉'
+            | '◎'
+            | '◆'
+            | '◇'
+            | '■'
+            | '★'
+            | '☆'
+            | '·'
     )
 }
 
@@ -1405,7 +1428,10 @@ fn strip_leading_mark(token: &str) -> &str {
 /// `IPv4`, `IPv6`, and `IPv6-only`. The `v` is lowercase, so the token is
 /// not an all-caps citation, but it is still a real word.
 fn version_token(token: &str) -> bool {
-    let letters: String = token.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    let letters: String = token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
     if letters.len() < 3 || letters.len() > 12 || !token.chars().any(|ch| ch.is_ascii_digit()) {
         return false;
     }
@@ -2289,8 +2315,7 @@ fn is_marker_text(text: &str) -> bool {
     !text.is_empty()
         && text.chars().count() <= 2
         && text.chars().all(|ch| {
-            ch.is_ascii_digit()
-                || matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆' | '#' | '+')
+            ch.is_ascii_digit() || matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆' | '#' | '+')
         })
 }
 
@@ -5244,12 +5269,14 @@ mod tests {
         glyphs.push(brace);
         let segs = segment_glyphs(&glyphs);
         assert!(
-            segs.iter().any(|segment| segment.text.contains('{') && !segment.text.contains('a')),
+            segs.iter()
+                .any(|segment| segment.text.contains('{') && !segment.text.contains('a')),
             "{:?}",
             segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
         );
         assert!(
-            segs.iter().any(|segment| segment.text.contains('a') && !segment.text.contains('{')),
+            segs.iter()
+                .any(|segment| segment.text.contains('a') && !segment.text.contains('{')),
             "{:?}",
             segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
         );
@@ -5280,7 +5307,8 @@ mod tests {
             hits[0]
         );
         assert!(
-            hits[0].contains("Physics") && hits[0].contains("Quantitative") || hits[0].contains("Quantita"),
+            hits[0].contains("Physics") && hits[0].contains("Quantitative")
+                || hits[0].contains("Quantita"),
             "{}",
             hits[0]
         );
@@ -5299,11 +5327,7 @@ mod tests {
             "caption wrap dropped: {}",
             caption.text
         );
-        assert!(
-            !hits[0].contains("Table 2"),
-            "{}",
-            hits[0]
-        );
+        assert!(!hits[0].contains("Table 2"), "{}", hits[0]);
     }
 
     #[test]
@@ -9875,7 +9899,9 @@ mod tests {
             .map(|seg| seg.text.clone())
             .collect();
         assert!(
-            texts.iter().any(|text| text.contains('+') && text.contains("FKL")),
+            texts
+                .iter()
+                .any(|text| text.contains('+') && text.contains("FKL")),
             "{texts:?}"
         );
     }
@@ -9900,7 +9926,10 @@ mod tests {
             .map(|seg| seg.text.clone())
             .collect();
         assert_eq!(texts.len(), 1, "{texts:?}");
-        assert!(texts[0].contains("Energy") && texts[0].contains("Matrix.org"), "{texts:?}");
+        assert!(
+            texts[0].contains("Energy") && texts[0].contains("Matrix.org"),
+            "{texts:?}"
+        );
     }
 
     #[test]
@@ -9910,13 +9939,62 @@ mod tests {
         // The next page's list must not be stitched on because it starts with
         // `and`.
         let rows = [
-            (0u32, 0u32, 40.0, 500.0, 640.0, "Microkernel and OS, Modern Email, Monitoring and,"),
-            (1, 0, 28.0, 476.0, 664.0, "Observability, Mozilla, MySQL, Network, Nix and NixOS,"),
-            (2, 0, 20.0, 452.0, 680.0, "Open Media, Open Research, Open Source Design,"),
-            (3, 0, 8.0, 428.0, 704.0, "PostgreSQL, Python, Quantum Computing, Radio, Railways"),
-            (4, 0, 20.0, 404.0, 680.0, "and Open Transport, Real Time Communications (RTC), RISC-V,"),
-            (5, 0, 12.0, 380.0, 696.0, "Robotics and Simulation, Rust, Security, (SBOM), Swift,"),
-            (6, 1, 22.0, 500.0, 676.0, "and Open Transport, RISC-V, Rust, Security, Swift,"),
+            (
+                0u32,
+                0u32,
+                40.0,
+                500.0,
+                640.0,
+                "Microkernel and OS, Modern Email, Monitoring and,",
+            ),
+            (
+                1,
+                0,
+                28.0,
+                476.0,
+                664.0,
+                "Observability, Mozilla, MySQL, Network, Nix and NixOS,",
+            ),
+            (
+                2,
+                0,
+                20.0,
+                452.0,
+                680.0,
+                "Open Media, Open Research, Open Source Design,",
+            ),
+            (
+                3,
+                0,
+                8.0,
+                428.0,
+                704.0,
+                "PostgreSQL, Python, Quantum Computing, Radio, Railways",
+            ),
+            (
+                4,
+                0,
+                20.0,
+                404.0,
+                680.0,
+                "and Open Transport, Real Time Communications (RTC), RISC-V,",
+            ),
+            (
+                5,
+                0,
+                12.0,
+                380.0,
+                696.0,
+                "Robotics and Simulation, Rust, Security, (SBOM), Swift,",
+            ),
+            (
+                6,
+                1,
+                22.0,
+                500.0,
+                676.0,
+                "and Open Transport, RISC-V, Rust, Security, Swift,",
+            ),
         ];
         let mut glyphs = Vec::new();
         for (id, page, x, y, width, text) in rows {
@@ -9929,7 +10007,12 @@ mod tests {
         }
         let segs = segment_glyphs(&glyphs);
         let page0: Vec<_> = segs.iter().filter(|seg| seg.page_index == 0).collect();
-        assert_eq!(page0.len(), 1, "{:?}", page0.iter().map(|seg| &seg.text).collect::<Vec<_>>());
+        assert_eq!(
+            page0.len(),
+            1,
+            "{:?}",
+            page0.iter().map(|seg| &seg.text).collect::<Vec<_>>()
+        );
         assert!(
             page0[0].text.contains("RISC-V") && page0[0].text.contains("Railways"),
             "{}",
@@ -9955,8 +10038,24 @@ mod tests {
             glyphs.push(item);
             *id += 1;
         };
-        push(&mut glyphs, &mut id, 0, 40.0, 300.0, 220.0, "● 1052 events (+190)");
-        push(&mut glyphs, &mut id, 0, 40.0, 270.0, 240.0, "● 933 speakers (+146)");
+        push(
+            &mut glyphs,
+            &mut id,
+            0,
+            40.0,
+            300.0,
+            220.0,
+            "● 1052 events (+190)",
+        );
+        push(
+            &mut glyphs,
+            &mut id,
+            0,
+            40.0,
+            270.0,
+            240.0,
+            "● 933 speakers (+146)",
+        );
         push(
             &mut glyphs,
             &mut id,
@@ -10001,7 +10100,12 @@ mod tests {
             page0.iter().map(|seg| &seg.text).collect::<Vec<_>>()
         );
         let page1: Vec<_> = segs.iter().filter(|seg| seg.page_index == 1).collect();
-        assert_eq!(page1.len(), 1, "{:?}", page1.iter().map(|seg| &seg.text).collect::<Vec<_>>());
+        assert_eq!(
+            page1.len(),
+            1,
+            "{:?}",
+            page1.iter().map(|seg| &seg.text).collect::<Vec<_>>()
+        );
         assert!(page1[0].text.contains("RISC-V") && page1[0].text.contains("Ada"));
     }
 
@@ -10010,11 +10114,41 @@ mod tests {
         // FOSDEM page 14. The last line is padded with spaces out past the
         // page, and page 13's last item sits on the title's left edge.
         let rows = [
-            (0u32, 40.0, 500.0, 460.0, "Microkernel and OS, Modern Email, Monitoring and,"),
-            (1, 28.0, 476.0, 444.0, "Observability, Mozilla, MySQL, Network, Nix and NixOS,"),
-            (2, 8.0, 452.0, 484.0, "PostgreSQL, Python, Quantum Computing, Radio, Railways"),
-            (3, 8.0, 428.0, 484.0, "(SBOM), Software Defined Storage, Swift, Tool the"),
-            (4, 26.0, 404.0, 448.0, "Docs, Virtualization and Cloud, WebAssembly,"),
+            (
+                0u32,
+                40.0,
+                500.0,
+                460.0,
+                "Microkernel and OS, Modern Email, Monitoring and,",
+            ),
+            (
+                1,
+                28.0,
+                476.0,
+                444.0,
+                "Observability, Mozilla, MySQL, Network, Nix and NixOS,",
+            ),
+            (
+                2,
+                8.0,
+                452.0,
+                484.0,
+                "PostgreSQL, Python, Quantum Computing, Radio, Railways",
+            ),
+            (
+                3,
+                8.0,
+                428.0,
+                484.0,
+                "(SBOM), Software Defined Storage, Swift, Tool the",
+            ),
+            (
+                4,
+                26.0,
+                404.0,
+                448.0,
+                "Docs, Virtualization and Cloud, WebAssembly,",
+            ),
         ];
         let mut glyphs = Vec::new();
         let mut next = 0u32;
@@ -10041,7 +10175,13 @@ mod tests {
         title.advance = [321.0, 0.0];
         glyphs.push(title);
         next += 1;
-        let mut tail = glyph(next, 196.0, 380.0, "Matrix.org Foundation and Community", false);
+        let mut tail = glyph(
+            next,
+            196.0,
+            380.0,
+            "Matrix.org Foundation and Community",
+            false,
+        );
         tail.font_size = 20.0;
         // Same midpoint as the list (250), and the same left edge as the title.
         tail.bbox = [196.0, 380.0, 304.0, 400.0];
@@ -10108,8 +10248,14 @@ mod tests {
             bbox: [0.0, 0.0, 612.0, 792.0],
             kind: "image".into(),
         }];
-        assert!(ocr_line_low_quality("3jOV£9rOIit"), "scorer missed the garbage token");
-        assert!(ocr_line_low_quality("POBUtfttCO BV TttH"), "scorer missed the smear");
+        assert!(
+            ocr_line_low_quality("3jOV£9rOIit"),
+            "scorer missed the garbage token"
+        );
+        assert!(
+            ocr_line_low_quality("POBUtfttCO BV TttH"),
+            "scorer missed the smear"
+        );
         assert!(
             !ocr_line_low_quality("GKP24, CP26].") && !ocr_line_low_quality("[BBN10]"),
             "a citation key was scored as OCR"
@@ -10123,11 +10269,15 @@ mod tests {
         let seg = segment_placed(&glyphs, &SegmentFlags::default(), &regions, &pages);
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
         assert!(
-            texts.iter().all(|text| !text.contains("3jOV") && !text.contains("Constraints")),
+            texts
+                .iter()
+                .all(|text| !text.contains("3jOV") && !text.contains("Constraints")),
             "title scan was painted: {texts:?}"
         );
         assert!(
-            texts.iter().any(|text| text.contains("expressed every day")),
+            texts
+                .iter()
+                .any(|text| text.contains("expressed every day")),
             "{texts:?}"
         );
         assert!(

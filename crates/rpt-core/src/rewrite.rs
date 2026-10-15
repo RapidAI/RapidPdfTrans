@@ -25,15 +25,13 @@ use crate::extract::Extraction;
 use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSources, SubsetFont};
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
-    char_widths, cids_of, cjk_indent_ems, fit_cjk_block_with, heading_level, is_cjk_body,
-    justify_gaps, justify_wrapped_line, measure, pack_into_slots, pack_narrow_tail,
-    prompt_line_is_full, scale_for_heading, spread_to_lines, wrap_text, CjkMeasure, HeadingLevel,
-    LineSlots,
+    apply_formula_hole_widths, char_widths, cids_of, cjk_indent_ems, fit_cjk_block_with,
+    heading_level, is_cjk_body, justify_gaps, justify_gaps_holes, justify_wrapped_line, measure,
+    pack_into_slots_holes, pack_narrow_tail_holes, prompt_line_is_full, prompt_line_is_full_holes,
+    scale_for_heading, spread_to_lines, wrap_text, CjkMeasure, HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
-use crate::translate::{
-    comma_list_incomplete, BilingualLayout, OutputMode, TranslateReport,
-};
+use crate::translate::{comma_list_incomplete, BilingualLayout, OutputMode, TranslateReport};
 
 #[derive(Clone, Debug, Default)]
 pub struct RewriteOptions {
@@ -185,25 +183,27 @@ pub fn rewrite_translation(
         // equation has more math glyphs than words and stays original.
         let prose_math = prose_carries_inline_math(&segment_glyphs);
         let placing_stack = segment.translated.contains('⟦');
-        if !placing_stack && segment.glyph_ids.iter().any(|id| {
-            extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
-                if glyph.disposition.is_final() {
-                    return true;
-                }
-                match keep.get(id).map(String::as_str) {
-                    // `$9.7\times$` is a prose line. Redraw the operator with
-                    // the body font instead of leaving the English in place.
-                    Some("formula")
-                        if prose_math
-                            || crate::translate::is_inline_math_symbol(&glyph.unicode) =>
-                    {
-                        false
+        if !placing_stack
+            && segment.glyph_ids.iter().any(|id| {
+                extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
+                    if glyph.disposition.is_final() {
+                        return true;
                     }
-                    Some(_) => true,
-                    None => false,
-                }
+                    match keep.get(id).map(String::as_str) {
+                        // `$9.7\times$` is a prose line. Redraw the operator with
+                        // the body font instead of leaving the English in place.
+                        Some("formula")
+                            if prose_math
+                                || crate::translate::is_inline_math_symbol(&glyph.unicode) =>
+                        {
+                            false
+                        }
+                        Some(_) => true,
+                        None => false,
+                    }
+                })
             })
-        }) {
+        {
             for id in &segment.glyph_ids {
                 if !extraction.glyphs[by_id[id]].disposition.is_final() {
                     keep.entry(*id).or_insert_with(|| "kept".into());
@@ -1159,7 +1159,10 @@ fn numbered_heading_line(text: &str, glyphs: &[&Glyph]) -> bool {
             return false;
         }
     }
-    if bytes.get(index).is_none_or(|byte| !byte.is_ascii_whitespace()) {
+    if bytes
+        .get(index)
+        .is_none_or(|byte| !byte.is_ascii_whitespace())
+    {
         return false;
     }
     let rest = text[index..].trim_start();
@@ -1174,13 +1177,24 @@ fn numbered_heading_line(text: &str, glyphs: &[&Glyph]) -> bool {
     if visible.is_empty() {
         return false;
     }
-    let size = visible.iter().map(|glyph| glyph.font_size).fold(1.0f32, f32::max);
-    let top = visible.iter().map(|glyph| glyph.matrix[5]).fold(f32::MIN, f32::max);
-    let bottom = visible.iter().map(|glyph| glyph.matrix[5]).fold(f32::MAX, f32::min);
+    let size = visible
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    let top = visible
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MIN, f32::max);
+    let bottom = visible
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MAX, f32::min);
     if top - bottom > size * 0.45 {
         return false;
     }
-    let bold = visible.iter().all(|glyph| face_style(&glyph.font_name).bold);
+    let bold = visible
+        .iter()
+        .all(|glyph| face_style(&glyph.font_name).bold);
     bold || size >= 12.0
 }
 
@@ -1218,7 +1232,11 @@ fn math_span(glyphs: &[&Glyph]) -> Option<MathSpan> {
         .filter(|glyph| (top - glyph.matrix[5]).abs() <= body * 0.35)
         .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]))
         .fold(f32::MAX, f32::min);
-    let head_left = if head_band.is_finite() { head_band } else { left };
+    let head_left = if head_band.is_finite() {
+        head_band
+    } else {
+        left
+    };
     // A subscript is about a quarter of an em. A binomial (`k+1` over `2`)
     // stacks inside one em. Italic `k` on successive lines of a paragraph is
     // not that stack: the baselines are a full leading apart, and keeping the
@@ -1279,9 +1297,7 @@ pub(crate) fn two_sided_stack_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u3
     }
     for (base, mut members) in by_base {
         let baseline = baselines[base];
-        members.sort_by(|&left, &right| {
-            glyphs[left].matrix[4].total_cmp(&glyphs[right].matrix[4])
-        });
+        members.sort_by(|&left, &right| glyphs[left].matrix[4].total_cmp(&glyphs[right].matrix[4]));
         let mut parent: Vec<usize> = (0..members.len()).collect();
         for index in 0..members.len() {
             for other in index + 1..members.len() {
@@ -1295,8 +1311,11 @@ pub(crate) fn two_sided_stack_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u3
             }
         }
         let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
-        for index in 0..members.len() {
-            groups.entry(find_root(&mut parent, index)).or_default().push(members[index]);
+        for (index, member) in members.iter().enumerate() {
+            groups
+                .entry(find_root(&mut parent, index))
+                .or_default()
+                .push(*member);
         }
         for group in groups.into_values() {
             let above: Vec<usize> = group
@@ -1310,8 +1329,15 @@ pub(crate) fn two_sided_stack_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u3
                 .filter(|&index| glyphs[index].matrix[5] < baseline - body * 0.30)
                 .collect();
             // `k+1` over `2` has more than one glyph on a side. A prime over
-            // a subscript (`x′` with `1`) is one glyph each and stays inline.
-            if above.is_empty() || below.is_empty() || above.len().max(below.len()) < 2 {
+            // a subscript (`x′` with `1`) keeps the base letter between them
+            // and stays inline. `\binom{k}{2}` is one glyph each and has no
+            // letter on the baseline between them.
+            if above.is_empty() || below.is_empty() {
+                continue;
+            }
+            if above.len().max(below.len()) < 2
+                && !bare_binomial(&above, &below, glyphs, baseline, body)
+            {
                 continue;
             }
             let (above_left, above_right) = index_span(glyphs, &above);
@@ -1333,8 +1359,14 @@ pub(crate) fn two_sided_stack_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u3
                 continue;
             }
             let mut ids: Vec<u32> = group.iter().map(|&index| glyphs[index].id).collect();
-            let low = group.iter().map(|&index| glyphs[index].matrix[5]).fold(f32::MAX, f32::min);
-            let high = group.iter().map(|&index| glyphs[index].matrix[5]).fold(f32::MIN, f32::max);
+            let low = group
+                .iter()
+                .map(|&index| glyphs[index].matrix[5])
+                .fold(f32::MAX, f32::min);
+            let high = group
+                .iter()
+                .map(|&index| glyphs[index].matrix[5])
+                .fold(f32::MIN, f32::max);
             for glyph in glyphs {
                 if ids.contains(&glyph.id) || used.contains(&glyph.id) || !stack_delimiter(glyph) {
                     continue;
@@ -1441,6 +1473,32 @@ fn index_span(glyphs: &[&Glyph], indexes: &[usize]) -> (f32, f32) {
     (left, right)
 }
 
+/// `\binom{k}{2}`: one glyph over one glyph, and no baseline letter between
+/// them. `x′_1` has the base letter there and is not a binomial.
+fn bare_binomial(
+    above: &[usize],
+    below: &[usize],
+    glyphs: &[&Glyph],
+    baseline: f32,
+    body: f32,
+) -> bool {
+    if above.len() != 1 || below.len() != 1 {
+        return false;
+    }
+    if (glyphs[above[0]].matrix[4] - glyphs[below[0]].matrix[4]).abs() > body * 0.45 {
+        return false;
+    }
+    let left = glyphs[above[0]].matrix[4].min(glyphs[below[0]].matrix[4]);
+    let right = glyphs[above[0]].matrix[4].max(glyphs[below[0]].matrix[4]);
+    !glyphs.iter().any(|glyph| {
+        glyph.font_size > body * 0.84
+            && (glyph.matrix[5] - baseline).abs() <= body * 0.35
+            && glyph.matrix[4] >= left - body * 0.25
+            && glyph.matrix[4] <= right + body * 0.25
+            && !glyph.unicode.trim().is_empty()
+    })
+}
+
 fn stack_delimiter(glyph: &Glyph) -> bool {
     if !is_math_font(&glyph.font_name) && inherent_keep(glyph) != Some("formula") {
         return false;
@@ -1461,6 +1519,7 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     groups.extend(formula_runs(glyphs, body, &used));
     absorb_attached_scripts(glyphs, body, &mut groups);
     absorb_formula_parens(glyphs, body, &mut groups);
+    absorb_math_accents(glyphs, body, &mut groups);
     sort_placeholder_groups(glyphs, body, &mut groups);
     groups
 }
@@ -1486,7 +1545,10 @@ fn absorb_formula_parens(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) 
             if members.is_empty() {
                 continue;
             }
-            let left = members.iter().map(|item| item.matrix[4]).fold(f32::MAX, f32::min);
+            let left = members
+                .iter()
+                .map(|item| item.matrix[4])
+                .fold(f32::MAX, f32::min);
             let right = members
                 .iter()
                 .map(|item| item.bbox[2].max(item.matrix[4]))
@@ -1517,13 +1579,73 @@ fn absorb_formula_parens(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) 
     }
 }
 
+/// Latin Modern draws `\widehat` as U+F8F8 in the extension font, almost at
+/// body size, a few points above the letter. It is not a superscript, and
+/// leaving it in the prose paints a black square.
+fn absorb_math_accents(glyphs: &[&Glyph], body: f32, groups: &mut Vec<Vec<u32>>) {
+    let mut used: HashSet<u32> = groups.iter().flatten().copied().collect();
+    let mut fresh: Vec<Vec<u32>> = Vec::new();
+    for glyph in glyphs {
+        if used.contains(&glyph.id) || !is_math_accent_char(&glyph.unicode) {
+            continue;
+        }
+        let base = glyphs
+            .iter()
+            .copied()
+            .filter(|base| {
+                base.id != glyph.id
+                    && !base.unicode.trim().is_empty()
+                    && !is_math_accent_char(&base.unicode)
+                    && base.font_size > body * 0.75
+                    && glyph.matrix[5] > base.matrix[5] + body * 0.05
+                    && glyph.matrix[5] - base.matrix[5] <= body * 0.65
+                    && {
+                        let dx = glyph.matrix[4] - base.matrix[4];
+                        dx >= -body * 0.2 && dx <= body * 0.9
+                    }
+            })
+            .min_by(|left, right| {
+                let left_dx = (glyph.matrix[4] - left.matrix[4]).abs();
+                let right_dx = (glyph.matrix[4] - right.matrix[4]).abs();
+                left_dx.total_cmp(&right_dx)
+            });
+        let Some(base) = base else {
+            continue;
+        };
+        if let Some(group) = groups.iter_mut().find(|ids| ids.contains(&base.id)) {
+            group.push(glyph.id);
+            used.insert(glyph.id);
+            continue;
+        }
+        if let Some(group) = fresh.iter_mut().find(|ids| ids.contains(&base.id)) {
+            group.push(glyph.id);
+            used.insert(glyph.id);
+            continue;
+        }
+        if !is_math_font(&base.font_name) && inherent_keep(base) != Some("formula") {
+            continue;
+        }
+        fresh.push(vec![base.id, glyph.id]);
+        used.insert(base.id);
+        used.insert(glyph.id);
+    }
+    groups.extend(fresh);
+}
+
+fn is_math_accent_char(text: &str) -> bool {
+    matches!(text.trim(), "\u{f8f8}" | "\u{02C6}" | "\u{0302}")
+}
+
 /// A subscript digit drawn in the roman face (`i_1`) sits just outside the
 /// math cluster. Pull it into the hole so it is not painted as a full-size `1`.
 fn absorb_attached_scripts(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) {
     let mut used: HashSet<u32> = groups.iter().flatten().copied().collect();
     let by_id = glyph_index_refs(glyphs);
     for glyph in glyphs {
-        if used.contains(&glyph.id) || glyph.unicode.trim().is_empty() || glyph.font_size > body * 0.84 {
+        if used.contains(&glyph.id)
+            || glyph.unicode.trim().is_empty()
+            || glyph.font_size > body * 0.84
+        {
             continue;
         }
         let mut best: Option<(usize, f32)> = None;
@@ -1535,7 +1657,10 @@ fn absorb_attached_scripts(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]
             if members.is_empty() {
                 continue;
             }
-            let left = members.iter().map(|item| item.matrix[4]).fold(f32::MAX, f32::min);
+            let left = members
+                .iter()
+                .map(|item| item.matrix[4])
+                .fold(f32::MAX, f32::min);
             let right = members
                 .iter()
                 .map(|item| item.bbox[2].max(item.matrix[4]))
@@ -1549,7 +1674,13 @@ fn absorb_attached_scripts(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]
             if dy > body * 0.7 {
                 continue;
             }
-            let dist = if x < left { left - x } else if x > right { x - right } else { 0.0 };
+            let dist = if x < left {
+                left - x
+            } else if x > right {
+                x - right
+            } else {
+                0.0
+            };
             if best.is_none_or(|(_, previous)| dist < previous) {
                 best = Some((index, dist));
             }
@@ -1585,7 +1716,8 @@ fn sort_placeholder_groups(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]
         ys.sort_by(|left, right| left.total_cmp(right));
         let mid = ys.get(ys.len() / 2).copied().unwrap_or(0.0);
         let baselines = body_baselines(glyphs, body);
-        let y = nearest_baseline(mid, &baselines, body * 0.85).map_or(mid, |index| baselines[index]);
+        let y =
+            nearest_baseline(mid, &baselines, body * 0.85).map_or(mid, |index| baselines[index]);
         (y, x)
     };
     groups.sort_by(|left, right| {
@@ -1637,11 +1769,11 @@ fn script_atoms(glyphs: &[&Glyph], body: f32, used: &HashSet<u32>) -> Vec<Vec<u3
         }
     }
     let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
-    for index in 0..scripts.len() {
+    for (index, script) in scripts.iter().enumerate() {
         clusters
             .entry(find_root(&mut parent, index))
             .or_default()
-            .push(scripts[index]);
+            .push(*script);
     }
     let mut atoms = Vec::new();
     for cluster in clusters.into_values() {
@@ -1649,7 +1781,10 @@ fn script_atoms(glyphs: &[&Glyph], body: f32, used: &HashSet<u32>) -> Vec<Vec<u3
             .iter()
             .any(|&index| is_math_font(&glyphs[index].font_name));
         let (left, right) = index_span(glyphs, &cluster);
-        let mut ys: Vec<f32> = cluster.iter().map(|&index| glyphs[index].matrix[5]).collect();
+        let mut ys: Vec<f32> = cluster
+            .iter()
+            .map(|&index| glyphs[index].matrix[5])
+            .collect();
         ys.sort_by(|a, b| a.total_cmp(b));
         let mid = ys[ys.len() / 2];
         let Some(base) = nearest_baseline(mid, &baselines, body * 0.85) else {
@@ -1699,9 +1834,13 @@ fn script_bases<'a>(
     candidates.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
     let wide = right - left > body * 1.3;
     if !wide {
-        let best = candidates.iter().copied().filter(|glyph| {
-            glyph.matrix[4] <= left + body * 0.25 && glyph.matrix[4] >= left - body * 0.85
-        }).max_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+        let best = candidates
+            .iter()
+            .copied()
+            .filter(|glyph| {
+                glyph.matrix[4] <= left + body * 0.25 && glyph.matrix[4] >= left - body * 0.85
+            })
+            .max_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
         return best.into_iter().collect();
     }
     let mut picked: Vec<&Glyph> = candidates
@@ -1881,7 +2020,10 @@ pub(crate) fn merge_stacked_paragraphs(
             .iter()
             .filter_map(|id| glyphs.get(by_id[id]))
             .collect();
-        let stacks = page_stacks.get(&segment.page_index).map(Vec::as_slice).unwrap_or(&[]);
+        let stacks = page_stacks
+            .get(&segment.page_index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         spans.push(merge_span(&owned, stacks));
     }
     let mut keep = vec![false; segments.len()];
@@ -1931,12 +2073,12 @@ pub(crate) fn merge_stacked_paragraphs(
                 grew = false;
                 let mut stay = Vec::new();
                 for index in rest.drain(..) {
-                    let touches = chain.iter().any(|other| {
-                        match (spans[*other], spans[index]) {
+                    let touches = chain
+                        .iter()
+                        .any(|other| match (spans[*other], spans[index]) {
                             (Some(left), Some(right)) => merge_spans_chain(&left, &right),
                             _ => false,
-                        }
-                    });
+                        });
                     if touches {
                         chain.push(index);
                         grew = true;
@@ -2043,10 +2185,14 @@ fn merge_span(glyphs: &[&Glyph], stacks: &[Vec<u32>]) -> Option<MergeSpan> {
         .filter(|glyph| (top - glyph.matrix[5]).abs() <= body * 0.35)
         .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]))
         .fold(f32::MAX, f32::min);
-    let head_left = if head_band.is_finite() { head_band } else { left };
-    let stacked = glyphs.iter().any(|glyph| {
-        stacks.iter().any(|ids| ids.contains(&glyph.id))
-    });
+    let head_left = if head_band.is_finite() {
+        head_band
+    } else {
+        left
+    };
+    let stacked = glyphs
+        .iter()
+        .any(|glyph| stacks.iter().any(|ids| ids.contains(&glyph.id)));
     Some(MergeSpan {
         page,
         top,
@@ -2145,7 +2291,8 @@ fn absorb_interior_shards(
     let mut have: HashSet<u32> = ids.iter().copied().collect();
     let mut drop = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
-        if in_chain.contains(&index) || segment.glyph_ids.is_empty() || segment.glyph_ids.len() > 3 {
+        if in_chain.contains(&index) || segment.glyph_ids.is_empty() || segment.glyph_ids.len() > 3
+        {
             continue;
         }
         let shard: Vec<&Glyph> = segment
@@ -2266,7 +2413,8 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
         let mut ys: Vec<f32> = source.iter().map(|glyph| glyph.matrix[5]).collect();
         ys.sort_by(|left, right| left.total_cmp(right));
         let mid = ys.get(ys.len() / 2).copied().unwrap_or(0.0);
-        let y = nearest_baseline(mid, &baselines, body * 0.85).map_or(mid, |index| baselines[index]);
+        let y =
+            nearest_baseline(mid, &baselines, body * 0.85).map_or(mid, |index| baselines[index]);
         let x = source
             .iter()
             .map(|glyph| glyph.matrix[4])
@@ -2334,15 +2482,7 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
         if let Some(index) = token.stack {
             let (mark_left, mark_y, mark_right) = anchors[index];
             push_gap(
-                &mut out,
-                &prev_text,
-                prev_right,
-                prev_y,
-                "⟦",
-                mark_left,
-                mark_y,
-                body,
-                band,
+                &mut out, &prev_text, prev_right, prev_y, "⟦", mark_left, mark_y, body, band,
             );
             out.push('⟦');
             out.push_str(&index.to_string());
@@ -4390,6 +4530,9 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         '\u{27A2}' | '\u{27A4}' | '\u{27A5}' | '\u{2794}' | '\u{279C}' | '\u{279E}' => &['→', '>'],
         '\u{2705}' | '\u{2714}' => &['✓', '*'],
         '\u{274C}' | '\u{274E}' => &['×', 'x'],
+        // Latin Modern `\widehat`. A black square is not a hat; the accent
+        // stays on its letter inside a formula hole.
+        '\u{F8F8}' => &[],
         '\u{E000}'..='\u{F8FF}' => &['■', '•', '*'],
         _ if pictograph(ch) => &['•', '*'],
         _ => &[],
@@ -4679,7 +4822,12 @@ fn centered_list_ink(ink: &[InkLine<'_>]) -> bool {
     }
     let size = ink
         .iter()
-        .map(|line| line.glyphs.iter().map(|glyph| glyph.font_size).fold(0.0, f32::max))
+        .map(|line| {
+            line.glyphs
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(0.0, f32::max)
+        })
         .fold(1.0, f32::max)
         .max(1.0);
     let commas = ink
@@ -7451,36 +7599,28 @@ fn run_in_label_indent(
     (indent > size * 0.6).then_some(indent)
 }
 
-/// ⟦N⟧ is one formula. Two digits name that formula, then ideographic spaces
-/// reserve its width. The digits keep adjacent holes from merging, and they
-/// survive a wrap that would trim a trailing space. Layout deletes both and
-/// draws the original glyphs into the hole.
-fn expand_stack_placeholders(text: &str, glyphs: &[&Glyph], font: &SubsetFont) -> String {
+/// ⟦N⟧ is one formula. Two digits name that formula, then one ideographic
+/// space marks the hole. Layout deletes both and draws the original glyphs
+/// into a gap of `formula_ink_width` points. The marker's own font advances
+/// are not the gap: a 9pt subscript must not reserve a full em.
+fn expand_stack_placeholders(
+    text: &str,
+    glyphs: &[&Glyph],
+    font: &SubsetFont,
+) -> (String, HashMap<usize, f32>) {
     if !text.contains('⟦')
         || !font.glyphs.contains_key(&0x3000)
         || !font.glyphs.contains_key(&u32::from(b'0'))
     {
-        return text.to_string();
+        return (text.to_string(), HashMap::new());
     }
     let body = prose_body_size(glyphs);
     let stacks = placeholder_groups(glyphs, body);
     if stacks.is_empty() {
-        return text.to_string();
+        return (text.to_string(), HashMap::new());
     }
-    // Wrap draws near 0.90 of the English size. Counting the spaces at that
-    // size keeps the hole at least as wide as the binomial.
-    let advance = font
-        .glyphs
-        .get(&0x3000)
-        .map(|(_, advance)| *advance as f32 * body * 0.90 / font.units_per_em as f32)
-        .unwrap_or(body)
-        .max(1.0);
-    let digit = font
-        .glyphs
-        .get(&u32::from(b'0'))
-        .map(|(_, advance)| *advance as f32 * body * 0.90 / font.units_per_em as f32)
-        .unwrap_or(advance);
     let by_id = glyph_index_refs(glyphs);
+    let mut holes = HashMap::new();
     let mut out = String::new();
     let mut rest = text;
     while let Some(start) = rest.find('⟦') {
@@ -7494,11 +7634,9 @@ fn expand_stack_placeholders(text: &str, glyphs: &[&Glyph], font: &SubsetFont) -
         if let Ok(index) = after[..end].parse::<usize>() {
             if index <= 99 {
                 if let Some(ids) = stacks.get(index) {
-                    let width = stack_width(ids, glyphs, &by_id).max(advance);
-                    let spaces_width = (width - digit * 2.0).max(advance);
-                    let count = (spaces_width / advance).ceil().max(1.0) as usize;
+                    holes.insert(index, formula_ink_width(ids, glyphs, &by_id));
                     out.push_str(&format!("{index:02}"));
-                    out.extend(std::iter::repeat('\u{3000}').take(count));
+                    out.push('\u{3000}');
                     rest = &after[end + '⟧'.len_utf8()..];
                     continue;
                 }
@@ -7508,7 +7646,7 @@ fn expand_stack_placeholders(text: &str, glyphs: &[&Glyph], font: &SubsetFont) -
         rest = after;
     }
     out.push_str(rest);
-    out
+    (out, holes)
 }
 
 fn glyph_index_refs(glyphs: &[&Glyph]) -> HashMap<u32, usize> {
@@ -7519,7 +7657,9 @@ fn glyph_index_refs(glyphs: &[&Glyph]) -> HashMap<u32, usize> {
         .collect()
 }
 
-fn stack_width(ids: &[u32], glyphs: &[&Glyph], by_id: &HashMap<u32, usize>) -> f32 {
+/// Ink width of a formula, from its leftmost origin to the rightmost pen.
+/// The hole reserves this many points. It does not grow with the Chinese em.
+fn formula_ink_width(ids: &[u32], glyphs: &[&Glyph], by_id: &HashMap<u32, usize>) -> f32 {
     let mut left = f32::MAX;
     let mut right = f32::MIN;
     for id in ids {
@@ -7527,9 +7667,14 @@ fn stack_width(ids: &[u32], glyphs: &[&Glyph], by_id: &HashMap<u32, usize>) -> f
             continue;
         };
         left = left.min(glyph.matrix[4].min(glyph.bbox[0]));
-        right = right.max(glyph.bbox[2].max(glyph.matrix[4]));
+        let pen = glyph.matrix[4] + glyph.advance[0].max(0.0);
+        right = right.max(glyph.bbox[2].max(glyph.matrix[4]).max(pen));
     }
-    if left.is_finite() { right - left } else { 0.0 }
+    if left.is_finite() && right > left {
+        right - left
+    } else {
+        0.0
+    }
 }
 
 /// Replace each numbered hole with a rigid move of that formula's glyphs.
@@ -7610,7 +7755,13 @@ fn lift_stack_placeholders(
         let mut cursor = 0usize;
         for (start, end, index, duplicate) in cuts {
             if cursor < start {
-                rebuilt.push(slice_drawn(line, &chars, cursor, start, char_origin(line, &chars, cursor)));
+                rebuilt.push(slice_drawn(
+                    line,
+                    &chars,
+                    cursor,
+                    start,
+                    char_origin(line, &chars, cursor),
+                ));
             }
             if duplicate {
                 if let Some(drawn) = plain_stack_drawn(
@@ -7626,7 +7777,13 @@ fn lift_stack_placeholders(
             cursor = end;
         }
         if cursor < chars.len() {
-            rebuilt.push(slice_drawn(line, &chars, cursor, chars.len(), char_origin(line, &chars, cursor)));
+            rebuilt.push(slice_drawn(
+                line,
+                &chars,
+                cursor,
+                chars.len(),
+                char_origin(line, &chars, cursor),
+            ));
         }
     }
     rebuilt.retain(|line| !line.text.is_empty());
@@ -7750,7 +7907,6 @@ fn stack_anchor(ids: &[u32], glyphs: &[&Glyph], body: f32) -> (f32, f32) {
     if members.is_empty() {
         return (f32::NAN, f32::NAN);
     }
-    let anchor_x = members.iter().map(|glyph| glyph.matrix[4]).fold(f32::MAX, f32::min);
     let left = members
         .iter()
         .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]))
@@ -7759,8 +7915,14 @@ fn stack_anchor(ids: &[u32], glyphs: &[&Glyph], body: f32) -> (f32, f32) {
         .iter()
         .map(|glyph| glyph.bbox[2].max(glyph.matrix[4]))
         .fold(left, f32::max);
-    let high = members.iter().map(|glyph| glyph.matrix[5]).fold(f32::MIN, f32::max);
-    let low = members.iter().map(|glyph| glyph.matrix[5]).fold(f32::MAX, f32::min);
+    let high = members
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MIN, f32::max);
+    let low = members
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MAX, f32::min);
     let mid = (high + low) * 0.5;
     let mut band: Vec<f32> = glyphs
         .iter()
@@ -7779,7 +7941,7 @@ fn stack_anchor(ids: &[u32], glyphs: &[&Glyph], body: f32) -> (f32, f32) {
         band.sort_by(|left, right| left.total_cmp(right));
         band[band.len() / 2]
     };
-    (anchor_x, anchor_y)
+    (left, anchor_y)
 }
 
 fn layout_segment(
@@ -7825,7 +7987,7 @@ fn layout_segment(
         Some(trim_leading_quotes(text))
     };
     let text = without_mark.as_deref().unwrap_or(text);
-    let expanded = expand_stack_placeholders(text, glyphs, font);
+    let (expanded, holes) = expand_stack_placeholders(text, glyphs, font);
     let text = expanded.as_str();
     if text
         .chars()
@@ -7835,7 +7997,9 @@ fn layout_segment(
     }
     let pages = pages_of(glyphs);
     if pages.len() > 1 {
-        return layout_across_pages(glyphs, text, font, extraction, resource, skew, metrics);
+        return layout_across_pages(
+            glyphs, text, font, extraction, resource, skew, metrics, &holes,
+        );
     }
     if !bilingual && ink.len() == 1 {
         if let Some(drawn) = layout_indexed_contents_heading(
@@ -8070,6 +8234,7 @@ fn layout_segment(
             font,
             metrics,
             callout_indent,
+            &holes,
         )
     };
     let (block_left, block_right, lines, mut size, leading, indent) =
@@ -8104,7 +8269,7 @@ fn layout_segment(
         // A dash item is one paragraph. Spreading it onto the source line
         // breaks leaves each continuation at a different indent.
         lines
-    } else if let Some(packed) = pack_narrow_tail(text, size, indent, &spans, font) {
+    } else if let Some(packed) = pack_narrow_tail_holes(text, size, indent, &spans, font, &holes) {
         for (index, line) in packed.iter().enumerate() {
             if line.trim().is_empty() {
                 absorbed.extend(ink[index].glyphs.iter().map(|glyph| glyph.id));
@@ -8217,12 +8382,15 @@ fn layout_segment(
             // to that cap letter-spaces `请注意，在完整的《白鲸》` without
             // reaching the margin.
             if (prompt_sample || callout_paint.is_some())
-                && !prompt_line_is_full(line, size, limit, font)
+                && !prompt_line_is_full_holes(line, size, limit, font, &holes)
             {
                 justify = false;
             }
             let line = line.clone();
             let supers = line_masks.get(index).cloned().unwrap_or_default();
+            let mut widths = widths_with_superscripts(&line, size, font, &supers, sup.as_ref());
+            let hole_chars: Vec<char> = line.chars().collect();
+            apply_formula_hole_widths(&hole_chars, &mut widths, &holes);
             Drawn {
                 page,
                 x: block_left + if index == 0 { indent } else { 0.0 },
@@ -8232,8 +8400,8 @@ fn layout_segment(
                 cids: cids_of(&line, font),
                 resource: resource.to_string(),
                 skew,
-                widths: widths_with_superscripts(&line, size, font, &supers, sup.as_ref()),
-                gaps: justify_gaps(&line, size, limit, font, justify),
+                widths,
+                gaps: justify_gaps_holes(&line, size, limit, font, justify, &holes),
                 text: line,
                 supers,
                 sup_scale: sup.as_ref().map(|item| item.scale).unwrap_or(1.0),
@@ -9225,7 +9393,7 @@ fn compose_bold_run_in(
         .max(1.0);
     let mut body_key: Option<Vec<u32>> = None;
     let mut body_x = f32::MAX;
-    for (key, _) in groups {
+    for key in groups.keys() {
         if key == head_key {
             continue;
         }
@@ -9304,7 +9472,9 @@ fn compose_bold_run_in(
         .map(|line| line.y)
         .fold(f32::MIN, f32::max);
     let leading = if body_lines.len() >= 2 {
-        (body_lines[0].y - body_lines[1].y).abs().clamp(paint * 1.15, paint * 1.85)
+        (body_lines[0].y - body_lines[1].y)
+            .abs()
+            .clamp(paint * 1.15, paint * 1.85)
     } else {
         paint * 1.55
     };
@@ -9396,7 +9566,8 @@ fn bold_run_in_glyphs(glyphs: &[&Glyph]) -> bool {
         return false;
     }
     let bold_letters = glyphs.iter().any(|glyph| {
-        glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) && face_style(&glyph.font_name).bold
+        glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+            && face_style(&glyph.font_name).bold
     });
     // The italic `k` in `Randomized k-server.` is a math face, not a second
     // roman word. It still belongs to the bold run-in.
@@ -9437,7 +9608,10 @@ fn ids_glyphs<'a>(
     glyphs
 }
 
-fn embedded_font<'a>(resource: &str, embedded: &'a [(String, SubsetFont)]) -> Option<&'a SubsetFont> {
+fn embedded_font<'a>(
+    resource: &str,
+    embedded: &'a [(String, SubsetFont)],
+) -> Option<&'a SubsetFont> {
     embedded
         .iter()
         .find(|(name, _)| name == resource)
@@ -11030,8 +11204,8 @@ fn heading_pull_crosses_script(
             }
             let dy = (glyph.matrix[5] - origin).abs();
             let script = dy > 1.6 && dy < body && glyph.font_size <= body * 0.88;
-            let in_column = glyph.matrix[4] >= block.left - 4.0
-                && glyph.matrix[4] <= column_right + body;
+            let in_column =
+                glyph.matrix[4] >= block.left - 4.0 && glyph.matrix[4] <= column_right + body;
             if script && in_column {
                 return true;
             }
@@ -11386,7 +11560,10 @@ fn reposition_stacks(
         let mut moved = Vec::new();
         for shift in page_shifts {
             for id in &shift.ids {
-                let Some(glyph) = by_id.get(id).and_then(|index| extraction.glyphs.get(*index)) else {
+                let Some(glyph) = by_id
+                    .get(id)
+                    .and_then(|index| extraction.glyphs.get(*index))
+                else {
                     continue;
                 };
                 if glyph.font_resource.is_empty() || glyph.char_code.is_empty() {
@@ -11938,7 +12115,17 @@ fn drawn_hits(drawn: &[Drawn], font: &SubsetFont, page: u32, bbox: [f32; 4]) -> 
 }
 
 fn drawn_bbox(line: &Drawn, font: &SubsetFont) -> [f32; 4] {
-    let width = measure(&line.text, line.size, font).max(line.size * 0.4);
+    // `measure` sees a formula hole as two digits and an ideographic space.
+    // The laid-out widths are the math ink. Using the short measure leaves
+    // the formula "unhit", and the last character of the line is stamped
+    // on top of it.
+    let measured = measure(&line.text, line.size, font);
+    let laid = if line.widths.len() == line.text.chars().count() {
+        line.widths.iter().sum::<f32>() + line.gaps.iter().sum::<f32>()
+    } else {
+        0.0
+    };
+    let width = measured.max(laid).max(line.size * 0.4);
     [
         line.x,
         line.y - line.size * 0.3,
@@ -12063,6 +12250,7 @@ fn layout_across_pages(
     resource: &str,
     skew: f32,
     metrics: CjkMeasure,
+    holes: &HashMap<usize, f32>,
 ) -> Option<Vec<Drawn>> {
     let pages = pages_of(glyphs);
     let mut boxes = Vec::new();
@@ -12142,7 +12330,7 @@ fn layout_across_pages(
     let mut size = start;
     let packed = loop {
         let indent = fixed_indent.unwrap_or(size * indent_ems);
-        if let Some(packed) = pack_into_slots(text, size, indent, &boxes, font, true) {
+        if let Some(packed) = pack_into_slots_holes(text, size, indent, &boxes, font, true, holes) {
             let flat: String = packed
                 .iter()
                 .flatten()
@@ -12262,8 +12450,14 @@ fn layout_across_pages(
                 cids: cids_of(&line, font),
                 resource: resource.to_string(),
                 skew,
-                widths: widths_with_superscripts(&line, size, font, &supers, sup.as_ref()),
-                gaps: justify_gaps(&line, size, limit, font, false),
+                widths: {
+                    let mut widths =
+                        widths_with_superscripts(&line, size, font, &supers, sup.as_ref());
+                    let hole_chars: Vec<char> = line.chars().collect();
+                    apply_formula_hole_widths(&hole_chars, &mut widths, holes);
+                    widths
+                },
+                gaps: justify_gaps_holes(&line, size, limit, font, false, holes),
                 text: line,
                 supers,
                 sup_scale: sup.as_ref().map(|item| item.scale).unwrap_or(1.0),
@@ -14933,7 +15127,11 @@ mod tests {
             "last line mid drifted to {}",
             (last.left + last.right) * 0.5
         );
-        assert!(last.right < 600.0, "pad still in the right edge {}", last.right);
+        assert!(
+            last.right < 600.0,
+            "pad still in the right edge {}",
+            last.right
+        );
         let translated = "Rust、安全、社交、Swift、测试、存储、WebAssembly、Web 性能";
         let mut points: Vec<u32> = translated.chars().map(|ch| ch as u32).collect();
         points.sort_unstable();
@@ -14995,7 +15193,12 @@ mod tests {
             id += 1;
         };
         for (index, ch) in "We use a potential".chars().enumerate() {
-            push(72.0 + index as f32 * 5.0, 700.0, &ch.to_string(), "LMRoman10");
+            push(
+                72.0 + index as f32 * 5.0,
+                700.0,
+                &ch.to_string(),
+                "LMRoman10",
+            );
         }
         for (index, ch) in ["k", "+", "1", "2"].iter().enumerate() {
             // The `2` sits under `k+1`, inside one em. A full leading lower
@@ -15004,11 +15207,25 @@ mod tests {
             push(200.0 + index as f32 * 6.0, y, ch, "LMMathItalic10");
         }
         for (index, ch) in "dimensional vector".chars().enumerate() {
-            push(240.0 + index as f32 * 5.0, 700.0, &ch.to_string(), "LMRoman10");
+            push(
+                240.0 + index as f32 * 5.0,
+                700.0,
+                &ch.to_string(),
+                "LMRoman10",
+            );
         }
-        push(72.0, 400.0, "Unrelated paragraph about servers.", "LMRoman10");
+        push(
+            72.0,
+            400.0,
+            "Unrelated paragraph about servers.",
+            "LMRoman10",
+        );
         drop(push);
-        let near: Vec<u32> = glyphs.iter().filter(|glyph| glyph.id != id - 1).map(|glyph| glyph.id).collect();
+        let near: Vec<u32> = glyphs
+            .iter()
+            .filter(|glyph| glyph.id != id - 1)
+            .map(|glyph| glyph.id)
+            .collect();
         let far_id = id - 1;
         let extraction = Extraction {
             coordinate_space: "user",
@@ -15071,7 +15288,12 @@ mod tests {
             push(250.0 + index as f32 * 6.0, y, ch, "LMMathItalic10");
         }
         for (index, ch) in "The check that the potential holds.".chars().enumerate() {
-            push(90.0 + index as f32 * 5.0, 658.0, &ch.to_string(), "LMRoman10");
+            push(
+                90.0 + index as f32 * 5.0,
+                658.0,
+                &ch.to_string(),
+                "LMRoman10",
+            );
         }
         drop(push);
         let prose: Vec<u32> = glyphs
@@ -15119,7 +15341,10 @@ mod tests {
         };
         let blocks = super::math_block_segments(&report, &extraction, &by_id);
         assert!(blocks.contains(&0), "the binomial paragraph was reflowed");
-        assert!(!blocks.contains(&1), "the indented paragraph was kept as math");
+        assert!(
+            !blocks.contains(&1),
+            "the indented paragraph was kept as math"
+        );
     }
 
     #[test]
@@ -15137,10 +15362,20 @@ mod tests {
             id += 1;
         };
         for (index, ch) in "4 The potential and its increase".chars().enumerate() {
-            push(72.0 + index as f32 * 5.0, 400.0, &ch.to_string(), "LMRoman10");
+            push(
+                72.0 + index as f32 * 5.0,
+                400.0,
+                &ch.to_string(),
+                "LMRoman10",
+            );
         }
         for (index, ch) in "Fix any total order on the labels".chars().enumerate() {
-            push(72.0 + index as f32 * 5.0, 388.0, &ch.to_string(), "LMRoman10");
+            push(
+                72.0 + index as f32 * 5.0,
+                388.0,
+                &ch.to_string(),
+                "LMRoman10",
+            );
         }
         for (index, ch) in ["Q", "=", "z", "q", "x"].iter().enumerate() {
             push(72.0 + index as f32 * 8.0, 376.0, ch, "LMMathItalic10");
@@ -15230,7 +15465,10 @@ mod tests {
             !released.contains(&0),
             "a bold section heading was kept as a math block"
         );
-        assert!(released.contains(&2), "releasing the heading reflowed the display");
+        assert!(
+            released.contains(&2),
+            "releasing the heading reflowed the display"
+        );
     }
 
     #[test]
@@ -15386,7 +15624,13 @@ mod tests {
         }
         let stack_x = x;
         for (index, ch) in ["k", "+", "1"].iter().enumerate() {
-            push(stack_x + index as f32 * 6.0, 705.0, 8.0, ch, "LMMathItalic10");
+            push(
+                stack_x + index as f32 * 6.0,
+                705.0,
+                8.0,
+                ch,
+                "LMMathItalic10",
+            );
         }
         push(stack_x + 8.0, 694.0, 8.0, "2", "LMMathItalic10");
         // Latin Modern draws the binomial fences as empty extension glyphs
@@ -15589,13 +15833,25 @@ mod tests {
             units_per_em: 1000,
             glyphs: codes,
         };
-        let expanded = super::expand_stack_placeholders("前⟦0⟧⟦1⟧后", &refs, &font);
+        let (expanded, holes) = super::expand_stack_placeholders("前⟦0⟧⟦1⟧后", &refs, &font);
         assert!(
             expanded.contains('0') && expanded.contains('\u{3000}') && expanded.contains('后'),
             "adjacent holes merged or dropped: {expanded}"
         );
         assert!(
-            expanded.find("00").is_some_and(|at| expanded[at..].contains("01")),
+            !expanded.contains("\u{3000}\u{3000}"),
+            "a hole reserved more than its math: {expanded}"
+        );
+        assert!(
+            holes
+                .get(&0)
+                .is_some_and(|width| *width < 12.0 && *width > 8.0),
+            "q_x was padded out to an em: {holes:?}"
+        );
+        assert!(
+            expanded
+                .find("00")
+                .is_some_and(|at| expanded[at..].contains("01")),
             "the second formula lost its index: {expanded}"
         );
         let wrapped = crate::layout::wrap_text(&expanded, 10.0, 80.0, 80.0, &font).expect("wrap");
@@ -15604,8 +15860,9 @@ mod tests {
             kept.contains('\u{3000}'),
             "wrap trimmed the formula hole: {wrapped:?}"
         );
-        let trailing = crate::layout::wrap_text("并且\u{3000}\u{3000}\u{3000}", 10.0, 200.0, 200.0, &font)
-            .expect("trailing");
+        let trailing =
+            crate::layout::wrap_text("并且\u{3000}\u{3000}\u{3000}", 10.0, 200.0, 200.0, &font)
+                .expect("trailing");
         assert!(
             trailing.iter().any(|line| line.contains('\u{3000}')),
             "a trailing hole was trimmed: {trailing:?}"
@@ -15636,12 +15893,19 @@ mod tests {
         assert!(shifts.iter().any(|shift| shift.ids.contains(&q)));
         assert!(shifts.iter().any(|shift| shift.ids.contains(&g)));
         let painted: String = lines.iter().map(|item| item.text.as_str()).collect();
-        assert!(!painted.contains('\u{3000}'), "hole stayed in the line: {painted}");
-        assert!(painted.contains('前') && painted.contains('后'), "{painted}");
         assert!(
-            wrapped.iter().filter(|item| item.contains('\u{3000}')).all(|item| {
-                item.chars().any(|ch| ch.is_ascii_digit())
-            }),
+            !painted.contains('\u{3000}'),
+            "hole stayed in the line: {painted}"
+        );
+        assert!(
+            painted.contains('前') && painted.contains('后'),
+            "{painted}"
+        );
+        assert!(
+            wrapped
+                .iter()
+                .filter(|item| item.contains('\u{3000}'))
+                .all(|item| { item.chars().any(|ch| ch.is_ascii_digit()) }),
             "the index split from its hole: {wrapped:?}"
         );
     }
@@ -15710,8 +15974,12 @@ mod tests {
                     .iter()
                     .filter_map(|id| extracted.glyphs.get(by_id[id]))
                     .collect();
-                let base = members.iter().any(|glyph| glyph.unicode == "g" && glyph.font_size > 9.0);
-                let sub = members.iter().any(|glyph| glyph.unicode == "1" && glyph.font_size < 8.5);
+                let base = members
+                    .iter()
+                    .any(|glyph| glyph.unicode == "g" && glyph.font_size > 9.0);
+                let sub = members
+                    .iter()
+                    .any(|glyph| glyph.unicode == "1" && glyph.font_size < 8.5);
                 base && sub
             }),
             "g_i1 lost its subscript glyph"
@@ -15740,6 +16008,542 @@ mod tests {
     }
 
     #[test]
+    fn the_k_server_page4_holes_match_the_math_and_fill_the_column() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/cache/arxiv-2609.15979.pdf");
+        if !path.is_file() {
+            return;
+        }
+        let pdf = PdfDocument::open(&path).unwrap();
+        let extracted = pdf.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extracted.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extracted.regions,
+            &extracted.pages,
+        );
+        let merged = merge_stacked_paragraphs(segmentation.segments, &extracted.glyphs);
+        let paragraph = merged
+            .iter()
+            .find(|segment| segment.page_index == 3 && segment.text.contains("which is a"))
+            .unwrap_or_else(|| panic!("page 4 opening paragraph missing"));
+        let translated = "我们现在可以仅以代数形式考虑该问题，因为工作函数和扩展代价可以只用向量 ⟦0⟧ 及其变换来表示。我们使用基于二次乘积 ⟦1⟧ 的势函数，它是一个 ⟦2⟧ 维向量，其坐标由数对 ⟦3⟧ 与 ⟦4⟧ 索引，其分量通过取 ⟦5⟧ 和 ⟦6⟧ 在各自坐标上的分量的乘积得到。该势函数为 Ψ = ⟦7⟧，其中 Q = ⟦8⟧⟦9⟧，且 ⟦10⟧ = ⟦11⟧ ν(det⟦12⟧⟦13⟧⟦14⟧。⟦15⟧ 项和 µ 函数与先前已知的用于证明 WFA 某些情形竞争性的势函数类似。其他势函数也使用了选择一个点子集来最小化一个表达式，该表达式包含工作函数值（这里通过 ⟦16⟧ 间接表示）以及所用点之间带负号的距离对（这里通过 ⟦17⟧ 表示）";
+        let mut points: Vec<u32> = translated
+            .chars()
+            .map(|ch| ch as u32)
+            .chain("0123456789　 Ψµμν()=，。、".chars().map(|ch| ch as u32))
+            .collect();
+        points.sort_unstable();
+        points.dedup();
+        let font = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &points,
+            &FontSources::default(),
+        )
+        .expect("cjk font");
+        let by_id = glyph_index(&extracted.glyphs);
+        let glyphs: Vec<&Glyph> = paragraph
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extracted.glyphs.get(by_id[id]))
+            .collect();
+        let column_right = glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.font_size > 9.0 && glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+            })
+            .map(|glyph| glyph.matrix[4] + glyph.advance[0].max(0.0))
+            .fold(0.0f32, f32::max);
+        assert!(
+            (column_right - 540.0).abs() < 1.5,
+            "page 4 column right drifted to {column_right:.1}"
+        );
+        let mut drawn = layout_segment(
+            &glyphs,
+            translated,
+            &font,
+            &extracted,
+            false,
+            "RPT",
+            0.0,
+            CjkMeasure::resolve(0.0, 0.0),
+        )
+        .unwrap_or_else(|| panic!("page 4 paragraph did not fit"));
+        let shifts = lift_stack_placeholders(&mut drawn, &glyphs, &font)
+            .unwrap_or_else(|| panic!("a formula hole was missing"));
+        struct Slice {
+            y: f32,
+            x: f32,
+            right: f32,
+        }
+        let mut slices: Vec<Slice> = Vec::new();
+        for line in &drawn {
+            let right = line.x + line.widths.iter().sum::<f32>() + line.gaps.iter().sum::<f32>();
+            assert!(
+                right <= column_right + 0.8,
+                "text at y={:.1} ends at {right:.1}, past {column_right:.1}: {}",
+                line.y,
+                line.text
+            );
+            slices.push(Slice {
+                y: line.y,
+                x: line.x,
+                right,
+            });
+        }
+        let mut formulas: Vec<(f32, f32, f32, String)> = Vec::new();
+        for shift in &shifts {
+            let members: Vec<&Glyph> = shift
+                .ids
+                .iter()
+                .filter_map(|id| extracted.glyphs.get(by_id[id]))
+                .collect();
+            let left = members
+                .iter()
+                .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]))
+                .fold(f32::MAX, f32::min);
+            let math_right = members
+                .iter()
+                .map(|glyph| {
+                    let pen = glyph.matrix[4] + glyph.advance[0].max(0.0);
+                    glyph.bbox[2].max(glyph.matrix[4]).max(pen)
+                })
+                .fold(left, f32::max)
+                + shift.dx;
+            let hole = left + shift.dx;
+            let ink: String = members.iter().map(|glyph| glyph.unicode.as_str()).collect();
+            assert!(
+                math_right <= column_right + 0.8,
+                "{ink:?} ends at {math_right:.1}, past {column_right:.1}"
+            );
+            formulas.push((hole, math_right, math_right - hole, ink));
+        }
+        let column_left = slices.iter().map(|slice| slice.x).fold(f32::MAX, f32::min);
+        let mut ys: Vec<f32> = Vec::new();
+        for slice in &slices {
+            if !ys.iter().any(|y| (*y - slice.y).abs() < 0.8) {
+                ys.push(slice.y);
+            }
+        }
+        ys.sort_by(|left, right| right.total_cmp(left));
+        let mut rows: Vec<(f32, f32, f32)> = Vec::new();
+        for (row_index, y) in ys.iter().enumerate() {
+            let mut on_line: Vec<&Slice> = slices
+                .iter()
+                .filter(|slice| (slice.y - y).abs() < 0.8)
+                .collect();
+            on_line.sort_by(|left, right| left.x.total_cmp(&right.x));
+            let indent = row_index == 0;
+            let mut gaps: Vec<(f32, f32)> = Vec::new();
+            if !indent {
+                if let Some(first) = on_line.first() {
+                    if first.x > column_left + 1.5 {
+                        gaps.push((column_left, first.x));
+                    }
+                }
+            }
+            for pair in on_line.windows(2) {
+                if pair[1].x > pair[0].right + 1.5 {
+                    gaps.push((pair[0].right, pair[1].x));
+                }
+            }
+            for (gap_start, gap_end) in gaps {
+                let gap = gap_end - gap_start;
+                let mut cursor = gap_start;
+                let mut covered = 0.0f32;
+                let mut guard = 0;
+                while cursor < gap_end - 0.8 {
+                    let next = formulas
+                        .iter()
+                        .filter(|(hole, math_right, _, _)| {
+                            (*hole - cursor).abs() <= 1.5 && *math_right <= gap_end + 1.5
+                        })
+                        .min_by(|(left_hole, _, _, _), (right_hole, _, _, _)| {
+                            (*left_hole - cursor)
+                                .abs()
+                                .total_cmp(&(*right_hole - cursor).abs())
+                        });
+                    let Some((hole, math_right, width, _)) = next else {
+                        break;
+                    };
+                    let _ = hole;
+                    cursor = *math_right;
+                    covered += *width;
+                    guard += 1;
+                    if guard > 8 {
+                        break;
+                    }
+                }
+                assert!(
+                    (cursor - gap_end).abs() < 1.5,
+                    "line y={y:.1} gap {gap_start:.1}-{gap_end:.1} ({gap:.1}pt) is not the math (reached {cursor:.1}, covered {covered:.1})"
+                );
+            }
+            let mut right = on_line
+                .iter()
+                .map(|slice| slice.right)
+                .fold(column_left, f32::max);
+            let left = if indent {
+                on_line
+                    .iter()
+                    .map(|slice| slice.x)
+                    .fold(column_right, f32::min)
+            } else {
+                column_left
+            };
+            for (hole, math_right, _, _) in &formulas {
+                if *hole >= left - 1.0 && *math_right <= right + 80.0 && *hole <= right + 1.0 {
+                    right = right.max(*math_right);
+                }
+            }
+            rows.push((*y, left, right));
+        }
+        assert!(rows.len() >= 3, "paragraph collapsed: {rows:?}");
+        assert!(
+            rows.last().is_some_and(|row| row.2 - row.1 > 80.0),
+            "the paragraph still ends on a short orphan line: {rows:?}"
+        );
+        for (y, left, right) in rows.iter().take(rows.len() - 1) {
+            let available = column_right - left;
+            let fill = (right - left) / available;
+            assert!(
+                fill >= 0.90,
+                "line at y={y:.1} fills {fill:.2} ({left:.1}-{right:.1}, edge {column_right:.1})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_k_server_page10_hats_stay_in_holes_and_the_paragraph_fills() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/cache/arxiv-2609.15979.pdf");
+        if !path.is_file() {
+            return;
+        }
+        let pdf = PdfDocument::open(&path).unwrap();
+        let extracted = pdf.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extracted.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extracted.regions,
+            &extracted.pages,
+        );
+        let merged = merge_stacked_paragraphs(segmentation.segments, &extracted.glyphs);
+        let page: Vec<_> = merged
+            .iter()
+            .filter(|segment| segment.page_index == 9)
+            .collect();
+        for segment in &merged {
+            let letters = segment
+                .text
+                .chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .count();
+            if letters < 20 {
+                continue;
+            }
+            assert!(
+                !segment.text.contains('\u{f8f8}')
+                    && !segment.text.contains('■')
+                    && !segment.text.contains('\u{FFFD}'),
+                "tofu in prose on page {}: {}",
+                segment.page_index + 1,
+                segment.text.chars().take(96).collect::<String>()
+            );
+        }
+        assert!(
+            page.iter().all(|segment| segment.text != "k−1"),
+            "the K^{{k-1}} superscript is still its own line"
+        );
+        let paragraph = page
+            .iter()
+            .find(|segment| segment.text.contains("Each family spans"))
+            .unwrap_or_else(|| panic!("the coordinate-family paragraph is still split"));
+        assert!(
+            !paragraph.text.contains('\u{f8f8}')
+                && !paragraph.text.contains('■')
+                && !paragraph.text.contains('\u{FFFD}'),
+            "a hat leaked into the prose as tofu: {}",
+            paragraph.text
+        );
+        assert!(
+            paragraph.text.contains('⟦'),
+            "hatted math was not holed: {}",
+            paragraph.text
+        );
+        let lemma = page
+            .iter()
+            .find(|segment| segment.text.contains("new potential after the request"))
+            .unwrap_or_else(|| panic!("lemma 4.2 statement missing"));
+        assert!(
+            !lemma.text.contains('\u{f8f8}') && !lemma.text.contains('■'),
+            "lemma 4.2 still has a hat stand-in: {}",
+            lemma.text
+        );
+        let by_id = glyph_index(&extracted.glyphs);
+        let glyphs: Vec<&Glyph> = paragraph
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extracted.glyphs.get(by_id[id]))
+            .collect();
+        let translated = "考虑这三个量 ⟦1⟧ 和 ⟦2⟧。定义这些量的行列式的大小分别为 k、⟦3⟧ 1 和 ⟦0⟧ = ⟦4⟧。每个族都张成其坐标空间：H 张成 ⟦5⟧，其投影张成 ⟦6⟧ 以及投影基的乘积张成剩余的二次坐标。因此，这三个量都是有限的。";
+        let mut points: Vec<u32> = translated
+            .chars()
+            .map(|ch| ch as u32)
+            .chain("0123456789　 kHΨµμ=，。、以及".chars().map(|ch| ch as u32))
+            .collect();
+        points.sort_unstable();
+        points.dedup();
+        let font = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &points,
+            &FontSources::default(),
+        )
+        .expect("cjk font");
+        let column_right = glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.font_size > 9.0 && glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+            })
+            .map(|glyph| glyph.matrix[4] + glyph.advance[0].max(0.0))
+            .fold(0.0f32, f32::max);
+        assert!(
+            (column_right - 540.0).abs() < 1.5,
+            "page 10 column right drifted to {column_right:.1}"
+        );
+        let mut drawn = layout_segment(
+            &glyphs,
+            translated,
+            &font,
+            &extracted,
+            false,
+            "RPT",
+            0.0,
+            CjkMeasure::resolve(0.0, 0.0),
+        )
+        .unwrap_or_else(|| panic!("page 10 family paragraph did not fit"));
+        let shifts = lift_stack_placeholders(&mut drawn, &glyphs, &font)
+            .unwrap_or_else(|| panic!("a formula hole was missing"));
+        assert!(
+            shifts.iter().any(|shift| {
+                shift.ids.iter().any(|id| {
+                    extracted
+                        .glyphs
+                        .get(by_id[id])
+                        .is_some_and(|glyph| glyph.unicode.contains('\u{f8f8}'))
+                })
+            }),
+            "the hat was not painted from the original glyph"
+        );
+        let painted: String = drawn.iter().map(|line| line.text.as_str()).collect();
+        assert!(
+            !painted.contains('■')
+                && !painted.contains('\u{FFFD}')
+                && !painted.contains('\u{f8f8}'),
+            "tofu in the family paragraph: {painted}"
+        );
+        let mut rows: Vec<(f32, f32, f32)> = Vec::new();
+        for line in &drawn {
+            let right = line.x + line.widths.iter().sum::<f32>() + line.gaps.iter().sum::<f32>();
+            assert!(
+                right <= column_right + 0.8,
+                "text at y={:.1} x={:.1} ends at {right:.1} (widths {:.1} gaps {:.1}), past {column_right:.1}: {}",
+                line.y,
+                line.x,
+                line.widths.iter().sum::<f32>(),
+                line.gaps.iter().sum::<f32>(),
+                line.text
+            );
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|row: &&mut (f32, f32, f32)| (row.0 - line.y).abs() < 0.6)
+            {
+                row.1 = row.1.min(line.x);
+                row.2 = row.2.max(right);
+            } else {
+                rows.push((line.y, line.x, right));
+            }
+        }
+        rows.sort_by(|left, right| right.0.total_cmp(&left.0));
+        for pair in rows.windows(2) {
+            let gap = pair[0].0 - pair[1].0;
+            assert!(
+                gap > 8.0,
+                "lines overlap at y={:.1} and {:.1}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+        let column_left = 72.0f32;
+        for (index, (y, left, right)) in rows.iter().enumerate() {
+            if index + 1 == rows.len() {
+                assert!(
+                    right - left > 40.0,
+                    "the paragraph ends on a scrap at y={y:.1}"
+                );
+                continue;
+            }
+            let start = if index == 0 { *left } else { column_left };
+            let fill = (right - start) / (column_right - start);
+            assert!(
+                fill >= 0.90,
+                "line at y={y:.1} fills {fill:.2} ({start:.1}-{right:.1})"
+            );
+        }
+        let lemma_glyphs: Vec<&Glyph> = lemma
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extracted.glyphs.get(by_id[id]))
+            .collect();
+        let lemma_text = "请求之后的新势满足 ⟦0⟧ ⟦1⟧ + ⟦2⟧。";
+        let mut lemma_points: Vec<u32> = lemma_text
+            .chars()
+            .map(|ch| ch as u32)
+            .chain(points)
+            .collect();
+        lemma_points.sort_unstable();
+        lemma_points.dedup();
+        let lemma_font = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: lemma_glyphs
+                    .iter()
+                    .any(|glyph| glyph.font_name.to_ascii_lowercase().contains("italic")),
+            },
+            &lemma_points,
+            &FontSources::default(),
+        )
+        .expect("lemma font");
+        let mut lemma_drawn = layout_segment(
+            &lemma_glyphs,
+            lemma_text,
+            &lemma_font,
+            &extracted,
+            false,
+            "RPT",
+            0.0,
+            CjkMeasure::resolve(0.0, 0.0),
+        )
+        .unwrap_or_else(|| panic!("lemma 4.2 did not fit: {}", lemma.text));
+        let lemma_shifts = lift_stack_placeholders(&mut lemma_drawn, &lemma_glyphs, &lemma_font)
+            .unwrap_or_else(|| panic!("lemma 4.2 dropped a hole"));
+        assert!(
+            lemma_shifts.iter().any(|shift| {
+                shift.ids.iter().any(|id| {
+                    extracted
+                        .glyphs
+                        .get(by_id[id])
+                        .is_some_and(|glyph| glyph.unicode.contains('\u{f8f8}'))
+                })
+            }),
+            "lemma 4.2 hat was not kept"
+        );
+        let lemma_paint: String = lemma_drawn.iter().map(|line| line.text.as_str()).collect();
+        assert!(
+            !lemma_paint.contains('■') && !lemma_paint.contains('\u{FFFD}'),
+            "tofu in lemma 4.2: {lemma_paint}"
+        );
+        let mut lemma_ys: Vec<f32> = lemma_drawn.iter().map(|line| line.y).collect();
+        lemma_ys.sort_by(|left, right| left.total_cmp(right));
+        lemma_ys.dedup_by(|left, right| (*left - *right).abs() < 0.8);
+        let lemma_lines: Vec<&str> = lemma_drawn.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(lemma_ys.len(), 1, "lemma 4.2 wrapped: {lemma_lines:?}");
+        for line in &lemma_drawn {
+            let right = line.x + line.widths.iter().sum::<f32>() + line.gaps.iter().sum::<f32>();
+            assert!(right <= column_right + 0.8, "lemma 4.2 ends at {right:.1}");
+        }
+        let old = page
+            .iter()
+            .find(|segment| segment.text.contains("old potential before the request"))
+            .unwrap_or_else(|| panic!("lemma 4.1 statement missing"));
+        assert!(
+            !old.text.contains('\u{f8f8}') && !old.text.contains('■'),
+            "lemma 4.1 still has a hat stand-in: {}",
+            old.text
+        );
+        assert!(
+            page.iter().any(|segment| {
+                segment
+                    .text
+                    .starts_with("Multiplying a vector ⟦0⟧ ⟦1⟧ by e1")
+            }),
+            "the e1 paragraph lost its math holes"
+        );
+        let mixed = merged
+            .iter()
+            .find(|segment| segment.text.contains("For a mixed term"))
+            .unwrap_or_else(|| panic!("mixed term missing"));
+        let mixed_glyphs: Vec<&Glyph> = mixed
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extracted.glyphs.get(by_id[id]))
+            .collect();
+        let mixed_text = "对于混合项，使用 π⟦0⟧ ⟦1⟧⟦2⟧ 写出";
+        let mut mixed_points: Vec<u32> = mixed_text
+            .chars()
+            .map(|ch| ch as u32)
+            .chain(lemma_points)
+            .collect();
+        mixed_points.sort_unstable();
+        mixed_points.dedup();
+        let mixed_font = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &mixed_points,
+            &FontSources::default(),
+        )
+        .expect("mixed font");
+        let mut mixed_drawn = layout_segment(
+            &mixed_glyphs,
+            mixed_text,
+            &mixed_font,
+            &extracted,
+            false,
+            "RPT",
+            0.0,
+            CjkMeasure::resolve(0.0, 0.0),
+        )
+        .unwrap_or_else(|| panic!("mixed term did not fit: {}", mixed.text));
+        assert!(
+            mixed_drawn.iter().all(|line| line.text != "出"),
+            "the last character was stamped onto the formula"
+        );
+        let mixed_shifts = lift_stack_placeholders(&mut mixed_drawn, &mixed_glyphs, &mixed_font)
+            .unwrap_or_else(|| panic!("mixed term dropped a hole"));
+        let write = mixed_drawn
+            .iter()
+            .find(|line| line.text.contains('写'))
+            .unwrap_or_else(|| panic!("写出 was not painted"));
+        let write_x = write.x;
+        for shift in &mixed_shifts {
+            let mut right = f32::MIN;
+            for id in &shift.ids {
+                let Some(glyph) = extracted.glyphs.get(by_id[id]) else {
+                    continue;
+                };
+                let x1 = glyph.bbox[2].max(glyph.matrix[4] + glyph.advance[0].max(0.0)) + shift.dx;
+                right = right.max(x1);
+            }
+            assert!(
+                right <= write_x + 0.6,
+                "formula ink ends at {right:.1}, inside 写出 at {write_x:.1}"
+            );
+        }
+    }
+
+    #[test]
     fn math_glyphs_count_as_text_overlap() {
         let mut formula = ink_glyph(0, 100.0, 400.0, 10.0, "μ");
         formula.font_name = "LMMathItalic10".into();
@@ -15759,7 +16563,10 @@ mod tests {
             diagnostics: Vec::new(),
         };
         let hit = overlapping_text(&extraction, &[0]);
-        assert!(hit.is_some(), "a math glyph overlapping text was ignored: {hit:?}");
+        assert!(
+            hit.is_some(),
+            "a math glyph overlapping text was ignored: {hit:?}"
+        );
     }
 
     #[test]
@@ -16994,9 +17801,7 @@ mod tests {
         assert!(comma_list_english(
             "Energy, Legal and Policy, Open Media, LLVM"
         ));
-        assert!(english_body_source(
-            "Ada, Go, Rust, PostgreSQL, LLVM, Nix"
-        ));
+        assert!(english_body_source("Ada, Go, Rust, PostgreSQL, LLVM, Nix"));
         assert!(!comma_list_english("能源、法律与政策、LLVM、Go、Rust"));
         assert!(!english_body_source("Go, Rust"));
     }
@@ -17046,7 +17851,8 @@ mod tests {
         };
         let by_id = glyph_index(&extraction.glyphs);
         let head_text = "相关问题。";
-        let body_text = "k-服务器问题与许多其他在线问题密切相关，例如分页问题对应于度量空间的特殊情况。";
+        let body_text =
+            "k-服务器问题与许多其他在线问题密切相关，例如分页问题对应于度量空间的特殊情况。";
         let font_for = |text: &str| {
             let mut map = HashMap::new();
             for (id, ch) in (1u16..).zip(text.chars()) {
@@ -17129,9 +17935,10 @@ mod tests {
         let head_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
         let body_at = glyphs.len() as u32;
         x += 8.0;
-        for (index, ch) in "A separate direction for the k-server problem concerns randomized algorithms."
-            .chars()
-            .enumerate()
+        for (index, ch) in
+            "A separate direction for the k-server problem concerns randomized algorithms."
+                .chars()
+                .enumerate()
         {
             let mut glyph = ink_glyph(body_at + index as u32, x, 709.0, 10.9, &ch.to_string());
             glyph.bbox = [x, 700.0, x + 4.4, 716.0];
@@ -17160,7 +17967,8 @@ mod tests {
         };
         let by_id = glyph_index(&extraction.glyphs);
         let head_text = "随机化k-服务器";
-        let body_text = "k-服务器问题的另一个研究方向涉及随机化算法，并且在均匀度量上可以实现竞争比。";
+        let body_text =
+            "k-服务器问题的另一个研究方向涉及随机化算法，并且在均匀度量上可以实现竞争比。";
         let font_for = |text: &str| {
             let mut map = HashMap::new();
             for (id, ch) in (1u16..).zip(text.chars()) {
@@ -17212,7 +18020,11 @@ mod tests {
             .iter()
             .find(|line| line.text.contains('随'))
             .expect("heading");
-        assert!(head.text.ends_with('。'), "heading lost its stop: {}", head.text);
+        assert!(
+            head.text.ends_with('。'),
+            "heading lost its stop: {}",
+            head.text
+        );
         let body = drawn
             .iter()
             .find(|line| line.resource == "REG" && (line.y - head.y).abs() < 0.5)
@@ -22683,6 +23495,7 @@ ET",
             "F",
             0.0,
             CjkMeasure::resolve(0.90, 1.60),
+            &HashMap::new(),
         )
         .expect("callout crosses the page");
         let label = drawn

@@ -546,8 +546,7 @@ fn bibliography_follows(
             }
             continue;
         }
-        if is_reference_entry(text) || looks_author_year_start(text) || roster_bearing_year(text)
-        {
+        if is_reference_entry(text) || looks_author_year_start(text) || roster_bearing_year(text) {
             return true;
         }
         // `OpenAI Josh Achiam, …` wraps, and `and` appears on the year line.
@@ -587,10 +586,7 @@ fn author_roster(text: &str) -> bool {
     let mut names = 0usize;
     let mut other = 0usize;
     for word in &words {
-        let bare: String = word
-            .chars()
-            .filter(|ch| ch.is_ascii_alphabetic())
-            .collect();
+        let bare: String = word.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
         if bare.is_empty() {
             continue;
         }
@@ -601,7 +597,11 @@ fn author_roster(text: &str) -> bool {
         ) {
             continue;
         }
-        if bare.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+        if bare
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
             names += 1;
         } else {
             other += 1;
@@ -616,9 +616,7 @@ fn roster_bearing_year(text: &str) -> bool {
     let Some(at) = find_year(text) else {
         return false;
     };
-    let head = text[..at]
-        .trim()
-        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':'));
+    let head = text[..at].trim().trim_end_matches(['.', ',', ';', ':']);
     author_roster(head)
 }
 
@@ -1143,14 +1141,7 @@ mod tests {
         // The left column beside the heading stays translatable.
         let mut glyphs = Vec::new();
         let mut id = 0;
-        line(
-            &mut glyphs,
-            &mut id,
-            0,
-            72.0,
-            640.0,
-            "Study stays here.",
-        );
+        line(&mut glyphs, &mut id, 0, 72.0, 640.0, "Study stays here.");
         line(&mut glyphs, &mut id, 0, 306.0, 660.0, "References");
         line(
             &mut glyphs,
@@ -1203,7 +1194,9 @@ mod tests {
             "not a reference: {}",
             ojas.text
         );
-        let appendix = seg.iter().find(|item| item.text.contains("XML-formatted tables"));
+        let appendix = seg
+            .iter()
+            .find(|item| item.text.contains("XML-formatted tables"));
         if let Some(appendix) = appendix {
             assert!(
                 appendix.glyph_ids.iter().all(|id| !ids.contains(id)),

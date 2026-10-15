@@ -9,6 +9,8 @@
 //! fitted lines into the PDF, including bilingual page layouts. Both stay
 //! callable when no model is configured.
 
+use std::collections::HashMap;
+
 use crate::font::SubsetFont;
 use crate::translate::verbatim_spans;
 
@@ -358,6 +360,7 @@ pub(crate) fn fit_cjk_block(
         font,
         metrics,
         None,
+        &HashMap::new(),
     )
 }
 
@@ -373,6 +376,7 @@ pub(crate) fn fit_cjk_block_with(
     font: &SubsetFont,
     metrics: CjkMeasure,
     fixed_indent: Option<f32>,
+    holes: &HashMap<usize, f32>,
 ) -> Option<(Vec<String>, f32, f32, f32)> {
     let start = (source_size * scale).max(1.0);
     // A paragraph that already fits stays at `start`. A narrow column, or a
@@ -420,7 +424,7 @@ pub(crate) fn fit_cjk_block_with(
         let first_width = (width - indent).max(size * 0.5);
         // A narrow column can need more lines than `wrap_text` will count at
         // the starting size. That is a reason to shrink, not to keep the English.
-        let Some(mut lines) = wrap_text(text, size, first_width, width, font) else {
+        let Some(mut lines) = wrap_text_holes(text, size, first_width, width, font, holes) else {
             if size <= floor + 0.01 {
                 return None;
             }
@@ -439,12 +443,12 @@ pub(crate) fn fit_cjk_block_with(
         // character still fit after the Latin word. A display title moves
         // that short tail down so the word stays whole.
         if source_size >= 16.0 {
-            rejoin_cjk_tail_after_latin(&mut lines, size, width, first_width, font);
+            rejoin_cjk_tail_after_latin(&mut lines, size, width, first_width, font, holes);
         }
         let gaps = lines.len().saturating_sub(1);
         let within = lines.iter().enumerate().all(|(index, line)| {
             let limit = if index == 0 { first_width } else { width };
-            fit_measure(line, size, font) <= limit + 1.0
+            fit_measure_holes(line, size, font, holes) <= limit + 1.0
         });
         let single_source = available <= 0.5;
         let tail = lines
@@ -539,6 +543,18 @@ pub(crate) fn justify_gaps(
     font: &SubsetFont,
     justify: bool,
 ) -> Vec<f32> {
+    justify_gaps_holes(text, size, width, font, justify, &HashMap::new())
+}
+
+/// Like [`justify_gaps`], measuring a formula hole at its math width.
+pub(crate) fn justify_gaps_holes(
+    text: &str,
+    size: f32,
+    width: f32,
+    font: &SubsetFont,
+    justify: bool,
+    holes: &HashMap<usize, f32>,
+) -> Vec<f32> {
     let chars: Vec<char> = text.chars().collect();
     let mut gaps = vec![0.0f32; chars.len().saturating_sub(1)];
     if !justify || chars.len() < 2 || size <= 0.0 {
@@ -553,7 +569,7 @@ pub(crate) fn justify_gaps(
     if line_skips_justification(text) {
         return gaps;
     }
-    let slack = width - fit_measure(text, size, font);
+    let slack = width - fit_measure_holes(text, size, font, holes);
     // A line that already fills the measure, or one that is mostly empty
     // (a short label), stays as it is. Anything wider than the cap is a
     // wrap problem: the line should have taken another word or a camelCase
@@ -590,7 +606,17 @@ pub(crate) fn justify_wrapped_line(lines: &[String], index: usize) -> bool {
 /// The justification cap cannot square it, so the extra space would only
 /// pull the characters apart.
 pub(crate) fn prompt_line_is_full(text: &str, size: f32, width: f32, font: &SubsetFont) -> bool {
-    let slack = width - fit_measure(text, size, font);
+    prompt_line_is_full_holes(text, size, width, font, &HashMap::new())
+}
+
+pub(crate) fn prompt_line_is_full_holes(
+    text: &str,
+    size: f32,
+    width: f32,
+    font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
+) -> bool {
+    let slack = width - fit_measure_holes(text, size, font, holes);
     if slack <= 0.4 {
         return true;
     }
@@ -619,6 +645,7 @@ fn rejoin_cjk_tail_after_latin(
     width: f32,
     first_width: f32,
     font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
 ) {
     if lines.len() < 2 {
         return;
@@ -648,8 +675,8 @@ fn rejoin_cjk_tail_after_latin(
         }
         let right = format!("{moved}{}", lines[index + 1]);
         let limit = if index == 0 { first_width } else { width };
-        if fit_measure(&left, size, font) > limit + 1.0
-            || fit_measure(&right, size, font) > width + 1.0
+        if fit_measure_holes(&left, size, font, holes) > limit + 1.0
+            || fit_measure_holes(&right, size, font, holes) > width + 1.0
         {
             continue;
         }
@@ -788,11 +815,28 @@ pub(crate) fn wrap_text(
     max_width: f32,
     font: &SubsetFont,
 ) -> Option<Vec<String>> {
+    wrap_text_holes(text, size, first_width, max_width, font, &HashMap::new())
+}
+
+/// Wrap `text`. A formula hole (`NN` plus ideographic spaces) advances by the
+/// math width in `holes`, which does not scale with the Chinese size.
+pub(crate) fn wrap_text_holes(
+    text: &str,
+    size: f32,
+    first_width: f32,
+    max_width: f32,
+    font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
+) -> Option<Vec<String>> {
     let chars: Vec<char> = text.chars().collect();
+    let advances = formula_advances_chars(&chars, size, font, holes);
     let sticky = sticky_after(&chars);
     let item_heads = (0..chars.len())
         .filter(|&index| enumerated_item_at(&chars, index))
         .count();
+    // A formula paragraph must not hang a period past the column. Other
+    // prose still hangs one closing mark.
+    let allow_hang = holes.is_empty();
     let mut lines = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
@@ -811,10 +855,10 @@ pub(crate) fn wrap_text(
                 item_break = true;
                 break;
             }
-            let advance = char_advance(chars[end], size, font);
+            let advance = advances[end];
             if end > start && width + advance > limit {
                 // A closing comma or period may hang past the measure once.
-                if hanging_punct(chars[end]) && width <= limit + 0.01 {
+                if allow_hang && hanging_punct(chars[end]) && width <= limit + 0.01 {
                     end += 1;
                 }
                 break;
@@ -839,13 +883,18 @@ pub(crate) fn wrap_text(
                     end -= 1;
                 }
             }
+            // A formula hole that does not fit moves as a whole. Splitting
+            // the digits from the ideographic space paints the math over the
+            // next line.
+            end = retreat_formula_hole(&chars, start, end);
             // `FewShotPromptTemplate` did not fit after `包括`, so the line
             // stopped early and justification opened half an em between
             // ideographs. A camelCase boundary that still fits belongs on
             // this line. A URL stays sticky and is not cut.
-            end = pull_latin_prefix(&chars, &sticky, start, end, fitted, limit, size, font);
+            end = pull_latin_prefix(&chars, &advances, &sticky, start, end, fitted, limit, size);
             end = prefer_enumeration_break(&chars, &sticky, start, end);
             end = prefer_list_delimiter(&chars, &sticky, start, end);
+            end = retreat_formula_hole(&chars, start, end);
         }
         let mut line_end = end;
         while line_end > start && is_break_space(chars[line_end - 1]) {
@@ -870,10 +919,47 @@ pub(crate) fn wrap_text(
             return None;
         }
     }
-    let mut lines = lines;
-    snap_line_compounds(&mut lines, max_width, size, font);
+    snap_line_compounds(&mut lines, max_width, size, font, holes);
     let lines = move_opening_brackets(lines);
     Some(lines).filter(|lines| !lines.is_empty())
+}
+
+/// `end` landed inside `NN　`. Break before the hole when the line already
+/// has text; otherwise keep the hole together.
+fn retreat_formula_hole(chars: &[char], start: usize, end: usize) -> usize {
+    let Some((hole_start, hole_end)) = formula_hole_at(chars, end) else {
+        return end;
+    };
+    if end <= hole_start || end >= hole_end {
+        return end;
+    }
+    if hole_start > start {
+        hole_start
+    } else {
+        hole_end.min(chars.len())
+    }
+}
+
+fn formula_hole_at(chars: &[char], index: usize) -> Option<(usize, usize)> {
+    let mut cursor = 0usize;
+    while cursor + 2 < chars.len() {
+        if !(chars[cursor].is_ascii_digit()
+            && chars[cursor + 1].is_ascii_digit()
+            && chars[cursor + 2] == '\u{3000}')
+        {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += 3;
+        while cursor < chars.len() && chars[cursor] == '\u{3000}' {
+            cursor += 1;
+        }
+        if index > start && index < cursor {
+            return Some((start, cursor));
+        }
+    }
+    None
 }
 
 /// A centered name list breaks after `、` so an item stays on one line.
@@ -920,7 +1006,13 @@ fn prefer_list_delimiter(chars: &[char], sticky: &[bool], start: usize, end: usi
 
 /// `量子|计算` moves onto one line. The dictionary hit is the same one a
 /// page break already uses.
-fn snap_line_compounds(lines: &mut Vec<String>, width: f32, size: f32, font: &SubsetFont) {
+fn snap_line_compounds(
+    lines: &mut Vec<String>,
+    width: f32,
+    size: f32,
+    font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
+) {
     if lines.len() < 2 || width <= 0.0 {
         return;
     }
@@ -929,7 +1021,7 @@ fn snap_line_compounds(lines: &mut Vec<String>, width: f32, size: f32, font: &Su
         let upcoming: Vec<char> = lines[index + 1].chars().collect();
         let before: Vec<char> = lines[index].chars().collect();
         let mut slot = vec![lines[index].clone()];
-        if !retreat_compound_boundary(&mut slot, &upcoming, width, size, font) {
+        if !retreat_compound_boundary(&mut slot, &upcoming, width, size, font, holes) {
             index += 1;
             continue;
         }
@@ -949,7 +1041,10 @@ fn snap_line_compounds(lines: &mut Vec<String>, width: f32, size: f32, font: &Su
         }
         index += 1;
     }
-    lines.retain(|line| line.chars().any(|ch| ch == '\u{3000}' || !ch.is_whitespace()));
+    lines.retain(|line| {
+        line.chars()
+            .any(|ch| ch == '\u{3000}' || !ch.is_whitespace())
+    });
 }
 
 fn char_advance(ch: char, size: f32, font: &SubsetFont) -> f32 {
@@ -966,6 +1061,80 @@ fn fit_measure(text: &str, size: f32, font: &SubsetFont) -> f32 {
         measure(&body, size, font)
     } else {
         measure(text, size, font)
+    }
+}
+
+fn fit_measure_holes(text: &str, size: f32, font: &SubsetFont, holes: &HashMap<usize, f32>) -> f32 {
+    if holes.is_empty() {
+        return fit_measure(text, size, font);
+    }
+    // The closing mark stays inside the column when a formula hole is on
+    // the line. Dropping it from the measure makes justification spend that
+    // width again and the mark crosses the margin.
+    let chars: Vec<char> = text.chars().collect();
+    formula_advances_chars(&chars, size, font, holes)
+        .iter()
+        .sum()
+}
+
+/// Per-character advances. A `NN　` run sums to the formula's point width.
+#[allow(dead_code)]
+pub(crate) fn formula_advances(
+    text: &str,
+    size: f32,
+    font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
+) -> Vec<f32> {
+    let chars: Vec<char> = text.chars().collect();
+    formula_advances_chars(&chars, size, font, holes)
+}
+
+fn formula_advances_chars(
+    chars: &[char],
+    size: f32,
+    font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
+) -> Vec<f32> {
+    let mut advances: Vec<f32> = chars
+        .iter()
+        .map(|ch| char_advance(*ch, size, font))
+        .collect();
+    apply_formula_hole_widths(chars, &mut advances, holes);
+    advances
+}
+
+/// The two digits and the ideographic spaces of hole `NN` advance as one
+/// width. That width is the math ink in points, not the font's em.
+pub(crate) fn apply_formula_hole_widths(
+    chars: &[char],
+    advances: &mut [f32],
+    holes: &HashMap<usize, f32>,
+) {
+    if holes.is_empty() || advances.len() != chars.len() {
+        return;
+    }
+    let mut index = 0usize;
+    while index + 2 < chars.len() {
+        if !(chars[index].is_ascii_digit()
+            && chars[index + 1].is_ascii_digit()
+            && chars[index + 2] == '\u{3000}')
+        {
+            index += 1;
+            continue;
+        }
+        let id =
+            (chars[index] as u8 - b'0') as usize * 10 + (chars[index + 1] as u8 - b'0') as usize;
+        let mut end = index + 3;
+        while end < chars.len() && chars[end] == '\u{3000}' {
+            end += 1;
+        }
+        if let Some(width) = holes.get(&id).copied() {
+            advances[index] = width.max(0.4);
+            for advance in &mut advances[index + 1..end] {
+                *advance = 0.0;
+            }
+        }
+        index = end;
     }
 }
 
@@ -1421,13 +1590,13 @@ fn cjk_pair_count(text: &str) -> usize {
 /// still fits. Sticky spans (a URL, a citation) are not entered.
 fn pull_latin_prefix(
     chars: &[char],
+    advances: &[f32],
     sticky: &[bool],
     start: usize,
     end: usize,
     fitted: usize,
     limit: f32,
     size: f32,
-    font: &SubsetFont,
 ) -> usize {
     if end <= start || end >= chars.len() || fitted <= end {
         return end;
@@ -1436,14 +1605,15 @@ fn pull_latin_prefix(
     // boundary inside `Jupyter|Notebook` is the break that fills the line.
     // Entering a URL would cut `https://Ex.com/AbCd` at `Ab|Cd`.
     let head: String = chars[start..end].iter().collect();
-    let slack = limit - measure(&head, size, font);
+    let measured = |from: usize, to: usize| advances[from..to].iter().sum::<f32>();
+    let slack = limit - measured(start, end);
     let cap = cjk_pair_count(&head) as f32 * size * MAX_JUSTIFY_EM;
     if slack <= cap + 0.4 {
         return end;
     }
     let room = fitted.min(chars.len());
     let mut best = end;
-    let mut width = measure(&head, size, font);
+    let mut width = measured(start, end);
     let mut index = end;
     while index < room {
         if index > end && sticky.get(index - 1).copied().unwrap_or(false) {
@@ -1452,7 +1622,7 @@ fn pull_latin_prefix(
         if index > end && camel_boundary(chars, index) && width <= limit + 0.4 {
             best = index;
         }
-        let advance = char_advance(chars[index], size, font);
+        let advance = advances[index];
         if width + advance > limit + 0.4 {
             break;
         }
@@ -1565,6 +1735,7 @@ pub(crate) struct LineSlots {
 
 /// Wrap `text` across page boxes. Every non-space character is placed, or the
 /// fit is refused. A short first box must not keep a prefix and drop the tail.
+#[allow(dead_code)]
 pub(crate) fn pack_into_slots(
     text: &str,
     size: f32,
@@ -1572,6 +1743,26 @@ pub(crate) fn pack_into_slots(
     boxes: &[LineSlots],
     font: &SubsetFont,
     snap_compounds: bool,
+) -> Option<Vec<Vec<String>>> {
+    pack_into_slots_holes(
+        text,
+        size,
+        indent,
+        boxes,
+        font,
+        snap_compounds,
+        &HashMap::new(),
+    )
+}
+
+pub(crate) fn pack_into_slots_holes(
+    text: &str,
+    size: f32,
+    indent: f32,
+    boxes: &[LineSlots],
+    font: &SubsetFont,
+    snap_compounds: bool,
+    holes: &HashMap<usize, f32>,
 ) -> Option<Vec<Vec<String>>> {
     if boxes.is_empty() || size <= 0.0 || text.trim().is_empty() {
         return None;
@@ -1581,7 +1772,7 @@ pub(crate) fn pack_into_slots(
     let mut cursor = 0usize;
     let mut first_line = true;
     for (box_index, slot) in boxes.iter().enumerate() {
-        while cursor < chars.len() && chars[cursor].is_whitespace() {
+        while cursor < chars.len() && is_break_space(chars[cursor]) {
             cursor += 1;
         }
         if cursor >= chars.len() {
@@ -1595,7 +1786,7 @@ pub(crate) fn pack_into_slots(
             width
         };
         let remaining: String = chars[cursor..].iter().collect();
-        let wrapped = wrap_text(&remaining, size, first_width, width, font)?;
+        let wrapped = wrap_text_holes(&remaining, size, first_width, width, font, holes)?;
         let take = wrapped.len().min(slot.slots.max(1));
         if take == 0 {
             return None;
@@ -1619,6 +1810,7 @@ pub(crate) fn pack_into_slots(
                 last_limit,
                 size,
                 font,
+                holes,
             ) {
                 consumed = consumed_chars(&chars[cursor..], &used);
                 if consumed == 0 {
@@ -1630,7 +1822,7 @@ pub(crate) fn pack_into_slots(
         packed.push(used);
         first_line = false;
     }
-    while cursor < chars.len() && chars[cursor].is_whitespace() {
+    while cursor < chars.len() && is_break_space(chars[cursor]) {
         cursor += 1;
     }
     if cursor < chars.len() {
@@ -1644,12 +1836,24 @@ pub(crate) fn pack_into_slots(
 /// Pack one piece per source line, using that line's own width. A short
 /// last line of a body paragraph is wider than this and stays on the
 /// normal wrap.
+#[allow(dead_code)]
 pub(crate) fn pack_narrow_tail(
     text: &str,
     size: f32,
     indent: f32,
     spans: &[(f32, f32)],
     font: &SubsetFont,
+) -> Option<Vec<String>> {
+    pack_narrow_tail_holes(text, size, indent, spans, font, &HashMap::new())
+}
+
+pub(crate) fn pack_narrow_tail_holes(
+    text: &str,
+    size: f32,
+    indent: f32,
+    spans: &[(f32, f32)],
+    font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
 ) -> Option<Vec<String>> {
     if spans.len() < 2 || size <= 0.0 {
         return None;
@@ -1672,7 +1876,7 @@ pub(crate) fn pack_narrow_tail(
             slots: 1,
         })
         .collect();
-    let packed = pack_into_slots(text, size, indent, &boxes, font, false)?;
+    let packed = pack_into_slots_holes(text, size, indent, &boxes, font, false, holes)?;
     let mut lines: Vec<String> = packed
         .into_iter()
         .map(|slot| slot.into_iter().next().unwrap_or_default())
@@ -1800,11 +2004,12 @@ fn retreat_compound_boundary(
     width: f32,
     size: f32,
     font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
 ) -> bool {
     let Some(last) = used.last().cloned() else {
         return false;
     };
-    let Some(snap) = compound_snap(&last, upcoming, width, size, font) else {
+    let Some(snap) = compound_snap(&last, upcoming, width, size, font, holes) else {
         return false;
     };
     let last_chars: Vec<char> = last.chars().collect();
@@ -1829,7 +2034,7 @@ fn retreat_compound_boundary(
                 return false;
             }
             let line = format!("{last}{extra}");
-            if fit_measure(&line, size, font) > width + 0.6 {
+            if fit_measure_holes(&line, size, font, holes) > width + 0.6 {
                 return false;
             }
             line
@@ -1860,6 +2065,7 @@ fn compound_snap(
     width: f32,
     size: f32,
     font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
 ) -> Option<CompoundSnap> {
     let left: Vec<char> = last.chars().collect();
     if left.is_empty() {
@@ -1873,7 +2079,7 @@ fn compound_snap(
     if right.is_empty() || !is_cjk_body(*left.last()?) || !is_cjk_body(right[0]) {
         return None;
     }
-    if let Some(snap) = dictionary_crossing(&left, right, last, width, size, font) {
+    if let Some(snap) = dictionary_crossing(&left, right, last, width, size, font, holes) {
         return Some(snap);
     }
     // `词。` would open the next page. Keep that character with the word before it.
@@ -1882,7 +2088,7 @@ fn compound_snap(
         return None;
     }
     let pulled = format!("{last}{}", right[0]);
-    if fit_measure(&pulled, size, font) <= width + 0.6 {
+    if fit_measure_holes(&pulled, size, font, holes) <= width + 0.6 {
         return Some(CompoundSnap::Pull(1));
     }
     let mut run = 0usize;
@@ -1899,6 +2105,7 @@ fn dictionary_crossing(
     width: f32,
     size: f32,
     font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
 ) -> Option<CompoundSnap> {
     let take = left.len().min(8);
     let prefix = &left[left.len() - take..];
@@ -1930,7 +2137,7 @@ fn dictionary_crossing(
     for ch in right.iter().take(on_right) {
         pulled.push(*ch);
     }
-    if fit_measure(&pulled, size, font) <= width + 0.6 {
+    if fit_measure_holes(&pulled, size, font, holes) <= width + 0.6 {
         return Some(CompoundSnap::Pull(on_right));
     }
     (on_left > 0 && left.len() > on_left).then_some(CompoundSnap::Push(on_left))
@@ -1998,7 +2205,9 @@ mod tests {
         let lines = wrap_text(text, 10.0, 50.0, 50.0, &font).expect("wrap");
         let joined = lines.join("|");
         assert!(
-            lines.iter().all(|line| !line.ends_with('量') && !line.starts_with('子')),
+            lines
+                .iter()
+                .all(|line| !line.ends_with('量') && !line.starts_with('子')),
             "量子 was split: {joined}"
         );
         assert!(
@@ -2018,10 +2227,7 @@ mod tests {
             lines.iter().all(|line| !line.ends_with('真')),
             "真实 was split: {joined}"
         );
-        assert!(
-            lines.iter().any(|line| line.contains("真实")),
-            "{joined}"
-        );
+        assert!(lines.iter().any(|line| line.contains("真实")), "{joined}");
     }
 
     #[test]
@@ -2734,12 +2940,11 @@ mod tests {
         let font = uniform_font(text);
         let lines = wrap_text(text, 10.0, 180.0, 180.0, &font).unwrap();
         let glued = lines.join("");
+        assert!(glued.contains("Plücker"), "Plücker was split: {lines:?}");
         assert!(
-            glued.contains("Plücker"),
-            "Plücker was split: {lines:?}"
-        );
-        assert!(
-            lines.iter().all(|line| !line.ends_with("Plü") && !line.starts_with("cker")),
+            lines
+                .iter()
+                .all(|line| !line.ends_with("Plü") && !line.starts_with("cker")),
             "{lines:?}"
         );
     }
@@ -2947,5 +3152,96 @@ mod tests {
         assert!(tail >= 2, "orphan tail: {lines:?}");
         let flat: String = lines.iter().flat_map(|line| line.chars()).collect();
         assert_eq!(flat, text);
+    }
+
+    #[test]
+    fn a_formula_hole_uses_the_math_width_and_stays_inside_the_column() {
+        let prose = "因为工作函数和扩展代价可以只用向量00　及其变换来表示。我们使用基于二次乘积的势函数，它是一个维向量，其坐标由数对与索引，其分量通过取和在各自坐标上的分量的乘积得到。该势函数项和函数与先前已知的势函数类似。";
+        let mut glyphs = HashMap::new();
+        for (id, ch) in (1u16..).zip(prose.chars()) {
+            let advance = if ch.is_ascii_digit() { 500 } else { 1000 };
+            glyphs.insert(ch as u32, (id, advance));
+        }
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+        };
+        let mut holes = HashMap::new();
+        holes.insert(0, 9.6);
+        let size = 10.0;
+        let column = 220.0;
+        let lines = wrap_text_holes(prose, size, column, column, &font, &holes).expect("wrap");
+        assert!(
+            lines.iter().any(|line| line.contains('\u{3000}')),
+            "the hole was dropped: {lines:?}"
+        );
+        for (index, line) in lines.iter().enumerate() {
+            let advances = formula_advances(line, size, &font, &holes);
+            let width: f32 = advances.iter().sum();
+            assert!(
+                width <= column + 0.51,
+                "line {index} extends to {width:.1} past {column}: {line}"
+            );
+            let chars: Vec<char> = line.chars().collect();
+            if chars.contains(&'\u{3000}') {
+                let mut cursor = 0usize;
+                while cursor + 2 < chars.len() {
+                    if chars[cursor].is_ascii_digit()
+                        && chars[cursor + 1].is_ascii_digit()
+                        && chars[cursor + 2] == '\u{3000}'
+                    {
+                        let sum = advances[cursor] + advances[cursor + 1] + advances[cursor + 2];
+                        assert!(
+                            (sum - 9.6).abs() < 0.05,
+                            "hole measured {sum:.2}, not the 9.6pt math"
+                        );
+                        assert!(
+                            width >= column * 0.90,
+                            "the line around the hole fills {:.2}: {line}",
+                            width / column
+                        );
+                        break;
+                    }
+                    cursor += 1;
+                }
+                assert!(
+                    !line.starts_with('\u{3000}')
+                        && line.chars().filter(|ch| ch.is_ascii_digit()).count() >= 2,
+                    "the hole was split: {line}"
+                );
+            }
+        }
+        let wide = "其他势函数也使用了选择一个点子集来最小化一个表达式，该表达式包含工作函数值这里通过15　间接表示以及所用点之间带负号的距离对。";
+        let mut wide_glyphs = font.glyphs.clone();
+        for (id, ch) in (200u16..).zip(wide.chars()) {
+            wide_glyphs
+                .entry(ch as u32)
+                .or_insert((id, if ch.is_ascii_digit() { 500 } else { 1000 }));
+        }
+        let wide_font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: wide_glyphs,
+        };
+        let mut wide_holes = HashMap::new();
+        wide_holes.insert(15, 70.0);
+        let wide_lines =
+            wrap_text_holes(wide, size, column, column, &wide_font, &wide_holes).expect("wide");
+        for (index, line) in wide_lines.iter().enumerate() {
+            let width = fit_measure_holes(line, size, &wide_font, &wide_holes);
+            assert!(
+                width <= column + 0.51,
+                "wide hole crossed the margin on line {index}: {width:.1} {line}"
+            );
+            assert!(
+                !line.starts_with('\u{3000}'),
+                "hole index split onto the next line: {wide_lines:?}"
+            );
+        }
+        assert!(
+            wide_lines.iter().any(|line| line.contains("15\u{3000}")),
+            "the wide hole was split: {wide_lines:?}"
+        );
     }
 }
