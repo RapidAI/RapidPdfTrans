@@ -166,12 +166,17 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
             if is_reference_heading(text)
                 && !toc_title_beside_leaders(&segments[line.seg_index], glyphs)
             {
-                in_refs = true;
-                refs_x = Some(line.x);
-                selected.insert(line.seg_index);
-                streak_from = None;
-                streak_entries = 0;
-                streak_gap = 0;
+                // `References` followed by a sentence is a section about
+                // citations, not the bibliography. A real list starts with
+                // an entry (`[1] Smith` or `Bai, S. 2025`).
+                if bibliography_follows(&order, &placed, &tops, pos) {
+                    in_refs = true;
+                    refs_x = Some(line.x);
+                    selected.insert(line.seg_index);
+                    streak_from = None;
+                    streak_entries = 0;
+                    streak_gap = 0;
+                }
                 continue;
             }
             if is_reference_entry(text) {
@@ -499,6 +504,61 @@ fn same_line(seed: &Glyph, glyph: &Glyph) -> bool {
 pub(crate) fn is_reference_heading(text: &str) -> bool {
     let norm = normalize_heading(text);
     REF_HEADINGS.iter().any(|heading| norm == *heading)
+}
+
+/// The lines after a `References` heading. An entry opens the bibliography.
+/// A sentence (`References are placed alongside…`) does not.
+fn bibliography_follows(
+    order: &[usize],
+    placed: &[Placed],
+    tops: &HashMap<u32, f32>,
+    pos: usize,
+) -> bool {
+    let mut looked = 0usize;
+    for &placed_index in order.iter().skip(pos + 1) {
+        let line = &placed[placed_index];
+        if is_running_header(placed, tops, line) {
+            continue;
+        }
+        let text = line.text.trim();
+        if text.chars().count() < 8 {
+            // `[1]` is often its own segment, ahead of the author line.
+            if starts_bracket_marker(text) || starts_numbered_marker(text) {
+                return true;
+            }
+            continue;
+        }
+        if is_reference_entry(text) || looks_author_year_start(text) {
+            return true;
+        }
+        if is_section_break(text) || prose_sentence(text) {
+            return false;
+        }
+        looked += 1;
+        if looked >= 4 {
+            return false;
+        }
+    }
+    false
+}
+
+fn prose_sentence(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 6 {
+        return false;
+    }
+    const FUNCTION: &[&str] = &[
+        "the", "and", "are", "is", "was", "were", "this", "that", "with", "for", "from", "using",
+        "may", "can", "not", "also", "their", "these", "those",
+    ];
+    words.iter().any(|word| {
+        let bare: String = word
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        FUNCTION.contains(&bare.as_str())
+    })
 }
 
 /// `References …… 20` is a contents row. The title segment is only the word.
@@ -936,6 +996,51 @@ mod tests {
         let kept = text_of(&glyphs, &ids);
         assert!(kept.contains("Smith"), "{kept}");
         assert!(!kept.contains("layout"), "{kept}");
+    }
+
+    #[test]
+    fn a_references_heading_followed_by_prose_is_not_a_bibliography() {
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(&mut glyphs, &mut id, 0, 72.0, 700.0, "References");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            680.0,
+            "References are placed alongside their citations as sidenotes, as well.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            660.0,
+            "This can be accomplished using the normal cite command.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            400.0,
+            660.0,
+            "Edward R. Tufte. Beautiful Evidence. Graphics Press, 2006.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            1,
+            72.0,
+            760.0,
+            "Full page figures may be placed in a figure environment.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(
+            !kept.contains("sidenotes") && !kept.contains("figure environment"),
+            "{kept}"
+        );
     }
 
     #[test]

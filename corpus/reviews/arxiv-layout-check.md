@@ -235,3 +235,37 @@ Renders: `/opt/cursor/artifacts/corpus-loop/`.
 | 14 | Practice prose is Chinese. Column headers and `Example 1:` cells stay English. | — | table cells |
 | 29–32 | References stay English. | — | — |
 | 36 | Changelog entries are Chinese (`添加了通过公众意见建议的众多示例`). The DOI footer stays in the margin. | was high | sideways footer no longer joins the line |
+
+## Journal article and a Tufte handout
+
+Two new openly licensed PDFs. Each translation is coverage-complete (`english_body` 0). Figure interiors, table cells, and bibliographies stay English.
+
+| id | pages | PDF |
+| --- | --- | --- |
+| mmwr-mm7312a3, CDC MMWR, public domain | 5, two-column letter | `/opt/cursor/artifacts/pdfs/mmwr-mm7312a3-zh.pdf` |
+| tufte-sample-handout, Apache-2.0 | 5, sidenotes | `/opt/cursor/artifacts/pdfs/tufte-sample-handout-zh.pdf` |
+
+`45 CFR Part 46` is in the manifest and not translated in this pass.
+
+### Fix in this change
+
+| defect | where it showed |
+| --- | --- |
+| A heading `References` followed by a sentence opened the bibliography, so the rest of the handout stayed English. A heading opens that section only when an entry (`[1]`, `Abbas, A.`) follows. | Tufte pages 2–5 |
+
+### mmwr-mm7312a3
+
+| page | findings | severity | fixed |
+| --- | --- | --- | --- |
+| 1 | Title, abstract, and introduction are Chinese in the two columns. One author stays `Christine M. Thomas`; the other names are translated. Affiliation marks stay on the names. | low | — |
+| 2–4 | Body columns are Chinese. The discussion fills the column. | — | — |
+| 5 | Bibliography stays English (`CDC. Measles…`, the Pink Book URL). | — | — |
+
+### tufte-sample-handout
+
+| page | findings | severity | fixed |
+| --- | --- | --- | --- |
+| 1 | Title and the sidenote introduction are Chinese. `\newthought` stays a command. | — | — |
+| 2–3 | The `References` section is Chinese prose (`参考文献也会与引用一起作为旁注放置`). Sidenote citations stay with that prose. Figure captions are Chinese. Table cells stay English. | was high | heading followed by a sentence is not a bibliography |
+| 4 | The typewriter lorem ipsum block stays Latin (kept as code). The margin-dimension list is Chinese. | low | — |
+| 5 | The install notes are Chinese. The Bringhurst citation stays a citation. | — | — |

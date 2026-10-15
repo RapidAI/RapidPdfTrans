@@ -1890,6 +1890,57 @@
         "word"
       ],
       "ci": false
+    },
+    {
+      "id": "mmwr-mm7312a3",
+      "url": "https://www.cdc.gov/mmwr/volumes/73/wr/pdfs/mm7312a3-H.pdf",
+      "source": "cdc",
+      "title": "Implications of Measles Inclusion by Commercial Syndromic PCR Panels — United States, May 2022–April 2023",
+      "license": "Public domain (US government work; PDF not committed)",
+      "sha256": "adacd0029fff90061b65ef4c0b9f3c6c1063eb8ec63f3a90c6a879ee15e49444",
+      "bytes": 225688,
+      "pages": 5,
+      "tags": [
+        "government",
+        "journal",
+        "two-column",
+        "public-health"
+      ],
+      "ci": false
+    },
+    {
+      "id": "tufte-sample-handout",
+      "url": "https://mirrors.ctan.org/macros/latex/contrib/tufte-latex/sample-handout.pdf",
+      "source": "ctan",
+      "title": "An Example of the Usage of the Tufte-Handout Style",
+      "license": "Apache-2.0 (tufte-latex sample; PDF not committed)",
+      "sha256": "458e6a4b51802b7dd4aa6221c1b2cb1bb38f42458b9bd782ff52e93a7a37a385",
+      "bytes": 114216,
+      "pages": 5,
+      "tags": [
+        "latex",
+        "sidenotes",
+        "handout",
+        "single-column"
+      ],
+      "ci": false
+    },
+    {
+      "id": "cfr-2024-45-part46",
+      "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title45-vol1/pdf/CFR-2024-title45-vol1-part46.pdf",
+      "source": "govinfo",
+      "title": "45 CFR Part 46 — Protection of Human Subjects (2024)",
+      "license": "Public domain (US government work; PDF not committed)",
+      "bytes": 244969,
+      "pages": 28,
+      "sha256": "158e49d8b1f9be18da42d45a55d5d3e321210d930ffb3c31fa60608ec5e29053",
+      "tags": [
+        "government",
+        "legal",
+        "two-column",
+        "regulation"
+      ],
+      "ci": false
     }
   ]
 }
