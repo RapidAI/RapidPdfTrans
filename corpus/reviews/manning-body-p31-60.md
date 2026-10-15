@@ -2,11 +2,11 @@
 
 Sample: printed pages 31–60 of *AI Agents and Applications*. That span is PDF pages 59–88 of the full book. The 30-page slice is 531×636.572 pt. Source slice: `/opt/cursor/artifacts/pdfs/manning-body-p31-60-source.pdf`. Translation: `/opt/cursor/artifacts/pdfs/manning-body-p31-60.pdf`.
 
-Pages 1–30, with the listing-gap and column-fill fixes, are `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` (also `manning-body-p1-30-v4.pdf`).
+Pages 1–30, with the 0.15em justification cap, are `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` (also `manning-body-p1-30-v5.pdf`).
 
-Coverage is complete (`english_body` 0; kept 9949, rewritten 51078, total 61027). Body text is Noto Serif CJK SC Light. Headings are a heavier CJK face and larger than the body. Figure interiors, table cells, and monospace listings stay English. Captions are translated. Paragraphs use a 2em first-line indent.
+Coverage is complete (`english_body` 0; kept 10090, rewritten 50937, total 61027). Body text is Noto Serif CJK SC Light. Headings are a heavier CJK face and larger than the body. Figure interiors, table cells, and monospace listings stay English. Captions are translated. Paragraphs use a 2em first-line indent. CJK–CJK justification stays within 0.15em.
 
-Each translated page was compared with the source on glyph positions. No CJK word overlaps another. No body line ends on an opening bracket. No monospace listing is painted twice.
+Each translated page was compared with the source. Painted advance boxes do not overlap. A prompt example is one block: the label is a single token, the quoted input is translated as a whole, and each line keeps the source x and the sans face. No body line ends on an opening bracket. No monospace listing is painted twice.
 
 ## Fixes in this pass
 
@@ -18,6 +18,9 @@ Each translated page was compared with the source on glyph positions. No CJK wor
 | The running head was `章节 2 以编程方式执行提示` | even pages of chapter 2 | The head is `第2章 以编程方式执行提示词`, the same wording as pages 1–30. |
 | A link bullet absorbed the next page’s `Summary` and the mark changed size | p50 | A bullet that is only a URL does not join the next page. Every link in that list keeps the source Wingdings mark at x=108.8, size 8.46. |
 | `Thread of Thought` was painted as 思维链 | p48 | The bullet says 思维线程, so it is not the same term as 思维链. |
+| Table 2.1 example-column bullets were translated | p40 | Lines under a table caption do not vote for the body face, and later rows use the table's accumulated span. The Rolex and Omega bullets stay English. |
+| `2.5 Reasoning in detail` was kept as a table cell | p40 | `2.5` and the title share a baseline but a gutter splits them. That pair stops the table walk. The heading paints as `2.5 详细推理`. |
+| Prompt samples split `TEXT` into `T` and `文 本`, mixed the English input with its translation, and stacked lines | p34, p40, p42, p46, p50 | A prompt block is the small-caps label plus the following sans lines. The label is one token (`说明`, `文本`, `指令`, `示例`). The quoted input is translated as a whole. Tags such as `<Tone>` become `<语气>` without breaking inside the brackets. Extra wrapped lines keep at least 1.05em of leading, and a block that grows pushes the next paragraph down. |
 
 ## Accepted
 
@@ -35,13 +38,13 @@ Each translated page was compared with the source on glyph positions. No CJK wor
 | 31 | Pass | `2.2 使用 LangChain 运行提示词` stays with the section index. The shell sample under it is English. The following prose is Chinese. |
 | 32 | Pass | Running head is `第2章 以编程方式执行提示词`. Body opens in Chinese. The `➥` shell lines stay English and share the code baseline. |
 | 33 | Pass | `2.3 提示模板`. The monospace aqueduct sample stays English. The prose around it is Chinese. |
-| 34 | Pass | The `PromptTemplate` call stays English, including `num_words=20`. The steps around it are Chinese. |
-| 35 | Pass | `2.4 提示类型`. The instruction and text samples are Chinese. Quotation marks keep the source size. |
+| 34 | Pass | The `PromptTemplate` call stays English, including `num_words=20`. `说明：` and `文本` are one token each. The headphone sentence is Chinese, and the answer is `文本应被归类为“科技”`. |
+| 35 | Pass | `2.4 提示词类型`. The instruction and text samples are Chinese. Quotation marks keep the source size. |
 | 36 | Pass | The sentiment table inside the sample stays English. The `OUTPUT` lead is translated with the sentence. |
 | 37 | Pass | The Rolex bullets are one gold square at x=126.2, size 8.46. The words share the hanging indent. |
 | 38 | Pass | The sample paragraphs are Chinese. No leftover English body. |
 | 39 | Pass | The Java question-and-answer sample is Chinese. `Java` and `JVM` stay Latin inside the sentences. |
-| 40 | Pass | Caption `表 2.1 提示词类型及示例` is Chinese. The two columns of examples stay English. |
+| 40 | Pass | Caption `表 2.1 提示词类型及示例` is Chinese. The example column stays English, including the Rolex and Omega bullets. `2.5 详细推理` shares the heading baseline. The one-shot block is `指令：` and `示例：` at the source indent. |
 | 41 | Pass | `2.5.2 双样本学习` shares the heading baseline. The revised prompt discussion is Chinese. |
 | 42 | Pass | The palindrome example is Chinese. The code fence, where present, stays English. |
 | 43 | Pass | ChatGPT’s reply in the sample is Chinese. The page does not open with a leftover English sentence. |
@@ -51,7 +54,7 @@ Each translated page was compared with the source on glyph positions. No CJK wor
 | 47 | Pass | Table 2.2 cells stay English. The shaded box is Chinese: `超越思维链`, then 思维树 and 思维线程, with the arXiv URL intact. |
 | 48 | Pass | `(续)` continues the box in Chinese. The ThoT bullet is 思维线程, not 思维链. The list marks in the body lists share x and size within each list. |
 | 49 | Pass | `2.6 提示结构`. The structure bullets are one gold square. |
-| 50 | Pass | The seven link bullets are the same Wingdings mark at x=108.8, size 8.46. `Summary` is not glued onto the GitHub URL. |
+| 50 | Pass | The sample tags are whole tokens: `<指令>`, `<输入>`, `<语气>`, `<输出格式>`. The seven link bullets are the same Wingdings mark at x=108.8, size 8.46. `Summary` is not glued onto the GitHub URL. |
 | 51 | Pass | `摘要` is the chapter close. Every summary bullet is the same mark at x=117.8. |
 | 52 | Pass | Running head only, plus the license line. |
 | 53 | Pass | `第 2 部分` and `摘要` do not overlap. The part introduction is Chinese with a 2em indent. |

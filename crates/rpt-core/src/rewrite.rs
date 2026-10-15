@@ -25,9 +25,9 @@ use crate::extract::Extraction;
 use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSources, SubsetFont};
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
-    char_widths, cids_of, cjk_indent_ems, fit_cjk_block, heading_level, justify_gaps, measure,
-    pack_into_slots, pack_narrow_tail, scale_for_heading, spread_to_lines, wrap_text, CjkMeasure,
-    HeadingLevel, LineSlots,
+    char_widths, cids_of, cjk_indent_ems, fit_cjk_block, heading_level, is_cjk_body, justify_gaps,
+    measure, pack_into_slots, pack_narrow_tail, scale_for_heading, spread_to_lines, wrap_text,
+    CjkMeasure, HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
@@ -146,6 +146,7 @@ pub fn rewrite_translation(
         .segments
         .iter()
         .any(|segment| segment.translated.chars().any(is_han_char));
+    let prompt_samples = prompt_sample_flags(report, extraction, &by_id);
     for (index, segment) in report.segments.iter().enumerate() {
         if segment.glyph_ids.is_empty() {
             continue;
@@ -213,6 +214,11 @@ pub fn rewrite_translation(
         let translated = crate::translate::restore_list_number(&segment.source, &translated);
         let translated = crate::translate::restore_credit_names(&segment.source, &translated);
         let translated = crate::translate::repair_body_translation(&segment.source, &translated);
+        let translated = if prompt_samples.get(index).copied().unwrap_or(false) {
+            crate::translate::unmix_prompt_line(&segment.source, &translated)
+        } else {
+            translated
+        };
         let will_draw = translated != segment.source;
         if !operators_are_private(&glyphs, &owners) {
             // A contents title shares its text operator with the leader dots and
@@ -5852,7 +5858,8 @@ fn layout_segment(
         .find(|info| info.index == page)
         .map(|info| info.media_box)
         .unwrap_or([0.0, 0.0, 612.0, 792.0]);
-    let ink = ink_lines(glyphs);
+    let mut ink = ink_lines(glyphs);
+    let quotes = detach_decorative_quotes(&mut ink);
     if ink.is_empty() {
         return None;
     }
@@ -5983,6 +5990,12 @@ fn layout_segment(
     // A numbered item keeps the source number in the margin. Every line of
     // the words shares the hanging indent, with no first-line indent.
     let body_text;
+    let run_in = if numbered.is_none() && bullet.is_none() && hanging.is_none() {
+        run_in_label(&ink).filter(|item| item.known)
+    } else {
+        None
+    };
+    let mut label_paint: Option<(f32, String)> = None;
     let text = if let Some(item) = &numbered {
         block_left = item.text_left.min(block_right - source_size.max(1.0));
         indent_ems = 0.0;
@@ -5997,7 +6010,26 @@ fn layout_segment(
         indent_ems = 0.0;
         body_text = bullet_body_text(text).to_string();
         body_text.as_str()
+    } else if let Some(item) = run_in.as_ref() {
+        // The small-caps label stays in the margin. The prose starts at the
+        // source hanging indent, with no extra first-line indent.
+        block_left = item.text_x.min(block_right - source_size.max(1.0));
+        indent_ems = 0.0;
+        if let Some((label, rest)) = split_run_in_label(text) {
+            label_paint = Some((item.label_x, label));
+            body_text = rest;
+        } else {
+            body_text = text.to_string();
+        }
+        body_text.as_str()
     } else {
+        // A decorative quote is not a first line. Both source lines of the
+        // sample already share the hanging indent.
+        if !quotes.is_empty() || sample_sans_ink(&ink) {
+            // A prompt sample and a callout are already at the source x.
+            // A body indent would slide `TEXT` and the model answer right.
+            indent_ems = 0.0;
+        }
         text
     };
     // A giant chapter numeral is a path on the right. The title stops before
@@ -6092,6 +6124,11 @@ fn layout_segment(
         // size is the mixed-size glitch inside the paragraph.
         absorbed.extend(glyphs.iter().map(|glyph| glyph.id));
     }
+    if let Some(item) = &run_in {
+        // The small-caps initial (`T` of `TEXT`) sits left of the translation.
+        // Covering it redraws that one letter on top of the label.
+        absorbed.extend(item.label_ids.iter().copied());
+    }
     let line_masks = split_superscripts(text, &lines, &mask);
     let mut origin_y = top_y;
     if bilingual {
@@ -6102,7 +6139,7 @@ fn layout_segment(
             origin_y = top_y - size * 1.2;
         }
     }
-    let ys: Vec<f32> = if bilingual {
+    let mut ys: Vec<f32> = if bilingual {
         (0..lines.len())
             .map(|index| origin_y - index as f32 * leading)
             .collect()
@@ -6127,6 +6164,12 @@ fn layout_segment(
     } else {
         baselines_for(&ink, lines.len())
     };
+    // A prompt sample that wraps onto more lines than the source must not
+    // stack those lines. Open the leading and let the column shift move
+    // whatever sits underneath.
+    if sample_sans_ink(&ink) {
+        ys = separate_baselines(&ys, size);
+    }
     let last_y = ys.iter().copied().fold(origin_y, f32::min);
     if last_y < media[1] - 0.5 || origin_y > media[3] {
         return None;
@@ -6271,6 +6314,66 @@ fn layout_segment(
                 },
             );
         }
+    }
+    if let Some((label_x, label_text)) = label_paint {
+        let text_x = run_in.as_ref().map(|item| item.text_x);
+        let host = drawn
+            .iter()
+            .find(|line| !line.text.trim().is_empty())
+            .map(|line| (line.size, line.y));
+        if let Some((size, y)) = host {
+            let (label_text, size) = fit_run_in_label(&label_text, label_x, text_x, size, font);
+            let widths = char_widths(&label_text, size, font);
+            drawn.insert(
+                0,
+                Drawn {
+                    page,
+                    x: label_x,
+                    y,
+                    size,
+                    color: text_color.clone(),
+                    cids: cids_of(&label_text, font),
+                    resource: resource.to_string(),
+                    skew,
+                    widths,
+                    gaps: vec![0.0; label_text.chars().count().saturating_sub(1)],
+                    text: label_text,
+                    supers: Vec::new(),
+                    sup_scale: 1.0,
+                    sup_rise: 0.0,
+                    glyph_ids: glyph_ids.clone(),
+                },
+            );
+        }
+    }
+    for glyph in &quotes {
+        let raw = glyph.unicode.trim();
+        let mark =
+            if raw.chars().all(|ch| font.glyphs.contains_key(&(ch as u32))) && !raw.is_empty() {
+                raw.to_string()
+            } else if font.glyphs.contains_key(&('“' as u32)) {
+                "“".to_string()
+            } else {
+                continue;
+            };
+        let size = glyph.font_size.max(1.0);
+        drawn.push(Drawn {
+            page,
+            x: glyph.matrix[4],
+            y: glyph.matrix[5],
+            size,
+            color: glyph.fill_color.clone(),
+            cids: cids_of(&mark, font),
+            resource: resource.to_string(),
+            skew: 0.0,
+            widths: char_widths(&mark, size, font),
+            gaps: Vec::new(),
+            text: mark,
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids: glyph_ids.clone(),
+        });
     }
     let mut drawn = restyle_list_lines(drawn, &ink, font);
     if !bilingual {
@@ -7007,15 +7110,24 @@ fn close_column_holes(
                     size * 2.6
                 };
                 let chained = same_column && source_gap > 0.0 && source_gap < reach;
+                let drawn_gap = prev.bottom - (block.top + shift);
                 if chained {
                     // `shift` is the pull already applied above this block.
                     // Only a hole that is still open after that pull is closed.
-                    let drawn_gap = prev.bottom - (block.top + shift);
                     if drawn_gap > source_gap + 1.0 {
                         extra = drawn_gap - source_gap;
                     }
                 } else {
                     shift = 0.0;
+                }
+                // A prompt sample that grew past its own source lines has to
+                // push the next paragraph down. Other blocks keep the
+                // hole-closer, which only pulls a shorter paragraph up.
+                let grew = prev.bottom + 0.5 < prev.source_bottom;
+                let drawn_gap = prev.bottom - (block.top + shift);
+                if grew && source_gap > 0.0 && drawn_gap < size * 0.85 {
+                    let want = source_gap.max(size * 1.05);
+                    extra += drawn_gap - want;
                 }
             }
             shift += extra;
@@ -7645,6 +7757,23 @@ fn leaders_between(extraction: &Extraction, page: u32, y: f32, left: f32, right:
 /// Every source baseline gets a drawn line when there are enough pieces.
 /// Extra pieces sit in the largest gaps so a longer translation still covers
 /// the English lines instead of walking off the bottom of the paragraph.
+/// Extra prompt lines were interpolated into a one-line gap and painted on
+/// top of each other. Keep at least 1.05em between baselines.
+fn separate_baselines(ys: &[f32], size: f32) -> Vec<f32> {
+    let mut ys = ys.to_vec();
+    let min_lead = size.max(1.0) * 1.05;
+    for index in 1..ys.len() {
+        let lead = ys[index - 1] - ys[index];
+        if lead < min_lead {
+            let push = min_lead - lead;
+            for y in ys.iter_mut().skip(index) {
+                *y -= push;
+            }
+        }
+    }
+    ys
+}
+
 fn baselines_for(ink: &[InkLine<'_>], count: usize) -> Vec<f32> {
     let src: Vec<f32> = ink.iter().map(|line| line.y).collect();
     if src.is_empty() || count == 0 {
@@ -8104,7 +8233,13 @@ fn layout_across_pages(
         if last_y < media[1] - 0.5 || top > media[3] {
             return None;
         }
-        let ys = baselines_for(ink, lines.len());
+        let mut ys = baselines_for(ink, lines.len());
+        if sample_sans_glyphs(glyphs) {
+            ys = separate_baselines(&ys, size);
+            if ys.iter().copied().fold(top, f32::min) < media[1] - 0.5 {
+                return None;
+            }
+        }
         let draw_left = if box_index == 0 {
             hanging.map(|shift| left + shift).unwrap_or(*left)
         } else {
@@ -8203,6 +8338,319 @@ fn layout_across_pages(
     Some(drawn)
 }
 
+fn is_quote_mark(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().all(|ch| {
+            matches!(
+                ch,
+                '"' | '\'' | '“' | '”' | '„' | '«' | '»' | '‘' | '’' | '「' | '」'
+            )
+        })
+}
+
+/// A prompt sample paints a 22pt quotation mark in the left margin of the
+/// paragraph. It is not a line of the sentence. Leaving it in the ink pulls
+/// `block_left` onto the mark and stacks the next line on top of the numbers.
+fn detach_decorative_quotes<'a>(ink: &mut Vec<InkLine<'a>>) -> Vec<&'a Glyph> {
+    let mut sizes: Vec<f32> = ink
+        .iter()
+        .flat_map(|line| line.glyphs.iter().map(|glyph| glyph.font_size))
+        .filter(|size| *size >= 1.0)
+        .collect();
+    if sizes.is_empty() {
+        return Vec::new();
+    }
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    let body = sizes[sizes.len() / 2].max(1.0);
+    let mut quotes = Vec::new();
+    for line in ink.iter_mut() {
+        let mut keep = Vec::new();
+        for glyph in line.glyphs.drain(..) {
+            let huge = glyph.font_size >= body * 1.7 && glyph.font_size >= 14.0;
+            if huge && is_quote_mark(&glyph.unicode) {
+                quotes.push(glyph);
+            } else {
+                keep.push(glyph);
+            }
+        }
+        if keep.is_empty() {
+            line.glyphs = keep;
+            continue;
+        }
+        let left = keep
+            .iter()
+            .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
+            .fold(f32::MAX, f32::min);
+        let right = keep
+            .iter()
+            .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]).max(glyph.matrix[4]))
+            .fold(left, f32::max);
+        let mut ys: Vec<f32> = keep.iter().map(|glyph| glyph.matrix[5]).collect();
+        ys.sort_by(|left, right| left.total_cmp(right));
+        line.y = ys[ys.len() / 2];
+        line.left = left;
+        line.right = right;
+        line.glyphs = keep;
+    }
+    ink.retain(|line| !line.glyphs.is_empty());
+    quotes
+}
+
+struct RunIn {
+    label_x: f32,
+    text_x: f32,
+    label_ids: Vec<u32>,
+    known: bool,
+}
+
+/// `INSTRUCTION` is small caps at the left of the line and the sentence
+/// starts at a hanging indent. Chinese keeps that split: the label stays at
+/// the label's x, and the prose starts at the source body x.
+fn run_in_label(ink: &[InkLine<'_>]) -> Option<RunIn> {
+    let line = ink.first()?;
+    if line.glyphs.len() < 6 {
+        return None;
+    }
+    let mut glyphs = line.glyphs.clone();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    let body = sizes[sizes.len() * 3 / 4].max(1.0);
+    let mut at = None;
+    for index in 1..glyphs.len().min(24) {
+        let prev = glyphs[index - 1];
+        let prev_right = prev.bbox[0]
+            .max(prev.bbox[2])
+            .max(prev.matrix[4] + prev.advance[0].max(0.0));
+        let gap = glyphs[index].matrix[4] - prev_right;
+        if gap > body * 0.45 {
+            at = Some(index);
+            break;
+        }
+    }
+    let at = at?;
+    if !(3..18).contains(&at) {
+        return None;
+    }
+    let label = &glyphs[..at];
+    let letters = label
+        .iter()
+        .filter(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .count();
+    if !(3..=16).contains(&letters) {
+        return None;
+    }
+    let upper = label
+        .iter()
+        .filter(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_uppercase()))
+        .count();
+    if upper * 2 < letters {
+        return None;
+    }
+    if !label.iter().any(|glyph| glyph.font_size <= body * 0.85) {
+        return None;
+    }
+    let text_x = glyphs[at].matrix[4];
+    let label_x = glyphs[0].matrix[4];
+    if text_x < label_x + body * 0.8 {
+        return None;
+    }
+    if glyphs[at].font_size < body * 0.9 {
+        return None;
+    }
+    let label_ids = glyphs[..at].iter().map(|glyph| glyph.id).collect();
+    let word: String = glyphs[..at]
+        .iter()
+        .flat_map(|glyph| glyph.unicode.chars())
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
+    Some(RunIn {
+        label_x,
+        text_x,
+        label_ids,
+        known: known_prompt_label(&word),
+    })
+}
+
+fn known_prompt_label(word: &str) -> bool {
+    let upper = word.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "INSTRUCTION"
+            | "TEXT"
+            | "OUTPUT"
+            | "EXAMPLE"
+            | "PERSONA"
+            | "CONTEXT"
+            | "INPUT"
+            | "TONE"
+            | "OUTPUTFORMAT"
+    )
+}
+
+/// The label must end before the source body x. A colon that does not fit
+/// the small-caps slot is dropped; the gap is the separator, as in the source.
+fn fit_run_in_label(
+    label: &str,
+    label_x: f32,
+    text_x: Option<f32>,
+    size: f32,
+    font: &SubsetFont,
+) -> (String, f32) {
+    let mut text = label.trim().to_string();
+    let Some(text_x) = text_x else {
+        return (text, size);
+    };
+    let room = text_x - label_x - 1.5;
+    if room <= size {
+        return (text, size);
+    }
+    if measure(&text, size, font) > room && text.ends_with(['：', ':', '﹕']) {
+        text.pop();
+    }
+    let mut paint = size;
+    let width = measure(&text, paint, font);
+    if width > room && width > 0.0 {
+        paint = (size * room / width).clamp(size * 0.72, size);
+    }
+    (text, paint)
+}
+
+fn sample_sans_ink(ink: &[InkLine<'_>]) -> bool {
+    let glyphs: Vec<&Glyph> = ink
+        .iter()
+        .flat_map(|line| line.glyphs.iter().copied())
+        .collect();
+    sample_sans_glyphs(&glyphs)
+}
+
+fn sample_sans_glyphs(glyphs: &[&Glyph]) -> bool {
+    let mut book = 0usize;
+    let mut other = 0usize;
+    for glyph in glyphs {
+        if glyph.unicode.trim().is_empty() || is_quote_mark(&glyph.unicode) {
+            continue;
+        }
+        let name = glyph.font_name.to_ascii_uppercase();
+        if name.contains("FRANKLIN") && !name.contains("DEMI") && !name.contains("ITAL") {
+            book += 1;
+        } else if glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) {
+            other += 1;
+        }
+    }
+    book > 0 && other == 0
+}
+
+/// Prompt examples run from a small-caps label through the following
+/// Franklin Book lines. A callout (`NOTE`) and the body face stop the block.
+fn prompt_sample_flags(
+    report: &TranslateReport,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Vec<bool> {
+    let mut rows = Vec::with_capacity(report.segments.len());
+    for segment in &report.segments {
+        let glyphs: Vec<&Glyph> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|index| &extraction.glyphs[*index]))
+            .collect();
+        if glyphs.is_empty() {
+            rows.push((0, 0.0, false, false));
+            continue;
+        }
+        let page = glyphs[0].page_index;
+        let top = glyphs
+            .iter()
+            .map(|glyph| glyph.matrix[5])
+            .fold(f32::MIN, f32::max);
+        let book = sample_sans_glyphs(&glyphs) && !is_callout_source(&segment.source);
+        let label = book && {
+            let ink = ink_lines(&glyphs);
+            run_in_label(&ink).is_some_and(|item| item.known)
+        };
+        rows.push((page, top, book, label));
+    }
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&left, &right| {
+        rows[left]
+            .0
+            .cmp(&rows[right].0)
+            .then(rows[right].1.total_cmp(&rows[left].1))
+    });
+    let mut flags = vec![false; rows.len()];
+    let mut in_block = false;
+    let mut last_page = u32::MAX;
+    let mut last_y = 0.0f32;
+    for slot in order {
+        let (page, top, book, label) = rows[slot];
+        if page != last_page {
+            in_block = false;
+        }
+        if !book {
+            in_block = false;
+            last_page = page;
+            last_y = top;
+            continue;
+        }
+        let gap = if in_block { last_y - top } else { f32::MAX };
+        if label || (in_block && (-2.0..=32.0).contains(&gap)) {
+            flags[slot] = true;
+            in_block = true;
+        } else {
+            in_block = false;
+        }
+        last_page = page;
+        last_y = top;
+    }
+    flags
+}
+
+fn is_callout_source(source: &str) -> bool {
+    let source = source.trim_start();
+    ["note", "definition", "warning", "tip"]
+        .iter()
+        .any(|label| {
+            let Some(head) = source.get(..label.len()) else {
+                return false;
+            };
+            head.eq_ignore_ascii_case(label)
+                && source[label.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !ch.is_ascii_alphabetic())
+        })
+}
+
+/// `指令：求此序列…` and `示例 33 是一个回文`. The label is the short CJK
+/// prefix; the rest is the hanging body.
+fn split_run_in_label(text: &str) -> Option<(String, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() && index < 4 && is_cjk_body(chars[index]) {
+        index += 1;
+    }
+    if index < 2 {
+        return None;
+    }
+    let colon = matches!(chars.get(index), Some('：' | ':' | '﹕'));
+    let numbered = chars.get(index) == Some(&' ')
+        && chars.get(index + 1).is_some_and(|ch| ch.is_ascii_digit());
+    if !colon && !numbered {
+        return None;
+    }
+    index += 1;
+    let label: String = chars[..index].iter().collect();
+    let rest: String = chars[index..].iter().collect();
+    let rest = rest.trim_start().to_string();
+    if rest.is_empty() {
+        None
+    } else {
+        Some((label, rest))
+    }
+}
+
 fn ink_lines<'a>(glyphs: &[&'a Glyph]) -> Vec<InkLine<'a>> {
     let mut ordered: Vec<&Glyph> = glyphs.to_vec();
     ordered.sort_by(|a, b| {
@@ -8215,8 +8663,17 @@ fn ink_lines<'a>(glyphs: &[&'a Glyph]) -> Vec<InkLine<'a>> {
         let same = groups.last().is_some_and(|group| {
             let anchor = group[0];
             // A drop cap on this baseline must not swallow the next line.
+            // A 22pt quotation mark used to widen the window until the next
+            // body line joined it, and the sample's left edge became the quote.
             let limit = crate::segment::representative_size(group);
-            (anchor.matrix[5] - glyph.matrix[5]).abs() <= limit * 0.35
+            let incoming = glyph.font_size.max(1.0);
+            let mismatched = incoming > limit * 1.8 || limit > incoming * 1.8;
+            let tolerance = if mismatched {
+                limit.min(incoming) * 0.35
+            } else {
+                limit * 0.35
+            };
+            (anchor.matrix[5] - glyph.matrix[5]).abs() <= tolerance
         });
         if same {
             groups.last_mut().unwrap().push(glyph);
@@ -8854,6 +9311,18 @@ fn superscript_mask(text: &str) -> Vec<bool> {
     while index < chars.len() {
         // A star and the digit after it are separate marks: `Zhang∗1`.
         if is_mark_star(chars[index]) {
+            // `**奇异**` is markdown around a word, not an author mark.
+            // Raising the star paints it on the line above. `张轩∗1` still
+            // rises: a digit follows the star.
+            let solid = |ch: char| !ch.is_whitespace() && !is_mark_star(ch);
+            let next = chars.iter().skip(index + 1).copied().find(|ch| solid(*ch));
+            let prev = chars[..index].iter().rev().copied().find(|ch| solid(*ch));
+            let han_word = next.is_some_and(is_han_char)
+                || (prev.is_some_and(is_han_char) && !next.is_some_and(|ch| ch.is_ascii_digit()));
+            if han_word {
+                index += 1;
+                continue;
+            }
             let prev = index.checked_sub(1).map(|slot| chars[slot]);
             let word = chars
                 .iter()
@@ -9985,6 +10454,8 @@ mod tests {
         assert_eq!(raised.iter().filter(|flag| **flag).count(), 3);
         let cjk_star = superscript_mask("张轩∗1");
         assert!(cjk_star[2] && cjk_star[3], "{cjk_star:?}");
+        let markdown = superscript_mask("该序列为**奇异**。");
+        assert!(markdown.iter().all(|flag| !flag), "{markdown:?}");
         assert!(superscript_mask("定理8.18").iter().all(|flag| !flag));
         assert!(superscript_mask("学习率0.001").iter().all(|flag| !flag));
         assert!(superscript_mask("n ≥ 2").iter().all(|flag| !flag));
@@ -15649,6 +16120,10 @@ ET",
         }
         rows.sort_by(|left, right| right.0.total_cmp(&left.0));
         assert!(rows.len() >= 2, "the paragraph should wrap: {rows:?}");
+        assert!(
+            rows[0].3.contains("Jupyter") && !rows[0].3.contains("Notebook"),
+            "the long token should break at camelCase and fill the line: {rows:?}"
+        );
         for (y, left, right, text) in rows.iter().take(rows.len() - 1) {
             let available = column_right - left;
             let fill = (right - left) / available;
@@ -15657,6 +16132,279 @@ ET",
                 "line at y={y:.1} fills {fill:.2} of the column ({left:.1}-{right:.1}, edge {column_right:.1}): {text}"
             );
         }
+        assert_max_cjk_gap(&painted, 0.15);
+    }
+
+    fn assert_max_cjk_gap(painted: &Extraction, max_em: f32) {
+        let mut glyphs: Vec<&Glyph> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().any(is_han_char))
+            .collect();
+        glyphs.sort_by(|left, right| {
+            right.matrix[5]
+                .total_cmp(&left.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4]))
+        });
+        for pair in glyphs.windows(2) {
+            if (pair[0].matrix[5] - pair[1].matrix[5]).abs() > 0.8 {
+                continue;
+            }
+            if !is_han_char(pair[0].unicode.chars().next().unwrap_or(' '))
+                || !is_han_char(pair[1].unicode.chars().next().unwrap_or(' '))
+            {
+                continue;
+            }
+            let size = pair[0].font_size.max(0.1);
+            // The box face advances 0.6em. The extract advance includes the
+            // justification gap, so the extra is the step past that em.
+            let step = pair[1].matrix[4] - pair[0].matrix[4];
+            let extra = step / size - 0.6;
+            assert!(
+                extra <= max_em + 0.02,
+                "gap {extra:.3}em between {} and {} at y={:.1}",
+                pair[0].unicode,
+                pair[1].unicode,
+                pair[0].matrix[5]
+            );
+        }
+    }
+
+    fn assert_no_glyph_overlap(painted: &Extraction) {
+        let glyphs: Vec<&Glyph> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| !glyph.invisible && glyph.unicode.chars().any(|ch| !ch.is_whitespace()))
+            .collect();
+        for index in 0..glyphs.len() {
+            for other in index + 1..glyphs.len() {
+                let a = glyphs[index];
+                let b = glyphs[other];
+                if a.page_index != b.page_index {
+                    continue;
+                }
+                let area = bbox_overlap_area(a.bbox, b.bbox);
+                let smaller = bbox_area(a.bbox).min(bbox_area(b.bbox)).max(0.1);
+                if area > 1.0 && area > smaller * 0.15 {
+                    panic!(
+                        "glyphs overlap {:.1}pt² ({:.0}% of the smaller): {:?} {:?} and {:?} {:?}",
+                        area,
+                        100.0 * area / smaller,
+                        a.unicode,
+                        a.bbox,
+                        b.unicode,
+                        b.bbox
+                    );
+                }
+            }
+        }
+    }
+
+    fn bbox_area(bbox: [f32; 4]) -> f32 {
+        (bbox[2] - bbox[0]).abs() * (bbox[3] - bbox[1]).abs()
+    }
+
+    fn bbox_overlap_area(a: [f32; 4], b: [f32; 4]) -> f32 {
+        let left = a[0].min(a[2]).max(b[0].min(b[2]));
+        let right = a[0].max(a[2]).min(b[0].max(b[2]));
+        let bottom = a[1].min(a[3]).max(b[1].min(b[3]));
+        let top = a[1].max(a[3]).min(b[1].max(b[3]));
+        (right - left).max(0.0) * (top - bottom).max(0.0)
+    }
+
+    #[test]
+    fn a_prompt_label_keeps_the_source_hanging_indent() {
+        // Small caps `INSTRUCTION` at the left, body at x=117. Type1 width
+        // 500 means size 9.5 advances 4.75pt, so the label is placed with Tm.
+        let bytes = contents_pdf_named(
+            b"BT \
+/F1 9.5 Tf 1 0 0 1 65 400 Tm (I) Tj \
+/F1 7.6 Tf 1 0 0 1 70 400 Tm (NSTRUCTION) Tj \
+/F1 9.5 Tf 1 0 0 1 117 400 Tm (Sum the palindromes in this sequence: 13, 1331.) Tj \
+/F1 9.5 Tf 1 0 0 1 79 380 Tm (E) Tj \
+/F1 7.6 Tf 1 0 0 1 84 380 Tm (XAMPLE) Tj \
+/F1 9.5 Tf 1 0 0 1 117 380 Tm (33 is a palindrome.) Tj \
+ET",
+            "FranklinGothic-Book",
+        );
+        let painted = paint_translation(
+            &bytes,
+            &[
+                (0, "指令：求此序列中回文数之和：13、1331。".into()),
+                (1, "示例 33 是一个回文".into()),
+            ],
+        );
+        let mut label_x = None;
+        let mut body_x = None;
+        let mut example_label = None;
+        let mut example_body = None;
+        for glyph in &painted.glyphs {
+            if glyph.unicode == "指" {
+                label_x = Some(glyph.matrix[4]);
+            }
+            if glyph.unicode == "求" {
+                body_x = Some(glyph.matrix[4]);
+            }
+            if glyph.unicode == "示" {
+                example_label = Some(glyph.matrix[4]);
+            }
+            if glyph.unicode == "3" && glyph.matrix[5] < 390.0 {
+                example_body = example_body.or(Some(glyph.matrix[4]));
+            }
+        }
+        let label_x = label_x.expect("missing 指令");
+        let body_x = body_x.expect("missing body");
+        assert!(
+            (label_x - 65.0).abs() < 4.0,
+            "label drifted to {label_x:.1}"
+        );
+        assert!(
+            (body_x - 117.0).abs() < 6.0,
+            "prose started at the left margin {body_x:.1}"
+        );
+        assert!(
+            body_x > label_x + 20.0,
+            "label and prose collapsed: label {label_x:.1} body {body_x:.1}"
+        );
+        let example_label = example_label.expect("missing 示例");
+        let example_body = example_body.expect("missing 33");
+        assert!(
+            (example_label - 79.0).abs() < 6.0,
+            "示例 drifted to {example_label:.1}"
+        );
+        assert!(
+            example_body > 110.0,
+            "示例 body stayed in the margin at {example_body:.1}"
+        );
+        assert_no_glyph_overlap(&painted);
+    }
+
+    #[test]
+    fn a_prompt_quote_does_not_collide_with_the_sample() {
+        // The 22pt quote sits 4.6pt above the continuation, which is how the
+        // source line-grouper folds it into `palin- “ dromes`.
+        let bytes = contents_pdf_named(
+            b"BT \
+/F1 9.5 Tf 1 0 0 1 117 210 Tm (I apologize for the previous palin-) Tj \
+/F1 22 Tf 1 0 0 1 102 203 Tm (\") Tj \
+/F1 9.5 Tf 1 0 0 1 117 198.4 Tm (dromes in this sequence: 13, 99, 56, 232, and 7.) Tj \
+ET",
+            "FranklinGothic-Book",
+        );
+        let painted = paint_translation(
+            &bytes,
+            &[(
+                0,
+                "我为之前的疏忽道歉。让我们正确地识别并求和此序列中的回文数：13, 99, 56, 232 和 7。".into(),
+            )],
+        );
+        let mut nines = Vec::new();
+        let mut twos = Vec::new();
+        for glyph in &painted.glyphs {
+            if glyph.unicode == "9" {
+                nines.push((glyph.matrix[4], glyph.matrix[5]));
+            }
+            if glyph.unicode == "2" {
+                twos.push((glyph.matrix[4], glyph.matrix[5]));
+            }
+            if glyph.unicode.chars().any(is_han_char) {
+                assert!(
+                    glyph.matrix[4] > 110.0,
+                    "sample prose fell into the quote margin at x={:.1} ({})",
+                    glyph.matrix[4],
+                    glyph.unicode
+                );
+            }
+        }
+        for (nx, ny) in &nines {
+            for (tx, ty) in &twos {
+                assert!(
+                    (ny - ty).abs() > 1.0 || (nx - tx).abs() > 2.0,
+                    "99 and 232 share a point ({nx:.1},{ny:.1}) ({tx:.1},{ty:.1})"
+                );
+            }
+        }
+        assert_no_glyph_overlap(&painted);
+    }
+
+    #[test]
+    fn a_quoted_line_is_not_a_callout_label() {
+        // `definition` is 10 bytes. A line whose 10th byte sits inside `“`
+        // must not panic, and it is not a callout.
+        assert!(!is_callout_source("EXAMPLE “a quoted sample line”"));
+        assert!(is_callout_source("NOTE This stays a callout."));
+        assert!(is_callout_source("Definition The term is one paragraph."));
+        assert!(!is_callout_source("notebook stays prose"));
+    }
+
+    #[test]
+    fn a_prompt_block_keeps_one_label_and_does_not_mix_the_input() {
+        // `TEXT` is small caps. The model left the English label and translated
+        // the sentence, and the answer quotes that sentence in English.
+        let bytes = contents_pdf_named(
+            b"BT \
+/F1 9.5 Tf 1 0 0 1 65 400 Tm (I) Tj \
+/F1 7.6 Tf 1 0 0 1 70 400 Tm (NSTRUCTION) Tj \
+/F1 9.5 Tf 1 0 0 1 117 400 Tm (Classify the following text into one category.) Tj \
+/F1 9.5 Tf 1 0 0 1 94 386 Tm (T) Tj \
+/F1 7.6 Tf 1 0 0 1 99 386 Tm (EXT) Tj \
+/F1 9.5 Tf 1 0 0 1 117 386 Tm (Headphones provide immersive audio.) Tj \
+/F1 9.5 Tf 1 0 0 1 117 360 Tm (The text Headphones provide immersive audio experiences for music lovers and) Tj \
+/F1 22 Tf 1 0 0 1 102 353 Tm (\") Tj \
+/F1 9.5 Tf 1 0 0 1 117 348.4 Tm (gamers alike. It should be classified as tech.) Tj \
+ET",
+            "FranklinGothic-Book",
+        );
+        let painted = paint_translation(
+            &bytes,
+            &[
+                (0, "说明：将以下文本归类到其中一个类别。".into()),
+                (
+                    1,
+                    "TEXT耳机为音乐爱好者和游戏玩家提供沉浸式音频体验。".into(),
+                ),
+                (
+                    2,
+                    "文本“Headphones provide immersive audio experiences for music lovers and “ gamers alike.” 应被归类为“科技”，因为它讨论了与技术相关的产品及其功能。".into(),
+                ),
+            ],
+        );
+        let mut label_x = None;
+        let mut body_x = None;
+        for glyph in &painted.glyphs {
+            if glyph.unicode == "T" {
+                panic!(
+                    "the small-caps T was painted at x={:.1} y={:.1}",
+                    glyph.matrix[4], glyph.matrix[5]
+                );
+            }
+            if glyph.unicode == "文" && glyph.matrix[4] < 110.0 {
+                label_x = Some(glyph.matrix[4]);
+            }
+            if glyph.unicode == "耳" {
+                body_x = Some(glyph.matrix[4]);
+            }
+            let latin = glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic());
+            let low = glyph.matrix[5] < 380.0;
+            if latin && low {
+                panic!(
+                    "quoted input stayed in the answer: {} at ({:.1},{:.1})",
+                    glyph.unicode, glyph.matrix[4], glyph.matrix[5]
+                );
+            }
+        }
+        let label_x = label_x.expect("missing 文本");
+        let body_x = body_x.expect("missing 耳机");
+        assert!(
+            (label_x - 94.0).abs() < 6.0,
+            "label drifted to {label_x:.1}"
+        );
+        assert!(
+            (body_x - 117.0).abs() < 8.0,
+            "example body started at {body_x:.1}"
+        );
+        assert!(body_x > label_x + 8.0, "label and body collapsed");
+        assert_no_glyph_overlap(&painted);
     }
 
     #[test]
@@ -15769,7 +16517,11 @@ ET",
             .iter()
             .flat_map(|(_, text)| text.chars().map(|ch| ch as u32))
             .collect();
-        chars.extend("■—–API ：".chars().map(|ch| ch as u32));
+        chars.extend(
+            "■—–API ：指令文本示例输出角色背景输入语气说明文字人设语调格式"
+                .chars()
+                .map(|ch| ch as u32),
+        );
         for seg in &segmentation.segments {
             chars.extend(seg.text.chars().map(|ch| ch as u32));
         }

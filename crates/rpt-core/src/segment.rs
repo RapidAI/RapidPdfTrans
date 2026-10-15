@@ -1883,6 +1883,14 @@ fn walk_interior(
     table: bool,
 ) -> Vec<usize> {
     let anchor = &lines[block[0]];
+    let mut span_left = block
+        .iter()
+        .map(|index| lines[*index].left)
+        .fold(anchor.left, f32::min);
+    let mut span_right = block
+        .iter()
+        .map(|index| lines[*index].right)
+        .fold(anchor.right, f32::max);
     let mut cursor = origin_y;
     let mut picked = Vec::new();
     loop {
@@ -1892,7 +1900,16 @@ fn walk_interior(
                 continue;
             }
             let dy = (line.y - cursor) * direction;
-            if dy <= 0.4 || !x_overlaps(anchor, line) {
+            // The caption is often only as wide as "Table 2.1…". A bullet in
+            // the example column starts further right and misses that box,
+            // so the cell was translated. Once a row is in, later rows overlap
+            // the table's accumulated span.
+            let overlaps = if table && !picked.is_empty() {
+                span_overlaps(span_left, span_right, line)
+            } else {
+                x_overlaps(anchor, line)
+            };
+            if dy <= 0.4 || !overlaps {
                 continue;
             }
             band.push((index, dy));
@@ -1926,6 +1943,7 @@ fn walk_interior(
         if group.iter().any(|&index| {
             caption_line.get(index).copied().unwrap_or(false)
                 || stops_interior(&lines[index], body_font)
+                || indexed_title_line(index, lines)
                 || is_running_header(&lines[index].text)
                 || is_display_heading(&lines[index])
         }) {
@@ -1933,6 +1951,8 @@ fn walk_interior(
         }
         for index in &group {
             picked.push(*index);
+            span_left = span_left.min(lines[*index].left);
+            span_right = span_right.max(lines[*index].right);
         }
         cursor = group
             .iter()
@@ -1991,6 +2011,84 @@ fn right_aligned_display_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) ->
     (upper.right - lower.right).abs() <= 2.0 && (upper.left - lower.left).abs() > 8.0
 }
 
+/// `2.5` and `Reasoning in detail` share a baseline, but the gutter splits
+/// them. The title is not `2.5 Reasoning…`, and `in` is lowercase, so neither
+/// piece is a section heading. It still is not a table cell.
+fn indexed_title_line(index: usize, lines: &[VisualLine<'_>]) -> bool {
+    let line = &lines[index];
+    let text = line.text.trim();
+    if dotted_index_only(text) {
+        return lines.iter().enumerate().any(|(other, title)| {
+            other != index
+                && title.page == line.page
+                && title.size >= 11.0
+                && baseline_neighbors(line, title)
+                && title.left + 2.0 >= line.right
+                && short_heading_title(&title.text)
+        });
+    }
+    line.size >= 11.0
+        && short_heading_title(text)
+        && lines.iter().enumerate().any(|(other, index_line)| {
+            other != index
+                && index_line.page == line.page
+                && baseline_neighbors(index_line, line)
+                && index_line.right <= line.left + 2.0
+                && dotted_index_only(&index_line.text)
+        })
+}
+
+fn baseline_neighbors(left: &VisualLine<'_>, right: &VisualLine<'_>) -> bool {
+    let size = left.size.max(right.size).max(1.0);
+    (left.y - right.y).abs() <= size * 0.35 && right.left - left.right <= size * 3.0
+}
+
+fn short_heading_title(text: &str) -> bool {
+    let text = text.trim();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() || words.len() > 8 || text.contains([',', ';', ':']) {
+        return false;
+    }
+    if text.ends_with(['.', '?', '!', '。']) {
+        return false;
+    }
+    text.chars().filter(|ch| ch.is_alphabetic()).count() >= 4
+}
+
+/// `2.5` and `2.5.1`. A bare chapter number is not this mark.
+fn dotted_index_only(text: &str) -> bool {
+    let text = text.trim().trim_end_matches('.');
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut index = 0;
+    let mut groups = 0;
+    loop {
+        if groups > 0 {
+            if index >= bytes.len() || bytes[index] != b'.' {
+                break;
+            }
+            index += 1;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == start || index - start > 2 {
+            return false;
+        }
+        groups += 1;
+        if groups > 4 {
+            return false;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+    }
+    groups >= 2 && index == bytes.len()
+}
+
 fn stops_interior(line: &VisualLine<'_>, body_font: &str) -> bool {
     // `DEFINITION Retrieval-Augmented…` uses a label face, so it is not a
     // body barrier, and the walk kept that first line inside the figure.
@@ -2022,27 +2120,55 @@ fn release_toc_titles(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
 }
 
 fn x_overlaps(anchor: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
-    let left = anchor.left.max(line.left);
-    let right = anchor.right.min(line.right);
-    let overlap = (right - left).max(0.0);
-    let narrow = (anchor.right - anchor.left)
-        .min(line.right - line.left)
-        .max(1.0);
+    span_overlaps(anchor.left, anchor.right, line)
+}
+
+fn span_overlaps(left: f32, right: f32, line: &VisualLine<'_>) -> bool {
+    let overlap_left = left.max(line.left);
+    let overlap_right = right.min(line.right);
+    let overlap = (overlap_right - overlap_left).max(0.0);
+    let narrow = (right - left).min(line.right - line.left).max(1.0);
     overlap >= narrow * 0.3
 }
 
 fn dominant_body_font(lines: &[VisualLine<'_>], page: u32) -> String {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut fallback: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for line in lines.iter().filter(|line| line.page == page) {
-        if is_body_shape(line) {
-            *counts.entry(line.font.as_str()).or_insert(0) += line.text.len();
+        if !is_body_shape(line) {
+            continue;
         }
+        *fallback.entry(line.font.as_str()).or_insert(0) += line.text.len();
+        // A long cell under `Table 2.1` is Franklin, and the paragraph above
+        // is New Baskerville. Counting the cell made Franklin the body face,
+        // so the paragraph was kept and the cell was translated.
+        if under_table_caption(line, lines) {
+            continue;
+        }
+        *counts.entry(line.font.as_str()).or_insert(0) += line.text.len();
+    }
+    if counts.is_empty() {
+        counts = fallback;
     }
     counts
         .into_iter()
         .max_by_key(|(_, count)| *count)
         .map(|(font, _)| font.to_string())
         .unwrap_or_default()
+}
+
+/// A cell, bullet, or wrapped row sitting under a table caption. The example
+/// column starts to the right of a short caption, so the test is wider than
+/// the caption's own box.
+fn under_table_caption(line: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> bool {
+    lines.iter().any(|caption| {
+        caption_kind(&caption.text) == Some("table")
+            && caption.page == line.page
+            && line.y < caption.y - 1.0
+            && caption.y - line.y <= 320.0
+            && line.left < caption.right + 240.0
+            && line.right > caption.left - 16.0
+    })
 }
 
 fn is_body_shape(line: &VisualLine<'_>) -> bool {
@@ -4628,6 +4754,130 @@ mod tests {
                 .any(|text| text.contains("Beyond Chain of Thought")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn a_table_bullet_beside_a_narrow_caption_stays_in_the_cell() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today. It continues so the column face stays the body face.";
+        let mut body_line = wide(0, 93.0, 620.0, body, 370.0, 10.0);
+        body_line.font_name = "NewBaskerville-Roman".into();
+        let mut caption = wide(
+            1,
+            93.0,
+            500.0,
+            "Table 2.1 Prompt types and examples",
+            142.0,
+            8.0,
+        );
+        caption.font_name = "FranklinGothic-Demi".into();
+        let mut cell = wide(
+            2,
+            99.0,
+            420.0,
+            "Composing text Write a piece on the diver watches, mentioning the following facts:",
+            320.0,
+            8.0,
+        );
+        cell.font_name = "FranklinGothic-Book".into();
+        // The example column starts near x=194. Overlap with the 142pt caption
+        // is under 30 percent, so a caption-only hit test dropped the bullet.
+        let mut bullet = wide(
+            3,
+            194.0,
+            406.0,
+            "■ The Rolex Oyster Perpetual was among the first to be water resistant.",
+            250.0,
+            8.5,
+        );
+        bullet.font_name = "FranklinGothic-Book".into();
+        let mut wrap = wide(
+            4,
+            206.0,
+            392.0,
+            "diver watch was the Seamaster.",
+            120.0,
+            8.0,
+        );
+        wrap.font_name = "FranklinGothic-Book".into();
+        let mut heading = wide(5, 57.0, 340.0, "2.5 Reasoning in detail", 180.0, 12.5);
+        heading.font_name = "FranklinGothic-Demi".into();
+        let seg = segment_with(
+            &[body_line, caption, cell, bullet, wrap, heading],
+            &SegmentFlags::default(),
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            kept.contains(&2) && kept.contains(&3) && kept.contains(&4),
+            "example-column bullets were translated: {:?} texts {texts:?}",
+            seg.kept
+        );
+        assert!(
+            !kept.contains(&5),
+            "the section heading was swallowed: {:?}",
+            seg.kept
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            !texts.iter().any(|text| text.contains("Rolex")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_split_section_index_is_not_a_table_cell() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today. It continues so the column face stays the body face.";
+        let mut body_line = wide(0, 93.0, 620.0, body, 370.0, 10.0);
+        body_line.font_name = "NewBaskerville-Roman".into();
+        let mut caption = wide(
+            1,
+            93.0,
+            500.0,
+            "Table 2.1 Prompt types and examples",
+            142.0,
+            8.0,
+        );
+        caption.font_name = "FranklinGothic-Demi".into();
+        let mut cell = wide(
+            2,
+            99.0,
+            406.0,
+            "ReasoningAdd the square numbers and name the result in the prompt.",
+            320.0,
+            8.5,
+        );
+        cell.font_name = "FranklinGothic-Book".into();
+        // 26pt is past a word space, so the index and the title are two lines.
+        // `in` is lowercase, and neither line is `2.5 Reasoning in detail`.
+        let mut index = wide(3, 57.0, 374.0, "2.5", 17.0, 12.5);
+        index.font_name = "FranklinGothic-DemiItal".into();
+        let mut title = wide(4, 100.0, 374.0, "Reasoning in detail", 160.0, 12.5);
+        title.font_name = "FranklinGothic-DemiItal".into();
+        let seg = segment_with(
+            &[body_line, caption, cell, index, title],
+            &SegmentFlags::default(),
+        );
+        let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
+        assert!(
+            kept.contains(&2),
+            "table cell was translated: {:?}",
+            seg.kept
+        );
+        assert!(
+            !kept.contains(&3) && !kept.contains(&4),
+            "the split heading was swallowed: {:?}",
+            seg.kept
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Reasoning in detail")),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"2.5"), "{texts:?}");
     }
 
     #[test]

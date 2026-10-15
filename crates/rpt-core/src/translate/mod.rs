@@ -829,7 +829,12 @@ fn load_checkpoint(
         if let Some(done) = cache.get(&seg.text) {
             // A cached echo of a body paragraph is not a translation. Leave it
             // for the model, which retries once when the reply is still English.
-            if needs_english_retry(&seg.text, done) || translation_flaw(&seg.text, done) {
+            // A Chinese paragraph with one extra full stop is still the
+            // translation. Sending it again can replace it with the English.
+            let chinese = cjk_count(done) >= 8;
+            if !chinese
+                && (needs_english_retry(&seg.text, done) || translation_flaw(&seg.text, done))
+            {
                 continue;
             }
             translated[index] = Some(done.clone());
@@ -1121,7 +1126,10 @@ fn is_sentence_end(chars: &[char], index: usize) -> bool {
         return false;
     }
     let mut next = index + 1;
-    while next < chars.len() && chars[next].is_whitespace() {
+    while next < chars.len()
+        && (chars[next].is_whitespace()
+            || matches!(chars[next], '”' | '"' | '\'' | '’' | '»' | '』' | '」'))
+    {
         next += 1;
     }
     if next >= chars.len() || !chars[next].is_ascii_uppercase() {
@@ -1781,6 +1789,11 @@ pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String 
     if retain_lone_label(source, translated) {
         return source.to_string();
     }
+    // `<Tone>` and `<OutputFormat>` are prompt markup. Translate each tag as
+    // one token. An all-English echo would otherwise be returned unchanged.
+    if let Some(tags) = gloss_prompt_xml(source, translated) {
+        return tags;
+    }
     // An identity echo is still English. Stripping a parenthesis there would
     // redraw the source line.
     if !translated
@@ -1808,6 +1821,7 @@ pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String 
     // `DEFINITION` and `NOTE` are callout labels. The model sometimes leaves
     // the English word, or glues `定义` onto the term without the colon.
     text = gloss_run_in_label(source, &text);
+    text = normalize_prompt_sample(source, &text);
     let source_end = source.trim_end();
     if source_end.ends_with("user") && !source.to_ascii_lowercase().contains("request") {
         text = text.replace("用户请求", "用户");
@@ -1820,6 +1834,343 @@ pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String 
         }
     }
     text
+}
+
+/// `<Tone>` / `</OutputFormat>` stay one token. The source is only tags, so
+/// the names are translated even when the model echoed them.
+fn gloss_prompt_xml(source: &str, translated: &str) -> Option<String> {
+    if !source.contains('<') {
+        return None;
+    }
+    let mut outside = String::new();
+    let mut in_tag = false;
+    for ch in source.chars() {
+        if ch == '<' {
+            in_tag = true;
+            continue;
+        }
+        if ch == '>' {
+            in_tag = false;
+            continue;
+        }
+        if !in_tag && !ch.is_whitespace() {
+            outside.push(ch);
+        }
+    }
+    if !outside.is_empty() {
+        return None;
+    }
+    const NAMES: &[(&str, &str)] = &[
+        ("outputformat", "输出格式"),
+        ("instruction", "指令"),
+        ("examples", "示例"),
+        ("example", "示例"),
+        ("persona", "角色"),
+        ("context", "背景"),
+        ("output", "输出"),
+        ("input", "输入"),
+        ("text", "文本"),
+        ("tone", "语气"),
+    ];
+    let chars: Vec<char> = translated.chars().collect();
+    let mut out = String::new();
+    let mut index = 0;
+    let mut changed = false;
+    while index < chars.len() {
+        if chars[index] != '<' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        let close = chars.get(index) == Some(&'/');
+        if close {
+            index += 1;
+        }
+        let name_at = index;
+        while index < chars.len() && chars[index].is_ascii_alphabetic() {
+            index += 1;
+        }
+        if index < chars.len() && chars[index] == '>' && index > name_at {
+            let name: String = chars[name_at..index].iter().collect();
+            index += 1;
+            if let Some((_, han)) = NAMES
+                .iter()
+                .find(|(english, _)| name.eq_ignore_ascii_case(english))
+            {
+                out.push('<');
+                if close {
+                    out.push('/');
+                }
+                out.push_str(han);
+                out.push('>');
+                changed = true;
+                continue;
+            }
+        }
+        out.extend(chars[start..index].iter());
+    }
+    changed.then_some(out)
+}
+
+/// A prompt example is one block. The small-caps label is a single token
+/// (`指令`, `文本`, `说明`), never the English word with its initial left
+/// behind. The quoted input is either copied in English or replaced entirely;
+/// a translation that keeps both is the mixed line.
+pub(crate) fn normalize_prompt_sample(source: &str, translated: &str) -> String {
+    let source_trim = source.trim_start();
+    let Some((han, aliases)) = prompt_label_gloss(source_trim) else {
+        return translated.to_string();
+    };
+    let mut body = translated.trim().to_string();
+    if let Some(rest) = strip_english_prompt_label(&body, source_trim) {
+        body = rest.to_string();
+    }
+    body = drop_echoed_prompt_english(&body);
+    body = cleanup_prompt_gaps(&body);
+    let mut label = han;
+    for alias in aliases {
+        if let Some(rest) = strip_han_prompt_label(&body, alias) {
+            body = rest.to_string();
+            label = alias;
+            break;
+        }
+    }
+    body = cleanup_prompt_gaps(&body);
+    if body.is_empty() {
+        return label.to_string();
+    }
+    if body.starts_with(&format!("{label}：")) || body.starts_with(&format!("{label}:")) {
+        return body;
+    }
+    format!("{label}：{body}")
+}
+
+/// A continuation of a prompt block has no small-caps label of its own.
+/// A long English sentence copied into the Chinese line is still the mixed quote.
+pub(crate) fn unmix_prompt_line(source: &str, translated: &str) -> String {
+    let normalized = normalize_prompt_sample(source, translated);
+    if prompt_label_gloss(source.trim_start()).is_some() {
+        return normalized;
+    }
+    drop_echoed_prompt_english(&normalized)
+}
+
+fn prompt_label_gloss(source: &str) -> Option<(&'static str, &'static [&'static str])> {
+    const LABELS: &[(&str, &str, &[&str])] = &[
+        ("output format", "输出格式", &["输出格式"]),
+        ("instruction", "指令", &["说明", "指令"]),
+        ("example", "示例", &["示例"]),
+        ("persona", "角色", &["角色设定", "人设", "角色"]),
+        ("context", "背景", &["背景"]),
+        ("input", "输入", &["输入"]),
+        ("output", "输出", &["输出"]),
+        ("text", "文本", &["文字", "文本"]),
+        ("tone", "语气", &["语调", "语气"]),
+    ];
+    for (english, han, aliases) in LABELS {
+        if prompt_source_starts_with(source, english) {
+            return Some((han, aliases));
+        }
+    }
+    None
+}
+
+/// `TEXT Headphones` and `INSTRUCTIONClassify`. A title-case heading
+/// (`Text classification`) is not a prompt label.
+fn prompt_source_starts_with(source: &str, label: &str) -> bool {
+    let Some(head) = source.get(..label.len()) else {
+        return false;
+    };
+    if !head.eq_ignore_ascii_case(label) {
+        return false;
+    }
+    if head.chars().any(|ch| ch.is_ascii_lowercase()) {
+        return false;
+    }
+    match source[label.len()..].chars().next() {
+        None => true,
+        Some(ch) if ch.is_ascii_lowercase() => false,
+        Some(_) => true,
+    }
+}
+
+fn strip_english_prompt_label<'a>(text: &'a str, source: &str) -> Option<&'a str> {
+    let english = if prompt_source_starts_with(source, "output format") {
+        "output format"
+    } else {
+        let end = source
+            .find(|ch: char| !ch.is_ascii_alphabetic())
+            .unwrap_or(source.len());
+        &source[..end]
+    };
+    if english.is_empty() {
+        return None;
+    }
+    let count = english.chars().count();
+    let head: String = text.chars().take(count).collect();
+    if !head.eq_ignore_ascii_case(english) {
+        return None;
+    }
+    let byte_len: usize = text.chars().take(count).map(|ch| ch.len_utf8()).sum();
+    Some(text[byte_len..].trim_start_matches([' ', ':', '：', '﹕']))
+}
+
+fn strip_han_prompt_label<'a>(text: &'a str, alias: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(alias)?;
+    if rest.is_empty() || rest.starts_with(['：', ':', '﹕', ' ']) {
+        return Some(rest.trim_start_matches(['：', ':', '﹕', ' ']));
+    }
+    // `说明将以下` glues the label to the sentence. `输出一个表格` is the
+    // sentence itself; the verb stays in the body and the label is added.
+    if alias != "输出" && rest.chars().next().is_some_and(is_han_prompt) {
+        return Some(rest);
+    }
+    None
+}
+
+fn is_han_prompt(ch: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+}
+
+/// A run of six or more source words left inside a Chinese sentence is the
+/// quoted example pasted next to its translation. Numbers and short names stay.
+fn drop_echoed_prompt_english(text: &str) -> String {
+    if cjk_count(text) < 2 {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut drop = vec![false; chars.len()];
+    let mut index = 0;
+    while index < chars.len() {
+        if !chars[index].is_ascii_alphabetic() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut words = 0usize;
+        while index < chars.len() {
+            if chars[index].is_ascii_alphabetic() {
+                let word = index;
+                while index < chars.len() && chars[index].is_ascii_alphabetic() {
+                    index += 1;
+                }
+                if index - word >= 2 {
+                    words += 1;
+                }
+                continue;
+            }
+            if chars[index].is_ascii_digit() {
+                while index < chars.len() && chars[index].is_ascii_digit() {
+                    index += 1;
+                }
+                continue;
+            }
+            if is_prompt_word_gap(chars[index]) {
+                index += 1;
+                continue;
+            }
+            break;
+        }
+        if words >= 6 {
+            for slot in &mut drop[start..index] {
+                *slot = true;
+            }
+        }
+    }
+    if !drop.iter().any(|flag| *flag) {
+        return text.to_string();
+    }
+    let kept: String = chars
+        .iter()
+        .enumerate()
+        .filter(|(slot, _)| !drop[*slot])
+        .map(|(_, ch)| *ch)
+        .collect();
+    let cleaned = cleanup_prompt_gaps(&kept);
+    if cjk_count(&cleaned) < 2 {
+        text.to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn orphan_curly_opener(chars: &[char], index: usize) -> bool {
+    for &ch in chars.iter().skip(index + 1) {
+        if ch == '“' {
+            return true;
+        }
+        if ch == '”' {
+            return false;
+        }
+    }
+    false
+}
+
+fn is_prompt_word_gap(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | '.'
+                | ';'
+                | ':'
+                | '!'
+                | '?'
+                | '\''
+                | '"'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '-'
+                | '—'
+                | '–'
+                | '/'
+                | '('
+                | ')'
+        )
+}
+
+fn cleanup_prompt_gaps(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut kept = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        // `文本“应被归类为“科技”` kept the quote that opened the English
+        // sentence after that sentence was removed. A second opener before
+        // any closer is not a pair.
+        if chars[index] == '“' && orphan_curly_opener(&chars, index) {
+            index += 1;
+            continue;
+        }
+        if matches!(chars[index], '“' | '"') {
+            let mut end = index + 1;
+            while end < chars.len() && chars[end].is_whitespace() {
+                end += 1;
+            }
+            if end < chars.len() && matches!(chars[end], '”' | '"') {
+                index = end + 1;
+                continue;
+            }
+        }
+        kept.push(chars[index]);
+        index += 1;
+    }
+    let mut collapsed = String::new();
+    let mut space = false;
+    for ch in kept.chars() {
+        if ch == ' ' {
+            if !space {
+                collapsed.push(ch);
+            }
+            space = true;
+        } else {
+            space = false;
+            collapsed.push(ch);
+        }
+    }
+    collapsed.trim().to_string()
 }
 
 fn source_starts_with_label(text: &str, label: &str) -> bool {
@@ -3119,6 +3470,10 @@ mod tests {
             "grounding outputs using Retrieval-Augmented Generation (RAG). From there, we stop.",
             "使用检索增强生成 (RAG)。随后我们停下。"
         ));
+        assert!(!extra_sentence_end(
+            "Whether it’s considered “strange.” In a mathematical sense, it might be unusual.",
+            "它是否被视为“奇怪”。在数学意义上，它可能并不寻常。"
+        ));
         assert!(translation_flaw(
             "solution: The Model Context Protocol",
             "解决方案： The Model Context Protocol"
@@ -3622,6 +3977,40 @@ mod tests {
         );
         assert!(note.starts_with("注意："), "{note}");
         assert!(!note.contains("NOTE"), "{note}");
+        let text = repair_body_translation(
+            "TEXT Headphones provide immersive audio experiences for music lovers and gamers alike.",
+            "TEXT耳机为音乐爱好者和游戏玩家提供沉浸式音频体验。",
+        );
+        assert!(text.starts_with("文本：耳机"), "{text}");
+        assert!(!text.contains("TEXT"), "{text}");
+        let instruction = repair_body_translation(
+            "INSTRUCTION Classify the following text into one of these categories: history, tech, gardening.",
+            "说明：将以下文本归类到其中一个类别：历史、科技、园艺。",
+        );
+        assert_eq!(
+            instruction,
+            "说明：将以下文本归类到其中一个类别：历史、科技、园艺。"
+        );
+        let mixed = unmix_prompt_line(
+            "The text “Headphones provide immersive audio experiences for music lovers and “ gamers alike.” should be classified as “tech” because it discusses technology-related products.",
+            "文本“Headphones provide immersive audio experiences for music lovers and “ gamers alike.” 应被归类为“科技”，因为它讨论了与技术相关的产品及其功能。",
+        );
+        assert!(
+            !mixed.to_ascii_lowercase().contains("headphones"),
+            "{mixed}"
+        );
+        assert!(!mixed.to_ascii_lowercase().contains("gamers"), "{mixed}");
+        assert!(mixed.contains("文本应被归类为“科技”"), "{mixed}");
+        assert!(!mixed.contains("文本“应"), "{mixed}");
+        assert_eq!(repair_body_translation("</Tone>", "</Tone>"), "</语气>");
+        assert_eq!(
+            repair_body_translation("<OutputFormat>", "<OutputFormat>"),
+            "<输出格式>"
+        );
+        assert_eq!(
+            repair_body_translation("</Input> <Tone>", "</Input> <Tone>"),
+            "</输入> <语气>"
+        );
     }
 
     #[test]

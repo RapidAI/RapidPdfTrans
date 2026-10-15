@@ -498,8 +498,13 @@ pub(crate) fn fit_cjk_block(
     }
 }
 
+/// Extra space between two CJK ideographs, as a fraction of the em.
+/// A larger cap (`0.50`) filled a short line by pulling `的一系列` apart.
+const MAX_JUSTIFY_EM: f32 = 0.15;
+
 /// Extra space goes only between CJK characters. A single `Tc` would letter-space
-/// the Latin citation on the same line.
+/// the Latin citation on the same line. The extra never exceeds [`MAX_JUSTIFY_EM`];
+/// a line that is still short breaks a long Latin token instead of stretching.
 pub(crate) fn justify_gaps(
     text: &str,
     size: f32,
@@ -523,13 +528,13 @@ pub(crate) fn justify_gaps(
     }
     let slack = width - fit_measure(text, size, font);
     // A line that already fills the measure, or one that is mostly empty
-    // (a short label), stays as it is. A body line that stopped before a
-    // long Latin word still has to reach the column edge. Half an em is
-    // enough when the only flexible gaps are a short run of CJK.
+    // (a short label), stays as it is. Anything wider than the cap is a
+    // wrap problem: the line should have taken another word or a camelCase
+    // break, not opened a river between ideographs.
     if slack < 0.4 || slack > width * 0.55 {
         return gaps;
     }
-    let extra = (slack / slots.len() as f32).min(size * 0.50);
+    let extra = (slack / slots.len() as f32).min(size * MAX_JUSTIFY_EM);
     if extra < 0.05 {
         return gaps;
     }
@@ -770,6 +775,11 @@ pub(crate) fn wrap_text(
                     end -= 1;
                 }
             }
+            // `FewShotPromptTemplate` did not fit after `包括`, so the line
+            // stopped early and justification opened half an em between
+            // ideographs. A camelCase boundary that still fits belongs on
+            // this line. A URL stays sticky and is not cut.
+            end = pull_latin_prefix(&chars, &sticky, start, end, fitted, limit, size, font);
             end = prefer_enumeration_break(&chars, &sticky, start, end);
         }
         let mut line_end = end;
@@ -1150,6 +1160,89 @@ fn can_break(prev: char, next: char) -> bool {
     break_after(prev) && break_before(next)
 }
 
+/// `Few|Shot`, `Prompt|Template`, and `HTML|Parser`. A run of capitals stays
+/// together until the last capital that introduces a lowercase tail.
+fn camel_boundary(chars: &[char], index: usize) -> bool {
+    if index == 0 || index >= chars.len() {
+        return false;
+    }
+    let prev = chars[index - 1];
+    let next = chars[index];
+    if !prev.is_ascii_alphabetic() || !next.is_ascii_uppercase() {
+        return false;
+    }
+    if prev.is_ascii_lowercase() {
+        return true;
+    }
+    chars
+        .get(index + 1)
+        .is_some_and(|ch| ch.is_ascii_lowercase())
+}
+
+fn cjk_pair_count(text: &str) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .windows(2)
+        .filter(|pair| is_cjk_body(pair[0]) && is_cjk_body(pair[1]))
+        .count()
+}
+
+/// The legal break left the line short of what [`MAX_JUSTIFY_EM`] can close,
+/// and the next token is a long camelCase word. Take the longest prefix that
+/// still fits. Sticky spans (a URL, a citation) are not entered.
+fn pull_latin_prefix(
+    chars: &[char],
+    sticky: &[bool],
+    start: usize,
+    end: usize,
+    fitted: usize,
+    limit: f32,
+    size: f32,
+    font: &SubsetFont,
+) -> usize {
+    if end <= start || end >= chars.len() || fitted <= end {
+        return end;
+    }
+    // A URL or a citation is sticky. A camelCase identifier is not: the
+    // boundary inside `Jupyter|Notebook` is the break that fills the line.
+    // Entering a URL would cut `https://Ex.com/AbCd` at `Ab|Cd`.
+    let head: String = chars[start..end].iter().collect();
+    let slack = limit - measure(&head, size, font);
+    let cap = cjk_pair_count(&head) as f32 * size * MAX_JUSTIFY_EM;
+    if slack <= cap + 0.4 {
+        return end;
+    }
+    let room = fitted.min(chars.len());
+    let mut best = end;
+    let mut width = measure(&head, size, font);
+    let mut index = end;
+    while index < room {
+        if index > end && sticky.get(index - 1).copied().unwrap_or(false) {
+            break;
+        }
+        if index > end && camel_boundary(chars, index) && width <= limit + 0.4 {
+            best = index;
+        }
+        let advance = char_advance(chars[index], size, font);
+        if width + advance > limit + 0.4 {
+            break;
+        }
+        width += advance;
+        index += 1;
+    }
+    // `Jupyter|Notebook` can fill the measure on the boundary itself. The
+    // loop stops at `fitted`, so that break is not seen from inside.
+    if index > end
+        && index < chars.len()
+        && camel_boundary(chars, index)
+        && !sticky.get(index - 1).copied().unwrap_or(false)
+        && width <= limit + 0.4
+    {
+        best = index;
+    }
+    best
+}
+
 fn break_before(ch: char) -> bool {
     !matches!(
         ch,
@@ -1200,6 +1293,7 @@ fn is_opening_bracket(ch: char) -> bool {
             | '('
             | '['
             | '{'
+            | '<'
     )
 }
 
@@ -1913,8 +2007,18 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .all(|line| !line.ends_with('（') && !line.ends_with('(')),
+                .all(|line| !line.ends_with('（') && !line.ends_with('(') && !line.ends_with('<')),
             "an opening bracket ends a line: {lines:?}"
+        );
+        let tagged = "</输入> <语气>";
+        let tags = wrap_text(tagged, 10.0, 70.0, 70.0, &uniform_font(tagged)).expect("tags");
+        assert!(
+            tags.iter().all(|line| !line.ends_with('<')),
+            "a prompt tag was split: {tags:?}"
+        );
+        assert!(
+            tags.iter().any(|line| line.contains("<语气>")),
+            "the tag should stay one token: {tags:?}"
         );
         assert!(
             lines.iter().any(|line| line.starts_with('（')),
@@ -2032,6 +2136,54 @@ mod tests {
         assert!(
             long_lines.len() <= 8 && long_lines.iter().all(|line| line.chars().count() >= 4),
             "a sticky span wider than the line became one character: {long_lines:?}"
+        );
+    }
+
+    #[test]
+    fn justification_never_opens_more_than_a_sixth_of_an_em() {
+        let text = "的一系列提示工程工具包括后续说明";
+        let font = uniform_font(text);
+        let width = measure(text, 10.0, &font) + 40.0;
+        let gaps = justify_gaps(text, 10.0, width, &font, true);
+        let cap = 10.0 * 0.15 + 0.01;
+        assert!(
+            gaps.iter().all(|gap| *gap <= cap),
+            "inter-character gap exceeded {cap:.2}: {gaps:?}"
+        );
+        assert!(gaps.iter().any(|gap| *gap > 0.0), "{gaps:?}");
+    }
+
+    #[test]
+    fn a_long_camel_case_token_breaks_so_the_line_can_fill() {
+        let text = "的一系列提示工程工具包括FewShotPromptTemplate并且继续写完这一句说明。";
+        let font = uniform_font(text);
+        // `包括FewShot` fits in 200pt. The whole identifier does not, and the
+        // line must not stop before `Few` just to keep the token intact.
+        let lines = wrap_text(text, 10.0, 200.0, 200.0, &font).unwrap();
+        assert!(
+            lines[0].contains("FewShot") && !lines[0].contains("PromptTemplate"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("PromptTemplate")),
+            "{lines:?}"
+        );
+        let slack = 200.0 - measure(&lines[0], 10.0, &font);
+        let cap = cjk_pair_count(&lines[0]) as f32 * 10.0 * 0.15 + 0.5;
+        assert!(
+            slack <= cap,
+            "line still short by {slack:.1}pt after the camelCase break: {}",
+            lines[0]
+        );
+        let url = "说明见https://Ex.com/AbCd获取更多";
+        // The URL is 190pt at 1em. A 180pt measure cannot hold it, so the
+        // line would have to cut the token. A wider measure must keep it whole.
+        let url_lines = wrap_text(url, 10.0, 250.0, 250.0, &uniform_font(url)).unwrap();
+        assert!(
+            url_lines
+                .iter()
+                .any(|line| line.contains("https://Ex.com/AbCd")),
+            "a URL was cut at camelCase: {url_lines:?}"
         );
     }
 
