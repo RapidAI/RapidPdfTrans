@@ -221,6 +221,18 @@ pub fn rewrite_translation(
             translated
         };
         let will_draw = translated != segment.source;
+        // A comma list the model left in English is still an English body
+        // paragraph, even when a later line of the same list was translated
+        // and the echo is not a character-for-character copy.
+        if job_translates
+            && !translated.chars().any(is_han_char)
+            && comma_list_english(&segment.source)
+        {
+            for id in &segment.glyph_ids {
+                keep.insert(*id, "english-body".into());
+            }
+            continue;
+        }
         if !operators_are_private(&glyphs, &owners) {
             // A contents title shares its text operator with the leader dots and
             // the page number. Blank the operator, draw the translation in the
@@ -564,6 +576,11 @@ pub fn rewrite_translation(
     // was fitted to its own English line, so the first Chinese line stopped
     // early. Join that wrap and fill the source measure before holes close.
     reflow_prompt_continuations(&mut drawn, extraction, &by_id, &embedded);
+    // `Related problems.` is bold and its own segment. Laying it out in the
+    // English heading's narrow box paints 相关问题。 on top of the paragraph.
+    // The heading and the body are one line: bold label, then the sentence.
+    reflow_bold_run_ins(&mut drawn, extraction, &by_id, &embedded);
+    absorb_inline_fences(&mut succeeded, extraction);
     let listing_shifts = close_column_holes(&mut drawn, extraction, &by_id);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
@@ -3140,6 +3157,45 @@ fn centered_heading_span(
         return None;
     }
     Some((left, right))
+}
+
+/// Devroom schedules and similar centered name lists. Each source line is
+/// centered, so the left edges wander and the midpoints do not.
+fn centered_list_ink(ink: &[InkLine<'_>]) -> bool {
+    if ink.len() < 3 {
+        return false;
+    }
+    let axis = centered_list_axis(ink);
+    if !axis.is_finite() {
+        return false;
+    }
+    let size = ink
+        .iter()
+        .map(|line| line.glyphs.iter().map(|glyph| glyph.font_size).fold(0.0, f32::max))
+        .fold(1.0, f32::max)
+        .max(1.0);
+    let commas = ink
+        .iter()
+        .filter(|line| ink_line_text(line).contains(','))
+        .count();
+    commas + 1 >= ink.len()
+        && ink.iter().all(|line| {
+            let mid = (line.left + line.right) * 0.5;
+            (mid - axis).abs() <= size * 3.0
+        })
+}
+
+fn centered_list_axis(ink: &[InkLine<'_>]) -> f32 {
+    let mut mids: Vec<f32> = ink
+        .iter()
+        .map(|line| (line.left + line.right) * 0.5)
+        .filter(|mid| mid.is_finite())
+        .collect();
+    if mids.is_empty() {
+        return f32::NAN;
+    }
+    mids.sort_by(|left, right| left.total_cmp(right));
+    mids[mids.len() / 2]
 }
 
 fn ink_line_text(line: &InkLine<'_>) -> String {
@@ -6531,6 +6587,22 @@ fn layout_segment(
         });
     }
     let mut drawn = restyle_list_lines(drawn, &ink, font);
+    // A centered comma list (`Energy, Legal and Policy, LLVM`) keeps the
+    // source axis. Left-aligning the Chinese makes the block a ragged column
+    // inside the original box.
+    if !bilingual && centered_list_ink(&ink) {
+        let axis = centered_list_axis(&ink);
+        for line in &mut drawn {
+            if line.text.trim().is_empty() {
+                continue;
+            }
+            line.gaps.fill(0.0);
+            let advance = line.widths.iter().sum::<f32>();
+            if advance > 0.0 && axis.is_finite() {
+                line.x = axis - advance * 0.5;
+            }
+        }
+    }
     if !bilingual {
         cover_unhit_clusters(
             &mut drawn,
@@ -7170,6 +7242,409 @@ fn adopt_unchanged_body_lines(
             sup_rise: 0.0,
             glyph_ids,
         });
+    }
+}
+
+/// A bold run-in (`Related problems.`, `Work functions and WFA.`) is its own
+/// segment. Its Chinese is wider than that English prefix, so the wrapped
+/// heading lands on the paragraph. Draw them as one line: the bold heading,
+/// then the body.
+fn reflow_bold_run_ins(
+    drawn: &mut Vec<Drawn>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+) {
+    if drawn.is_empty() {
+        return;
+    }
+    let mut groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
+    for (index, line) in drawn.iter().enumerate() {
+        if line.text.trim().is_empty() {
+            continue;
+        }
+        let mut key = line.glyph_ids.clone();
+        key.sort_unstable();
+        key.dedup();
+        if key.is_empty() {
+            continue;
+        }
+        groups.entry(key).or_default().push(index);
+    }
+    let keys: Vec<Vec<u32>> = groups.keys().cloned().collect();
+    let mut used = HashSet::new();
+    let mut plans: Vec<(Vec<usize>, Vec<Drawn>)> = Vec::new();
+    for key in &keys {
+        if used.contains(key) {
+            continue;
+        }
+        let Some((body_key, lines)) =
+            compose_bold_run_in(key, &groups, drawn, extraction, by_id, embedded)
+        else {
+            continue;
+        };
+        if used.contains(&body_key) {
+            continue;
+        }
+        let mut drop = groups.get(key).cloned().unwrap_or_default();
+        drop.extend(groups.get(&body_key).cloned().unwrap_or_default());
+        used.insert(key.clone());
+        used.insert(body_key);
+        plans.push((drop, lines));
+    }
+    if plans.is_empty() {
+        return;
+    }
+    let mut drop = HashSet::new();
+    let mut added = Vec::new();
+    for (indices, lines) in plans {
+        drop.extend(indices);
+        added.extend(lines);
+    }
+    let mut kept = Vec::new();
+    for (index, line) in drawn.drain(..).enumerate() {
+        if !drop.contains(&index) {
+            kept.push(line);
+        }
+    }
+    kept.extend(added);
+    *drawn = kept;
+}
+
+fn compose_bold_run_in(
+    head_key: &[u32],
+    groups: &HashMap<Vec<u32>, Vec<usize>>,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+) -> Option<(Vec<u32>, Vec<Drawn>)> {
+    let head_glyphs = ids_glyphs(head_key, extraction, by_id);
+    if !bold_run_in_glyphs(&head_glyphs) {
+        return None;
+    }
+    let head_y = head_glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(0.0, f32::max);
+    let head_right = head_glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+        .fold(f32::MIN, f32::max);
+    let head_left = head_glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].min(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min);
+    let page = head_glyphs[0].page_index;
+    let size = head_glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0, f32::max)
+        .max(1.0);
+    let mut body_key: Option<Vec<u32>> = None;
+    let mut body_x = f32::MAX;
+    for (key, _) in groups {
+        if key == head_key {
+            continue;
+        }
+        let glyphs = ids_glyphs(key, extraction, by_id);
+        if glyphs.is_empty() || glyphs[0].page_index != page {
+            continue;
+        }
+        let letters = glyphs
+            .iter()
+            .flat_map(|glyph| glyph.unicode.chars())
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .count();
+        if letters < 12 {
+            continue;
+        }
+        let hit = glyphs.iter().any(|glyph| {
+            (glyph.matrix[5] - head_y).abs() <= 1.6
+                && glyph.matrix[4] > head_right - 0.5
+                && glyph.matrix[4] < body_x
+        });
+        if !hit {
+            continue;
+        }
+        let x = glyphs
+            .iter()
+            .filter(|glyph| (glyph.matrix[5] - head_y).abs() <= 1.6)
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        if x < body_x {
+            body_x = x;
+            body_key = Some(key.clone());
+        }
+    }
+    let body_key = body_key?;
+    let body_glyphs = ids_glyphs(&body_key, extraction, by_id);
+    let column_right = body_glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+        .fold(head_right, f32::max);
+    let width = column_right - head_left;
+    if width < size * 8.0 {
+        return None;
+    }
+    let head_indices = groups.get(head_key)?;
+    let body_indices = groups.get(&body_key)?;
+    let mut head_lines: Vec<&Drawn> = head_indices.iter().map(|index| &drawn[*index]).collect();
+    let mut body_lines: Vec<&Drawn> = body_indices.iter().map(|index| &drawn[*index]).collect();
+    head_lines.sort_by(|left, right| right.y.total_cmp(&left.y));
+    body_lines.sort_by(|left, right| right.y.total_cmp(&left.y));
+    let head_font = embedded_font(&head_lines[0].resource, embedded)?;
+    let body_font = embedded_font(&body_lines[0].resource, embedded)?;
+    let head_text = join_wrapped_lines(&head_lines, head_font);
+    let body_text = join_wrapped_lines(&body_lines, body_font);
+    if head_text.trim().is_empty() || body_text.trim().is_empty() {
+        return None;
+    }
+    let paint = body_lines
+        .iter()
+        .map(|line| line.size)
+        .fold(size, f32::max)
+        .max(1.0);
+    let gap = paint * 0.4;
+    let head_width = measure(&head_text, paint, head_font);
+    let y0 = head_lines
+        .iter()
+        .chain(body_lines.iter())
+        .map(|line| line.y)
+        .fold(f32::MIN, f32::max);
+    let leading = if body_lines.len() >= 2 {
+        (body_lines[0].y - body_lines[1].y).abs().clamp(paint * 1.15, paint * 1.85)
+    } else {
+        paint * 1.55
+    };
+    let color = body_lines[0].color.clone();
+    let head_color = head_lines[0].color.clone();
+    let mut ids = head_key.to_vec();
+    ids.extend(body_key.iter().copied());
+    ids.sort_unstable();
+    ids.dedup();
+    let share = head_width + gap + paint * 2.0 <= width;
+    let (head_wrapped, body_wrapped, first_shift) = if share {
+        let first = (width - head_width - gap).max(paint);
+        let body_wrapped = wrap_text(&body_text, paint, first, width, body_font)?;
+        (vec![head_text], body_wrapped, head_width + gap)
+    } else {
+        let head_wrapped = wrap_text(&head_text, paint, width, width, head_font)?;
+        let body_wrapped = wrap_text(&body_text, paint, width, width, body_font)?;
+        (head_wrapped, body_wrapped, 0.0)
+    };
+    let mut painted = Vec::new();
+    for (index, line) in head_wrapped.iter().enumerate() {
+        painted.push(drawn_line(
+            page,
+            head_left,
+            y0 - index as f32 * leading,
+            paint,
+            head_color.clone(),
+            line,
+            head_font,
+            &head_lines[0].resource,
+            head_lines[0].skew,
+            &ids,
+            false,
+            width,
+        ));
+    }
+    let body_y0 = if share {
+        y0
+    } else {
+        y0 - head_wrapped.len() as f32 * leading
+    };
+    for (index, line) in body_wrapped.iter().enumerate() {
+        let x = if share && index == 0 {
+            head_left + first_shift
+        } else {
+            head_left
+        };
+        let measure_width = if share && index == 0 {
+            (width - first_shift).max(paint)
+        } else {
+            width
+        };
+        let justify = justify_wrapped_line(&body_wrapped, index);
+        painted.push(drawn_line(
+            page,
+            x,
+            body_y0 - index as f32 * leading,
+            paint,
+            color.clone(),
+            line,
+            body_font,
+            &body_lines[0].resource,
+            body_lines[0].skew,
+            &ids,
+            justify,
+            measure_width,
+        ));
+    }
+    Some((body_key, painted))
+}
+
+fn bold_run_in_glyphs(glyphs: &[&Glyph]) -> bool {
+    if glyphs.len() < 3 {
+        return false;
+    }
+    let letters = glyphs
+        .iter()
+        .filter(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .count();
+    if !(2..=80).contains(&letters) {
+        return false;
+    }
+    let text: String = glyphs
+        .iter()
+        .map(|glyph| glyph.unicode.as_str())
+        .collect::<String>();
+    let trimmed = text.trim();
+    if !(trimmed.ends_with('.') || trimmed.ends_with(':') || trimmed.ends_with('。')) {
+        return false;
+    }
+    let bold_letters = glyphs.iter().any(|glyph| {
+        glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) && face_style(&glyph.font_name).bold
+    });
+    let plain_letters = glyphs.iter().any(|glyph| {
+        glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) && !face_style(&glyph.font_name).bold
+    });
+    if !bold_letters || plain_letters {
+        return false;
+    }
+    let size = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0, f32::max)
+        .max(1.0);
+    let top = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MIN, f32::max);
+    let bottom = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MAX, f32::min);
+    top - bottom <= size * 0.45
+}
+
+fn ids_glyphs<'a>(
+    ids: &[u32],
+    extraction: &'a Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Vec<&'a Glyph> {
+    let mut glyphs: Vec<&Glyph> = ids
+        .iter()
+        .filter_map(|id| by_id.get(id).map(|index| &extraction.glyphs[*index]))
+        .collect();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    glyphs
+}
+
+fn embedded_font<'a>(resource: &str, embedded: &'a [(String, SubsetFont)]) -> Option<&'a SubsetFont> {
+    embedded
+        .iter()
+        .find(|(name, _)| name == resource)
+        .map(|(_, font)| font)
+}
+
+fn join_wrapped_lines(lines: &[&Drawn], font: &SubsetFont) -> String {
+    let mut out = String::new();
+    for line in lines {
+        let piece = line.text.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        if let Some(prev) = out.chars().last() {
+            let next = piece.chars().next().unwrap_or(' ');
+            if prev.is_ascii_alphanumeric()
+                && next.is_ascii_alphanumeric()
+                && font.glyphs.contains_key(&(' ' as u32))
+            {
+                out.push(' ');
+            }
+        }
+        out.push_str(piece);
+    }
+    out
+}
+
+/// A binomial fence or rule with no Unicode, sitting in a translated line,
+/// stays painted after the operators of that line are blanked. `n = k + |`
+/// is that fence. A display summation is not flanked by the paragraph.
+fn absorb_inline_fences(succeeded: &mut HashSet<u32>, extraction: &Extraction) {
+    let hosts: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| succeeded.contains(&glyph.id))
+        .collect();
+    if hosts.is_empty() {
+        return;
+    }
+    for glyph in &extraction.glyphs {
+        if !glyph.unmapped || succeeded.contains(&glyph.id) {
+            continue;
+        }
+        let name = glyph.font_name.to_ascii_uppercase();
+        if !name.contains("EXTENSION") && !name.contains("CMEX") {
+            continue;
+        }
+        let x = glyph.matrix[4];
+        let y = glyph.matrix[5];
+        let flanked = hosts.iter().any(|left| {
+            let size = left.font_size.max(1.0);
+            if left.page_index != glyph.page_index || (left.matrix[5] - y).abs() > size {
+                return false;
+            }
+            if left.matrix[4] >= x {
+                return false;
+            }
+            hosts.iter().any(|right| {
+                right.page_index == glyph.page_index
+                    && right.id != left.id
+                    && (right.matrix[5] - y).abs() <= size
+                    && right.matrix[4] > x
+                    && x - left.matrix[4] < size * 18.0
+                    && right.matrix[4] - x < size * 18.0
+            })
+        });
+        if flanked {
+            succeeded.insert(glyph.id);
+        }
+    }
+}
+
+fn drawn_line(
+    page: u32,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: Color,
+    text: &str,
+    font: &SubsetFont,
+    resource: &str,
+    skew: f32,
+    glyph_ids: &[u32],
+    justify: bool,
+    width: f32,
+) -> Drawn {
+    Drawn {
+        page,
+        x,
+        y,
+        size,
+        color,
+        cids: cids_of(text, font),
+        resource: resource.to_string(),
+        skew,
+        widths: char_widths(text, size, font),
+        gaps: justify_gaps(text, size, width, font, justify),
+        text: text.to_string(),
+        supers: vec![false; text.chars().count()],
+        sup_scale: 1.0,
+        sup_rise: 0.0,
+        glyph_ids: glyph_ids.to_vec(),
     }
 }
 
@@ -11375,8 +11850,14 @@ fn english_body_source(text: &str) -> bool {
     } else {
         trimmed.to_string()
     };
+    if body.chars().any(is_han_char) {
+        return false;
+    }
+    if comma_list_english(&body) {
+        return true;
+    }
     let latin = body.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    if latin < 40 || body.chars().any(is_han_char) {
+    if latin < 40 {
         return false;
     }
     let words: Vec<&str> = body.split_whitespace().collect();
@@ -11388,6 +11869,23 @@ fn english_body_source(text: &str) -> bool {
                 || word.contains('@')
                 || word.chars().all(|ch| ch.is_ascii_digit())
         })
+}
+
+/// `Energy, Legal and Policy, LLVM, Go` is one body paragraph. A short
+/// line of that list used to fall under the 40-letter floor, so coverage
+/// reported `english_body: 0` while the paragraph was still English.
+fn comma_list_english(text: &str) -> bool {
+    if text.chars().any(is_han_char) {
+        return false;
+    }
+    if text.matches(',').count() < 3 {
+        return false;
+    }
+    let words = text
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ':' | ';' | '/'))
+        .filter(|word| word.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .count();
+    words >= 4
 }
 
 fn is_han_char(ch: char) -> bool {
@@ -13359,6 +13857,124 @@ mod tests {
         assert!(!english_body_source(
             "\u{f0a1} https://github.com/dair-ai/Prompt-Engineering-Guide"
         ));
+        assert!(comma_list_english(
+            "Energy, Legal and Policy, Open Media, LLVM"
+        ));
+        assert!(english_body_source(
+            "Ada, Go, Rust, PostgreSQL, LLVM, Nix"
+        ));
+        assert!(!comma_list_english("能源、法律与政策、LLVM、Go、Rust"));
+        assert!(!english_body_source("Go, Rust"));
+    }
+
+    #[test]
+    fn a_bold_run_in_heading_does_not_overlap_the_paragraph() {
+        let mut glyphs = Vec::new();
+        let mut x = 72.0f32;
+        for (index, ch) in "Related problems.".chars().enumerate() {
+            let mut glyph = ink_glyph(index as u32, x, 400.0, 10.0, &ch.to_string());
+            glyph.font_name = "CMBX10".into();
+            glyph.bbox = [x, 392.0, x + 5.5, 408.0];
+            glyphs.push(glyph);
+            x += 5.5;
+        }
+        let head_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+        let body_at = glyphs.len() as u32;
+        x += 12.0;
+        for (index, ch) in "The k-server problem is closely related to paging."
+            .chars()
+            .enumerate()
+        {
+            let mut glyph = ink_glyph(body_at + index as u32, x, 400.0, 10.0, &ch.to_string());
+            glyph.bbox = [x, 392.0, x + 4.5, 408.0];
+            glyphs.push(glyph);
+            x += 4.5;
+        }
+        if let Some(last) = glyphs.last_mut() {
+            last.bbox[2] = 540.0;
+        }
+        let body_ids: Vec<u32> = glyphs
+            .iter()
+            .skip(head_ids.len())
+            .map(|glyph| glyph.id)
+            .collect();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let head_text = "相关问题。";
+        let body_text = "k-服务器问题与许多其他在线问题密切相关，例如分页问题对应于度量空间的特殊情况。";
+        let font_for = |text: &str| {
+            let mut map = HashMap::new();
+            for (id, ch) in (1u16..).zip(text.chars()) {
+                map.insert(ch as u32, (id, 1000));
+            }
+            map.entry(' ' as u32).or_insert((400, 400));
+            SubsetFont {
+                bytes: Vec::new(),
+                units_per_em: 1000,
+                glyphs: map,
+            }
+        };
+        let head_font = font_for(head_text);
+        let body_font = font_for(body_text);
+        let mut drawn = vec![
+            drawn_line(
+                0,
+                72.0,
+                400.0,
+                10.0,
+                Color::black(),
+                head_text,
+                &head_font,
+                "BOLD",
+                0.0,
+                &head_ids,
+                false,
+                90.0,
+            ),
+            drawn_line(
+                0,
+                72.0,
+                400.0,
+                10.0,
+                Color::black(),
+                body_text,
+                &body_font,
+                "REG",
+                0.0,
+                &body_ids,
+                false,
+                460.0,
+            ),
+        ];
+        let embedded = vec![("BOLD".into(), head_font), ("REG".into(), body_font)];
+        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded);
+        let head = drawn
+            .iter()
+            .find(|line| line.text.contains('相'))
+            .expect("heading");
+        let body = drawn
+            .iter()
+            .find(|line| line.resource == "REG" && (line.y - head.y).abs() < 0.5)
+            .expect("body on the heading line");
+        let head_advance = head.widths.iter().sum::<f32>() + head.gaps.iter().sum::<f32>();
+        assert!(
+            body.x + 0.6 >= head.x + head_advance,
+            "bold run-in overlaps the paragraph: heading x {:.1} width {:.1}, body x {:.1}",
+            head.x,
+            head_advance,
+            body.x
+        );
     }
 
     #[test]

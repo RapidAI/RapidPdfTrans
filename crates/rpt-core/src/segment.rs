@@ -858,6 +858,245 @@ fn detach_junk_ocr_pages(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> 
     drop_glyphs_as(lines, drop, "ocr")
 }
 
+/// Two centered lines of a comma-separated list. A left-aligned sentence
+/// that ends with a comma does not share this midpoint test: its next line
+/// starts at the same left edge, which the ordinary join already accepts.
+fn centered_comma_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    let size = upper.size.max(lower.size).max(1.0);
+    if (upper.size - lower.size).abs() > size * 0.2 {
+        return false;
+    }
+    let upper_mid = (upper.left + upper.right) * 0.5;
+    let lower_mid = (lower.left + lower.right) * 0.5;
+    if (upper_mid - lower_mid).abs() > size * 3.0 {
+        return false;
+    }
+    let upper_text = upper.text.trim();
+    let lower_text = lower.text.trim();
+    // A left-aligned address, heading, or sentence shares a left edge. A
+    // centered list does not: each line is centered, so the edges wander.
+    if (upper.left - lower.left).abs() <= size * 1.2 {
+        return false;
+    }
+    if upper_text.ends_with('.') || upper_text.ends_with('?') || upper_text.ends_with('!') {
+        return false;
+    }
+    let commas = upper_text.matches(',').count();
+    commas >= 2
+        && upper_text.split_whitespace().count() >= 3
+        && lower_text.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+/// Per-block OCR score. A low-quality block is not translated and not
+/// painted. A title page whose scan is only partly read (a real title plus
+/// `3jOV£9rOIit`) keeps the photograph: every text block on that page goes.
+fn detach_low_quality_ocr(
+    lines: &mut Vec<VisualLine<'_>>,
+    regions: &[PaintedRegion],
+    pages: &[PageInfo],
+) -> Vec<(u32, String)> {
+    let mut pages_present: Vec<u32> = lines.iter().map(|line| line.page).collect();
+    pages_present.sort_unstable();
+    pages_present.dedup();
+    let mut drop = std::collections::HashSet::new();
+    for page in pages_present {
+        let page_lines: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.page == page)
+            .map(|(index, _)| index)
+            .collect();
+        if page_lines.is_empty() {
+            continue;
+        }
+        let low: Vec<usize> = page_lines
+            .iter()
+            .copied()
+            .filter(|&index| ocr_line_low_quality(&lines[index].text))
+            .collect();
+        if low.is_empty() {
+            continue;
+        }
+        let drop_page = title_scan_with_partial_ocr(page, &page_lines, &low, lines, regions, pages);
+        let victims: &[usize] = if drop_page { &page_lines } else { &low };
+        for index in victims {
+            for glyph in &lines[*index].glyphs {
+                drop.insert(glyph.id);
+            }
+        }
+    }
+    drop_glyphs_as(lines, drop, "ocr")
+}
+
+fn title_scan_with_partial_ocr(
+    page: u32,
+    page_lines: &[usize],
+    low: &[usize],
+    lines: &[VisualLine<'_>],
+    regions: &[PaintedRegion],
+    pages: &[PageInfo],
+) -> bool {
+    if low.is_empty() || page_lines.len() > 24 {
+        return false;
+    }
+    let prose = page_lines
+        .iter()
+        .filter(|&&index| !ocr_line_low_quality(&lines[index].text) && prose_ocr_sentence(&lines[index].text))
+        .count();
+    if prose >= 4 {
+        return false;
+    }
+    let Some(info) = pages.iter().find(|info| info.index == page) else {
+        return false;
+    };
+    let page_area = (info.media_box[2] - info.media_box[0]).abs()
+        * (info.media_box[3] - info.media_box[1]).abs();
+    if page_area < 1.0 {
+        return false;
+    }
+    regions.iter().any(|region| {
+        if region.page_index != page || region.kind != "image" {
+            return false;
+        }
+        let width = (region.bbox[2] - region.bbox[0]).abs();
+        let height = (region.bbox[3] - region.bbox[1]).abs();
+        width * height >= page_area * 0.45
+    })
+}
+
+/// Dictionary-word ratio and garbage-character ratio for one OCR block.
+/// `The ideas are expressed` is readable. `3jOV£9rOIit` and `POBUtfttCO` are not.
+fn ocr_line_low_quality(text: &str) -> bool {
+    if text.contains("://") || text.contains('@') || text.contains("www.") {
+        return false;
+    }
+    let tokens: Vec<&str> = text
+        .split_whitespace()
+        .filter(|token| token.chars().any(|ch| ch.is_alphanumeric()))
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    let mut chars = 0usize;
+    let mut garbage = 0usize;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        chars += 1;
+        if junk_ocr_symbol(ch) {
+            garbage += 1;
+        }
+    }
+    if chars >= 6 && garbage * 8 >= chars {
+        return true;
+    }
+    let junk = tokens
+        .iter()
+        .filter(|token| ocr_garbage_token(token))
+        .count();
+    let dictionary = tokens.iter().filter(|token| dictionary_token(token)).count();
+    let ratio = dictionary as f32 / tokens.len() as f32;
+    if tokens.len() == 1 && junk == 1 && tokens[0].chars().count() >= 4 {
+        return true;
+    }
+    tokens.len() >= 2 && junk > 0 && ratio < 0.5
+}
+
+/// `3jOV£9rOIit` and `POBUtfttCO` are misreads. `PromptTemplate` and a URL
+/// are not: a camel-case hump is a real token, not a consonant smear.
+/// A junk symbol or a digit glued into a non-word (`3j`, `9r`) wins over
+/// that exemption. `log2` and `O(log2` stay: the letters are a plain word.
+fn ocr_garbage_token(token: &str) -> bool {
+    let chars: Vec<char> = token.chars().collect();
+    let letters: Vec<char> = chars
+        .iter()
+        .copied()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
+    if chars.iter().copied().any(junk_ocr_symbol) {
+        return true;
+    }
+    // `junk_ocr_token` treats every digit-letter join as garbage. A plain
+    // word (`log2`, `O(log2`) is a formula, so stop before that check.
+    if digit_touches_letter(&chars) {
+        return !plain_digit_word(&letters);
+    }
+    if camel_identifier(&letters) {
+        return false;
+    }
+    junk_ocr_token(token)
+}
+
+/// `log2`, `H2O`, `O(log2`: one capitalisation and a vowel. `3jOV9rOIit` is
+/// not this shape, so a digit glued to a letter is still a misread.
+fn plain_digit_word(letters: &[char]) -> bool {
+    plain_word_case(letters)
+        && letters.iter().any(|ch| {
+            matches!(
+                ch.to_ascii_lowercase(),
+                'a' | 'e' | 'i' | 'o' | 'u' | 'y'
+            )
+        })
+}
+
+/// `Prompt|Template` has a capital followed by a lowercase hump that contains
+/// a vowel. `Iit` inside `3jOV£9rOIit` is only two letters, and `POBUtfttCO`
+/// has a lowercase smear (`tftt`) with no vowel.
+fn camel_identifier(letters: &[char]) -> bool {
+    if letters.len() < 4 {
+        return false;
+    }
+    let vowel = |ch: char| matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u');
+    let mut index = 0;
+    while index < letters.len() {
+        if letters[index].is_ascii_uppercase() {
+            let start = index + 1;
+            let mut end = start;
+            while end < letters.len() && letters[end].is_ascii_lowercase() {
+                end += 1;
+            }
+            if end - start >= 3 && letters[start..end].iter().any(|ch| vowel(*ch)) {
+                return true;
+            }
+            index = end.max(index + 1);
+            continue;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn dictionary_token(token: &str) -> bool {
+    if junk_ocr_token(token) {
+        return false;
+    }
+    let bare: String = token.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    if bare.len() < 2 {
+        return false;
+    }
+    let lower = bare.to_ascii_lowercase();
+    if COMMON_WORDS.contains(&lower.as_str()) {
+        return true;
+    }
+    let chars: Vec<char> = bare.chars().collect();
+    chars.iter().any(|ch| {
+        matches!(
+            ch.to_ascii_lowercase(),
+            'a' | 'e' | 'i' | 'o' | 'u' | 'y'
+        )
+    }) && consonant_run(&chars) < 5
+}
+
+const COMMON_WORDS: &[&str] = &[
+    "the", "and", "are", "is", "was", "were", "this", "that", "with", "for", "from", "using",
+    "may", "can", "not", "also", "their", "these", "those", "of", "in", "on", "to", "a", "an",
+    "or", "as", "at", "by", "be", "it", "its", "we", "our", "you", "your", "which", "when",
+    "where", "what", "who", "how", "but", "if", "then", "than", "into", "over", "under", "about",
+    "between", "after", "before", "each", "other", "such", "only", "more", "most", "some", "any",
+    "all", "no", "yes", "has", "have", "had", "been", "being", "will", "would", "should", "could",
+];
+
 fn page_has_prose(lines: &[&VisualLine<'_>]) -> bool {
     let joined = lines
         .iter()
@@ -1046,6 +1285,7 @@ fn assemble(
     // A scanned cover whose OCR is `3jOV£9rOIit` has no sentence. Painting a
     // translation covers the photograph with gibberish. The image stays.
     kept.extend(detach_junk_ocr_pages(&mut lines));
+    kept.extend(detach_low_quality_ocr(&mut lines, regions, pages));
     attach_markers(&mut lines);
     attach_math_scripts(&mut lines);
     kept.extend(detach_toc_marks(&mut lines));
@@ -1755,7 +1995,8 @@ fn is_marker_text(text: &str) -> bool {
     !text.is_empty()
         && text.chars().count() <= 2
         && text.chars().all(|ch| {
-            ch.is_ascii_digit() || matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆' | '#')
+            ch.is_ascii_digit()
+                || matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆' | '#' | '+')
         })
 }
 
@@ -2777,7 +3018,9 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
             best.map(|(index, _)| index).or_else(|| {
                 columns.iter().position(|column| {
                     column.last().is_some_and(|prev| {
-                        hanging_pull(prev, &line) || right_aligned_display_wrap(prev, &line)
+                        hanging_pull(prev, &line)
+                            || right_aligned_display_wrap(prev, &line)
+                            || centered_comma_continuation(prev, &line)
                     })
                 })
             })
@@ -3485,6 +3728,11 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     let dy = upper.y - lower.y;
     if dy < size * 0.7 || dy > size * 1.5 {
         return false;
+    }
+    // A centered devroom list breaks the left edge on every line (`Energy,`
+    // / `Legal and Policy,`). The shared axis is the line's midpoint.
+    if centered_comma_continuation(upper, lower) {
+        return true;
     }
     // `2 Guided…` is the next numbered item, not the tail of item 1.
     if !hyphen && numbered_item_body(&lower.text).is_some() {
@@ -9040,6 +9288,112 @@ mod tests {
             "{:?}",
             seg.kept
         );
+    }
+
+    #[test]
+    fn a_citation_superscript_plus_joins_the_key() {
+        let mut host = glyph(0, 72.0, 100.0, "[FKL 91]", false);
+        host.font_size = 10.0;
+        host.bbox = [72.0, 98.0, 150.0, 110.0];
+        host.advance = [78.0, 0.0];
+        let mut plus = glyph(1, 112.0, 104.5, "+", false);
+        plus.font_size = 7.5;
+        plus.bbox = [112.0, 104.0, 118.0, 112.0];
+        let texts: Vec<_> = segment_glyphs(&[host, plus])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains('+') && text.contains("FKL")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_centered_comma_list_is_one_paragraph() {
+        let rows = [
+            (180.0, 500.0, 240.0, "Ada, Android, Go, Rust,"),
+            (140.0, 486.0, 320.0, "Energy, Legal and Policy, LLVM,"),
+            (160.0, 472.0, 280.0, "Matrix.org Foundation and Community"),
+        ];
+        let mut glyphs = Vec::new();
+        for (id, (x, y, width, text)) in rows.iter().enumerate() {
+            let mut item = glyph(id as u32, *x, *y, text, false);
+            item.font_size = 10.0;
+            item.bbox = [*x, *y, x + width, y + 10.0];
+            item.advance = [*width, 0.0];
+            glyphs.push(item);
+        }
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("Energy") && texts[0].contains("Matrix.org"), "{texts:?}");
+    }
+
+    #[test]
+    fn a_partial_ocr_title_keeps_the_image_and_a_bad_block_is_dropped() {
+        let mut glyphs = Vec::new();
+        let mut title = glyph(0, 80.0, 500.0, "Constraints of Public Utilities", false);
+        title.page_index = 0;
+        title.font_size = 18.0;
+        title.bbox = [80.0, 500.0, 400.0, 520.0];
+        glyphs.push(title);
+        let mut junk = glyph(1, 80.0, 460.0, "3jOV£9rOIit", false);
+        junk.page_index = 0;
+        junk.bbox = [80.0, 460.0, 200.0, 474.0];
+        glyphs.push(junk);
+        let mut prose = glyph(
+            2,
+            72.0,
+            700.0,
+            "The ideas are expressed every day in the pages.",
+            false,
+        );
+        prose.page_index = 1;
+        prose.bbox = [72.0, 700.0, 400.0, 712.0];
+        glyphs.push(prose);
+        let mut noise = glyph(3, 72.0, 680.0, "POBUtfttCO BV TttH", false);
+        noise.page_index = 1;
+        noise.bbox = [72.0, 680.0, 220.0, 692.0];
+        glyphs.push(noise);
+        let pages = vec![
+            crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            },
+            crate::glyph::PageInfo {
+                index: 1,
+                object_id: "2 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            },
+        ];
+        let regions = vec![crate::glyph::PaintedRegion {
+            page_index: 0,
+            bbox: [0.0, 0.0, 612.0, 792.0],
+            kind: "image".into(),
+        }];
+        assert!(ocr_line_low_quality("3jOV£9rOIit"), "scorer missed the garbage token");
+        assert!(ocr_line_low_quality("POBUtfttCO BV TttH"), "scorer missed the smear");
+        let seg = segment_placed(&glyphs, &SegmentFlags::default(), &regions, &pages);
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().all(|text| !text.contains("3jOV") && !text.contains("Constraints")),
+            "title scan was painted: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("expressed every day")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().all(|text| !text.contains("POBUtfttCO")),
+            "{texts:?}"
+        );
+        assert!(seg.kept.iter().any(|(_, reason)| reason == "ocr"));
     }
 
     #[test]

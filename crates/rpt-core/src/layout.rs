@@ -557,7 +557,11 @@ pub(crate) fn justify_gaps(
     // (a short label), stays as it is. Anything wider than the cap is a
     // wrap problem: the line should have taken another word or a camelCase
     // break, not opened a river between ideographs.
-    if slack < 0.4 || slack > width * 0.55 {
+    // The cap cannot square a line that is still short by more than one
+    // sixth of an em per pair. Spacing those characters only opens rivers
+    // (`关 系。此 后`) and the tail stays short. Leave the line ragged.
+    let cap = slots.len() as f32 * size * MAX_JUSTIFY_EM;
+    if slack < 0.4 || slack > cap + 0.4 {
         return gaps;
     }
     let extra = (slack / slots.len() as f32).min(size * MAX_JUSTIFY_EM);
@@ -1249,13 +1253,19 @@ fn can_break_at(chars: &[char], sticky: &[bool], end: usize) -> bool {
     can_break(chars[end - 1], chars[end])
 }
 
+/// ASCII letters and accented Latin (`Plücker`, `naïve`, `café`). CJK stays
+/// a per-character break. `ü` is not ASCII, and treating it as a break split
+/// `Plü` / `cker`.
+fn is_latin_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || (ch.is_alphabetic() && !is_cjk_body(ch))
+}
+
 fn can_break(prev: char, next: char) -> bool {
     // Keep Latin words and hyphenated names on one line. CJK still breaks per character.
-    if prev.is_ascii_alphanumeric() && (next.is_ascii_alphanumeric() || next == '-' || next == '\'')
-    {
+    if is_latin_word_char(prev) && (is_latin_word_char(next) || next == '-' || next == '\'') {
         return false;
     }
-    if (prev == '-' || prev == '\'') && next.is_ascii_alphanumeric() {
+    if (prev == '-' || prev == '\'') && is_latin_word_char(next) {
         return false;
     }
     break_after(prev) && break_before(next)
@@ -2509,7 +2519,9 @@ mod tests {
     fn justification_never_opens_more_than_a_sixth_of_an_em() {
         let text = "的一系列提示工程工具包括后续说明";
         let font = uniform_font(text);
-        let width = measure(text, 10.0, &font) + 40.0;
+        let natural = measure(text, 10.0, &font);
+        let pairs = cjk_pair_count(text) as f32;
+        let width = natural + (pairs * 10.0 * 0.15 * 0.5).max(1.0);
         let gaps = justify_gaps(text, 10.0, width, &font, true);
         let cap = 10.0 * 0.15 + 0.01;
         assert!(
@@ -2517,6 +2529,27 @@ mod tests {
             "inter-character gap exceeded {cap:.2}: {gaps:?}"
         );
         assert!(gaps.iter().any(|gap| *gap > 0.0), "{gaps:?}");
+        let rivers = justify_gaps(text, 10.0, natural + 40.0, &font, true);
+        assert!(
+            rivers.iter().all(|gap| *gap == 0.0),
+            "a line the cap cannot square was letter-spaced: {rivers:?}"
+        );
+    }
+
+    #[test]
+    fn an_accented_latin_word_stays_on_one_line() {
+        let text = "赋值拟阵自然地产生于行列式的赋值和 Plücker 关系。此后进一步扩展。";
+        let font = uniform_font(text);
+        let lines = wrap_text(text, 10.0, 180.0, 180.0, &font).unwrap();
+        let glued = lines.join("");
+        assert!(
+            glued.contains("Plücker"),
+            "Plücker was split: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.ends_with("Plü") && !line.starts_with("cker")),
+            "{lines:?}"
+        );
     }
 
     #[test]

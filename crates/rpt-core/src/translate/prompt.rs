@@ -31,6 +31,7 @@ Translate each segment's \"text\" field into {dst}. \
 Copy every placeholder token of the form ⟦N⟧ exactly, including the brackets and the number. Do not translate, reorder, split, or drop placeholders. \
 Do not copy context_before or context_after into the output. \
 Preserve punctuation that belongs to the segment. \
+When a segment is a comma-separated list of topics and names, translate descriptive topics into {dst} and keep product, project, language, and organization names in their original Latin spelling. \
 Return one object per input id. Do not merge, drop, or invent ids.",
         src = language_name(source_lang),
         dst = language_name(target_lang),
@@ -63,6 +64,7 @@ Reply with JSON only, no markdown, in exactly this shape: \
 {{\"translations\":[{{\"id\":0,\"text\":\"...\"}}]}}. \
 The text value must be {dst}. Do not return the English source. \
 Keep numbers, URLs, and personal names in their original Latin spelling. \
+In a comma-separated list, translate descriptive topics and keep product, project, language, and organization names in Latin. \
 Copy every ⟦N⟧ placeholder unchanged. Do not add notes or explanations."
     )
 }

@@ -2387,6 +2387,7 @@ fn gloss_replacement(inner: &str) -> Option<String> {
         || inner
             .chars()
             .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
+        || math_parenthetical(inner)
     {
         return None;
     }
@@ -2414,6 +2415,35 @@ fn gloss_replacement(inner: &str) -> Option<String> {
         return Some(acronyms[0].to_string());
     }
     Some(String::new())
+}
+
+/// `(log k)`, `(log2 k)`, and `(logn log^2 k)` are the formula, not an
+/// English gloss. `O(log k)` was drawn as `O` once the parentheses were
+/// stripped. `(against oblivious adversaries)` is still a gloss.
+fn math_parenthetical(inner: &str) -> bool {
+    let words = gloss_words(inner);
+    !words.is_empty() && words.len() <= 6 && words.iter().all(|word| math_word(word))
+}
+
+fn math_word(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "log" | "ln" | "exp" | "sin" | "cos" | "tan" | "max" | "min" | "sup" | "inf" | "det"
+    ) {
+        return true;
+    }
+    if lower.starts_with("log") && lower[3..].chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return true;
+    }
+    if word.chars().all(|ch| ch.is_ascii_digit()) && !word.is_empty() {
+        return true;
+    }
+    let letters = word.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    letters == 1
+        && word
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '^' | '+' | '-' | '*'))
 }
 
 fn gloss_words(inner: &str) -> Vec<&str> {
@@ -3232,6 +3262,26 @@ mod tests {
         assert_eq!(TranslateOptions::default().resolved_model(), {
             resolve_choice(None, std::env::var("RPT_LLM_MODEL").ok().as_deref(), "auto")
         });
+    }
+
+    #[test]
+    fn inline_math_parentheses_are_not_english_glosses() {
+        let kept = repair_body_translation(
+            "a competitive ratio of O(log k) is known",
+            "可以实现O(logk)的竞争比，以及Ω(log2 k)下界",
+        );
+        assert!(
+            kept.contains("(logk)") && kept.contains("(log2 k)"),
+            "{kept}"
+        );
+        let gloss = repair_body_translation(
+            "algorithms (against oblivious adversaries) exist",
+            "算法（against oblivious adversaries）存在",
+        );
+        assert!(
+            !gloss.contains("against"),
+            "{gloss}"
+        );
     }
 
     #[test]
