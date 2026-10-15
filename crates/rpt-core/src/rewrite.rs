@@ -620,7 +620,11 @@ pub fn rewrite_translation(
     // The heading and the body are one line: bold label, then the sentence.
     reflow_bold_run_ins(&mut drawn, extraction, &by_id, &embedded);
     absorb_inline_fences(&mut succeeded, extraction);
+    let y_before: Vec<f32> = drawn.iter().map(|line| line.y).collect();
     let listing_shifts = close_column_holes(&mut drawn, extraction, &by_id);
+    // The formula was seated on the line before this pull. Leaving it there
+    // paints `≤ µ(Q̂) + µ(H)` on the proof after the lemma statement moved up.
+    carry_formula_with_line(&drawn, &y_before, &mut stack_shifts);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
@@ -7740,6 +7744,7 @@ fn lift_stack_placeholders(
                 ids: stacks[*index].clone(),
                 dx: hole - anchor_x,
                 dy: line.y - anchor_y,
+                host_y: line.y,
             });
         }
         per_line
@@ -8916,6 +8921,9 @@ struct ListingShift {
     ids: Vec<u32>,
     dx: f32,
     dy: f32,
+    /// Baseline of the drawn line this shift was measured against.
+    /// `NaN` for a listing shift, which already carries its own pull.
+    host_y: f32,
 }
 
 /// A contents title shares its baseline with a kept page number. Body text
@@ -10117,6 +10125,24 @@ pub(crate) fn body_hole_reach(size: f32) -> f32 {
     size.max(1.0) * 3.4
 }
 
+/// A column pull moves the translated line. The formula hole was measured
+/// against the line's old baseline, so it has to take the same step.
+fn carry_formula_with_line(drawn: &[Drawn], y_before: &[f32], shifts: &mut [ListingShift]) {
+    for shift in shifts.iter_mut() {
+        if !shift.host_y.is_finite() {
+            continue;
+        }
+        let Some((index, _)) = drawn.iter().enumerate().find(|(index, line)| {
+            line.page == shift.page
+                && (y_before[*index] - shift.host_y).abs() <= 0.6
+                && shift.ids.iter().any(|id| line.glyph_ids.contains(id))
+        }) else {
+            continue;
+        };
+        shift.dy += drawn[index].y - y_before[index];
+    }
+}
+
 fn close_column_holes(
     drawn: &mut [Drawn],
     extraction: &Extraction,
@@ -10300,6 +10326,7 @@ fn close_column_holes(
                         ids: quotes,
                         dx: 0.0,
                         dy: shift,
+                        host_y: f32::NAN,
                     });
                 }
             }
@@ -10322,6 +10349,7 @@ fn close_column_holes(
                         ids: block.kept_ids.clone(),
                         dx: 0.0,
                         dy: shift,
+                        host_y: f32::NAN,
                     });
                 }
             }
@@ -16541,6 +16569,71 @@ mod tests {
                 "formula ink ends at {right:.1}, inside 写出 at {write_x:.1}"
             );
         }
+    }
+
+    #[test]
+    fn a_pulled_line_carries_its_formula() {
+        let line = Drawn {
+            page: 0,
+            x: 72.0,
+            y: 510.0,
+            size: 10.0,
+            color: Color::black(),
+            cids: vec![1],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: "请求之前的旧势满足".into(),
+            glyph_ids: vec![7, 8],
+            widths: vec![10.0],
+            gaps: Vec::new(),
+            supers: vec![false],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let other = Drawn {
+            page: 0,
+            x: 72.0,
+            y: 490.0,
+            size: 10.0,
+            color: Color::black(),
+            cids: vec![2],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: "证明。".into(),
+            glyph_ids: vec![9],
+            widths: vec![10.0],
+            gaps: Vec::new(),
+            supers: vec![false],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let drawn = vec![line, other];
+        let y_before = vec![492.0, 470.0];
+        let mut shifts = vec![ListingShift {
+            page: 0,
+            ids: vec![7],
+            dx: -20.0,
+            dy: 4.0,
+            host_y: 492.0,
+        }];
+        carry_formula_with_line(&drawn, &y_before, &mut shifts);
+        assert!(
+            (shifts[0].dy - 22.0).abs() < 0.01,
+            "formula dy {} did not follow the 18pt pull",
+            shifts[0].dy
+        );
+        let mut listing = ListingShift {
+            page: 0,
+            ids: vec![9],
+            dx: 0.0,
+            dy: 18.0,
+            host_y: f32::NAN,
+        };
+        carry_formula_with_line(&drawn, &y_before, std::slice::from_mut(&mut listing));
+        assert!(
+            (listing.dy - 18.0).abs() < 0.01,
+            "a listing shift was pulled twice"
+        );
     }
 
     #[test]
