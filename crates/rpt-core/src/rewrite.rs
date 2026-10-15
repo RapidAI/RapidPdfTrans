@@ -1841,6 +1841,11 @@ fn script_bases<'a>(
     // subscripts; keeping only the left `e` leaves `j` in the hole and the
     // right `e` in the words (`e_i j e`).
     let mut picked: Vec<&Glyph> = Vec::new();
+    fn take<'b>(picked: &mut Vec<&'b Glyph>, base: &'b Glyph) {
+        if picked.iter().all(|glyph| glyph.id != base.id) {
+            picked.push(base);
+        }
+    }
     for id in scripts {
         let Some(script) = glyphs.iter().copied().find(|glyph| glyph.id == *id) else {
             continue;
@@ -1858,16 +1863,36 @@ fn script_bases<'a>(
         else {
             continue;
         };
-        if picked.iter().all(|glyph| glyph.id != base.id) {
-            picked.push(base);
+        take(&mut picked, base);
+    }
+    // A comma just after the cluster was already in the hole. Dropping it
+    // puts that mark back into the sentence.
+    let wide = right - left > body * 1.3;
+    if !wide {
+        if let Some(best) = candidates
+            .iter()
+            .copied()
+            .filter(|glyph| {
+                glyph.matrix[4] <= left + body * 0.25 && glyph.matrix[4] >= left - body * 0.85
+            })
+            .max_by(|left_glyph, right_glyph| {
+                left_glyph.matrix[4].total_cmp(&right_glyph.matrix[4])
+            })
+        {
+            take(&mut picked, best);
         }
+        picked.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+        return picked;
+    }
+    for glyph in candidates.iter().copied().filter(|glyph| {
+        let x = glyph.matrix[4];
+        x >= left - body * 0.95 && x <= right + body * 0.08
+    }) {
+        take(&mut picked, glyph);
     }
     picked.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
     // `min` sits just left of its limit. Walk back across the word, not
     // across the equation.
-    if right - left <= body * 1.3 {
-        return picked;
-    }
     let mut guard = 0;
     while guard < 5 {
         guard += 1;
@@ -11479,7 +11504,9 @@ fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) 
 
 /// A display under the heading (`Q = [z q q]`) stays in the source stream.
 /// Pulling `4 请求时的势及其增量` up leaves that display on the English
-/// baseline and the heading in the hole above it.
+/// baseline and the heading in the hole above it. Inline math on the
+/// paragraph (`a_1, …, a_k`) moves with that paragraph, so it does not pin
+/// the heading.
 fn heading_leaves_display_below(
     block: &ColumnBlock,
     proposed: f32,
@@ -11491,13 +11518,10 @@ fn heading_leaves_display_below(
         return false;
     }
     let reach = size * 8.0;
-    let mut bands: HashMap<i32, usize> = HashMap::new();
+    let mut math_bands: HashMap<i32, usize> = HashMap::new();
+    let mut letter_bands: HashMap<i32, usize> = HashMap::new();
     for glyph in &extraction.glyphs {
-        if glyph.page_index != page
-            || glyph.invisible
-            || glyph.unicode.trim().is_empty()
-            || !is_math_font(&glyph.font_name)
-        {
+        if glyph.page_index != page || glyph.invisible || glyph.unicode.trim().is_empty() {
             continue;
         }
         let below = block.source_top - glyph.matrix[5];
@@ -11507,10 +11531,21 @@ fn heading_leaves_display_below(
         if glyph.matrix[4] < block.left - size || glyph.matrix[4] > block.left + size * 28.0 {
             continue;
         }
+        if glyph.font_size < size * 0.7 {
+            continue;
+        }
         let band = (glyph.matrix[5] * 2.0).round() as i32;
-        *bands.entry(band).or_default() += 1;
+        let word = glyph.unicode.chars().all(|ch| ch.is_ascii_alphabetic());
+        if is_math_font(&glyph.font_name) {
+            *math_bands.entry(band).or_default() += 1;
+        } else if word {
+            // `Identify a vector a = …` is a sentence. `Q = [z q q]` is not.
+            *letter_bands.entry(band).or_default() += 1;
+        }
     }
-    bands.values().any(|count| *count >= 4)
+    math_bands
+        .iter()
+        .any(|(band, count)| *count >= 4 && letter_bands.get(band).copied().unwrap_or(0) < 8)
 }
 
 /// The formula is drawn on the paragraph's pre-close baseline. Closing
@@ -16175,7 +16210,7 @@ mod tests {
             .zip(["Q", "=", "z", "q"])
             .enumerate()
         {
-            let mut glyph = ink_glyph(30 + index as u32, x, 330.0, 10.0, text);
+            let mut glyph = ink_glyph(30 + index as u32, x, 330.0, 11.0, text);
             glyph.font_name = "LMMathItalic10".into();
             display.push(glyph);
         }
@@ -16219,6 +16254,65 @@ mod tests {
         assert!(
             (body_y - 378.0).abs() < 0.5,
             "the paragraph under the heading moved off the display: {body_y}"
+        );
+    }
+
+    #[test]
+    fn an_inline_formula_does_not_pin_the_heading() {
+        // Section 3's `a_1, …, a_k` sits on the paragraph. That line moves
+        // with the heading, so the heading still closes the hole above it.
+        let mut tall = ink_glyph(2, 340.0, 470.0, 10.0, "U");
+        tall.font_name = "LMMathItalic10".into();
+        let mut heading = ink_glyph(10, 72.0, 400.0, 14.3, "3");
+        heading.font_name = "LMRoman12-Bold".into();
+        let mut glyphs = vec![
+            ink_glyph(1, 72.0, 500.0, 10.0, "A"),
+            ink_glyph(3, 72.0, 430.0, 10.0, "W"),
+            tall,
+            heading,
+            ink_glyph(20, 72.0, 378.0, 10.0, "F"),
+        ];
+        for (index, ch) in "Identify".chars().enumerate() {
+            glyphs.push(ink_glyph(
+                40 + index as u32,
+                80.0 + index as f32 * 6.0,
+                330.0,
+                11.0,
+                &ch.to_string(),
+            ));
+        }
+        for (index, (x, text)) in [140.0, 160.0, 180.0, 200.0]
+            .into_iter()
+            .zip(["a", ",", "a", "k"])
+            .enumerate()
+        {
+            let mut glyph = ink_glyph(30 + index as u32, x, 330.0, 11.0, text);
+            glyph.font_name = "LMMathItalic10".into();
+            glyphs.push(glyph);
+        }
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(72.0, 500.0, 10.0, "上文", vec![1]),
+            test_draw(72.0, 430.0, 10.0, "摘要收短", vec![3, 2]),
+            test_draw(72.0, 400.0, 14.3, "3 二次乘积及其行列式", vec![10]),
+            test_draw(91.0, 378.0, 10.0, "接下来我们解释", vec![20]),
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let heading_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('3'))
+            .unwrap()
+            .y;
+        assert!(
+            heading_y > 400.5,
+            "inline math pinned the heading: {heading_y}"
         );
     }
 
