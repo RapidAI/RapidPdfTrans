@@ -611,6 +611,10 @@ pub fn rewrite_translation(
         }
         spans.clear();
     }
+    // The label moved with the listing. The arrow is a path in the source
+    // stream, so it stays on the English baseline unless those y values move
+    // by the same amount.
+    shift_listing_arrows(doc, extraction, &by_id, &drawn, &listing_shifts);
 
     let draw_ids: HashSet<u32> = succeeded
         .iter()
@@ -7538,10 +7542,15 @@ fn close_column_holes(
             }
         }
         blocks.extend(listing_blocks(drawn, extraction, page));
+        // A code annotation between two listing lines used to reset the
+        // pull, so `text_chunks_chain` rose and `| summarize_map_chain`
+        // stayed on the English baseline. One listing moves as one block.
+        fuse_listing_runs(&mut blocks);
         // `1.3` and `Typical LLM use cases` are two draws of one row. The
         // index is short, so closing the hole above it used to lift `1.3`
         // onto the previous line and leave the title behind.
         merge_section_heading_blocks(&mut blocks, drawn);
+        let slots = listing_slots(&blocks, extraction);
         blocks.sort_by(|left, right| right.top.total_cmp(&left.top));
         let mut used_ids = HashSet::new();
         for line in drawn.iter().filter(|line| line.page == page) {
@@ -7550,6 +7559,7 @@ fn close_column_holes(
         let mut claimed_quotes = HashSet::new();
         let mut shift = 0.0f32;
         let mut prev: Option<ColumnBlock> = None;
+        let mut placed_lines: Vec<PlacedListing> = Vec::new();
         for block in blocks {
             // A column page number sits to the right of its title. It is not
             // the next paragraph, and treating it as one used to drop the
@@ -7579,6 +7589,13 @@ fn close_column_holes(
                     shift = 0.0;
                     prev = Some(block);
                 }
+                continue;
+            }
+            // `拆分链` sits on the `text_chunks_chain` baseline, to the right
+            // of the code. Treating it as the next paragraph reset the pull,
+            // so the lines under the label stayed on the English baseline and
+            // the label floated in the hole.
+            if !block.listing && is_code_annotation(&block, &slots, drawn, extraction, by_id) {
                 continue;
             }
             let mut extra = 0.0f32;
@@ -7642,20 +7659,650 @@ fn close_column_holes(
                     });
                 }
             }
-            if block.listing && shift.abs() > 0.4 {
-                shifts.push(ListingShift {
-                    page,
-                    ids: block.kept_ids.clone(),
-                    dy: shift,
-                });
+            if block.listing {
+                for slot in &slots {
+                    if slot.y <= block.source_top + 0.6 && slot.y + 0.6 >= block.source_bottom {
+                        placed_lines.push(PlacedListing {
+                            page,
+                            y: slot.y,
+                            left: slot.left,
+                            right: slot.right,
+                            size: slot.size,
+                            dy: shift,
+                        });
+                    }
+                }
+                if shift.abs() > 0.4 {
+                    shifts.push(ListingShift {
+                        page,
+                        ids: block.kept_ids.clone(),
+                        dy: shift,
+                    });
+                }
             }
             let mut placed = block;
             placed.top += shift;
             placed.bottom += shift;
             prev = Some(placed);
         }
+        seat_listing_annotations(drawn, extraction, by_id, &placed_lines);
     }
     shifts
+}
+
+struct ListingSlot {
+    y: f32,
+    left: f32,
+    right: f32,
+    size: f32,
+}
+
+struct PlacedListing {
+    page: u32,
+    y: f32,
+    left: f32,
+    right: f32,
+    size: f32,
+    dy: f32,
+}
+
+/// Consecutive monospace lines are one listing. A later line must not close
+/// a hole of its own, or the source leading between `text_chunks_chain` and
+/// `| summarize_map_chain.map()` opens up.
+fn fuse_listing_runs(blocks: &mut Vec<ColumnBlock>) {
+    let mut order: Vec<usize> = (0..blocks.len())
+        .filter(|&index| blocks[index].listing)
+        .collect();
+    order.sort_by(|&left, &right| blocks[right].source_top.total_cmp(&blocks[left].source_top));
+    let mut drop = Vec::new();
+    let mut head: Option<usize> = None;
+    for index in order {
+        if let Some(prev) = head {
+            let size = blocks[prev].size.max(blocks[index].size).max(1.0);
+            let gap = blocks[prev].source_bottom - blocks[index].source_top;
+            let aligned = (blocks[prev].left - blocks[index].left).abs() < size * 16.0;
+            if aligned && (-0.6..size * 3.2).contains(&gap) {
+                let incoming = &blocks[index];
+                let kept = incoming.kept_ids.clone();
+                let top = incoming.top;
+                let bottom = incoming.bottom;
+                let left = incoming.left;
+                let right = incoming.right;
+                let source_top = incoming.source_top;
+                let source_bottom = incoming.source_bottom;
+                let incoming_size = incoming.size;
+                let host = &mut blocks[prev];
+                host.kept_ids.extend(kept);
+                host.top = host.top.max(top);
+                host.bottom = host.bottom.min(bottom);
+                host.left = host.left.min(left);
+                host.right = host.right.max(right);
+                host.source_top = host.source_top.max(source_top);
+                host.source_bottom = host.source_bottom.min(source_bottom);
+                host.size = host.size.max(incoming_size);
+                drop.push(index);
+                continue;
+            }
+        }
+        head = Some(index);
+    }
+    if drop.is_empty() {
+        return;
+    }
+    let mut kept = Vec::new();
+    for (index, block) in blocks.drain(..).enumerate() {
+        if !drop.contains(&index) {
+            kept.push(block);
+        }
+    }
+    *blocks = kept;
+}
+
+fn listing_slots(blocks: &[ColumnBlock], extraction: &Extraction) -> Vec<ListingSlot> {
+    let mut slots = Vec::new();
+    for block in blocks.iter().filter(|block| block.listing) {
+        let mut glyphs: Vec<&Glyph> = block
+            .kept_ids
+            .iter()
+            .filter_map(|id| {
+                extraction
+                    .glyphs
+                    .iter()
+                    .find(|glyph| glyph.id == *id && crate::segment::mono_face(&glyph.font_name))
+            })
+            .collect();
+        glyphs.sort_by(|left, right| {
+            right.matrix[5]
+                .total_cmp(&left.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4]))
+        });
+        let mut line: Vec<&Glyph> = Vec::new();
+        let flush = |line: &[&Glyph], slots: &mut Vec<ListingSlot>| {
+            if line.is_empty() {
+                return;
+            }
+            let y = line[0].matrix[5];
+            let left = line
+                .iter()
+                .map(|glyph| glyph.matrix[4])
+                .fold(f32::MAX, f32::min);
+            let right = line
+                .iter()
+                .map(|glyph| glyph.matrix[4] + glyph.advance[0].max(0.0))
+                .fold(left, f32::max);
+            let size = line
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max);
+            slots.push(ListingSlot {
+                y,
+                left,
+                right,
+                size,
+            });
+        };
+        for glyph in glyphs {
+            if line
+                .last()
+                .is_some_and(|prev| (prev.matrix[5] - glyph.matrix[5]).abs() >= 0.8)
+            {
+                flush(&line, &mut slots);
+                line.clear();
+            }
+            line.push(glyph);
+        }
+        flush(&line, &mut slots);
+    }
+    slots
+}
+
+/// A short label on a listing baseline, to the right of the code. `Split chain`
+/// is that label. A body sentence is not.
+fn is_code_annotation(
+    block: &ColumnBlock,
+    slots: &[ListingSlot],
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    if block.indices.is_empty() || slots.is_empty() {
+        return false;
+    }
+    block
+        .indices
+        .iter()
+        .all(|index| annotation_slot(&drawn[*index], slots, extraction, by_id).is_some())
+}
+
+fn annotation_slot<'a>(
+    line: &Drawn,
+    slots: &'a [ListingSlot],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Option<&'a ListingSlot> {
+    let glyphs: Vec<&Glyph> = line
+        .glyph_ids
+        .iter()
+        .filter_map(|id| extraction.glyphs.get(by_id[id]))
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    if glyphs.is_empty()
+        || glyphs
+            .iter()
+            .any(|glyph| crate::segment::mono_face(&glyph.font_name))
+    {
+        return None;
+    }
+    let text: String = glyphs.iter().map(|glyph| glyph.unicode.as_str()).collect();
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 48 || text.split_whitespace().count() > 6 {
+        return None;
+    }
+    let source_y = glyphs.iter().map(|glyph| glyph.matrix[5]).sum::<f32>() / glyphs.len() as f32;
+    let source_x = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[4])
+        .fold(f32::MAX, f32::min);
+    slots
+        .iter()
+        .find(|slot| (slot.y - source_y).abs() <= 1.2 && source_x > slot.right + slot.size * 0.3)
+}
+
+/// The translated label keeps the source annotation x, size, and the code
+/// line's baseline. A 0.9 body scale used to paint `拆分链` smaller than
+/// `Split chain`, and the hole closer left it in the gap.
+fn seat_listing_annotations(
+    drawn: &mut [Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    placed: &[PlacedListing],
+) {
+    if placed.is_empty() {
+        return;
+    }
+    for line in drawn.iter_mut() {
+        let Some(slot) = placed.iter().find(|slot| {
+            slot.page == line.page
+                && annotation_slot(
+                    line,
+                    &[ListingSlot {
+                        y: slot.y,
+                        left: slot.left,
+                        right: slot.right,
+                        size: slot.size,
+                    }],
+                    extraction,
+                    by_id,
+                )
+                .is_some()
+        }) else {
+            continue;
+        };
+        let glyphs: Vec<&Glyph> = line
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extraction.glyphs.get(by_id[id]))
+            .filter(|glyph| !glyph.unicode.trim().is_empty())
+            .collect();
+        if glyphs.is_empty() {
+            continue;
+        }
+        let source_x = glyphs
+            .iter()
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        let source_size = glyphs
+            .iter()
+            .map(|glyph| glyph.font_size)
+            .fold(1.0f32, f32::max);
+        let factor = source_size / line.size.max(0.1);
+        line.x = source_x;
+        line.y = slot.y + slot.dy;
+        if (factor - 1.0).abs() > 0.02 {
+            line.size = source_size;
+            for width in &mut line.widths {
+                *width *= factor;
+            }
+            for gap in &mut line.gaps {
+                *gap *= factor;
+            }
+        }
+    }
+}
+
+/// Move the arrow paths that share a `q` group with a code annotation.
+/// The label is redrawn; the arrow is still the source path.
+fn shift_listing_arrows(
+    doc: &mut Document,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    drawn: &[Drawn],
+    shifts: &[ListingShift],
+) {
+    if shifts.is_empty() {
+        return;
+    }
+    let mut placed = Vec::new();
+    for shift in shifts {
+        let mut glyphs: Vec<&Glyph> = shift
+            .ids
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|index| &extraction.glyphs[*index]))
+            .filter(|glyph| crate::segment::mono_face(&glyph.font_name))
+            .collect();
+        glyphs.sort_by(|left, right| right.matrix[5].total_cmp(&left.matrix[5]));
+        let mut line: Vec<&Glyph> = Vec::new();
+        let mut flush = |line: &[&Glyph]| {
+            if line.is_empty() {
+                return;
+            }
+            let y = line[0].matrix[5];
+            let left = line
+                .iter()
+                .map(|glyph| glyph.matrix[4])
+                .fold(f32::MAX, f32::min);
+            let right = line
+                .iter()
+                .map(|glyph| glyph.matrix[4] + glyph.advance[0].max(0.0))
+                .fold(left, f32::max);
+            let size = line
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max);
+            placed.push(PlacedListing {
+                page: shift.page,
+                y,
+                left,
+                right,
+                size,
+                dy: shift.dy,
+            });
+        };
+        for glyph in glyphs {
+            if line
+                .last()
+                .is_some_and(|prev| (prev.matrix[5] - glyph.matrix[5]).abs() >= 0.8)
+            {
+                flush(&line);
+                line.clear();
+            }
+            line.push(glyph);
+        }
+        flush(&line);
+    }
+    let mut moves: HashMap<ObjectId, Vec<(usize, f32)>> = HashMap::new();
+    for line in drawn {
+        let glyphs: Vec<&Glyph> = line
+            .glyph_ids
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|index| &extraction.glyphs[*index]))
+            .filter(|glyph| !glyph.unicode.trim().is_empty())
+            .collect();
+        if glyphs.is_empty() {
+            continue;
+        }
+        let slots: Vec<ListingSlot> = placed
+            .iter()
+            .filter(|slot| slot.page == line.page)
+            .map(|slot| ListingSlot {
+                y: slot.y,
+                left: slot.left,
+                right: slot.right,
+                size: slot.size,
+            })
+            .collect();
+        if annotation_slot(line, &slots, extraction, by_id).is_none() {
+            continue;
+        }
+        let source_y =
+            glyphs.iter().map(|glyph| glyph.matrix[5]).sum::<f32>() / glyphs.len() as f32;
+        let dy = line.y - source_y;
+        if dy.abs() < 0.4 {
+            continue;
+        }
+        let Some(span) = span_of(&glyphs[0].source) else {
+            continue;
+        };
+        moves
+            .entry(span.object_id)
+            .or_default()
+            .push((span.start, dy));
+    }
+    for (id, mut anchors) in moves {
+        anchors.sort_by_key(|left| std::cmp::Reverse(left.0));
+        anchors.dedup_by(|left, right| left.0 == right.0);
+        let Ok(object) = doc.get_object(id) else {
+            continue;
+        };
+        let Ok(stream) = object.as_stream() else {
+            continue;
+        };
+        let Ok(mut bytes) = stream.decompressed_content() else {
+            continue;
+        };
+        let mut changed = false;
+        for (anchor, dy) in anchors {
+            if nudge_annotation_group(&mut bytes, anchor, dy) {
+                changed = true;
+            }
+        }
+        if !changed {
+            continue;
+        }
+        let Ok(object) = doc.get_object_mut(id) else {
+            continue;
+        };
+        let Ok(stream) = object.as_stream_mut() else {
+            continue;
+        };
+        stream.set_plain_content(bytes);
+    }
+}
+
+/// Add `dy` to the arrow and its clip inside the `q`…`Q` group that draws
+/// the annotation. A full-page clip in that group stays put.
+fn nudge_annotation_group(bytes: &mut Vec<u8>, anchor: usize, dy: f32) -> bool {
+    let Some((start, end)) = annotation_q_group(bytes, anchor) else {
+        return false;
+    };
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let mut numbers: Vec<(usize, usize, f32)> = Vec::new();
+    for token in content_tokens(&bytes[start..end]) {
+        match token.kind {
+            ContentTokKind::Number(value) => {
+                numbers.push((start + token.start, start + token.end, value));
+            }
+            ContentTokKind::Operator(op) => {
+                if op == "re" && numbers.len() >= 4 {
+                    let width = numbers[numbers.len() - 2].2;
+                    let height = numbers[numbers.len() - 1].2;
+                    if width.abs() < 220.0 && height.abs() < 40.0 {
+                        let y = &numbers[numbers.len() - 3];
+                        replacements.push((y.0, y.1, pdf_num(y.2 + dy)));
+                    }
+                } else if (op == "cm" || op == "Tm") && numbers.len() >= 6 {
+                    // `9 0 0 9 x y Tm` stores the font size on the diagonal.
+                    // `1 0 0 1 x y cm` is a plain move. Both y values are
+                    // user space when the matrix is not rotated.
+                    let matrix = &numbers[numbers.len() - 6..];
+                    let upright = matrix[1].2.abs() < 0.02 && matrix[2].2.abs() < 0.02;
+                    if upright {
+                        let y = &matrix[5];
+                        replacements.push((y.0, y.1, pdf_num(y.2 + dy)));
+                    }
+                }
+                numbers.clear();
+            }
+            ContentTokKind::Break => numbers.clear(),
+        }
+    }
+    if replacements.is_empty() {
+        return false;
+    }
+    replacements.sort_by_key(|item| std::cmp::Reverse(item.0));
+    for (from, to, text) in replacements {
+        bytes.splice(from..to, text.into_bytes());
+    }
+    true
+}
+
+fn annotation_q_group(bytes: &[u8], anchor: usize) -> Option<(usize, usize)> {
+    let mut stack: Vec<usize> = Vec::new();
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    for token in content_tokens(bytes) {
+        if let ContentTokKind::Operator(op) = token.kind {
+            if op == "q" {
+                stack.push(token.start);
+            } else if op == "Q" {
+                if let Some(start) = stack.pop() {
+                    groups.push((start, token.end));
+                }
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(start, end)| *start <= anchor && anchor < *end)
+        .min_by_key(|(start, end)| end - start)
+}
+
+enum ContentTokKind {
+    Number(f32),
+    Operator(&'static str),
+    Break,
+}
+
+struct ContentTok {
+    kind: ContentTokKind,
+    start: usize,
+    end: usize,
+}
+
+fn content_tokens(bytes: &[u8]) -> Vec<ContentTok> {
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    let mut array = 0i32;
+    let mut dict = 0i32;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if byte == b'%' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if byte == b'(' {
+            index = skip_literal_string(bytes, index);
+            if array == 0 && dict == 0 {
+                tokens.push(ContentTok {
+                    kind: ContentTokKind::Break,
+                    start: index,
+                    end: index,
+                });
+            }
+            continue;
+        }
+        if byte == b'<' && index + 1 < bytes.len() && bytes[index + 1] == b'<' {
+            dict += 1;
+            index += 2;
+            continue;
+        }
+        if byte == b'>' && index + 1 < bytes.len() && bytes[index + 1] == b'>' {
+            dict = (dict - 1).max(0);
+            index += 2;
+            continue;
+        }
+        if byte == b'<' {
+            index += 1;
+            while index < bytes.len() && bytes[index] != b'>' {
+                index += 1;
+            }
+            index = (index + 1).min(bytes.len());
+            continue;
+        }
+        if byte == b'[' {
+            array += 1;
+            index += 1;
+            continue;
+        }
+        if byte == b']' {
+            array = (array - 1).max(0);
+            index += 1;
+            continue;
+        }
+        if byte == b'/' {
+            index += 1;
+            while index < bytes.len()
+                && !bytes[index].is_ascii_whitespace()
+                && !matches!(
+                    bytes[index],
+                    b'[' | b']' | b'{' | b'}' | b'(' | b')' | b'<' | b'>' | b'/' | b'%'
+                )
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(end) = scan_pdf_number(bytes, index) {
+            if array == 0 && dict == 0 {
+                let text = std::str::from_utf8(&bytes[index..end]).unwrap_or("0");
+                let value = text.parse::<f32>().unwrap_or(0.0);
+                tokens.push(ContentTok {
+                    kind: ContentTokKind::Number(value),
+                    start: index,
+                    end,
+                });
+            }
+            index = end;
+            continue;
+        }
+        if byte.is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphabetic() || bytes[index] == b'*')
+            {
+                index += 1;
+            }
+            if array == 0 && dict == 0 {
+                let name = match &bytes[start..index] {
+                    b"q" => Some("q"),
+                    b"Q" => Some("Q"),
+                    b"re" => Some("re"),
+                    b"cm" => Some("cm"),
+                    b"Tm" => Some("Tm"),
+                    _ => None,
+                };
+                if let Some(op) = name {
+                    tokens.push(ContentTok {
+                        kind: ContentTokKind::Operator(op),
+                        start,
+                        end: index,
+                    });
+                } else {
+                    tokens.push(ContentTok {
+                        kind: ContentTokKind::Break,
+                        start,
+                        end: index,
+                    });
+                }
+            }
+            continue;
+        }
+        index += 1;
+    }
+    tokens
+}
+
+fn scan_pdf_number(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start;
+    if bytes[index] == b'+' || bytes[index] == b'-' {
+        index += 1;
+        if index >= bytes.len() {
+            return None;
+        }
+    }
+    let mut digits = false;
+    let mut dot = false;
+    let mark = index;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'0'..=b'9' => {
+                digits = true;
+                index += 1;
+            }
+            b'.' if !dot => {
+                dot = true;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    (digits && index > mark).then_some(index)
+}
+
+fn skip_literal_string(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    let mut depth = 1i32;
+    while index < bytes.len() && depth > 0 {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth -= 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    index.min(bytes.len())
 }
 
 fn blocks_share_column(prev: &ColumnBlock, block: &ColumnBlock, size: f32) -> bool {
@@ -7990,11 +8637,19 @@ fn reposition_listings(
             if glyphs.is_empty() {
                 continue;
             }
-            glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+            // One listing shift covers every line. Sorting only by x would
+            // draw `text_chunks_chain` and `| summarize_map_chain` as one run.
+            glyphs.sort_by(|left, right| {
+                right.matrix[5]
+                    .total_cmp(&left.matrix[5])
+                    .then(left.matrix[4].total_cmp(&right.matrix[4]))
+            });
             let mut start = 0usize;
             while start < glyphs.len() {
                 let mut end = start + 1;
-                while end < glyphs.len() && glyphs[end].font_resource == glyphs[start].font_resource
+                while end < glyphs.len()
+                    && glyphs[end].font_resource == glyphs[start].font_resource
+                    && (glyphs[end].matrix[5] - glyphs[start].matrix[5]).abs() < 0.8
                 {
                     end += 1;
                 }
@@ -17032,6 +17687,48 @@ ET",
     }
 
     #[test]
+    fn an_annotation_arrow_moves_and_the_page_clip_stays() {
+        let mut bytes = b"q
+1 i
+205.26 138.66 129.84 -9.84 re
+W* n
+0 666.03 531 -666 re
+W n
+BT
+/F16 1 Tf
+9 0 0 9 254.22 131.64 Tm
+.398 g
+[(Split chain)] TJ
+ET
+0 g
+q 1 0 0 1 236.28 133.74 cm
+0 0 m
+-4.56 0 l
+f
+Q
+249 128.79 .24001 9.9 re
+f
+Q
+"
+        .to_vec();
+        let anchor = bytes
+            .windows(5)
+            .position(|window| window == b"Split")
+            .unwrap();
+        assert!(nudge_annotation_group(&mut bytes, anchor, 20.0));
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("254.22 151.640 Tm"), "label baseline: {text}");
+        assert!(text.contains("236.28 153.740 cm"), "arrow head: {text}");
+        assert!(text.contains("249 148.790"), "arrow stem: {text}");
+        assert!(text.contains("205.26 158.660"), "row clip: {text}");
+        assert!(
+            text.contains("0 666.03 531 -666 re"),
+            "page clip moved: {text}"
+        );
+        assert!(text.contains("-4.56 0 l"), "path-local y moved: {text}");
+    }
+
+    #[test]
     fn a_shorter_paragraph_closes_the_gap_above_a_listing() {
         let bytes = flow_pdf(
             b"BT /F1 10 Tf \
@@ -17130,6 +17827,166 @@ ET",
         assert!(
             follow > 436.0 + 4.0,
             "paragraph after the listing stayed on the English baseline {follow:.1}"
+        );
+    }
+
+    #[test]
+    fn a_listing_keeps_its_leading_and_the_annotation_stays_on_the_code_line() {
+        let bytes = listing_annotation_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let segmentation = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        for (id, reason) in &segmentation.kept {
+            extraction.mark_kept(*id, reason.clone()).unwrap();
+        }
+        let mut chars: Vec<u32> = "拆分链最后组合成一条链接下来运行整条归约链"
+            .chars()
+            .map(|ch| ch as u32)
+            .collect();
+        for seg in &segmentation.segments {
+            chars.extend(seg.text.chars().map(|ch| ch as u32));
+        }
+        let segments: Vec<_> = segmentation
+            .segments
+            .iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("Split") {
+                    "拆分链".to_string()
+                } else if seg.text.contains("Finally") {
+                    "最后组合成一条链".to_string()
+                } else if seg.text.contains("combined chain") {
+                    "接下来运行整条归约链".to_string()
+                } else {
+                    seg.text.clone()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids.clone(),
+                    source: seg.text.clone(),
+                    translated,
+                }
+            })
+            .collect();
+        doc.rewrite(
+            &mut extraction,
+            &TranslateReport {
+                segments,
+                calls: 0,
+                cache_hits: 0,
+            },
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&chars)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let painted = PdfDocument::open_bytes(&doc.save_bytes().unwrap())
+            .unwrap()
+            .extract();
+        let mut code: Vec<(f32, String)> = Vec::new();
+        for glyph in &painted.glyphs {
+            if glyph.font_name.contains("Courier") && !glyph.unicode.trim().is_empty() {
+                if let Some(row) = code
+                    .iter_mut()
+                    .find(|(y, _)| (*y - glyph.matrix[5]).abs() < 0.8)
+                {
+                    row.1.push_str(&glyph.unicode);
+                } else {
+                    code.push((glyph.matrix[5], glyph.unicode.clone()));
+                }
+            }
+        }
+        code.sort_by(|left, right| right.0.total_cmp(&left.0));
+        let chunks = code
+            .iter()
+            .find(|(_, text)| text.contains("text_chunks"))
+            .unwrap_or_else(|| panic!("listing missing: {code:?}"));
+        let map_line = code
+            .iter()
+            .find(|(_, text)| text.contains("summarize_map"))
+            .unwrap_or_else(|| panic!("continuation missing: {code:?}"));
+        let close = code
+            .iter()
+            .find(|(_, text)| text.trim() == ")")
+            .unwrap_or_else(|| panic!("closing bracket missing: {code:?}"));
+        assert!(
+            (chunks.0 - map_line.0 - 10.0).abs() < 0.6,
+            "listing re-spaced: chunks {:.2} map {:.2}",
+            chunks.0,
+            map_line.0
+        );
+        assert!(
+            (map_line.0 - close.0 - 10.0).abs() < 0.6,
+            "listing re-spaced: map {:.2} close {:.2}",
+            map_line.0,
+            close.0
+        );
+        assert!(
+            chunks.0 > 470.0 + 4.0,
+            "listing stayed on the English baseline {:.2}",
+            chunks.0
+        );
+        let label: Vec<&Glyph> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.unicode.chars().any(is_han_char)
+                    && glyph.unicode != "最"
+                    && glyph.matrix[4] > 200.0
+            })
+            .collect();
+        assert!(
+            !label.is_empty(),
+            "annotation missing: {}",
+            painted.plain_text()
+        );
+        let label_y = label[0].matrix[5];
+        let label_x = label
+            .iter()
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            (label_y - chunks.0).abs() < 0.6,
+            "annotation y {label_y:.2} code y {:.2}",
+            chunks.0
+        );
+        assert!((label_x - 280.0).abs() < 0.8, "annotation x {label_x:.2}");
+        assert!(
+            (label[0].font_size - 9.0).abs() < 0.15,
+            "annotation size {}",
+            label[0].font_size
+        );
+        let arrow = painted.regions.iter().find(|region| {
+            region.kind == "path"
+                && (region.bbox[2] - region.bbox[0]).abs() > 8.0
+                && (region.bbox[2] - region.bbox[0]).abs() < 30.0
+                && (region.bbox[3] - region.bbox[1]).abs() < 3.0
+                && region.bbox[0] > 200.0
+        });
+        let arrow = arrow.unwrap_or_else(|| panic!("arrow missing: {:?}", painted.regions));
+        let arrow_y = arrow.bbox[1];
+        let moved = chunks.0 - 470.0;
+        assert!(
+            (arrow_y - (471.0 + moved)).abs() < 0.8,
+            "arrow y {arrow_y:.2} expected {:.2} (code moved {moved:.2})",
+            471.0 + moved
+        );
+        let follow = painted
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode.contains('下'))
+            .unwrap_or_else(|| panic!("paragraph under the listing missing"));
+        assert!(
+            (chunks.0 - follow.matrix[5] - 40.0).abs() < 8.0,
+            "paragraph under the listing split away: code {:.2} follow {:.2}",
+            chunks.0,
+            follow.matrix[5]
         );
     }
 
@@ -18738,6 +19595,86 @@ ET",
         let mut resources = lopdf::Dictionary::new();
         resources.set("Font", fonts);
         let content_id = doc.add_object(Stream::new(dictionary! {}, content.to_vec()));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn listing_annotation_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let widths: Vec<lopdf::Object> = (0..256).map(|_| lopdf::Object::Integer(500)).collect();
+        let face = |name: &str| {
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => lopdf::Object::Name(name.as_bytes().to_vec()),
+                "Encoding" => "WinAnsiEncoding",
+                "FirstChar" => 0,
+                "LastChar" => 255,
+                "Widths" => widths.clone(),
+            }
+        };
+        let body = doc.add_object(face("Helvetica"));
+        let code = doc.add_object(face("Courier"));
+        let label = doc.add_object(face("HumanistMann521-BoldCondensed"));
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", body);
+        fonts.set("F2", code);
+        fonts.set("F3", label);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        // `Split chain` shares the `text_chunks_chain` baseline. The arrow is
+        // the `re` just under that label, inside the same `q` group.
+        let content = b"BT /F1 10 Tf \
+1 0 0 1 72 520 Tm (Finally we combine the document splitting chain and the map chain into one.) Tj \
+1 0 0 1 72 506 Tm (The reduce chain is the last stage of that combined MapReduce pipeline today.) Tj \
+/F2 8 Tf \
+1 0 0 1 72 480 Tm (map_reduce_chain = \\() Tj \
+1 0 0 1 86 470 Tm (text_chunks_chain) Tj \
+1 0 0 1 86 460 Tm (| summarize_map_chain.map\\(\\)) Tj \
+1 0 0 1 72 450 Tm (\\)) Tj \
+/F1 10 Tf \
+1 0 0 1 72 430 Tm (The combined chain runs after the chunks have been summarized above.) Tj \
+ET\n\
+q\n\
+BT\n\
+/F3 9 Tf\n\
+1 0 0 1 280 470 Tm (Split chain) Tj\n\
+ET\n\
+q 1 0 0 1 250 472 cm\n\
+0 0 m\n\
+12 0 l\n\
+0 2 l\n\
+0 -2 l\n\
+f\n\
+Q\n\
+248 471 20 1 re\n\
+f\n\
+Q\n"
+            .to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
         let page = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,

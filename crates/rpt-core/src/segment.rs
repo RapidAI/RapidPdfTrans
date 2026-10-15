@@ -777,20 +777,28 @@ fn listing_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
 }
 
 fn listing_line(line: &VisualLine<'_>) -> bool {
-    let mut mono = 0usize;
+    let mut mono_letters = 0usize;
+    let mut mono_marks = 0usize;
     let mut other = 0usize;
     for glyph in &line.glyphs {
-        let letters = letter_count(glyph);
-        if letters == 0 {
+        if glyph.unicode.trim().is_empty() {
             continue;
         }
+        let letters = letter_count(glyph);
         if mono_face(&glyph.font_name) {
-            mono += letters;
-        } else {
+            if letters > 0 {
+                mono_letters += letters;
+            } else {
+                // A closing bracket is the last line of the listing. It has
+                // no letters, and leaving it out lets that line stay behind
+                // when the block above it moves.
+                mono_marks += 1;
+            }
+        } else if letters > 0 {
             other += letters;
         }
     }
-    mono >= 2 && other == 0
+    other == 0 && (mono_letters >= 2 || (mono_letters == 0 && mono_marks >= 1))
 }
 
 pub(crate) fn mono_face(name: &str) -> bool {

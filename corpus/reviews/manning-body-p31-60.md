@@ -2,13 +2,17 @@
 
 Sample: printed pages 31–60 of *AI Agents and Applications*. That span is PDF pages 59–88 of the full book. The 30-page slice is 531×636.572 pt. Source slice: `/opt/cursor/artifacts/pdfs/manning-body-p31-60-source.pdf`. Translation: `/opt/cursor/artifacts/pdfs/manning-body-p31-60.pdf`.
 
-Pages 1–30 are `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` (also `manning-body-p1-30-v10.pdf`). This slice is `manning-body-p31-60-v7.pdf`.
+Pages 1–30 are `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` (also `manning-body-p1-30-v11.pdf`). This slice is `manning-body-p31-60-v8.pdf`.
 
 Coverage is complete (`english_body` 0; kept 10090, rewritten 50937, total 61027). Body text is Noto Serif CJK SC Light. Headings are a heavier CJK face and larger than the body. Figure interiors, table cells, and monospace listings stay English. Captions are translated. Paragraphs use a 2em first-line indent. CJK–CJK justification stays within 0.15em.
 
 Each translated page was compared with the source. Painted advance boxes do not overlap. A prompt example is one block: the label is a single token, the quoted input is translated as a whole, and each line keeps the source x and the sans face. No body line ends on an opening bracket. No monospace listing is painted twice.
 
 ## Fixes in this pass
+
+A code listing moves as one block. The source leading between its lines stays, including a closing `)` and an indented continuation. A label drawn beside a code line (`拆分链`, `映射链`, `归约链`) is seated on that line’s baseline at the source x, in the source annotation size, on Noto Sans CJK Bold. The arrow paths in the same group move with the label. A full-page clip stays where it was.
+
+Printed page 60 is the only code annotation in either slice. The `map_reduce_chain` listing is five JetBrains lines 10.20 pt apart, the same steps as the source (180.96, 170.76, 160.56, 150.36, 140.16). `拆分链` is on `text_chunks_chain` at y=170.76, x=254.22, size 9. `映射链` is on `| summarize_map_chain.map()` at y=160.56, x=316.08. `归约链` is on `| summarize_reduce_chain` at y=150.36, x=257.94. Each arrow’s stem moved by the same 39.12 pt as its label. Pages 1–30 have no label sitting beside a monospace line. Every other matched listing pair in both slices keeps the source inner spacing (181 pairs here, 29 in pages 1–30).
 
 A `NOTE` whose translation began `请注意，…` is the same callout as `定义：`. The label is `注意：` in the source label colour at the source label x, and the sentence starts at the source body x. Later lines sit on the callout’s left edge. A callout line is justified only when the extra space stays inside 0.15em; a line that still would not reach the margin is left tight.
 
@@ -91,4 +95,4 @@ A decorative answer quote stays the source width and sits left of the answer. Th
 | 57 | Pass | `3.1 总结超出上下文窗口的文档` stays with the index. The definition continues at x=114.2 in the same gray, `处理超过 1 百万个 token。`, with no first-line indent. The next paragraph indents to x=120.1. The note at the bottom is `注意：` at x=114.2 and `在完整的《白鲸》…` at x=144.9, with no letter-spacing. Figure 3.1’s caption is Chinese. |
 | 58 | Pass | The import block and `text_chunks_chain` are one English listing. The `➥chunk_overlap` line and the closing brackets sit on the moved baselines, 10.2 pt apart, with no second copy. |
 | 59 | Pass | `3.1.3 映射（Map）`. The `summarize_chunk` listing is English, including the prompt arrow, one copy of each line. The note under it is Chinese. |
-| 60 | Pass | `(续)` then `3.1.4 归约`. The reduce-chain listing is English and continuous. The prose around it is Chinese. |
+| 60 | Pass | `(续)` then `3.1.4 归约` and `3.1.5 MapReduce 组合链`. The reduce listing and the `map_reduce_chain` listing are English. The five `map_reduce_chain` lines stay 10.20 pt apart, and `拆分链` / `映射链` / `归约链` share those baselines at the source x, size 9, Noto Sans CJK Bold. The prose around the listing is Chinese. |
