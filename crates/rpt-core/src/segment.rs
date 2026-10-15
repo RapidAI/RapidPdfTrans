@@ -616,6 +616,266 @@ fn majority_run(line: &VisualLine<'_>) -> Option<RunFace> {
     }
 }
 
+/// A scanned pamphlet paints a column of rules (`§`, `|`, `1`) in the margin
+/// on the same baseline as the text. OCR glues a letter onto the rule
+/// (`j§`, `jj|`, `||`) and sometimes leaves a stray `S` in the same column.
+/// The gap to the sentence is wider than a word space, and the same x repeats
+/// down the page. Those marks are not part of the sentence.
+fn detach_border_rules(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
+    struct Edge {
+        id: u32,
+        page: u32,
+        x: f32,
+        y: f32,
+        /// A rule character. A stray letter is dropped only when it sits on
+        /// a column that already has rules.
+        rule: bool,
+    }
+    let mut edges = Vec::new();
+    for line in lines.iter() {
+        let mut glyphs = line.glyphs.clone();
+        glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+        let size = line.size.max(1.0);
+        let content: Vec<&&Glyph> = glyphs
+            .iter()
+            .filter(|glyph| !glyph.unicode.trim().is_empty())
+            .collect();
+        if content.is_empty() {
+            continue;
+        }
+        // A column split leaves the rule on a line of its own (`||`, `S`).
+        if content.len() == 1 {
+            let glyph = content[0];
+            let piece = glyph.unicode.trim().chars().count();
+            if (1..=2).contains(&piece) {
+                edges.push(Edge {
+                    id: glyph.id,
+                    page: line.page,
+                    x: glyph.matrix[4],
+                    y: line.y,
+                    rule: border_token(&glyph.unicode),
+                });
+            }
+            continue;
+        }
+        if content.len() <= 4
+            && content.iter().all(|glyph| ornament_piece(&glyph.unicode))
+            && content.iter().any(|glyph| border_token(&glyph.unicode))
+        {
+            let x = content
+                .iter()
+                .map(|glyph| glyph.matrix[4])
+                .fold(f32::MAX, f32::min);
+            for glyph in &content {
+                edges.push(Edge {
+                    id: glyph.id,
+                    page: line.page,
+                    x,
+                    y: line.y,
+                    rule: true,
+                });
+            }
+            continue;
+        }
+        for left_end in [true, false] {
+            let Some(run) = margin_run(&content, left_end, size) else {
+                continue;
+            };
+            let rule = run.iter().any(|&slot| border_token(&content[slot].unicode));
+            let anchor = run[run.len() - 1];
+            for slot in run {
+                edges.push(Edge {
+                    id: content[slot].id,
+                    page: line.page,
+                    x: content[anchor].matrix[4],
+                    y: line.y,
+                    rule,
+                });
+            }
+        }
+    }
+    let mut drop = std::collections::HashSet::new();
+    let mut columns: Vec<(u32, f32)> = Vec::new();
+    let mut used = vec![false; edges.len()];
+    for index in 0..edges.len() {
+        if used[index] || !edges[index].rule {
+            continue;
+        }
+        let mut cluster = vec![index];
+        for other in index + 1..edges.len() {
+            if edges[other].rule
+                && edges[other].page == edges[index].page
+                && (edges[other].x - edges[index].x).abs() < 4.0
+            {
+                cluster.push(other);
+            }
+        }
+        let mut ys: Vec<i32> = cluster
+            .iter()
+            .map(|&slot| (edges[slot].y * 2.0) as i32)
+            .collect();
+        ys.sort_unstable();
+        ys.dedup();
+        if ys.len() >= 4 {
+            columns.push((edges[index].page, edges[index].x));
+            for slot in cluster {
+                used[slot] = true;
+                drop.insert(edges[slot].id);
+            }
+        }
+    }
+    for edge in &edges {
+        if edge.rule {
+            continue;
+        }
+        if columns
+            .iter()
+            .any(|(page, x)| *page == edge.page && (edge.x - x).abs() < 4.0)
+        {
+            drop.insert(edge.id);
+        }
+    }
+    drop_glyphs(lines, drop)
+}
+
+/// Glyphs of one tight ornament, from the outer edge inward. The last index
+/// is the glyph nearest the sentence.
+fn margin_run(content: &[&&Glyph], left_end: bool, size: f32) -> Option<Vec<usize>> {
+    if content.len() < 2 {
+        return None;
+    }
+    let mut index = if left_end { 0 } else { content.len() - 1 };
+    let step: isize = if left_end { 1 } else { -1 };
+    let mut run = vec![index];
+    while run.len() < 4 {
+        let next = index as isize + step;
+        if next < 0 || next >= content.len() as isize {
+            break;
+        }
+        let next_i = next as usize;
+        let gap = if left_end {
+            glyph_span_gap(content[index], content[next_i])
+        } else {
+            glyph_span_gap(content[next_i], content[index])
+        };
+        if gap > size * 0.45 || !ornament_piece(&content[next_i].unicode) {
+            break;
+        }
+        run.push(next_i);
+        index = next_i;
+    }
+    let body = index as isize + step;
+    if body < 0 || body >= content.len() as isize {
+        return None;
+    }
+    let body_i = body as usize;
+    let gap = if left_end {
+        glyph_span_gap(content[index], content[body_i])
+    } else {
+        glyph_span_gap(content[body_i], content[index])
+    };
+    if gap < size * 0.9 {
+        return None;
+    }
+    let rule = run.iter().any(|&slot| border_token(&content[slot].unicode));
+    // A lone letter does not open a column. It is claimed later when a rule
+    // stack already occupies this x (`S` beside `|`).
+    if !rule && run.len() != 1 {
+        return None;
+    }
+    Some(run)
+}
+
+fn glyph_span_gap(left: &Glyph, right: &Glyph) -> f32 {
+    right.bbox[0].min(right.bbox[2]) - left.bbox[0].max(left.bbox[2])
+}
+
+/// OCR of a printed rule: a long string of `l` and `|` with no spaces.
+fn detach_rule_noise(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
+    let mut drop = std::collections::HashSet::new();
+    for line in lines.iter() {
+        if !ocr_rule_noise(&line.text) {
+            continue;
+        }
+        for glyph in &line.glyphs {
+            drop.insert(glyph.id);
+        }
+    }
+    drop_glyphs(lines, drop)
+}
+
+fn ocr_rule_noise(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|ch| ch.is_whitespace()) {
+        return false;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() < 24 {
+        return false;
+    }
+    let marks = chars
+        .iter()
+        .filter(|ch| {
+            matches!(
+                ch,
+                'l' | 'I' | 'i' | '|' | '1' | '!' | 'f' | 'F' | '[' | ']' | '^'
+            )
+        })
+        .count();
+    marks * 5 >= chars.len() * 4
+}
+
+fn drop_glyphs(
+    lines: &mut Vec<VisualLine<'_>>,
+    drop: std::collections::HashSet<u32>,
+) -> Vec<(u32, String)> {
+    if drop.is_empty() {
+        return Vec::new();
+    }
+    let mut kept = Vec::new();
+    let mut rebuilt = Vec::new();
+    for line in lines.drain(..) {
+        let mut body = Vec::new();
+        for glyph in line.glyphs {
+            if drop.contains(&glyph.id) {
+                kept.push((glyph.id, "margin".into()));
+            } else {
+                body.push(glyph);
+            }
+        }
+        if !body.is_empty() {
+            rebuilt.push(visual_line(body));
+        }
+    }
+    *lines = rebuilt;
+    kept
+}
+
+fn border_token(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= 2
+        && trimmed.chars().all(|ch| {
+            matches!(
+                ch,
+                '|' | '¦' | '§' | '│' | '┃' | '║' | '‖' | '1' | 'I' | '='
+            ) || ('\u{2500}'..='\u{257F}').contains(&ch)
+        })
+}
+
+/// A glyph OCR stuck onto a rule (`j` in `j§`, `S` in the same column).
+fn ornament_piece(text: &str) -> bool {
+    if border_token(text) {
+        return true;
+    }
+    let trimmed = text.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    (1..=2).contains(&chars.len())
+        && chars
+            .iter()
+            .all(|ch| matches!(ch, 'j' | 'J' | 'S' | 's' | 'l' | 'i' | 'f' | 'F' | '^'))
+}
+
 fn assemble(
     raw: Vec<Vec<&Glyph>>,
     flags: &SegmentFlags,
@@ -639,6 +899,8 @@ fn assemble(
             lines.push(visual_line(body));
         }
     }
+    kept.extend(detach_border_rules(&mut lines));
+    kept.extend(detach_rule_noise(&mut lines));
     attach_markers(&mut lines);
     attach_math_scripts(&mut lines);
     kept.extend(detach_toc_marks(&mut lines));
@@ -1997,13 +2259,17 @@ fn is_running_header(text: &str) -> bool {
 /// can union with a drawing and the bounding box then covers the title.
 /// Diagram labels are body size or smaller.
 fn is_display_heading(line: &VisualLine<'_>) -> bool {
-    line.size >= 16.0
-        && line
-            .text
-            .chars()
-            .filter(|ch| ch.is_ascii_alphabetic())
-            .count()
-            >= 4
+    let letters = line
+        .text
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count();
+    // A 56pt slide title (`You!`) has fewer than four letters. A diagram
+    // label at body size (`GPU`) does not.
+    if line.size >= 28.0 && letters >= 2 {
+        return true;
+    }
+    line.size >= 16.0 && letters >= 4
 }
 
 /// Both lines end on the same right edge and are display size. Body lines
@@ -2918,6 +3184,12 @@ fn list_carries_over(prev: &[VisualLine<'_>], lower: &VisualLine<'_>) -> bool {
     if (upper.size - lower.size).abs() > size * 0.35 {
         return false;
     }
+    // A slide title is a larger face. `If you need help` at 36pt is not the
+    // rest of a 24pt bullet. Comparing against the list line keeps a title
+    // from slipping under the band that is measured on the larger size.
+    if lower.size > upper.size * 1.2 {
+        return false;
+    }
     let body_left = prev.iter().map(|line| line.left).fold(f32::MAX, f32::min);
     let shift = lower.left - body_left;
     (-size..=size * 4.0).contains(&shift)
@@ -3267,7 +3539,21 @@ pub(crate) fn starts_with_list_marker(text: &str) -> bool {
 fn is_list_marker(ch: char) -> bool {
     matches!(
         ch,
-        '-' | '–' | '—' | '•' | '●' | '◦' | '▪' | '■' | '‣' | '∙' | '·' | '‧'
+        '-' | '–'
+            | '—'
+            | '•'
+            | '●'
+            | '○'
+            | '◯'
+            | '◎'
+            | '◉'
+            | '◦'
+            | '▪'
+            | '■'
+            | '‣'
+            | '∙'
+            | '·'
+            | '‧'
     ) || ('\u{E000}'..='\u{F8FF}').contains(&ch)
 }
 
@@ -8497,6 +8783,216 @@ mod tests {
     }
 
     #[test]
+    fn a_scanned_margin_rule_does_not_join_the_sentence() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let words = [
+            "Follow the campaign",
+            "pages of a paper",
+            "Your ideas matter",
+            "And the ideas of",
+        ];
+        for (row, word) in words.iter().enumerate() {
+            let y = 400.0 - row as f32 * 14.0;
+            let mut left = glyph(id, 30.0, y, if row % 2 == 0 { "§" } else { "|" }, false);
+            id += 1;
+            left.font_size = 10.0;
+            left.bbox = [30.0, y, 36.0, y + 10.0];
+            glyphs.push(left);
+            // The rule and the words are one line. A wide space glyph fills
+            // the margin, so a column split does not see a gap.
+            let mut space = glyph(id, 36.0, y, " ", false);
+            id += 1;
+            space.font_size = 10.0;
+            space.bbox = [36.0, y, 80.0, y + 10.0];
+            space.advance = [44.0, 0.0];
+            glyphs.push(space);
+            let mut body = glyph(id, 80.0, y, word, false);
+            id += 1;
+            body.font_size = 10.0;
+            body.bbox = [80.0, y, 220.0, y + 10.0];
+            body.advance = [140.0, 0.0];
+            glyphs.push(body);
+            let mut right = glyph(id, 300.0, y, "1", false);
+            id += 1;
+            right.font_size = 10.0;
+            right.bbox = [300.0, y, 306.0, y + 10.0];
+            glyphs.push(right);
+        }
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains('§') && !text.contains('|')),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Follow the campaign")),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept.iter().any(|(_, reason)| reason == "margin"),
+            "{:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn a_glued_margin_ornament_stays_out_of_the_sentence() {
+        // `||`, `j§`, and a stray `S` sit in one margin column. The gap is
+        // inside the run, so the last glyph alone is not a wide-spaced rule.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let rows: &[(&str, &str, &[&str])] = &[
+            ("=", "are expressed every day in the pages of", &["|", "|"]),
+            ("1", "your candidate!", &["j", "§"]),
+            ("§", "Follow the campaign through the", &["1"]),
+            ("I", "And the ideas of everyone", &["1"]),
+            ("|", "Outside of Chicago months", &["S"]),
+        ];
+        for (row, (left, body, right)) in rows.iter().enumerate() {
+            let y = 400.0 - row as f32 * 14.0;
+            let mut mark = glyph(id, 30.0, y, left, false);
+            id += 1;
+            mark.font_size = 9.0;
+            mark.bbox = [30.0, y, 36.0, y + 9.0];
+            glyphs.push(mark);
+            let mut word = glyph(id, 80.0, y, body, false);
+            id += 1;
+            word.font_size = 9.0;
+            word.bbox = [80.0, y, 220.0, y + 9.0];
+            glyphs.push(word);
+            let mut cursor = 300.0f32;
+            for piece in *right {
+                let width = 3.0;
+                let mut item = glyph(id, cursor, y, piece, false);
+                id += 1;
+                item.font_size = 9.0;
+                item.bbox = [cursor, y, cursor + width, y + 9.0];
+                glyphs.push(item);
+                cursor += width;
+            }
+        }
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .all(|text| { !text.contains('|') && !text.contains('§') && !text.contains('S') }),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("pages of") && !text.contains('j')),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("your candidate!")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_ocr_rule_of_ells_is_not_a_sentence() {
+        let noise = block(
+            0,
+            30.0,
+            500.0,
+            300.0,
+            6.0,
+            "fllHlllilllllllflllilllllillllllllllilllllilll",
+        );
+        let body = block(1, 70.0, 400.0, 200.0, 9.0, "Your ideas matter here.");
+        let seg = segment_with(&[noise, body], &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(texts.iter().all(|text| !text.contains("fllH")), "{texts:?}");
+        assert!(
+            texts.iter().any(|text| text.contains("ideas matter")),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept.iter().any(|(_, reason)| reason == "margin"),
+            "{:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn a_white_circle_sub_bullet_stays_its_own_item() {
+        // A slide's ○ item sits one leading under the ● line. It is the next
+        // item, not the tail of "Sunday evening".
+        let parent = block(
+            0,
+            40.0,
+            300.0,
+            520.0,
+            18.0,
+            "● As is tradition: If you help clean up Sunday evening",
+        );
+        let child = block(
+            1,
+            72.0,
+            274.0,
+            420.0,
+            18.0,
+            "○ Keep all network cable you remove under",
+        );
+        let texts: Vec<_> = segment_glyphs(&[parent, child])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(
+            texts[0].starts_with('●') && !texts[0].contains('○'),
+            "{texts:?}"
+        );
+        assert!(texts[1].starts_with('○'), "{texts:?}");
+    }
+
+    #[test]
+    fn a_large_slide_title_on_a_photo_is_not_a_figure_label() {
+        let mut title = block(0, 310.0, 168.0, 100.0, 56.0, "You!");
+        title.font_name = "Signika-Regular".into();
+        let regions = [crate::glyph::PaintedRegion {
+            page_index: 0,
+            bbox: [150.0, -7.0, 570.0, 412.0],
+            kind: "image".into(),
+        }];
+        let pages = [crate::glyph::PageInfo {
+            index: 0,
+            object_id: "1 0".into(),
+            media_box: [0.0, 0.0, 720.0, 405.0],
+            rotate: 0,
+        }];
+        let seg = segment_placed(&[title], &SegmentFlags::default(), &regions, &pages);
+        assert!(
+            seg.kept.iter().all(|(_, reason)| reason != "figure"),
+            "slide title kept as a figure: {:?}",
+            seg.kept
+        );
+        assert!(
+            seg.segments.iter().any(|item| item.text.contains("You!")),
+            "{:?}",
+            seg.segments
+                .iter()
+                .map(|item| &item.text)
+                .collect::<Vec<_>>()
+        );
+        let mut label = block(1, 200.0, 200.0, 36.0, 12.0, "GPU");
+        label.font_name = "Signika-Regular".into();
+        let small = segment_placed(&[label], &SegmentFlags::default(), &regions, &pages);
+        assert!(
+            small.kept.iter().any(|(_, reason)| reason == "figure"),
+            "diagram label was translated: {:?}",
+            small.kept
+        );
+    }
+
+    #[test]
     fn a_short_wrap_beside_a_theorem_frame_stays_in_the_paragraph() {
         let upper = block(
             0,
@@ -8856,6 +9352,59 @@ mod tests {
             texts
                 .iter()
                 .any(|text| text.contains("Chapter 4") && !text.contains("Chapter 3")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_larger_slide_title_does_not_continue_the_bullet() {
+        let mut id = 0u32;
+        let mut paint = |x, y, size, text: &str| {
+            let mut glyphs = paint_word(&mut id, x, y, text, "Signika-Regular");
+            let mut cursor = x;
+            for glyph in &mut glyphs {
+                let ch = glyph.unicode.chars().next().unwrap_or(' ');
+                let width = if ch == ' ' { size * 0.33 } else { size * 0.52 };
+                glyph.font_size = size;
+                glyph.matrix = [size, 0.0, 0.0, size, cursor, y];
+                glyph.bbox = [cursor, y, cursor + width, y + size];
+                glyph.advance = [width, 0.0];
+                cursor += width;
+            }
+            glyphs
+        };
+        let mut bullet = paint(72.0, 140.0, 24.0, "○ Dinner for all teardown volunteers on");
+        let mut wrap = paint(
+            104.0,
+            112.0,
+            24.0,
+            "Sunday night (same as Friday night buildup)",
+        );
+        for glyph in bullet.iter_mut().chain(wrap.iter_mut()) {
+            glyph.page_index = 0;
+        }
+        let mut title = paint(109.0, 700.0, 36.0, "If you need help / who does what");
+        for glyph in &mut title {
+            glyph.page_index = 1;
+        }
+        bullet.extend(wrap);
+        bullet.extend(title);
+        let texts: Vec<_> = segment_glyphs(&bullet)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("Dinner")
+                    && text.contains("buildup")
+                    && !text.contains("who does what")
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("who does what") && !text.contains("Dinner")),
             "{texts:?}"
         );
     }

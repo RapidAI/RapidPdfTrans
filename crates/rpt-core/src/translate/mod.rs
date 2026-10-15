@@ -1763,6 +1763,19 @@ fn is_function_word(word: &str) -> bool {
             | "change"
             | "contents"
             | "introduction"
+            // Slide titles, not bylines. `Treasure Hunt`, `First Aid`, and
+            // `Global Switch Day` are title case, the same shape as a name.
+            | "treasure"
+            | "hunt"
+            | "first"
+            | "aid"
+            | "global"
+            | "switch"
+            | "day"
+            | "your"
+            | "business"
+            | "interests"
+            | "illusion"
             | "references"
             | "appendix"
             | "abstract"
@@ -3295,6 +3308,26 @@ mod tests {
         assert!(!whole_line_is_personal_name("Ramsey's Theorem"));
         assert!(!whole_line_is_personal_name("Executive Summary"));
         assert!(!whole_line_is_personal_name("Change Log"));
+        assert!(!whole_line_is_personal_name("Treasure Hunt"));
+        assert!(!whole_line_is_personal_name("First Aid"));
+        assert!(!whole_line_is_personal_name("Global Switch Day"));
+        assert_eq!(
+            restore_credit_names("Treasure Hunt", "寻宝游戏"),
+            "寻宝游戏"
+        );
+        assert_eq!(restore_credit_names("First Aid", "急救"), "急救");
+        assert_eq!(
+            restore_credit_names("Global Switch Day", "全球切换日"),
+            "全球切换日"
+        );
+        assert!(!whole_line_is_personal_name("Business Interests Safe"));
+        assert!(!whole_line_is_personal_name("La Follette Illusion"));
+        assert!(!whole_line_is_personal_name("Your Ideas"));
+        assert_eq!(restore_credit_names("Your Ideas", "您的想法"), "您的想法");
+        assert_eq!(
+            restore_credit_names("Business Interests Safe", "商业利益得到保障"),
+            "商业利益得到保障"
+        );
         assert_eq!(
             restore_credit_names("Executive Summary", "执行摘要"),
             "执行摘要"

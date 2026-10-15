@@ -1873,6 +1873,40 @@
       "ci": false
     },
     {
+      "id": "fosdem-2025-welcome",
+      "url": "https://archive.fosdem.org/2025/events/attachments/fosdem-2025-6712-welcome-to-fosdem-2025/slides/237789/2025-02-0_6CcRbRi.pdf",
+      "source": "fosdem",
+      "title": "Welcome to FOSDEM 2025",
+      "license": "CC BY (FOSDEM 2025; PDF not committed)",
+      "sha256": "bdd82aefe0b79d5476f7a8fa291acf10673ddaeb4ca05131d5c3cad01ad874e3",
+      "bytes": 1128275,
+      "pages": 36,
+      "tags": [
+        "slides",
+        "landscape",
+        "lists",
+        "conference"
+      ],
+      "ci": false
+    },
+    {
+      "id": "lafollette-illusion-1924",
+      "url": "https://archive.org/download/241015LovestoneLafolletteillusionBw/241015-lovestone-lafolletteillusion-bw_text.pdf",
+      "source": "archive.org",
+      "title": "The LaFollette Illusion (Jay Lovestone, 1924, OCR text layer)",
+      "license": "Public domain (US, 1924, no copyright notice; PDF not committed)",
+      "sha256": "b4ed91777734a0404d3a5324b72590c3d3151411519bf8e0bf6226afbb5891e8",
+      "bytes": 1310895,
+      "pages": 52,
+      "tags": [
+        "scanned",
+        "ocr",
+        "pamphlet",
+        "public-domain"
+      ],
+      "ci": false
+    },
+    {
       "id": "nist-sp-800-218",
       "url": "https://nvlpubs.nist.gov/nistpubs/specialpublications/nist.sp.800-218.pdf",
       "source": "nist",
