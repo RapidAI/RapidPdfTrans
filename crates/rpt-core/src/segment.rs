@@ -2568,9 +2568,7 @@ fn find_page_continuation(
     used: &[bool],
 ) -> Option<usize> {
     let upper = current.last()?;
-    // Vector order follows column reading order, so a later paragraph in the
-    // next page can appear first. The continuation is the top of the left column.
-    let mut best: Option<(usize, f32, f32)> = None;
+    let mut next_page = Vec::new();
     for (index, para) in paragraphs.iter().enumerate() {
         if used[index] || para.is_empty() || is_page_bridge(para) {
             continue;
@@ -2579,18 +2577,115 @@ fn find_page_continuation(
         if lower.page != upper.page + 1 {
             continue;
         }
-        let replace = match best {
-            None => true,
-            Some((_, left, y)) => {
-                lower.left < left - 28.0 || ((lower.left - left).abs() <= 28.0 && lower.y > y)
+        next_page.push((index, lower.left, lower.y));
+    }
+    if next_page.is_empty() {
+        return None;
+    }
+    // A hyphenated right column finishes at the top of the next page's left
+    // column (`de-` / `tecting`). That column can sit far from this margin.
+    if soft_hyphen_stem(&upper.text).is_some() {
+        let mut best: Option<(usize, f32, f32)> = None;
+        for &(index, left, y) in &next_page {
+            let replace = match best {
+                None => true,
+                Some((_, best_left, best_y)) => {
+                    left < best_left - 28.0 || ((left - best_left).abs() <= 28.0 && y > best_y)
+                }
+            };
+            if replace {
+                best = Some((index, left, y));
             }
-        };
-        if replace {
-            best = Some((index, lower.left, lower.y));
+        }
+        if let Some((_, anchor, _)) = best {
+            let mut column: Vec<(usize, f32)> = next_page
+                .iter()
+                .filter(|(_, left, _)| (left - anchor).abs() <= 28.0)
+                .map(|(index, _, y)| (*index, *y))
+                .collect();
+            column.sort_by(|left, right| right.1.total_cmp(&left.1));
+            if let Some(index) = first_body_continuation(current, paragraphs, &column) {
+                return Some(index);
+            }
         }
     }
-    let index = best?.0;
-    page_continuation(current, &paragraphs[index]).then_some(index)
+    // The sentence keeps this margin. A gutter index (`3.1.1`, `2.5`) is
+    // further left and must not hide `word.` or `explain`.
+    let mut band: Vec<(usize, f32)> = next_page
+        .into_iter()
+        .filter(|(_, left, _)| (left - upper.left).abs() <= 36.0)
+        .map(|(index, _, y)| (index, y))
+        .collect();
+    band.sort_by(|left, right| right.1.total_cmp(&left.1));
+    first_body_continuation(current, paragraphs, &band)
+}
+
+/// Top of the column first. A running head or a section title may sit above
+/// the lowercase continuation. A new paragraph stops the search.
+fn first_body_continuation(
+    current: &[VisualLine<'_>],
+    paragraphs: &[Vec<VisualLine<'_>>],
+    ordered: &[(usize, f32)],
+) -> Option<usize> {
+    for (index, _) in ordered {
+        if page_continuation(current, &paragraphs[*index]) {
+            return Some(*index);
+        }
+        if paragraph_is_page_head(&paragraphs[*index]) {
+            continue;
+        }
+        break;
+    }
+    None
+}
+
+/// A running title, a dotted section heading, or a gutter index. The sentence
+/// from the previous page continues in the body under it.
+fn paragraph_is_page_head(para: &[VisualLine<'_>]) -> bool {
+    if para.is_empty() || para.len() > 2 {
+        return false;
+    }
+    if para.len() == 1 && dotted_index_only(para[0].text.trim()) {
+        return true;
+    }
+    let mut text = para
+        .iter()
+        .map(|line| line.text.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    text = strip_trailing_folio(&text).to_string();
+    if text.chars().count() > 90 || sentence_end(text.trim_end()) {
+        return false;
+    }
+    if is_running_header(&text) {
+        return true;
+    }
+    let Some((dotted, rest)) = section_heading_index(&text) else {
+        return false;
+    };
+    if !dotted {
+        return false;
+    }
+    let words = rest.split_whitespace().count();
+    (1..=14).contains(&words) && !rest.contains([',', ';', ':'])
+}
+
+fn strip_trailing_folio(text: &str) -> &str {
+    let trimmed = text.trim_end();
+    let bytes = trimmed.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1].is_ascii_digit() {
+        end -= 1;
+    }
+    if end < bytes.len()
+        && end > 0
+        && bytes[end - 1].is_ascii_whitespace()
+        && bytes.len() - end <= 4
+    {
+        return trimmed[..end].trim_end();
+    }
+    trimmed
 }
 
 /// True when nothing but a footer, caption, or header sits below this paragraph.
@@ -6950,6 +7045,115 @@ mod tests {
         assert!(!texts.iter().any(|text| text.ends_with(" on")), "{texts:?}");
         assert!(
             texts.iter().any(|text| text.starts_with("Figure")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_callout_sentence_joins_across_a_running_head() {
+        // The gutter index `3.1.1` is further left than the body, and the
+        // running head sits above `word.`. Neither is the rest of the sentence.
+        let mut tail = glyph(
+            0,
+            105.0,
+            80.0,
+            "where one token roughly corresponds to one",
+            false,
+        );
+        tail.page_index = 0;
+        let mut index = glyph(1, 66.0, 500.0, "3.1.1", false);
+        index.page_index = 1;
+        let mut head = glyph(
+            2,
+            157.0,
+            700.0,
+            "3.1 Summarizing a document bigger than the context window",
+            false,
+        );
+        head.page_index = 1;
+        let mut next = glyph(
+            3,
+            114.0,
+            640.0,
+            "word. For example the model continues the sentence here.",
+            false,
+        );
+        next.page_index = 1;
+        let segs = segment_glyphs(&[tail, index, head, next]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("corresponds to one word. For example")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|text| text.trim() == "3.1.1"), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Summarizing") && !text.contains("word. For example")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn the_manning_definition_is_one_paragraph_across_the_page() {
+        let path =
+            std::path::Path::new("/opt/cursor/artifacts/pdfs/manning-body-p31-60-source.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(path).unwrap();
+        let extraction = doc.extract();
+        let segs = segment_glyphs(&extraction.glyphs);
+        assert!(
+            segs.iter().any(|seg| {
+                seg.text.contains("corresponds to one") && seg.text.contains("word. For example")
+            }),
+            "definition callout stayed split at the page break"
+        );
+        assert!(segs.iter().any(|seg| {
+            seg.text.contains("3.1 Summarizing a document bigger")
+                && !seg.text.contains("word. For example")
+        }));
+        assert!(
+            segs.iter().any(|seg| {
+                seg.text.contains("as I’ll") && seg.text.contains("explain in the next section")
+            }),
+            "a sentence that ends on I’ll stayed split at the page break"
+        );
+    }
+
+    #[test]
+    fn a_finished_sentence_does_not_cross_a_heading() {
+        let mut tail = glyph(0, 105.0, 80.0, "This paragraph is already finished.", false);
+        tail.page_index = 0;
+        let mut head = glyph(
+            1,
+            105.0,
+            700.0,
+            "3.1 Summarizing a document bigger than the context window",
+            false,
+        );
+        head.page_index = 1;
+        let mut next = glyph(
+            2,
+            114.0,
+            640.0,
+            "word. For example this starts a new sentence.",
+            false,
+        );
+        next.page_index = 1;
+        let segs = segment_glyphs(&[tail, head, next]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.ends_with("finished.")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("finished") && text.contains("word. For example")),
             "{texts:?}"
         );
     }

@@ -2,13 +2,21 @@
 
 Sample: printed pages 31–60 of *AI Agents and Applications*. That span is PDF pages 59–88 of the full book. The 30-page slice is 531×636.572 pt. Source slice: `/opt/cursor/artifacts/pdfs/manning-body-p31-60-source.pdf`. Translation: `/opt/cursor/artifacts/pdfs/manning-body-p31-60.pdf`.
 
-Pages 1–30 are `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` (also `manning-body-p1-30-v8.pdf`). This slice is `manning-body-p31-60-v5.pdf`.
+Pages 1–30 are `/opt/cursor/artifacts/pdfs/manning-body-p1-30.pdf` (also `manning-body-p1-30-v9.pdf`). This slice is `manning-body-p31-60-v6.pdf`.
 
 Coverage is complete (`english_body` 0; kept 10090, rewritten 50937, total 61027). Body text is Noto Serif CJK SC Light. Headings are a heavier CJK face and larger than the body. Figure interiors, table cells, and monospace listings stay English. Captions are translated. Paragraphs use a 2em first-line indent. CJK–CJK justification stays within 0.15em.
 
 Each translated page was compared with the source. Painted advance boxes do not overlap. A prompt example is one block: the label is a single token, the quoted input is translated as a whole, and each line keeps the source x and the sans face. No body line ends on an opening bracket. No monospace listing is painted twice.
 
 ## Fixes in this pass
+
+A sentence that crosses a page is one source paragraph, translated as one unit, then placed back onto each page’s lines. The next page keeps that paragraph’s colour and starts at the source continuation x, with no extra first-line indent. A line does not cut `词元`, `一个词`, `处理`, `法律`, `所有`, or `编排`.
+
+The definition on printed pages 56–57 was the case that showed the bug. `定义：` is blue at x=105.2. The first body line starts at x=159.4 in gray. Later lines on page 56 sit at x=105.2. Page 57 continues at x=114.2 with `处理超过 1 百万个 token。` in the same gray. The next paragraph’s first line is the indented one, at x=120.1. `一个词元` and `一个词` each stay on one line. The page break is `可以` / `处理`, not `处` / `理`.
+
+Cross-page paragraphs in this slice (printed pages): 39–40 (`as I’ll` / `explain`), 42–43 (the Abra classification), 43–44 (`NOTE`), 55–56 (summarization engines), 56–57 (`DEFINITION`), 58–59 (`NOTE` on LangChain chains). A gutter index such as `3.1.1` or `2.5` no longer hides the continuation, and a hyphenated right column still finishes in the next page’s left column.
+
+## Previous pass
 
 Hanging prompt labels match the source: no colon, one shared right edge, a slightly smaller sans (0.85 of the sample size, box height 7.25 against a body of 8.53), and the sample text at the source content x. Checked on the v4 export: `Tj100` count 0, 0 overlaps between a quote taller than 12 pt and another word, and every hanging label on a page ends on the same right edge (span 0).
 
@@ -75,8 +83,8 @@ A decorative answer quote stays the source width and sits left of the answer. Th
 | 53 | Pass | `第 2 部分` and `摘要` do not overlap. The part introduction is Chinese with a 2em indent. |
 | 54 | Pass | Blank verso. `CHAPTER` stays the source label. No lone `第`. |
 | 55 | Pass | Title is `使用 LangChain` / `摘要文本`, both ending at x=361, clear of the numeral. The two `本章涵盖` bullets match: x=96.2, size 8.46. `在第1章中` is the opening sentence. |
-| 56 | Pass | Running head is `第 3 章 使用 LangChain 对文本进行摘要`. The chapter introduction is Chinese. |
-| 57 | Pass | `3.1 总结超出上下文窗口的文档` stays with the index. Figure 3.1’s caption is Chinese. |
+| 56 | Pass | Running head is `第 3 章 使用 LangChain 对文本进行摘要`. `定义：` is blue at x=105.2. The gray body starts at x=159.4 and wraps at x=105.2. `一个词元` and `一个词` are each intact. The page ends on `可以`. |
+| 57 | Pass | `3.1 总结超出上下文窗口的文档` stays with the index. The definition continues at x=114.2 in the same gray, `处理超过 1 百万个 token。`, with no first-line indent. The next paragraph indents to x=120.1. Figure 3.1’s caption is Chinese. |
 | 58 | Pass | The import block and `text_chunks_chain` are one English listing. The `➥chunk_overlap` line and the closing brackets sit on the moved baselines, 10.2 pt apart, with no second copy. |
 | 59 | Pass | `3.1.3 映射（Map）`. The `summarize_chunk` listing is English, including the prompt arrow, one copy of each line. The note under it is Chinese. |
 | 60 | Pass | `(续)` then `3.1.4 归约`. The reduce-chain listing is English and continuous. The prose around it is Chinese. |

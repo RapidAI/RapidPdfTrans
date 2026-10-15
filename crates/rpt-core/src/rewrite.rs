@@ -6008,6 +6008,13 @@ fn layout_segment(
     } else {
         None
     };
+    let callout = if run_in.is_none() && numbered.is_none() && bullet.is_none() && hanging.is_none()
+    {
+        callout_lead_ink(&ink)
+    } else {
+        None
+    };
+    let mut callout_paint: Option<(String, Color, f32)> = None;
     let mut label_paint: Option<(PromptColumn, String)> = None;
     let text = if let Some(item) = &numbered {
         block_left = item.text_left.min(block_right - source_size.max(1.0));
@@ -6031,6 +6038,17 @@ fn layout_segment(
         indent_ems = 0.0;
         if let Some((label, rest)) = split_run_in_label(text) {
             label_paint = Some((column, label));
+            body_text = rest;
+        } else {
+            body_text = text.to_string();
+        }
+        body_text.as_str()
+    } else if let Some(lead) = callout.as_ref() {
+        if let Some((label, rest)) = split_callout_han(text) {
+            let gap = (lead.text_x - block_left).max(0.0);
+            let scale = scale_for_heading(HeadingLevel::Body, source_size, metrics).max(0.5);
+            indent_ems = gap / (source_size * scale).max(1.0);
+            callout_paint = Some((label, lead.label_color.clone(), lead.label_x));
             body_text = rest;
         } else {
             body_text = text.to_string();
@@ -6192,6 +6210,11 @@ fn layout_segment(
         item.text_color.clone()
     } else if let Some(item) = &bullet {
         item.text_color.clone()
+    } else if callout_paint.is_some() {
+        callout
+            .as_ref()
+            .map(|lead| lead.body_color.clone())
+            .unwrap_or_else(|| ink[0].glyphs[0].fill_color.clone())
     } else {
         list_run_colors(&ink)
             .map(|(_, text_color)| text_color)
@@ -6353,6 +6376,35 @@ fn layout_segment(
                     y,
                     size,
                     color: text_color.clone(),
+                    cids: cids_of(&label_text, font),
+                    resource: resource.to_string(),
+                    skew,
+                    widths,
+                    gaps: vec![0.0; label_text.chars().count().saturating_sub(1)],
+                    text: label_text,
+                    supers: Vec::new(),
+                    sup_scale: 1.0,
+                    sup_rise: 0.0,
+                    glyph_ids: glyph_ids.clone(),
+                },
+            );
+        }
+    }
+    if let Some((label_text, label_color, label_x)) = callout_paint {
+        if let Some(host) = drawn.iter().find(|line| !line.text.trim().is_empty()) {
+            let y = host.y;
+            let text_x = host.x;
+            let (label_text, size, label_x) =
+                place_callout_label(&label_text, label_x, text_x, host.size * 0.85, font);
+            let widths = char_widths(&label_text, size, font);
+            drawn.insert(
+                0,
+                Drawn {
+                    page,
+                    x: label_x,
+                    y,
+                    size,
+                    color: label_color,
                     cids: cids_of(&label_text, font),
                     resource: resource.to_string(),
                     skew,
@@ -8657,6 +8709,16 @@ fn layout_across_pages(
     let hanging = ink_pages
         .first()
         .and_then(|(_, ink, _, _)| list_outdent(ink, source_size));
+    let callout = callout_lead(glyphs);
+    let mut callout_label = None;
+    let body_owned =
+        if let Some((label, rest)) = callout.as_ref().and_then(|_| split_callout_han(text)) {
+            callout_label = Some(label);
+            rest
+        } else {
+            text.to_string()
+        };
+    let text = body_owned.as_str();
     let mut indent_ems = cjk_indent_ems(line_count, source_size, bold, text);
     // The marker hangs on the first page. Later pages are already at the
     // continuation edge, so they do not take a body first-line indent.
@@ -8666,13 +8728,22 @@ fn layout_across_pages(
             slot.width = (slot.width - shift).max(source_size);
         }
     }
+    // `定义：` hangs in the label's own colour. The first line of the
+    // explanation starts at the source body x. Later lines, and the next
+    // page, sit on the callout's left edge with no first-line indent.
+    let fixed_indent = callout.as_ref().and_then(|lead| {
+        callout_label.as_ref()?;
+        let left = ink_pages.first().map(|(_, _, left, _)| *left)?;
+        indent_ems = 0.0;
+        Some((lead.text_x - left).max(0.0))
+    });
     let scale = scale_for_heading(level, source_size, metrics);
     let start = (source_size * scale).max(1.0);
     let floor = (start * 0.78).max(source_size * 0.62).min(start);
     let mut size = start;
     let packed = loop {
-        let indent = size * indent_ems;
-        if let Some(packed) = pack_into_slots(text, size, indent, &boxes, font) {
+        let indent = fixed_indent.unwrap_or(size * indent_ems);
+        if let Some(packed) = pack_into_slots(text, size, indent, &boxes, font, true) {
             let flat: String = packed
                 .iter()
                 .flatten()
@@ -8693,8 +8764,12 @@ fn layout_across_pages(
         }
         size = next;
     };
-    let color = glyphs[0].fill_color.clone();
-    let indent = size * indent_ems;
+    let color = callout
+        .as_ref()
+        .filter(|_| callout_label.is_some())
+        .map(|lead| lead.body_color.clone())
+        .unwrap_or_else(|| glyphs[0].fill_color.clone());
+    let indent = fixed_indent.unwrap_or(size * indent_ems);
     let sup = superscript_metrics(glyphs);
     let mask = sup
         .as_ref()
@@ -8771,7 +8846,11 @@ fn layout_across_pages(
     } in plans
     {
         for (index, line) in lines.into_iter().enumerate() {
-            let line_indent = if first_line { indent } else { 0.0 };
+            let line_indent = if first_line {
+                fixed_indent.unwrap_or(indent)
+            } else {
+                0.0
+            };
             let limit = (width - line_indent).max(size * 0.5);
             let supers = line_masks.get(mask_index).cloned().unwrap_or_default();
             mask_index += 1;
@@ -8803,6 +8882,37 @@ fn layout_across_pages(
     let wanted: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
     if painted != wanted {
         return None;
+    }
+    if let (Some(label), Some(lead)) = (&callout_label, callout.as_ref()) {
+        if let Some(host) = drawn.iter().find(|line| !line.text.trim().is_empty()) {
+            let host_y = host.y;
+            let host_size = host.size;
+            let host_page = host.page;
+            let start = (lead.label_size * host_size / 10.0).clamp(host_size * 0.72, host_size);
+            let (label, paint, x) =
+                place_callout_label(label, lead.label_x, lead.text_x, start, font);
+            let widths = char_widths(&label, paint, font);
+            drawn.insert(
+                0,
+                Drawn {
+                    page: host_page,
+                    x,
+                    y: host_y,
+                    size: paint,
+                    color: lead.label_color.clone(),
+                    cids: cids_of(&label, font),
+                    resource: resource.to_string(),
+                    skew,
+                    widths,
+                    gaps: vec![0.0; label.chars().count().saturating_sub(1)],
+                    text: label,
+                    supers: Vec::new(),
+                    sup_scale: 1.0,
+                    sup_rise: 0.0,
+                    glyph_ids: glyphs.iter().map(|glyph| glyph.id).collect(),
+                },
+            );
+        }
     }
     let first_ink = ink_pages
         .first()
@@ -8931,6 +9041,146 @@ struct RunIn {
     text_x: f32,
     label_ids: Vec<u32>,
     known: bool,
+}
+
+struct CalloutLead {
+    label_color: Color,
+    body_color: Color,
+    label_x: f32,
+    text_x: f32,
+    label_size: f32,
+}
+
+/// `DEFINITION` / `NOTE` is a smaller coloured label. The sentence beside it
+/// keeps the body colour and the body x.
+fn callout_lead(glyphs: &[&Glyph]) -> Option<CalloutLead> {
+    let first = pages_of(glyphs).into_iter().next()?;
+    let subset: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| glyph.page_index == first)
+        .collect();
+    callout_lead_ink(&ink_lines(&subset))
+}
+
+fn callout_lead_ink(ink: &[InkLine<'_>]) -> Option<CalloutLead> {
+    let line = ink.first()?;
+    let mut glyphs = line.glyphs.clone();
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    let body = sizes[sizes.len() * 3 / 4].max(1.0);
+    let mut word = String::new();
+    let mut split = 0usize;
+    for (index, glyph) in glyphs.iter().enumerate() {
+        let letters: String = glyph
+            .unicode
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .collect();
+        if letters.is_empty() {
+            if word.is_empty() {
+                split = index + 1;
+                continue;
+            }
+            break;
+        }
+        if !word.is_empty() {
+            let prev = glyphs[index - 1];
+            let gap = glyph.matrix[4] - glyph_ink_right(prev);
+            let size_step = glyph.font_size >= body * 0.9 && prev.font_size <= body * 0.92;
+            if gap > body * 0.35 || size_step {
+                break;
+            }
+        }
+        let next = format!("{word}{letters}");
+        if !callout_word_prefix(&next) {
+            return None;
+        }
+        word = next;
+        split = index + 1;
+    }
+    if !is_callout_word(&word) || split >= glyphs.len() {
+        return None;
+    }
+    let text_x = glyphs[split].matrix[4];
+    let label_x = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[4])
+        .fold(text_x, f32::min);
+    if text_x < label_x + 4.0 {
+        return None;
+    }
+    let label_color = glyphs[..split]
+        .iter()
+        .find(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .map(|glyph| glyph.fill_color.clone())
+        .unwrap_or_else(Color::black);
+    let body_color = glyphs[split].fill_color.clone();
+    let label_size = glyphs[..split]
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    Some(CalloutLead {
+        label_color,
+        body_color,
+        label_x,
+        text_x,
+        label_size,
+    })
+}
+
+fn is_callout_word(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "definition" | "note" | "warning" | "tip"
+    )
+}
+
+fn callout_word_prefix(word: &str) -> bool {
+    ["definition", "note", "warning", "tip"]
+        .iter()
+        .any(|label| label.starts_with(&word.to_ascii_lowercase()))
+}
+
+/// `定义：正文` keeps the colon on the label. The body is what gets reflowed.
+fn split_callout_han(text: &str) -> Option<(String, String)> {
+    let trimmed = text.trim_start();
+    for han in ["定义", "注意", "警告", "提示"] {
+        let Some(rest) = trimmed.strip_prefix(han) else {
+            continue;
+        };
+        let rest = rest.trim_start_matches(['：', ':', '﹕', ' ', '\u{00A0}']);
+        if rest.is_empty() {
+            return None;
+        }
+        return Some((format!("{han}："), rest.to_string()));
+    }
+    None
+}
+
+/// The callout label stays at the source label x, in the label colour, and
+/// clears the body that starts at `text_x`.
+fn place_callout_label(
+    label: &str,
+    label_x: f32,
+    text_x: f32,
+    size: f32,
+    font: &SubsetFont,
+) -> (String, f32, f32) {
+    let mut paint = size.max(1.0);
+    loop {
+        let width = measure(label, paint, font);
+        if label_x + width <= text_x - 1.5 || paint <= size * 0.72 + 0.01 {
+            break;
+        }
+        let next = (paint * 0.94).max(size * 0.72);
+        if (next - paint).abs() < 0.01 {
+            break;
+        }
+        paint = next;
+    }
+    (label.to_string(), paint, label_x)
 }
 
 /// `INSTRUCTION` is small caps at the left of the line and the sentence
@@ -17251,6 +17501,131 @@ ET",
         assert!(bbox_overlap_area(quote, answer) < 0.1);
         let wide = [102.0, 116.0, 124.0, 138.6];
         assert!(bbox_overlap_area(wide, answer) > 1.0);
+    }
+
+    #[test]
+    fn a_cross_page_callout_keeps_body_colour_and_has_no_indent() {
+        let blue = Color::rgb(0.278, 0.42, 0.522);
+        let gray = Color::gray(0.148);
+        let mut glyphs = Vec::new();
+        let mut label = ink_glyph(0, 105.0, 100.0, 8.5, "DEFINITION");
+        label.fill_color = blue.clone();
+        label.font_name = "FranklinGothic-Demi".into();
+        label.bbox = [105.0, 93.0, 150.0, 108.0];
+        glyphs.push(label);
+        let mut id = 1u32;
+        for (index, ch) in "The window".chars().enumerate() {
+            let x = 160.0 + index as f32 * 4.5;
+            let mut glyph = ink_glyph(id, x, 100.0, 10.0, &ch.to_string());
+            glyph.fill_color = gray.clone();
+            glyph.bbox = [x, 92.0, x + 4.2, 108.0];
+            glyphs.push(glyph);
+            id += 1;
+        }
+        for (index, ch) in "stays here".chars().enumerate() {
+            let x = 105.0 + index as f32 * 5.0;
+            let mut glyph = ink_glyph(id, x, 86.0, 10.0, &ch.to_string());
+            glyph.fill_color = gray.clone();
+            glyph.bbox = [x, 78.0, x + 4.6, 94.0];
+            glyphs.push(glyph);
+            id += 1;
+        }
+        for (index, ch) in "word continues on the next page of this callout"
+            .chars()
+            .enumerate()
+        {
+            let x = 114.0 + index as f32 * 6.0;
+            let mut glyph = ink_glyph(id, x, 700.0, 10.0, &ch.to_string());
+            glyph.page_index = 1;
+            glyph.fill_color = gray.clone();
+            glyph.bbox = [x, 692.0, x + 5.5, 708.0];
+            glyphs.push(glyph);
+            id += 1;
+        }
+        for (index, ch) in "and the following line stays flush".chars().enumerate() {
+            let x = 114.0 + index as f32 * 6.0;
+            let mut glyph = ink_glyph(id, x, 686.0, 10.0, &ch.to_string());
+            glyph.page_index = 1;
+            glyph.fill_color = gray.clone();
+            glyph.bbox = [x, 678.0, x + 5.5, 694.0];
+            glyphs.push(glyph);
+            id += 1;
+        }
+        let text =
+            "定义：其中一个词元大致对应一个词。例如模型可以处理很多词元并且在下一页继续写完。";
+        let mut cmap = std::collections::HashMap::new();
+        for (cid, ch) in (1u16..).zip(text.chars()) {
+            cmap.insert(ch as u32, (cid, 1000));
+        }
+        let font = crate::font::SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: cmap,
+        };
+        let extraction = Extraction {
+            coordinate_space: "pdf",
+            pages: Vec::new(),
+            glyphs: Vec::new(),
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let drawn = layout_across_pages(
+            &refs,
+            text,
+            &font,
+            &extraction,
+            "F",
+            0.0,
+            CjkMeasure::resolve(0.90, 1.60),
+        )
+        .expect("callout crosses the page");
+        let label = drawn
+            .iter()
+            .find(|line| line.text.starts_with("定义"))
+            .expect("label");
+        assert_eq!(label.page, 0);
+        assert_eq!(label.color, blue);
+        assert!((label.x - 105.0).abs() < 1.0, "label x {}", label.x);
+        let continuation: Vec<_> = drawn.iter().filter(|line| line.page == 1).collect();
+        assert!(
+            !continuation.is_empty(),
+            "page 2 kept no lines ({})",
+            drawn.len()
+        );
+        for line in &continuation {
+            assert_eq!(line.color, gray, "continuation colour {:?}", line.color);
+            assert!(
+                (line.x - 114.0).abs() < 1.0,
+                "continuation indent x={} text={}",
+                line.x,
+                line.text
+            );
+        }
+        let mut pages: Vec<(u32, String)> = Vec::new();
+        for line in &drawn {
+            if line.text.starts_with("定义") {
+                continue;
+            }
+            if let Some(slot) = pages.iter_mut().find(|(page, _)| *page == line.page) {
+                slot.1.push_str(&line.text);
+            } else {
+                pages.push((line.page, line.text.clone()));
+            }
+        }
+        pages.sort_by_key(|(page, _)| *page);
+        for pair in pages.windows(2) {
+            let left = &pair[0].1;
+            let right = &pair[1].1;
+            assert!(
+                !(left.ends_with('个') && right.starts_with('词')),
+                "一个|词 across pages: {left:?} | {right:?}"
+            );
+            assert!(
+                !(left.ends_with("一个") && right.starts_with('词')),
+                "一个|词 across pages: {left:?} | {right:?}"
+            );
+        }
     }
 
     #[test]

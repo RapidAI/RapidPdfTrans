@@ -874,7 +874,34 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     mark_dotted_names(chars, &mut sticky);
     mark_latin_name(chars, &mut sticky);
     mark_proper_names(chars, &mut sticky);
+    mark_cjk_compounds(chars, &mut sticky);
     sticky
+}
+
+/// `词元` and `一个词` stay on one line. They can overlap (`其中一个词元`),
+/// so every match is marked. A later break is used when the compound does
+/// not fit.
+fn mark_cjk_compounds(chars: &[char], sticky: &mut [bool]) {
+    for word in CJK_COMPOUNDS {
+        let piece: Vec<char> = word.chars().collect();
+        if piece.len() < 2 || piece.len() > chars.len() {
+            continue;
+        }
+        let mut index = 0;
+        while index + piece.len() <= chars.len() {
+            let end = index + piece.len();
+            if chars[index..end] != piece[..] {
+                index += 1;
+                continue;
+            }
+            for boundary in index..end - 1 {
+                if let Some(flag) = sticky.get_mut(boundary) {
+                    *flag = true;
+                }
+            }
+            index += 1;
+        }
+    }
 }
 
 /// `Manning Publications` is one name. It may move to the next line, but
@@ -1390,6 +1417,7 @@ pub(crate) fn pack_into_slots(
     indent: f32,
     boxes: &[LineSlots],
     font: &SubsetFont,
+    snap_compounds: bool,
 ) -> Option<Vec<Vec<String>>> {
     if boxes.is_empty() || size <= 0.0 || text.trim().is_empty() {
         return None;
@@ -1398,7 +1426,7 @@ pub(crate) fn pack_into_slots(
     let mut packed = Vec::with_capacity(boxes.len());
     let mut cursor = 0usize;
     let mut first_line = true;
-    for slot in boxes {
+    for (box_index, slot) in boxes.iter().enumerate() {
         while cursor < chars.len() && chars[cursor].is_whitespace() {
             cursor += 1;
         }
@@ -1418,10 +1446,31 @@ pub(crate) fn pack_into_slots(
         if take == 0 {
             return None;
         }
-        let used = wrapped[..take].to_vec();
-        let consumed = consumed_chars(&chars[cursor..], &used);
+        let mut used = wrapped[..take].to_vec();
+        let mut consumed = consumed_chars(&chars[cursor..], &used);
         if consumed == 0 {
             return None;
+        }
+        // A page break is not a place to cut 一个|词. Pull the rest of the
+        // compound onto this page when it fits; otherwise start it on the next.
+        if snap_compounds && box_index + 1 < boxes.len() && cursor + consumed < chars.len() {
+            let last_limit = if used.len() == 1 && first_line {
+                first_width
+            } else {
+                width
+            };
+            if retreat_compound_boundary(
+                &mut used,
+                &chars[cursor + consumed..],
+                last_limit,
+                size,
+                font,
+            ) {
+                consumed = consumed_chars(&chars[cursor..], &used);
+                if consumed == 0 {
+                    return None;
+                }
+            }
         }
         cursor += consumed;
         packed.push(used);
@@ -1469,7 +1518,7 @@ pub(crate) fn pack_narrow_tail(
             slots: 1,
         })
         .collect();
-    let packed = pack_into_slots(text, size, indent, &boxes, font)?;
+    let packed = pack_into_slots(text, size, indent, &boxes, font, false)?;
     let mut lines: Vec<String> = packed
         .into_iter()
         .map(|slot| slot.into_iter().next().unwrap_or_default())
@@ -1538,6 +1587,194 @@ fn peel_cjk_suffix(
     }
     let suffix: String = chars[chars.len() - count..].iter().collect();
     Some((prefix, suffix))
+}
+
+/// Compounds that stay on one side of a page break. Longest match wins, so
+/// `一个词` is not cut as `一个` plus `词`.
+const CJK_COMPOUNDS: &[&str] = &[
+    "一个词",
+    "上下文",
+    "一个",
+    "一种",
+    "一些",
+    "一次",
+    "一位",
+    "一条",
+    "一本",
+    "这个",
+    "这种",
+    "这些",
+    "那个",
+    "那种",
+    "那些",
+    "每个",
+    "某个",
+    "某种",
+    "可以",
+    "处理",
+    "编排",
+    "法律",
+    "所有",
+    "不是",
+    "没有",
+    "我们",
+    "他们",
+    "它们",
+    "以及",
+    "或者",
+    "如果",
+    "因为",
+    "所以",
+    "但是",
+    "其中",
+    "词元",
+];
+
+enum CompoundSnap {
+    /// Take this many upcoming characters onto the page that is already open.
+    Pull(usize),
+    /// Move this many trailing characters onto the next page.
+    Push(usize),
+}
+
+fn retreat_compound_boundary(
+    used: &mut [String],
+    upcoming: &[char],
+    width: f32,
+    size: f32,
+    font: &SubsetFont,
+) -> bool {
+    let Some(last) = used.last().cloned() else {
+        return false;
+    };
+    let Some(snap) = compound_snap(&last, upcoming, width, size, font) else {
+        return false;
+    };
+    let last_chars: Vec<char> = last.chars().collect();
+    let next = match snap {
+        CompoundSnap::Pull(count) => {
+            let mut extra = String::new();
+            let mut seen = 0usize;
+            for ch in upcoming {
+                if ch.is_whitespace() {
+                    if seen == 0 {
+                        continue;
+                    }
+                    break;
+                }
+                extra.push(*ch);
+                seen += 1;
+                if seen == count {
+                    break;
+                }
+            }
+            if extra.chars().count() != count {
+                return false;
+            }
+            let line = format!("{last}{extra}");
+            if fit_measure(&line, size, font) > width + 0.6 {
+                return false;
+            }
+            line
+        }
+        CompoundSnap::Push(count) => {
+            if last_chars.len() <= count {
+                return false;
+            }
+            let line: String = last_chars[..last_chars.len() - count].iter().collect();
+            let line = line.trim_end().to_string();
+            if line.is_empty() {
+                return false;
+            }
+            line
+        }
+    };
+    if let Some(slot) = used.last_mut() {
+        *slot = next;
+    }
+    true
+}
+
+fn compound_snap(
+    last: &str,
+    upcoming: &[char],
+    width: f32,
+    size: f32,
+    font: &SubsetFont,
+) -> Option<CompoundSnap> {
+    let left: Vec<char> = last.chars().collect();
+    if left.is_empty() {
+        return None;
+    }
+    let mut right_at = 0usize;
+    while right_at < upcoming.len() && upcoming[right_at].is_whitespace() {
+        right_at += 1;
+    }
+    let right = &upcoming[right_at..];
+    if right.is_empty() || !is_cjk_body(*left.last()?) || !is_cjk_body(right[0]) {
+        return None;
+    }
+    if let Some(snap) = dictionary_crossing(&left, right, last, width, size, font) {
+        return Some(snap);
+    }
+    // `词。` would open the next page. Keep that character with the word before it.
+    let orphan = right.get(1).is_none_or(|ch| !is_cjk_body(*ch));
+    if !orphan {
+        return None;
+    }
+    let pulled = format!("{last}{}", right[0]);
+    if fit_measure(&pulled, size, font) <= width + 0.6 {
+        return Some(CompoundSnap::Pull(1));
+    }
+    let mut run = 0usize;
+    while run < left.len() && run < 4 && is_cjk_body(left[left.len() - 1 - run]) {
+        run += 1;
+    }
+    (run >= 1 && left.len() > run).then_some(CompoundSnap::Push(run))
+}
+
+fn dictionary_crossing(
+    left: &[char],
+    right: &[char],
+    last: &str,
+    width: f32,
+    size: f32,
+    font: &SubsetFont,
+) -> Option<CompoundSnap> {
+    let take = left.len().min(8);
+    let prefix = &left[left.len() - take..];
+    let suffix_len = right.len().min(8);
+    let mut junction = prefix.to_vec();
+    junction.extend_from_slice(&right[..suffix_len]);
+    let cut = prefix.len();
+    let mut best: Option<(usize, usize)> = None;
+    for word in CJK_COMPOUNDS {
+        let piece: Vec<char> = word.chars().collect();
+        if piece.len() < 2 || piece.len() > junction.len() {
+            continue;
+        }
+        for start in 0..=junction.len() - piece.len() {
+            if junction[start..start + piece.len()] != piece[..] {
+                continue;
+            }
+            let end = start + piece.len();
+            if start < cut && end > cut && best.is_none_or(|(_, len)| piece.len() > len) {
+                best = Some((start, piece.len()));
+            }
+        }
+    }
+    let (start, len) = best?;
+    let end = start + len;
+    let on_left = cut - start;
+    let on_right = end - cut;
+    let mut pulled = last.to_string();
+    for ch in right.iter().take(on_right) {
+        pulled.push(*ch);
+    }
+    if fit_measure(&pulled, size, font) <= width + 0.6 {
+        return Some(CompoundSnap::Pull(on_right));
+    }
+    (on_left > 0 && left.len() > on_left).then_some(CompoundSnap::Push(on_left))
 }
 
 fn consumed_chars(src: &[char], lines: &[String]) -> usize {
@@ -2329,7 +2566,8 @@ mod tests {
             width: 200.0,
             slots: 2,
         };
-        let packed = pack_into_slots(text, 10.0, 0.0, &[wide, wide], &font).expect("two boxes");
+        let packed =
+            pack_into_slots(text, 10.0, 0.0, &[wide, wide], &font, false).expect("two boxes");
         let flat: String = packed.iter().flatten().map(|line| line.as_str()).collect();
         assert_eq!(flat, text, "{packed:?}");
         assert!(packed[0].len() <= 2 && packed[1].len() <= 2, "{packed:?}");
@@ -2343,10 +2581,75 @@ mod tests {
                     slots: 1,
                 }],
                 &font,
+                false,
             )
             .is_none(),
             "one short line must not keep a prefix"
         );
+    }
+
+    #[test]
+    fn a_page_break_does_not_split_a_cjk_compound() {
+        // Twelve ems end on `一个`. The next character is `词`, which does not
+        // fit, so the compound moves intact onto the next page.
+        let text = "定义其中词元大致对应一个词。例如模型。";
+        let font = uniform_font(text);
+        let packed = pack_into_slots(
+            text,
+            10.0,
+            0.0,
+            &[
+                LineSlots {
+                    width: 120.0,
+                    slots: 1,
+                },
+                LineSlots {
+                    width: 200.0,
+                    slots: 2,
+                },
+            ],
+            &font,
+            true,
+        )
+        .expect("compound fits across the page");
+        let page_a = packed[0].concat();
+        let page_b = packed[1].concat();
+        assert!(
+            page_a.contains("一个词") || page_b.contains("一个词"),
+            "一个词 was cut: {page_a:?} | {page_b:?}"
+        );
+        assert!(
+            !(page_a.ends_with('个') && page_b.starts_with('词')),
+            "page break split 一个|词: {page_a:?} | {page_b:?}"
+        );
+        assert!(
+            !(page_a.ends_with('一') && page_b.starts_with('个')),
+            "page break split 一|个: {page_a:?} | {page_b:?}"
+        );
+        let flat = format!("{page_a}{page_b}");
+        assert_eq!(flat, text);
+    }
+
+    #[test]
+    fn a_line_does_not_split_a_cjk_compound() {
+        // `一个词` overlaps `词元` in `其中一个词元`. Neither boundary breaks.
+        let text = "不同的模型支持不同的词元限制，其中一个词元。";
+        let font = uniform_font(text);
+        // Twenty ems end on the 词 of `一个词`, and the following 元 does not
+        // fit. `词元` overlaps that `一个词`, so the break moves before both.
+        let lines = wrap_text(text, 10.0, 200.0, 200.0, &font).expect("wrap");
+        let flat: String = lines.concat();
+        assert_eq!(flat, text);
+        for pair in lines.windows(2) {
+            assert!(
+                !(pair[0].ends_with('词') && pair[1].starts_with('元')),
+                "词|元: {lines:?}"
+            );
+            assert!(
+                !(pair[0].ends_with('个') && pair[1].starts_with('词')),
+                "一个|词: {lines:?}"
+            );
+        }
     }
 
     #[test]
