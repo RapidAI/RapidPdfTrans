@@ -726,7 +726,15 @@ fn prepare_segments(
         &extraction.regions,
         &extraction.pages,
     );
-    let segments = segmentation.segments;
+    let segments = crate::rewrite::merge_stacked_paragraphs(segmentation.segments, &extraction.glyphs);
+    // A formula the segmenter dropped (`µ(G) = min`) is absorbed into the
+    // placeholder paragraph. Marking it kept here makes the later pending
+    // mark abort, and the original glyphs stay under the Chinese.
+    let absorbed: HashSet<u32> = segments
+        .iter()
+        .filter(|segment| segment.text.contains('⟦'))
+        .flat_map(|segment| segment.glyph_ids.iter().copied())
+        .collect();
     let reference_ids = if opts.skip_references {
         references::reference_glyph_ids(&extraction.glyphs)
     } else {
@@ -742,6 +750,9 @@ fn prepare_segments(
         .map(|(index, glyph)| (glyph.id, index))
         .collect();
     for (id, reason) in &segmentation.kept {
+        if absorbed.contains(id) {
+            continue;
+        }
         let Some(index) = by_id.get(id) else {
             continue;
         };
@@ -761,6 +772,12 @@ fn finish_report(
     calls: usize,
     cache_hits: usize,
 ) -> Result<TranslateReport> {
+    let by_id: HashMap<u32, usize> = extraction
+        .glyphs
+        .iter()
+        .enumerate()
+        .map(|(index, glyph)| (glyph.id, index))
+        .collect();
     let mut texts: Vec<String> = Vec::with_capacity(segments.len());
     for (i, seg) in segments.iter().enumerate() {
         let text = translated[i]
@@ -775,6 +792,12 @@ fn finish_report(
         let kept = seg.glyph_ids.iter().any(|id| reference_ids.contains(id));
         if !kept {
             for id in &seg.glyph_ids {
+                // An absorbed formula glyph can already be final. Marking it
+                // again aborts before the PDF is saved. Rewrite still blanks
+                // the operator because the id stays on the segment.
+                if extraction.glyphs[by_id[id]].disposition.is_final() {
+                    continue;
+                }
                 extraction.mark_translated_pending(*id, text.clone())?;
             }
         }
@@ -3675,6 +3698,39 @@ mod tests {
             .all(|g| matches!(g.disposition, Disposition::TranslatedPendingRewrite { .. })));
         assert!(!ex.coverage_report().complete);
         assert!(ex.assert_complete().is_err());
+    }
+
+    #[test]
+    fn a_kept_formula_inside_a_placeholder_paragraph_is_not_marked_again() {
+        let mut ex = extraction_from_lines(&["µ(G) = min"]);
+        ex.glyphs[0].disposition = Disposition::KeptOriginal {
+            reason: "ocr".into(),
+        };
+        let ids: Vec<u32> = ex.glyphs.iter().map(|glyph| glyph.id).collect();
+        let segments = vec![Segment {
+            id: 0,
+            page_index: 0,
+            glyph_ids: ids,
+            text: "µ(G) = min ⟦0⟧".into(),
+        }];
+        let report = finish_report(
+            &mut ex,
+            &segments,
+            &HashSet::new(),
+            vec![Some("势函数 µ(G) = min ⟦0⟧ 成立。".into())],
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(
+            matches!(ex.glyphs[0].disposition, Disposition::KeptOriginal { .. }),
+            "the formula glyph was marked again: {:?}",
+            ex.glyphs[0].disposition
+        );
+        assert!(ex.glyphs[1..]
+            .iter()
+            .all(|glyph| matches!(glyph.disposition, Disposition::TranslatedPendingRewrite { .. })));
+        assert!(report.segments[0].translated.contains('⟦'));
     }
 
     #[test]

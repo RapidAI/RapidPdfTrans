@@ -877,23 +877,41 @@ pub(crate) fn wrap_text(
 }
 
 /// A centered name list breaks after `、` so an item stays on one line.
-/// The break still has to leave the line mostly full.
+/// Body prose does not: a comma at 60% of the fitted span left `例如，` and
+/// `表明，` with a third of the column empty.
 fn prefer_list_delimiter(chars: &[char], sticky: &[bool], start: usize, end: usize) -> usize {
     if end <= start + 1 || end > chars.len() {
         return end;
     }
-    let marks = chars[start..end]
-        .iter()
-        .filter(|ch| **ch == '、' || **ch == '，')
-        .count();
-    if marks == 0 {
+    let window = &chars[start..end];
+    let ideographic = window.iter().filter(|ch| **ch == '、').count();
+    let commas = window.iter().filter(|ch| **ch == '，').count();
+    if ideographic == 0 && commas == 0 {
         return end;
     }
+    // Two or more `、` is a name list (`无线电、量子计算、铁路`). One `、`
+    // after a citation, or a prose `，`, stays on the line unless the line
+    // is already full. The 60% backup is what ragged the k-server column.
+    let list = ideographic >= 2;
     let mut alt = end;
     while alt > start + 1 {
         alt -= 1;
-        let mark = chars[alt - 1] == '、' || chars[alt - 1] == '，';
-        if mark && can_break_at(chars, sticky, alt) && (alt - start) * 5 >= (end - start) * 3 {
+        let mark = if list {
+            chars[alt - 1] == '、'
+        } else {
+            chars[alt - 1] == '、' || chars[alt - 1] == '，'
+        };
+        if !mark || !can_break_at(chars, sticky, alt) {
+            continue;
+        }
+        let span = end - start;
+        let kept = alt - start;
+        let full = if list {
+            kept * 5 >= span * 3
+        } else {
+            kept * 10 >= span * 9
+        };
+        if full {
             return alt;
         }
     }
@@ -967,7 +985,31 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     mark_latin_name(chars, &mut sticky);
     mark_proper_names(chars, &mut sticky);
     mark_cjk_compounds(chars, &mut sticky);
+    mark_reserved_gaps(chars, &mut sticky);
     sticky
+}
+
+/// A run of ideographic spaces stands in for a stacked formula. Splitting
+/// it puts half the hole on the next line and the binomial has nowhere to sit.
+fn mark_reserved_gaps(chars: &[char], sticky: &mut [bool]) {
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '\u{3000}' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index] == '\u{3000}' {
+            index += 1;
+        }
+        if index - start >= 2 {
+            for boundary in start..index.saturating_sub(1) {
+                if let Some(flag) = sticky.get_mut(boundary) {
+                    *flag = true;
+                }
+            }
+        }
+    }
 }
 
 /// `词元` and `一个词` stay on one line. They can overlap (`其中一个词元`),
@@ -1200,9 +1242,14 @@ fn mark_citations(chars: &[char], sticky: &mut [bool]) {
 
 /// `(Smith et al., 2020)` and `（王等，2020）` stay on one line. A year inside
 /// a Chinese sentence (`（……在2000年代……）`) is prose and still wraps.
+/// `（例如参见 Speyer … [SS04] 以及 … [MS15]）` is also prose: the digits sit
+/// in the bracket keys, and sticking the whole aside left `进一步扩展` short.
 fn parenthetical_is_citation(inside: &str) -> bool {
     if inside.to_ascii_lowercase().contains("et al") {
         return true;
+    }
+    if inside.contains('[') || inside.contains('［') {
+        return false;
     }
     let digits = inside.chars().filter(|ch| ch.is_ascii_digit()).count();
     if digits < 4 {
@@ -1728,6 +1775,7 @@ const CJK_COMPOUNDS: &[&str] = &[
     "词元",
     "量子计算",
     "量子",
+    "真实",
 ];
 
 enum CompoundSnap {
@@ -1946,6 +1994,59 @@ mod tests {
             lines.iter().any(|line| line.contains('、')),
             "the list did not break on a delimiter: {joined}"
         );
+    }
+
+    #[test]
+    fn zhen_shi_stays_on_one_line() {
+        let text = "流感是真实存在的";
+        let font = uniform_font(text);
+        // Five ems would end the line between 真 and 实.
+        let lines = wrap_text(text, 10.0, 40.0, 40.0, &font).expect("wrap");
+        let joined = lines.join("|");
+        assert!(
+            lines.iter().all(|line| !line.ends_with('真')),
+            "真实 was split: {joined}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("真实")),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn a_body_column_fills_past_a_prose_comma() {
+        let paragraphs = [
+            "k 服务器问题与许多其他在线问题密切相关。例如，分页（也称为缓存）问题对应于度量空间为一致度量的特殊情况，并且是竞争分析领域的基石 [ST85]。k 服务器问题属于度量任务系统 [BLS92, BCLL21, CL22, BCR23] 的范畴，在 (k + 1) 点度量上的 k 服务器问题等价于度量服务系统 [CL92, BCR23]，并与分层图遍历 [FFK+98, BCR25, CT26] 有着密切的联系。k 服务器问题的推广包括加权 k 服务器问题和广义 k 服务器问题 [FR94, SS06, BEK17, BEKN23, BMC26]、无限服务器问题 [CKL21, BBCJ20] 以及 k 出租车问题 [CK19, GKP24, CP26]。",
+            "k-服务器工作函数的一个重要性质是次凸性，它由 Koutsoupias 和 Papadimitriou [KP95] 在线算法背景下引入。然而，等价或密切相关概念在不同术语下已在多个领域独立出现。事实上，k-服务器设定中的次凸工作函数在数学上等价于赋值拟阵，这是 Dress 和 Wenzel [DW90] 在贪心算法变体背景下引入的概念。",
+            "Dress 和 Wenzel 关于赋值拟阵的基础性论文 [DW92] 表明，赋值拟阵自然地产生于行列式的赋值和 Plücker 关系。此后，这一关系通过热带几何得到了进一步推广。",
+            "Dress 和 Wenzel 关于赋值拟阵的基础性论文 [DW92] 表明，赋值拟阵自然地产生于行列式的赋值和 Plücker 关系。此后，这一关系通过热带几何的进展得到了进一步扩展（例如参见 Speyer 和 Sturmfels [SS04] 以及 Maclagan 和 Sturmfels [MS15]）。",
+        ];
+        let column = 468.0f32;
+        let size = 9.8f32;
+        for text in paragraphs {
+            let codes: Vec<u32> = text.chars().map(|ch| ch as u32).collect();
+            let Some(font) = crate::font::subset_for_style(
+                crate::font::FaceStyle {
+                    serif: true,
+                    bold: false,
+                    italic: false,
+                },
+                &codes,
+                &crate::font::FontSources::default(),
+            ) else {
+                return;
+            };
+            let lines = wrap_text(text, size, column, column, &font).expect("wrap");
+            assert!(lines.len() >= 2, "{lines:?}");
+            for line in &lines[..lines.len() - 1] {
+                let width = measure(line, size, &font);
+                assert!(
+                    width >= column * 0.90,
+                    "body line filled {:.0}% of the column: {line}",
+                    width / column * 100.0
+                );
+            }
+        }
     }
 
     #[test]

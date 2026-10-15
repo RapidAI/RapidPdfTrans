@@ -1063,7 +1063,10 @@ fn ocr_line_low_quality(text: &str) -> bool {
             continue;
         }
         chars += 1;
-        if junk_ocr_symbol(ch) {
+        // A slide bullet (`●FOSDEM`, `○IPv6`) is one glyph in the word. It is
+        // not a misread the way `£` inside `3jOV£9rOIit` is. Counting it made
+        // a 7-character line fail the garbage ratio and dropped the page.
+        if junk_ocr_symbol(ch) && !list_mark(ch) {
             garbage += 1;
         }
     }
@@ -1087,6 +1090,13 @@ fn ocr_line_low_quality(text: &str) -> bool {
 /// A junk symbol or a digit glued into a non-word (`3j`, `9r`) wins over
 /// that exemption. `log2` and `O(log2` stay: the letters are a plain word.
 fn ocr_garbage_token(token: &str) -> bool {
+    let token = strip_leading_mark(token);
+    if token.is_empty() {
+        return false;
+    }
+    if version_token(token) {
+        return false;
+    }
     let chars: Vec<char> = token.chars().collect();
     let letters: Vec<char> = chars
         .iter()
@@ -1202,6 +1212,10 @@ fn junk_token_count(text: &str) -> usize {
 /// A token OCR did not read as a word. A normal English word, including
 /// `LaFollette` and `Constraints`, is not junk.
 fn junk_ocr_token(token: &str) -> bool {
+    let token = strip_leading_mark(token);
+    if token.is_empty() || version_token(token) {
+        return false;
+    }
     let chars: Vec<char> = token.chars().filter(|ch| !ch.is_whitespace()).collect();
     if chars.len() < 3 {
         return false;
@@ -1240,6 +1254,31 @@ fn junk_ocr_symbol(ch: char) -> bool {
     // Brackets, CJK stops, and `*` are ordinary text. `£` inside `3jOV£9rOIit`
     // is a misread and is not in this set.
     !".,;:!?\"'`’“”‘—–-()[]{}<>/\\+*=&@#%^_|~…·•、。《》「」『』【】（），：；！？".contains(ch)
+}
+
+/// `●All` and `○IPv6-only` keep the bullet in the same glyph run. The
+/// bullet is not a misread; the word after it is what the scorer judges.
+fn list_mark(ch: char) -> bool {
+    matches!(
+        ch,
+        '●' | '○' | '•' | '◦' | '▪' | '▫' | '▸' | '►' | '‣' | '∙' | '◉' | '◎' | '◆' | '◇'
+            | '■' | '★' | '☆' | '·'
+    )
+}
+
+fn strip_leading_mark(token: &str) -> &str {
+    token.trim_start_matches(list_mark)
+}
+
+/// `IPv4`, `IPv6`, and `IPv6-only`. The `v` is lowercase, so the token is
+/// not an all-caps citation, but it is still a real word.
+fn version_token(token: &str) -> bool {
+    let letters: String = token.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    if letters.len() < 3 || letters.len() > 12 || !token.chars().any(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let lower = letters.to_ascii_lowercase();
+    lower == "ipv" || lower == "ipvonly"
 }
 
 fn digit_touches_letter(chars: &[char]) -> bool {
@@ -3620,7 +3659,8 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
     }
     // A centered devroom list fills its own slide. The next slide's list is
     // not the rest of this sentence, even when a line starts with `and`.
-    if centered_comma_block(prev) {
+    // A schedule bullet (`● 1052 events`) is not the start of that list either.
+    if centered_comma_block(prev) || centered_comma_block(next) {
         return false;
     }
     // A contents row already carries its page number. The next page's next
@@ -9576,6 +9616,71 @@ mod tests {
     }
 
     #[test]
+    fn a_schedule_bullet_does_not_absorb_the_next_slides_list() {
+        // FOSDEM page 12 ends on a bullet. Page 13 is a centered topic list.
+        // Carrying the bullet onto that list painted `Ada` on the schedule.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let push = |glyphs: &mut Vec<_>, id: &mut u32, page, x, y, width, text: &str| {
+            let mut item = glyph(*id, x, y, text, false);
+            item.page_index = page;
+            item.font_size = 18.0;
+            item.bbox = [x, y, x + width, y + 16.0];
+            item.advance = [width, 0.0];
+            glyphs.push(item);
+            *id += 1;
+        };
+        push(&mut glyphs, &mut id, 0, 40.0, 300.0, 220.0, "● 1052 events (+190)");
+        push(&mut glyphs, &mut id, 0, 40.0, 270.0, 240.0, "● 933 speakers (+146)");
+        push(
+            &mut glyphs,
+            &mut id,
+            0,
+            56.0,
+            240.0,
+            360.0,
+            "○ plus all the lightning talk",
+        );
+        push(
+            &mut glyphs,
+            &mut id,
+            1,
+            40.0,
+            320.0,
+            640.0,
+            "Ada, Android, Go, Rust, Energy,",
+        );
+        push(
+            &mut glyphs,
+            &mut id,
+            1,
+            28.0,
+            296.0,
+            664.0,
+            "Legal and Policy, LLVM, RISC-V, PostgreSQL,",
+        );
+        push(
+            &mut glyphs,
+            &mut id,
+            1,
+            80.0,
+            272.0,
+            560.0,
+            "Matrix.org Foundation and Community",
+        );
+        let segs = segment_glyphs(&glyphs);
+        let page0: Vec<_> = segs.iter().filter(|seg| seg.page_index == 0).collect();
+        assert!(
+            page0.iter().all(|seg| !seg.text.contains("Ada")),
+            "schedule absorbed the list: {:?}",
+            page0.iter().map(|seg| &seg.text).collect::<Vec<_>>()
+        );
+        let page1: Vec<_> = segs.iter().filter(|seg| seg.page_index == 1).collect();
+        assert_eq!(page1.len(), 1, "{:?}", page1.iter().map(|seg| &seg.text).collect::<Vec<_>>());
+        assert!(page1[0].text.contains("RISC-V") && page1[0].text.contains("Ada"));
+    }
+
+    #[test]
     fn a_padded_last_line_and_a_short_centered_tail_stay_in_the_list() {
         // FOSDEM page 14. The last line is padded with spaces out past the
         // page, and page 13's last item sits on the title's left edge.
@@ -9761,6 +9866,75 @@ mod tests {
             texts.iter().any(|text| text.contains("your candidate!")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn a_born_digital_slide_is_not_dropped_as_ocr() {
+        let pages = vec![crate::glyph::PageInfo {
+            index: 0,
+            object_id: "1 0".into(),
+            media_box: [0.0, 0.0, 720.0, 405.0],
+            rotate: 0,
+        }];
+        let regions = vec![crate::glyph::PaintedRegion {
+            page_index: 0,
+            bbox: [150.0, 0.0, 570.0, 405.0],
+            kind: "image".into(),
+        }];
+        let slides: &[&[&str]] = &[
+            &[
+                "Network",
+                "●FOSDEM",
+                "○IPv6-only - first non-network large-scale conference network to be so",
+                "○NAT64 & DNS64",
+                "○Fix yo bugs!",
+                "●FOSDEM-Dualstack",
+                "○IPv4 & IPv6",
+                "These are open networks – Encrypt your traffic",
+            ],
+            &[
+                "Schedule",
+                "●1052 events (+190)",
+                "●933 speakers (+146)",
+                "●70 tracks/devrooms (+3)",
+                "●43 BoFs",
+                "○plus all the lightning lightning talk",
+            ],
+            &[
+                "Thanks",
+                "●All volunteers",
+                "●All devroom managers",
+                "●All speakers",
+                "●All staff",
+            ],
+        ];
+        for lines in slides {
+            for line in *lines {
+                assert!(!ocr_line_low_quality(line), "low: {line}");
+            }
+            let mut glyphs = Vec::new();
+            for (index, text) in lines.iter().enumerate() {
+                let y = 360.0 - index as f32 * 28.0;
+                // The mascot image starts at x=150. The line stays to its left,
+                // which is how the slide's text sits beside the picture.
+                glyphs.push(block(index as u32, 40.0, y, 100.0, 16.0, text));
+            }
+            let seg = segment_placed(&glyphs, &SegmentFlags::default(), &regions, &pages);
+            let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+            assert!(
+                texts.iter().any(|text| text.contains(lines[1])),
+                "slide line was dropped as OCR: {texts:?}"
+            );
+            assert!(
+                seg.kept.iter().all(|(_, reason)| reason != "ocr"),
+                "born-digital slide was kept as OCR: {:?}",
+                seg.kept
+            );
+        }
+        assert!(ocr_line_low_quality("3jOV£9rOIit"));
+        assert!(!ocr_line_low_quality("○IPv4 & IPv6"));
+        assert!(!ocr_line_low_quality("●All volunteers"));
+        assert!(!ocr_line_low_quality("●1052 events (+190)"));
     }
 
     #[test]

@@ -100,33 +100,36 @@ The devroom list is Chinese, centered, with product and project names left in La
 - Page 5. `前言`.
 - Pages 7–12. Chapters 1 and 2 in Chinese, including `商业利益得到保障` territory and the Hoan quotation.
 
-## Owner pass: devroom list and the binomial paragraph
+## Owner pass: column fill and the binomial paragraph
 
-`rpt-core` lib tests: 362 passed, 1 ignored. Coverage on both exports is `complete: true`, `english_body: 0`.
+`rpt-core` lib tests: 371 passed, 1 ignored. Coverage on both exports is `complete: true`, `english_body: 0`.
 
 | id | PDF |
 | --- | --- |
 | arxiv-2609.15979 | `/opt/cursor/artifacts/pdfs/arxiv-2609.15979-zh.pdf` |
 | fosdem-2025-welcome | `/opt/cursor/artifacts/pdfs/fosdem-2025-welcome-zh.pdf` |
 
-A centered comma list whose last line is padded with spaces out past the page stays one paragraph, and the pad is not part of the midpoint. After the line bounds are recomputed, the Chinese is centered on that axis and spread from the source top baseline to the source bottom. A topic list (six or more commas, fewer than two sentence stops) is incomplete when a kept name, a camel-case token, a parenthetical acronym, or an item is missing; a cached incomplete list is translated again. A real two-sided stack (a binomial, pieces both above and below the nearby full-size baseline) keeps that paragraph in the original glyphs, in order. A lone period split off that paragraph stays `.`. `(k + 1)` stays inside the parentheses. Italic `k` on successive lines still translates with the paragraph. Glyph overlap still counts a math-italic glyph.
+A prose `，` stays on the line unless the break already keeps 90% of the fitted span. A name list (two or more `、`) may still break at `、` from 60%. A parenthetical that wraps bracket keys (`（例如参见 Speyer … [SS04] 以及 … [MS15]）`) is prose and wraps; `(Smith et al., 2020)` stays one token. The ragged page-4 lines (`例如，` / `然而，` / `[DW92] 表明，` / `进一步扩展`) came from those two breaks, not from the binomial keep.
 
-### FOSDEM pages 13–14, then the other 34
+The binomial is one placeholder in the sentence (`一个` ⟦k+1 over 2⟧ `维`). Inline math stays in the translation (`µ(G) = min…`, `(k + 1)`). A display equation on the far side of that paragraph still freezes the heading: cutting the walk painted `4 请求时的势及其增量` onto the U∗/0W stack. A slide bullet is not OCR garbage. A centered comma list is not the next line of the previous slide. `真实` is one compound. A citation `+` is not its own baseline.
 
-Page 13 is one centered paragraph, mids at 360, baselines from y=83 to y=323. It includes Ada, GraphQL, OpenAPI, AsyncAPI, DNS, eBPF, Go, HPC, JavaScript, LibreOffice, LLVM, and Matrix.org 基金会与社区. Topic words are Chinese (`能源`, `法律与政策`, `机密计算`).
+### FOSDEM, all 36 pages
 
-Page 14 is one centered paragraph, every line mid 360.1, including the short line `开放源设计、开放源固件、BMC 和 Bootloader`. Baselines run y=83 to y=275 in even 32pt steps. The source items are all present: Mozilla, MySQL, Nix, NixOS, CAD/CAM, BMC, Bootloader, PostgreSQL, Python, `量子计算`, RTC, RISC-V, Rust, SBOM, Swift, WebAssembly, Web 性能, and `文档工具化` for Tool the Docs.
+Pages 13 and 14 stay one centered list each. Page 13 includes Ada, GraphQL, OpenAPI, AsyncAPI, DNS, eBPF, Go, HPC, JavaScript, LibreOffice, LLVM, and Matrix.org 基金会与社区. Page 14 includes Mozilla, MySQL, Nix, NixOS, CAD/CAM, BMC, Bootloader, PostgreSQL, Python, `量子计算`, RTC, RISC-V, Rust, SBOM, Swift, WebAssembly, Web 性能, and `文档工具化`. Topic words are Chinese.
 
-Pages 1–6, 8, 10–11, 17–30, and 32–36 are the Chinese slides from the previous pass (page 9 has no text). Pages 15–16 are centered name lists: product names stay Latin, and the punctuation is Chinese. Pages 7, 12, and 31 still paint English echoes (`IPv6-only`, the schedule counts, `Thanks` / `All volunteers`).
+Page 7 is Chinese (`网络`, `仅 IPv6`, `修好你的 bug`, NAT64/DNS64). Page 12 is the Chinese schedule (`1052 活动`, `933 位演讲者`, `70 个主题轨道/Devroom`) and does not absorb page 13. Page 28 breaks as `流感是` / `真实存在的`. Page 31 is `谢谢` / `所有志愿者`. Pages 15–16 are booth-name lists. Remaining Latin on the other slides is URLs and product names. Page 9 has no text.
 
 ### k-server, all 18 pages
 
-Page 4 opens with the binomial paragraph in the original English, in order: `µ(G) = min…`, `k+1` over `2`, and `Q = [z^{−d(x,y)} qx qy]`. It ends `using z .` The following prose is Chinese, including `Ψt ≤ (k + 1)wt(X)` and `在 (k + 1) 点度量上`, and `[CK19, GKP24, CP26]`. The gap before `工作函数和 WFA` is the source 29pt paragraph gap. Section 1.3 is Chinese. `Plücker` is one word.
+Page 4. The opening paragraph is Chinese. The stack sits between `一个` and `维`, numerator `k+1` over `2`. `µ(G) = min…` and `Q = [z^{−d(x,y)} …]` stay inline. Section 1.3 and the run-in paragraphs fill the column: measured body lines are 90–103% of the 468pt measure except paragraph-final lines (`分别在引理 5.1…`, `无限服务器问题…`, `[Sit14] 的候选方案。`, `M♮-凹函数…[Mur03]。`). `例如，分页`, `然而，`, and `[DW92] 表明` are full lines. The Plücker sentence continues through `（例如参见 Speyer 和 Sturmfels` and breaks at 96% of the column. `Plücker` is one word. `(k + 1)` stays inside the parentheses.
 
-Pages 14–17 stay an English bibliography. Pages 1, 6, and 18 are Chinese around the formulas. Pages 2–3 and 5–13 keep a stacked-formula paragraph in English when the paragraph itself contains the stack (the definition on page 2, the determinant expansion on page 12); the surrounding prose is Chinese. `随机化 k-服务器` on page 5 is Chinese, with `O(log k)` and `Ω(log² k)` in the sentence.
+Page 1. Body lines are 13.5pt apart. `许多最初为` over `服务器位于` is that same leading. `[DEH+17]` does not open a gap.
+
+Page 9. `对于具有方形对角块的矩阵` and `固定有限标签集 … N ×` are Chinese, with `n+1` over `2` and `k+1` over `2` in the sentence. The heading `4 The potential and its increase at a request` stays the source English on its own baseline (x=72). Lemma 3.2 item 1 stays English (`If A is an invertible d × d matrix…`) on the formula-keep path.
+
+Pages 14–17 stay an English bibliography. Pages 5, 7, and 10–13 still keep some display-formula paragraphs in English (math-block), with Chinese already in the checkpoint. Pages 2–3, 6, and 18 are Chinese around the formulas. `随机化 k-服务器` on page 5 is Chinese, with `O(log k)` and `Ω(log² k)` in the sentence.
 
 ## Left open
 
-- The scan’s invisible OCR layer is still in the content stream, so a text extract of the cover and of page 2 still shows the old characters. The painted cover does not.
-- k-server page 1 has one crushed line pair in the opening paragraph. A paragraph that contains a real two-sided stack stays English instead of being reflowed around placeholder glyphs.
-- FOSDEM pages 7, 12, and 31 still paint English echoes. Page 28 wraps `真实` as `流感是真` / `实存在的`.
+- The scan’s invisible OCR layer is still in the content stream, so a text extract of the LaFollette cover and of page 2 still shows the old characters. The painted cover does not.
+- Lemma 3.2 item 1, and the math-block paragraphs on k-server pages 5, 7, and 10–13, stay English. Painting the page 9 heading moved it onto the binomial, so those lines stay in the source glyphs.
