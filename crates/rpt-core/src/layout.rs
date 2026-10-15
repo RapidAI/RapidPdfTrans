@@ -525,8 +525,9 @@ pub(crate) fn fit_cjk_block_with(
 }
 
 /// Extra space between two CJK ideographs, as a fraction of the em.
-/// A larger cap (`0.50`) filled a short line by pulling `的一系列` apart.
-const MAX_JUSTIFY_EM: f32 = 0.15;
+/// A larger cap (`0.15`) still tracked `对于任意` into `对 于 任 意`. A line
+/// that cannot be squared inside this hairline stays ragged.
+const MAX_JUSTIFY_EM: f32 = 0.05;
 
 /// Extra space goes only between CJK characters. A single `Tc` would letter-space
 /// the Latin citation on the same line. The extra never exceeds [`MAX_JUSTIFY_EM`];
@@ -2521,9 +2522,9 @@ mod tests {
         let font = uniform_font(text);
         let natural = measure(text, 10.0, &font);
         let pairs = cjk_pair_count(text) as f32;
-        let width = natural + (pairs * 10.0 * 0.15 * 0.5).max(1.0);
+        let width = natural + (pairs * 10.0 * MAX_JUSTIFY_EM * 0.5).max(1.0);
         let gaps = justify_gaps(text, 10.0, width, &font, true);
-        let cap = 10.0 * 0.15 + 0.01;
+        let cap = 10.0 * MAX_JUSTIFY_EM + 0.01;
         assert!(
             gaps.iter().all(|gap| *gap <= cap),
             "inter-character gap exceeded {cap:.2}: {gaps:?}"

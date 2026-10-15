@@ -2433,17 +2433,39 @@ fn math_word(word: &str) -> bool {
     ) {
         return true;
     }
-    if lower.starts_with("log") && lower[3..].chars().all(|ch| ch.is_ascii_alphanumeric()) {
+    // `log2`, `log²`, `logn`, `log^2`. The superscript is the exponent, not a gloss.
+    if let Some(rest) = word.get(3..) {
+        if word.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case("log")) {
+            return rest
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || math_mark(ch));
+        }
+    }
+    if word.chars().all(|ch| ch.is_ascii_digit() || math_mark(ch))
+        && word.chars().any(|ch| ch.is_ascii_digit())
+    {
         return true;
     }
-    if word.chars().all(|ch| ch.is_ascii_digit()) && !word.is_empty() {
-        return true;
+    // `k`, `n`, `∆`, `k²`. A Latin word such as `against` has more than one letter.
+    let mut cores = 0usize;
+    for ch in word.chars() {
+        if ch.is_ascii_alphabetic() || math_symbol(ch) {
+            cores += 1;
+        } else if !(ch.is_ascii_digit() || math_mark(ch)) {
+            return false;
+        }
     }
-    let letters = word.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    letters == 1
-        && word
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '^' | '+' | '-' | '*'))
+    cores == 1
+}
+
+fn math_mark(ch: char) -> bool {
+    matches!(ch, '_' | '^' | '+' | '-' | '*' | '\'')
+        || ('\u{00B2}'..='\u{00B3}').contains(&ch)
+        || ('\u{2070}'..='\u{209F}').contains(&ch)
+}
+
+fn math_symbol(ch: char) -> bool {
+    ('\u{0391}'..='\u{03C9}').contains(&ch) || ('\u{2200}'..='\u{22FF}').contains(&ch)
 }
 
 fn gloss_words(inner: &str) -> Vec<&str> {
@@ -3273,6 +3295,14 @@ mod tests {
         assert!(
             kept.contains("(logk)") && kept.contains("(log2 k)"),
             "{kept}"
+        );
+        let powers = repair_body_translation(
+            "improved to O(log n log2 k) and O(log Delta log3 k)",
+            "改进为 O(log n log² k) 和 O(log ∆ log³ k)",
+        );
+        assert!(
+            powers.contains("(log n log² k)") && powers.contains("(log ∆ log³ k)"),
+            "{powers}"
         );
         let gloss = repair_body_translation(
             "algorithms (against oblivious adversaries) exist",

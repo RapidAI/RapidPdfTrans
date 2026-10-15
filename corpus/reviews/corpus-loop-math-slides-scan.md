@@ -67,8 +67,41 @@ The source is an InvisibleOCR text layer. Painted text is the review. `pdftotext
 - Pages 5–6. Preface in Chinese. One sentence still contains the English word “effects”.
 - Page 7–12. Chapters 1 and 2 in Chinese. The heading Business Interests Safe is 商业利益得到保障. “J. P.” style names that are real people stay Latin when the line is a name.
 
+## Owner pass
+
+Exports below replace the three files from the first pass. Coverage is `english_body: 0` and `complete: true` on each. `rpt-core` lib tests: 353 passed, 1 ignored.
+
+| id | PDF |
+| --- | --- |
+| arxiv-2609.15979 | `/opt/cursor/artifacts/pdfs/arxiv-2609.15979-zh.pdf` |
+| fosdem-2025-welcome | `/opt/cursor/artifacts/pdfs/fosdem-2025-welcome-zh.pdf` |
+| lafollette-illusion-1924 v2 | `/opt/cursor/artifacts/pdfs/lafollette-1924-p1-12-zh-v2.pdf` |
+
+### k-server, pages 4–5 and the other 16
+
+A bold run-in is one unit with the paragraph. `相关问题。`, `工作函数和 WFA。`, `次凸性、赋值拟阵和热带几何。`, and `随机化 k-服务器。` are bold, and the body continues on that same baseline. The italic math `k` in `Randomized k-server.` stays inside the run-in. Word boxes on pages 4 and 5 do not overlap.
+
+`O(log k)`, `Ω(log k)`, `Ω(log² k)`, `O(log n log² k)`, `O(log ∆ log³ k)`, and `n = k + 1` stay in the sentence. `Plücker` is one word. `[CK19, GKP24, CP26]` closes the k-taxi sentence instead of sitting alone under a hole. A citation key such as `GKP24` is not scored as OCR. CJK justification stops at 0.05em, so `对于任意` is not tracked out into `对 于 任 意`.
+
+Pages 14–17 stay an English bibliography. One opening paragraph on page 1 has a single pair of lines about 4pt apart (`许多最初为` over `服务器位于`). A few formula lines still contain English (`For instance`, `The` beside a lemma number).
+
+### FOSDEM welcome, pages 13–14 and the other 34
+
+The devroom list is Chinese, centered, with product and project names left in Latin (`Ada`, `Android Open Source Project`, `LLVM`, `RISC-V`, `PostgreSQL`, `WebAssembly`, `Matrix.org`). Topic words are translated (`能源`, `法律与政策`, `开放媒体`, `机密计算`). The first letter of a long centered line is not a margin stamp, so the shared text operator is rewritten. Coverage counts an all-English comma list as `english_body`. Page 14 is the same list continued; a short tail (`子计算、无线电、铁路`) is centered, then the next chunk continues.
+
+### LaFollette Illusion v2, pages 1–12
+
+`/opt/cursor/artifacts/pdfs/lafollette-1924-p1-12-zh-v2.pdf`. Each text block is scored (dictionary-word ratio and garbage-character ratio). A low-quality block is not translated and not painted. A title scan that also contains a bad block drops every text block, so the photograph stays.
+
+- Page 1. The cover is the photograph. There is no `洗手间`, no `幻象`, and no painted `3jOV£9rOIit`. A text extract still sees the invisible OCR layer (`TOILETTE`, `3jOV£9rOIit`).
+- Page 2. The advertisement is Chinese (`您的想法`, the Daily Worker lines, the price, the Chicago address).
+- Page 3. Title page in Chinese. Jay Lovestone is translated.
+- Pages 4 and 6. Blank scans.
+- Page 5. `前言`.
+- Pages 7–12. Chapters 1 and 2 in Chinese, including `商业利益得到保障` territory and the Hoan quotation.
+
 ## Left open
 
-- The scan’s invisible OCR layer is still in the content stream, so a text extract of page 2 shows the old rule characters beside the Chinese. The painted lines do not.
-- One preface sentence still contains the English word “effects”.
-- Devroom and stand names on the FOSDEM deck stay English on purpose.
+- The scan’s invisible OCR layer is still in the content stream, so a text extract of the cover and of page 2 still shows the old characters. The painted cover does not.
+- k-server page 1 has one crushed line pair in the opening paragraph, and a few formula lines still mix an English word with the math.
+- FOSDEM page 14 breaks the devroom list into two centered chunks.

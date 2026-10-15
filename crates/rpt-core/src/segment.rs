@@ -1017,27 +1017,16 @@ fn ocr_garbage_token(token: &str) -> bool {
     if chars.iter().copied().any(junk_ocr_symbol) {
         return true;
     }
-    // `junk_ocr_token` treats every digit-letter join as garbage. A plain
-    // word (`log2`, `O(log2`) is a formula, so stop before that check.
+    // `GKP24`, `BBN10`, `log2`, and `3z` are citations and formulas: one
+    // capitalisation plus a digit. `3jOV9rOIit` is not that shape.
+    // `junk_ocr_token` would flag every digit-letter join, including these.
     if digit_touches_letter(&chars) {
-        return !plain_digit_word(&letters);
+        return !plain_word_case(&letters);
     }
     if camel_identifier(&letters) {
         return false;
     }
     junk_ocr_token(token)
-}
-
-/// `log2`, `H2O`, `O(log2`: one capitalisation and a vowel. `3jOV9rOIit` is
-/// not this shape, so a digit glued to a letter is still a misread.
-fn plain_digit_word(letters: &[char]) -> bool {
-    plain_word_case(letters)
-        && letters.iter().any(|ch| {
-            matches!(
-                ch.to_ascii_lowercase(),
-                'a' | 'e' | 'i' | 'o' | 'u' | 'y'
-            )
-        })
 }
 
 /// `Prompt|Template` has a capital followed by a lowercase hump that contains
@@ -2965,12 +2954,41 @@ fn margin_stamps(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
         xs.sort_by(|a, b| a.total_cmp(b));
         let anchor = xs[xs.len() / 2];
         for glyph in glyphs {
-            if (glyph.matrix[4] - anchor).abs() <= 4.0 && seen.insert(glyph.id) {
-                kept.push((glyph.id, "margin".into()));
+            if (glyph.matrix[4] - anchor).abs() > 4.0 || !seen.insert(glyph.id) {
+                continue;
             }
+            // The first letter of a long centered line can sit on one x.
+            // It is the start of the word, not a stamp, when the next letter
+            // is on the same baseline.
+            if word_continues_right(glyph, lines) {
+                seen.remove(&glyph.id);
+                continue;
+            }
+            kept.push((glyph.id, "margin".into()));
         }
     }
     kept
+}
+
+/// The next letter of this word, within about an em on the same baseline.
+fn word_continues_right(glyph: &Glyph, lines: &[VisualLine<'_>]) -> bool {
+    let size = glyph.font_size.max(1.0);
+    for line in lines {
+        if line.page != glyph.page_index || (line.y - glyph.matrix[5]).abs() > size * 0.45 {
+            continue;
+        }
+        for other in &line.glyphs {
+            if other.id == glyph.id {
+                continue;
+            }
+            let dx = other.matrix[4] - glyph.matrix[4];
+            if dx > 0.3 && dx <= size * 1.25 && other.unicode.chars().any(|ch| ch.is_alphanumeric())
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn stamp_glyph(glyph: &Glyph) -> bool {
@@ -6125,6 +6143,47 @@ mod tests {
             .kept
             .iter()
             .any(|(id, reason)| *id == 1 && reason == "margin"));
+    }
+
+    #[test]
+    fn a_centered_list_keeps_the_letter_that_starts_each_line() {
+        // The longest centered lines share a left edge. That column is the
+        // first letter of each topic, not a margin stamp.
+        let rows = [
+            "Ada, Android, Go,",
+            "Energy, Legal and Policy,",
+            "Friends, Management, Community,",
+            "Kernel, Legal, LibreOffice,",
+            "Monitoring, Mozilla, Network,",
+            "Open Media, Open Research,",
+            "PostgreSQL, Python, Rust,",
+            "Security, Swift, WebAssembly,",
+        ];
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        for (row, text) in rows.iter().enumerate() {
+            let y = 400.0 - row as f32 * 16.0;
+            let mut x = 40.0f32;
+            for ch in text.chars() {
+                let mut glyph = wide(id, x, y, &ch.to_string(), 8.0, 16.0);
+                id += 1;
+                glyph.font_name = "NimbusRoman-Regular".into();
+                glyphs.push(glyph);
+                x += if ch == ' ' { 4.0 } else { 8.0 };
+            }
+        }
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.clone()).collect();
+        let joined = texts.join(" ");
+        assert!(
+            joined.contains("Friends") && joined.contains("Energy") && joined.contains("Ada"),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept.iter().all(|(_, reason)| reason != "margin"),
+            "{:?}",
+            seg.kept
+        );
     }
 
     #[test]
@@ -9379,6 +9438,10 @@ mod tests {
         }];
         assert!(ocr_line_low_quality("3jOV£9rOIit"), "scorer missed the garbage token");
         assert!(ocr_line_low_quality("POBUtfttCO BV TttH"), "scorer missed the smear");
+        assert!(
+            !ocr_line_low_quality("GKP24, CP26].") && !ocr_line_low_quality("[BBN10]"),
+            "a citation key was scored as OCR"
+        );
         let seg = segment_placed(&glyphs, &SegmentFlags::default(), &regions, &pages);
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
         assert!(

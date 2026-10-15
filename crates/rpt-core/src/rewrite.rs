@@ -7395,8 +7395,17 @@ fn compose_bold_run_in(
     body_lines.sort_by(|left, right| right.y.total_cmp(&left.y));
     let head_font = embedded_font(&head_lines[0].resource, embedded)?;
     let body_font = embedded_font(&body_lines[0].resource, embedded)?;
-    let head_text = join_wrapped_lines(&head_lines, head_font);
+    let mut head_text = join_wrapped_lines(&head_lines, head_font);
     let body_text = join_wrapped_lines(&body_lines, body_font);
+    // `随机化k-服务器` dropped the source full stop. The body then reads as
+    // one word with the heading.
+    if !head_text
+        .chars()
+        .last()
+        .is_some_and(|ch| matches!(ch, '.' | ':' | '。' | '：'))
+    {
+        head_text.push('。');
+    }
     if head_text.trim().is_empty() || body_text.trim().is_empty() {
         return None;
     }
@@ -7507,8 +7516,12 @@ fn bold_run_in_glyphs(glyphs: &[&Glyph]) -> bool {
     let bold_letters = glyphs.iter().any(|glyph| {
         glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) && face_style(&glyph.font_name).bold
     });
+    // The italic `k` in `Randomized k-server.` is a math face, not a second
+    // roman word. It still belongs to the bold run-in.
     let plain_letters = glyphs.iter().any(|glyph| {
-        glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) && !face_style(&glyph.font_name).bold
+        glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+            && !face_style(&glyph.font_name).bold
+            && !is_math_font(&glyph.font_name)
     });
     if !bold_letters || plain_letters {
         return false;
@@ -13971,6 +13984,122 @@ mod tests {
         assert!(
             body.x + 0.6 >= head.x + head_advance,
             "bold run-in overlaps the paragraph: heading x {:.1} width {:.1}, body x {:.1}",
+            head.x,
+            head_advance,
+            body.x
+        );
+    }
+
+    #[test]
+    fn a_math_italic_k_stays_inside_the_bold_run_in() {
+        let mut glyphs = Vec::new();
+        let mut x = 72.0f32;
+        for (index, ch) in "Randomized k-server.".chars().enumerate() {
+            let mut glyph = ink_glyph(index as u32, x, 709.0, 10.9, &ch.to_string());
+            glyph.font_name = if ch == 'k' {
+                "LMMathItalic10".into()
+            } else {
+                "LMRoman10-Bold".into()
+            };
+            glyph.bbox = [x, 700.0, x + 5.2, 716.0];
+            glyphs.push(glyph);
+            x += 5.2;
+        }
+        let head_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+        let body_at = glyphs.len() as u32;
+        x += 8.0;
+        for (index, ch) in "A separate direction for the k-server problem concerns randomized algorithms."
+            .chars()
+            .enumerate()
+        {
+            let mut glyph = ink_glyph(body_at + index as u32, x, 709.0, 10.9, &ch.to_string());
+            glyph.bbox = [x, 700.0, x + 4.4, 716.0];
+            glyphs.push(glyph);
+            x += 4.4;
+        }
+        if let Some(last) = glyphs.last_mut() {
+            last.bbox[2] = 540.0;
+        }
+        let body_ids: Vec<u32> = glyphs
+            .iter()
+            .skip(head_ids.len())
+            .map(|glyph| glyph.id)
+            .collect();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let head_text = "随机化k-服务器";
+        let body_text = "k-服务器问题的另一个研究方向涉及随机化算法，并且在均匀度量上可以实现竞争比。";
+        let font_for = |text: &str| {
+            let mut map = HashMap::new();
+            for (id, ch) in (1u16..).zip(text.chars()) {
+                map.insert(ch as u32, (id, 1000));
+            }
+            map.entry('。' as u32).or_insert((1000, 1000));
+            map.entry(' ' as u32).or_insert((400, 400));
+            SubsetFont {
+                bytes: Vec::new(),
+                units_per_em: 1000,
+                glyphs: map,
+            }
+        };
+        let head_font = font_for(head_text);
+        let body_font = font_for(body_text);
+        let mut drawn = vec![
+            drawn_line(
+                0,
+                72.0,
+                709.0,
+                10.0,
+                Color::black(),
+                head_text,
+                &head_font,
+                "BOLD",
+                0.0,
+                &head_ids,
+                false,
+                120.0,
+            ),
+            drawn_line(
+                0,
+                72.0,
+                709.0,
+                10.0,
+                Color::black(),
+                body_text,
+                &body_font,
+                "REG",
+                0.0,
+                &body_ids,
+                false,
+                460.0,
+            ),
+        ];
+        let embedded = vec![("BOLD".into(), head_font), ("REG".into(), body_font)];
+        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded);
+        let head = drawn
+            .iter()
+            .find(|line| line.text.contains('随'))
+            .expect("heading");
+        assert!(head.text.ends_with('。'), "heading lost its stop: {}", head.text);
+        let body = drawn
+            .iter()
+            .find(|line| line.resource == "REG" && (line.y - head.y).abs() < 0.5)
+            .expect("body on the heading line");
+        let head_advance = head.widths.iter().sum::<f32>() + head.gaps.iter().sum::<f32>();
+        assert!(
+            body.x + 0.6 >= head.x + head_advance,
+            "math-italic run-in overlaps: heading x {:.1} width {:.1}, body x {:.1}",
             head.x,
             head_advance,
             body.x
