@@ -140,15 +140,19 @@ Manning stays regression-only. The same suite includes the definition join, the 
 
 ## k-server holes and hats
 
-`rpt-core` lib tests: 387 passed, 1 ignored. Coverage on `/opt/cursor/artifacts/pdfs/arxiv-2609.15979-zh.pdf` is `complete: true`, `english_body: 0`. The file has no `■`, U+FFFD, or `.notdef`.
+`rpt-core` lib tests: 390 passed, 1 ignored. Coverage on `/opt/cursor/artifacts/pdfs/arxiv-2609.15979-zh.pdf` is `complete: true`, `english_body: 0` (kept 11411, rewritten 27374). The file has no `■`, U+FFFD, or `.notdef`.
 
 Page 4. The opening paragraph’s holes are the math width, so the line continues after `q_x`, `q_y`, `(i,j)`, and `索引`. Non-final lines fill at least 90% of the 468pt column. Nothing crosses x=540. `表示）` stays on the paragraph’s last line, and `z^{−d(x,y)}` stays inside the column.
 
-Page 9. The heading `4 请求时的势及其增量` is still bold at x=72, y=458.6.
+Page 5. `随机化` (x 72–105) then `k-服务器。` (x 107–162) then `k-server` (x 166). The body starts after the label. A formula gap does not freeze that body under a longer Chinese label.
 
-Page 10. Latin Modern `\widehat` (U+F8F8) is part of the formula hole, so `Q̂`, `Ĥ`, and `µ(Q̂)` are the original glyphs. The coordinate-family paragraph is one Chinese block: `K^k` and `K^{k−1}` keep their superscripts, non-final lines fill the column, and the lines do not overlap. `将向量 h ∈ K^k 乘以 e_1` is Chinese, and `e_1 h_x` keeps the subscript. Lemma 4.1 and lemma 4.2 are one line each (`请求之前的旧势满足 Ψ ≤ µ(Q̂) + µ(H)`, `请求之后的新势满足 Ψ′ ≥ µ(Q̂) + µ(Ĥ)`). A column pull moves the formula with the line, so lemma 4.1’s inequality is no longer left on the proof.
+Page 9. The heading `4 请求时的势及其增量` is bold at x=72, y=380.1, off the source baseline. The paragraph above ends at y=349 (`值为两个块赋值之和。`). The body `固定有限标签集` starts at y=403. The binomial `k+1` over `2` stays at x≈430–456, to the right of the heading (the heading ends at x=207). A script under the heading ink still blocks the pull.
+
+Page 10. Latin Modern `\widehat` (U+F8F8) is part of the formula hole, so `Q̂`, `Ĥ`, and `µ(Q̂)` are the original glyphs. The coordinate-family paragraph is one Chinese block. `将向量 h ∈ K^k 乘以 e_1` is Chinese, and the plain `e1` is sunk: `e` on the baseline and `1` below it. Lemma 4.1 is one line: prose, then `Ψ`, then `≤ µ(Q̂)`, then `+` at x=283, then `µ(H)`, then `。` at x=316. Lemma 4.2 is the same shape (`Ψ′`, `≥ µ(Q̂)`, `+` at x=286, `µ(Ĥ)`, `。` at x=319). The plus sits between the two formula parts and the period starts at the formula’s right edge. On the first line, `e`, subscript `i`, and subscript `j` sit together (x 307, 312, 320); there is no stray `ij` at the source x. In the lemma 4.2 proof, each `q̂^x` has the hat on `q` and `x` below it, and `det Q̂^∗` has the hat on `Q`. A script fragment that is already inside a placeholder is not stamped again at the source x. A hat-only hole is shifted onto the letter painted before that hole.
 
 Page 11. A one-line formula paragraph used to stamp its last character onto the math, because the coverage box measured a hole as two digits and an ideographic space. The box now uses the laid-out width, so `写出` no longer sits on `q̂_y`.
+
+Pages 1–3, 6–8, and 12–18 match the previous export except where a script stamp moved into its formula. Pages 14–17 stay an English bibliography. Page 12 no longer has a floating `ij` at the bottom. Hat-on-letter overlaps are the accent sitting on its base.
 
 ## Left open
 
