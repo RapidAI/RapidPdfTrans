@@ -4,7 +4,7 @@ Sample: printed pages 1–30 of *AI Agents and Applications*, starting at the Pa
 
 Coverage is complete (`english_body` 0; kept 7134, rewritten 56190, total 63324). Body text is Noto Serif CJK SC Light. Headings are a heavier CJK face and larger than the body. Figure interiors, diagram labels, and monospace listings stay English. Captions are translated. Paragraphs use a 2em first-line indent.
 
-This export is `manning-body-p1-30-v7.pdf`, replayed from the same binary as pages 31–60 v4. A hanging prompt label is the stem only (no colon), right-aligned, and slightly smaller than the sample. This slice has no hanging prompt column and no title-case `Text` label. Callouts still paint `定义：` and `注意：`. `Tj100` count is 0, and no word `文字` sits in the label margin.
+This export is `manning-body-p1-30-v8.pdf`, replayed from the same binary as pages 31–60 v5. A hanging prompt label is the stem only (no colon), right-aligned, and slightly smaller than the sample. This slice has no hanging prompt column and no title-case `Text` label. A prompt line that does not fill its measure is not letter-spaced. Callouts still paint `定义：` and `注意：`. `Tj100` count is 0, and no word `文字` sits in the label margin.
 
 Each translated page was rendered beside the source. Word boxes on all 30 pages have no overlap (vertical overlap above 1.2 pt and area above 40% of the smaller word). No page paints a one-character translation of a lone CHAPTER or PART label, and no numbered step repeats its number or indents the continuation differently from the hanging edge.
 

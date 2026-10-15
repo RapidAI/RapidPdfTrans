@@ -544,6 +544,29 @@ pub(crate) fn justify_gaps(
     gaps
 }
 
+/// The last line of a paragraph is not justified. The last or only line of an
+/// enumerated item is not either: `股票2：` stays on its own line ahead of
+/// `股票3：`, and stretching that short line only letter-spaces it.
+pub(crate) fn justify_wrapped_line(lines: &[String], index: usize) -> bool {
+    let Some(next) = lines.get(index + 1) else {
+        return false;
+    };
+    let chars: Vec<char> = next.chars().collect();
+    !enumerated_item_at(&chars, 0)
+}
+
+/// A prompt line that still ends short of the measure is a standalone line.
+/// The justification cap cannot square it, so the extra space would only
+/// pull the characters apart.
+pub(crate) fn prompt_line_is_full(text: &str, size: f32, width: f32, font: &SubsetFont) -> bool {
+    let slack = width - fit_measure(text, size, font);
+    if slack <= 0.4 {
+        return true;
+    }
+    let pairs = cjk_pair_count(text) as f32;
+    pairs > 0.0 && slack <= pairs * size * MAX_JUSTIFY_EM + 0.4
+}
+
 fn line_skips_justification(text: &str) -> bool {
     if text.contains('@') || text.to_ascii_lowercase().contains("et al") {
         return true;
@@ -2179,6 +2202,44 @@ mod tests {
         let single = "股票1：苹果：新款iPhone的发布取得了成功";
         let one = wrap_text(single, 10.0, 400.0, 400.0, &uniform_font(single)).unwrap();
         assert_eq!(one, vec![single.to_string()]);
+        assert!(
+            !justify_wrapped_line(&lines, 0) && !justify_wrapped_line(&lines, 1),
+            "an item on its own line was justified: {lines:?}"
+        );
+        let gaps = justify_gaps(
+            &lines[0],
+            10.0,
+            width,
+            &font,
+            justify_wrapped_line(&lines, 0),
+        );
+        assert!(
+            gaps.iter().all(|gap| *gap == 0.0),
+            "股票2 was letter-spaced: {gaps:?}"
+        );
+        assert!(
+            !prompt_line_is_full(&lines[0], 10.0, width, &font),
+            "a short prompt item looked full"
+        );
+
+        let long = format!("股票2：{}继续写完这一项的说明。股票3：短", "甲".repeat(40));
+        let font = uniform_font(&long);
+        let wrapped = wrap_text(&long, 10.0, 180.0, 180.0, &font).unwrap();
+        assert!(wrapped.len() >= 3, "{wrapped:?}");
+        assert!(
+            justify_wrapped_line(&wrapped, 0)
+                && prompt_line_is_full(&wrapped[0], 10.0, 180.0, &font),
+            "a full item line should still square: {wrapped:?}"
+        );
+        let tail = wrapped
+            .iter()
+            .position(|line| line.starts_with("股票3"))
+            .unwrap();
+        assert!(tail > 0);
+        assert!(
+            !justify_wrapped_line(&wrapped, tail - 1),
+            "the last line of 股票2 was justified: {wrapped:?}"
+        );
     }
 
     #[test]

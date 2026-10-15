@@ -26,8 +26,8 @@ use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSourc
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
     char_widths, cids_of, cjk_indent_ems, fit_cjk_block, heading_level, is_cjk_body, justify_gaps,
-    measure, pack_into_slots, pack_narrow_tail, scale_for_heading, spread_to_lines, wrap_text,
-    CjkMeasure, HeadingLevel, LineSlots,
+    justify_wrapped_line, measure, pack_into_slots, pack_narrow_tail, prompt_line_is_full,
+    scale_for_heading, spread_to_lines, wrap_text, CjkMeasure, HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{BilingualLayout, OutputMode, TranslateReport};
@@ -6197,14 +6197,21 @@ fn layout_segment(
             .map(|(_, text_color)| text_color)
             .unwrap_or_else(|| ink[0].glyphs[0].fill_color.clone())
     };
-    let count = lines.len();
+    let prompt_sample = sample_sans_ink(&ink) || run_in.is_some();
     let glyph_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
     let mut drawn: Vec<Drawn> = lines
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(index, line)| {
             let limit = if index == 0 { first_width } else { width };
-            let justify = index + 1 != count;
+            // A prompt sample is ragged, like the source. Only a line that
+            // actually fills the measure is squared. An item that owns the
+            // whole line (`股票2：` before `股票3：`) never is.
+            let mut justify = justify_wrapped_line(&lines, index);
+            if prompt_sample && !prompt_line_is_full(line, size, limit, font) {
+                justify = false;
+            }
+            let line = line.clone();
             let supers = line_masks.get(index).cloned().unwrap_or_default();
             Drawn {
                 page,
@@ -7409,7 +7416,10 @@ fn reflow_prompt_chain(
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let justify = index + 1 != lines.len();
+            let mut justify = justify_wrapped_line(&lines, index);
+            if !prompt_line_is_full(line, size, width, font) {
+                justify = false;
+            }
             Drawn {
                 page: host.page,
                 x: host.body_x,
