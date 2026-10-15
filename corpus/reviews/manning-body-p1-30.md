@@ -4,6 +4,8 @@ Sample: printed pages 1–30 of *AI Agents and Applications*, starting at the Pa
 
 Coverage is complete (`english_body` 0; kept 7134, rewritten 56190, total 63324). Body text is Noto Serif CJK SC Light. Headings are a heavier CJK face and larger than the body. Figure interiors, diagram labels, and monospace listings stay English. Captions are translated. Paragraphs use a 2em first-line indent.
 
+This export is `manning-body-p1-30-v6.pdf`. The same prompt-column rules as pages 31–60 apply: a hanging label is one token with a full-width colon, and a 22pt answer quote is not painted over Han. This slice has no title-case `Text` column. A glyph scan found 0 overlaps between a 22pt quote and a Han glyph, and no hanging label missing `：`.
+
 Each translated page was rendered beside the source. Word boxes on all 30 pages have no overlap (vertical overlap above 1.2 pt and area above 40% of the smaller word). No page paints a one-character translation of a lone CHAPTER or PART label, and no numbered step repeats its number or indents the continuation differently from the hanging edge.
 
 ## Fixes in this pass

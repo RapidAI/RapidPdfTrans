@@ -559,6 +559,10 @@ pub fn rewrite_translation(
         &embedded,
         &owners,
     );
+    // `TEXT Julius… in the` / `demise of the Roman…` are two segments. Each
+    // was fitted to its own English line, so the first Chinese line stopped
+    // early. Join that wrap and fill the source measure before holes close.
+    reflow_prompt_continuations(&mut drawn, extraction, &by_id, &embedded);
     let listing_shifts = close_column_holes(&mut drawn, extraction, &by_id);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     apply_subentry_shifts(&mut drawn, &subentry_shifts);
@@ -5845,12 +5849,6 @@ fn layout_segment(
         (normalized, body_mask)
     };
     let text = normalized.as_str();
-    if text
-        .chars()
-        .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
-    {
-        return None;
-    }
     let page = glyphs[0].page_index;
     let media = extraction
         .pages
@@ -5861,6 +5859,21 @@ fn layout_segment(
     let mut ink = ink_lines(glyphs);
     let quotes = detach_decorative_quotes(&mut ink);
     if ink.is_empty() {
+        return None;
+    }
+    // The 22pt mark is painted from the source glyph. A translation that
+    // still opens with that mark (`“ 和 900`) would draw a second copy
+    // inside the line once the continuation joins the answer.
+    let without_mark = if quotes.is_empty() {
+        None
+    } else {
+        Some(trim_leading_quotes(text))
+    };
+    let text = without_mark.as_deref().unwrap_or(text);
+    if text
+        .chars()
+        .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
+    {
         return None;
     }
     let pages = pages_of(glyphs);
@@ -5995,7 +6008,7 @@ fn layout_segment(
     } else {
         None
     };
-    let mut label_paint: Option<(f32, String)> = None;
+    let mut label_paint: Option<(PromptColumn, String)> = None;
     let text = if let Some(item) = &numbered {
         block_left = item.text_left.min(block_right - source_size.max(1.0));
         indent_ems = 0.0;
@@ -6011,12 +6024,13 @@ fn layout_segment(
         body_text = bullet_body_text(text).to_string();
         body_text.as_str()
     } else if let Some(item) = run_in.as_ref() {
-        // The small-caps label stays in the margin. The prose starts at the
-        // source hanging indent, with no extra first-line indent.
-        block_left = item.text_x.min(block_right - source_size.max(1.0));
+        // The small-caps labels share one right edge. Chinese keeps that
+        // axis, and every line of the sample starts at the same body x.
+        let column = shared_prompt_axis(extraction, page, item);
+        block_left = column.text_x.min(block_right - source_size.max(1.0));
         indent_ems = 0.0;
         if let Some((label, rest)) = split_run_in_label(text) {
-            label_paint = Some((item.label_x, label));
+            label_paint = Some((column, label));
             body_text = rest;
         } else {
             body_text = text.to_string();
@@ -6315,14 +6329,14 @@ fn layout_segment(
             );
         }
     }
-    if let Some((label_x, label_text)) = label_paint {
-        let text_x = run_in.as_ref().map(|item| item.text_x);
+    if let Some((column, label_text)) = label_paint {
         let host = drawn
             .iter()
             .find(|line| !line.text.trim().is_empty())
-            .map(|line| (line.size, line.y));
-        if let Some((size, y)) = host {
-            let (label_text, size) = fit_run_in_label(&label_text, label_x, text_x, size, font);
+            .map(|line| (line.size, line.y, line.x));
+        if let Some((size, y, text_x)) = host {
+            let (label_text, size, label_x) =
+                fit_run_in_label(&label_text, &column, text_x, size, font);
             let widths = char_widths(&label_text, size, font);
             drawn.insert(
                 0,
@@ -6357,6 +6371,17 @@ fn layout_segment(
                 continue;
             };
         let size = glyph.font_size.max(1.0);
+        let natural = char_widths(&mark, size, font);
+        let source_width = (glyph.bbox[2] - glyph.bbox[0]).abs();
+        // Franklin's 22pt quote is about half an em wide. A full-width CJK
+        // quote at that size runs through the answer, which starts at the
+        // source x just to the right of the mark.
+        let widths = if natural.len() == 1 && source_width > 0.4 && source_width < natural[0] * 0.92
+        {
+            vec![source_width]
+        } else {
+            natural
+        };
         drawn.push(Drawn {
             page,
             x: glyph.matrix[4],
@@ -6366,7 +6391,7 @@ fn layout_segment(
             cids: cids_of(&mark, font),
             resource: resource.to_string(),
             skew: 0.0,
-            widths: char_widths(&mark, size, font),
+            widths,
             gaps: Vec::new(),
             text: mark,
             supers: Vec::new(),
@@ -6628,6 +6653,7 @@ struct ColumnBlock {
     top: f32,
     bottom: f32,
     left: f32,
+    right: f32,
     source_top: f32,
     source_bottom: f32,
     size: f32,
@@ -7017,6 +7043,396 @@ fn adopt_unchanged_body_lines(
     }
 }
 
+/// Two Franklin prompt lines that are one wrap (`…who played a pivotal role in the`
+/// / `demise of the Roman…`) are separate segments. Fitting each one leaves
+/// the first Chinese line short of the source measure. Reflow them as one
+/// paragraph at that measure. Stored source strings stay unchanged.
+fn reflow_prompt_continuations(
+    drawn: &mut Vec<Drawn>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+) {
+    if drawn.is_empty() {
+        return;
+    }
+    let mut groups: HashMap<(u32, Vec<u32>), Vec<usize>> = HashMap::new();
+    for (index, line) in drawn.iter().enumerate() {
+        if line.text.trim().is_empty() {
+            continue;
+        }
+        let mut key = line.glyph_ids.clone();
+        key.sort_unstable();
+        key.dedup();
+        if key.is_empty() {
+            continue;
+        }
+        groups.entry((line.page, key)).or_default().push(index);
+    }
+    let mut runs = Vec::new();
+    for ((page, ids), indices) in groups {
+        let Some(run) = prompt_run(drawn, &indices, page, &ids, extraction, by_id) else {
+            continue;
+        };
+        runs.push(run);
+    }
+    if runs.len() < 2 {
+        return;
+    }
+    runs.sort_by(|left, right| {
+        left.page
+            .cmp(&right.page)
+            .then(right.source_top.total_cmp(&left.source_top))
+            .then(left.body_x.total_cmp(&right.body_x))
+    });
+    let mut chains: Vec<Vec<usize>> = Vec::new();
+    let mut index = 0usize;
+    while index < runs.len() {
+        let mut chain = vec![index];
+        let mut next = index + 1;
+        while next < runs.len() && prompt_run_continues(&runs[*chain.last().unwrap()], &runs[next])
+        {
+            chain.push(next);
+            next += 1;
+        }
+        if chain.len() >= 2 {
+            chains.push(chain);
+            index = next;
+        } else {
+            index += 1;
+        }
+    }
+    if chains.is_empty() {
+        return;
+    }
+    let mut drop = HashSet::new();
+    let mut id_override: HashMap<usize, Vec<u32>> = HashMap::new();
+    let mut inserts: Vec<(usize, Vec<Drawn>)> = Vec::new();
+    for chain in chains {
+        let Some((at, lines, ids)) =
+            reflow_prompt_chain(drawn, &runs, &chain, extraction, by_id, embedded)
+        else {
+            continue;
+        };
+        for slot in &chain {
+            for index in &runs[*slot].indices {
+                if runs[*slot].body_indices.contains(index) {
+                    drop.insert(*index);
+                } else {
+                    id_override.insert(*index, ids.clone());
+                }
+            }
+        }
+        inserts.push((at, lines));
+    }
+    if inserts.is_empty() {
+        return;
+    }
+    let mut pending: HashMap<usize, Vec<Drawn>> = HashMap::new();
+    for (at, lines) in inserts {
+        pending.entry(at).or_default().extend(lines);
+    }
+    let mut kept = Vec::with_capacity(drawn.len());
+    for (index, mut line) in std::mem::take(drawn).into_iter().enumerate() {
+        if let Some(ids) = id_override.get(&index) {
+            line.glyph_ids = ids.clone();
+        }
+        let extra = pending.remove(&index);
+        if !drop.contains(&index) {
+            kept.push(line);
+        }
+        if let Some(lines) = extra {
+            kept.extend(lines);
+        }
+    }
+    *drawn = kept;
+}
+
+struct PromptRun {
+    indices: Vec<usize>,
+    body_indices: Vec<usize>,
+    page: u32,
+    body_x: f32,
+    source_right: f32,
+    source_top: f32,
+    source_bottom: f32,
+    size: f32,
+    has_label: bool,
+    continuation: bool,
+    short: bool,
+    body_text: String,
+    resource: String,
+}
+
+fn prompt_run(
+    drawn: &[Drawn],
+    indices: &[usize],
+    page: u32,
+    ids: &[u32],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> Option<PromptRun> {
+    let glyphs: Vec<&Glyph> = ids
+        .iter()
+        .filter_map(|id| by_id.get(id).map(|index| &extraction.glyphs[*index]))
+        .filter(|glyph| glyph.page_index == page && !glyph.unicode.trim().is_empty())
+        .collect();
+    if !sample_sans_glyphs(&glyphs) {
+        return None;
+    }
+    let ink = ink_lines(&glyphs);
+    let run_in = run_in_label(&ink).filter(|item| item.known);
+    let body_x = if let Some(item) = run_in.as_ref() {
+        item.text_x
+    } else {
+        indices
+            .iter()
+            .copied()
+            .filter(|&index| !is_quote_mark(&drawn[index].text))
+            .map(|index| drawn[index].x)
+            .fold(f32::MAX, f32::min)
+    };
+    if !body_x.is_finite() {
+        return None;
+    }
+    let mut source_right = body_x;
+    let mut source_ys = Vec::new();
+    for glyph in &glyphs {
+        if is_quote_mark(&glyph.unicode) || glyph.matrix[4] < body_x - 1.5 {
+            continue;
+        }
+        source_right = source_right.max(glyph_far_right(glyph));
+        source_ys.push(glyph.matrix[5]);
+    }
+    if source_ys.is_empty() {
+        return None;
+    }
+    source_ys.sort_by(|left, right| left.total_cmp(right));
+    let mut body_indices: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|&index| {
+            let line = &drawn[index];
+            !is_quote_mark(&line.text) && line.x + 1.0 >= body_x
+        })
+        .collect();
+    body_indices.sort_by(|&left, &right| drawn[right].y.total_cmp(&drawn[left].y));
+    let parts: Vec<&str> = body_indices
+        .iter()
+        .map(|&index| drawn[index].text.trim())
+        .filter(|text| !text.is_empty())
+        .collect();
+    let body_text = join_prompt_bodies(&parts);
+    if body_text.is_empty() {
+        return None;
+    }
+    let size = body_indices
+        .iter()
+        .map(|&index| drawn[index].size)
+        .fold(1.0f32, f32::max);
+    let drawn_right = body_indices
+        .iter()
+        .map(|&index| draw_ink_right(&drawn[index]))
+        .fold(body_x, f32::max);
+    let resource = drawn[body_indices[0]].resource.clone();
+    let continuation = run_in.is_none() && source_body_starts_lower(&glyphs, body_x);
+    Some(PromptRun {
+        indices: indices.to_vec(),
+        body_indices,
+        page,
+        body_x,
+        source_right,
+        source_top: source_ys[source_ys.len() - 1],
+        source_bottom: source_ys[0],
+        size,
+        has_label: run_in.is_some(),
+        continuation,
+        short: drawn_right + size * 1.2 < source_right,
+        body_text,
+        resource,
+    })
+}
+
+fn glyph_far_right(glyph: &Glyph) -> f32 {
+    glyph.bbox[0]
+        .max(glyph.bbox[2])
+        .max(glyph.matrix[4] + glyph.advance[0].max(0.0))
+}
+
+fn source_body_starts_lower(glyphs: &[&Glyph], body_x: f32) -> bool {
+    let mut body: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| {
+            !glyph.unicode.trim().is_empty()
+                && !is_quote_mark(&glyph.unicode)
+                && glyph.matrix[4] >= body_x - 1.5
+        })
+        .collect();
+    if body.is_empty() {
+        return false;
+    }
+    body.sort_by(|left, right| {
+        right.matrix[5]
+            .total_cmp(&left.matrix[5])
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let top = body[0].matrix[5];
+    let mut line: Vec<&Glyph> = body
+        .into_iter()
+        .filter(|glyph| (glyph.matrix[5] - top).abs() < 1.2)
+        .collect();
+    line.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let text: String = line.iter().map(|glyph| glyph.unicode.as_str()).collect();
+    text.trim_start()
+        .starts_with(|ch: char| ch.is_ascii_lowercase())
+}
+
+fn join_prompt_bodies(parts: &[&str]) -> String {
+    let mut out = String::new();
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let (Some(prev), Some(next)) = (out.chars().last(), part.chars().next()) {
+            if prev.is_ascii_alphanumeric() && next.is_ascii_alphanumeric() {
+                out.push(' ');
+            }
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+fn prompt_run_continues(prev: &PromptRun, next: &PromptRun) -> bool {
+    if prev.page != next.page || next.has_label || !next.continuation || !prev.short {
+        return false;
+    }
+    if (prev.body_x - next.body_x).abs() > 3.0 || prev.resource != next.resource {
+        return false;
+    }
+    let size = prev.size.max(next.size).max(1.0);
+    let gap = prev.source_bottom - next.source_top;
+    (size * 0.55..size * 1.85).contains(&gap)
+}
+
+fn reflow_prompt_chain(
+    drawn: &[Drawn],
+    runs: &[PromptRun],
+    chain: &[usize],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+) -> Option<(usize, Vec<Drawn>, Vec<u32>)> {
+    let host = &runs[chain[0]];
+    let font = embedded
+        .iter()
+        .find(|(name, _)| name == &host.resource)
+        .map(|(_, font)| font)?;
+    let parts: Vec<&str> = chain
+        .iter()
+        .map(|&slot| runs[slot].body_text.as_str())
+        .collect();
+    let text = join_prompt_bodies(&parts);
+    if text.chars().count() < 2 {
+        return None;
+    }
+    let width = chain
+        .iter()
+        .map(|&slot| runs[slot].source_right)
+        .fold(host.body_x, f32::max)
+        - host.body_x;
+    if width < host.size * 8.0 {
+        return None;
+    }
+    let size = host.size;
+    let mut lines = wrap_text(&text, size, width, width, font)?;
+    if lines.len() >= 2 {
+        let tail = lines.last().map(|line| line.chars().count()).unwrap_or(0);
+        if tail == 1 {
+            let prev = lines.len() - 2;
+            let mut chars: Vec<char> = lines[prev].chars().collect();
+            if chars.len() >= 2 {
+                let moved = chars.pop().unwrap();
+                lines[prev] = chars.into_iter().collect();
+                lines[prev + 1].insert(0, moved);
+            }
+        }
+    }
+    let old_first = host.body_indices.first().map(|&index| &drawn[index])?;
+    let old_width = measure(&old_first.text, size, font);
+    let new_width = measure(&lines[0], size, font);
+    if new_width < old_width + size * 0.8 {
+        return None;
+    }
+    let mut ids = Vec::new();
+    for slot in chain {
+        ids.extend(
+            runs[*slot]
+                .indices
+                .iter()
+                .flat_map(|&index| drawn[index].glyph_ids.iter().copied()),
+        );
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    let mut baselines = Vec::new();
+    for id in &ids {
+        let Some(&index) = by_id.get(id) else {
+            continue;
+        };
+        let glyph = &extraction.glyphs[index];
+        if glyph.page_index != host.page
+            || is_quote_mark(&glyph.unicode)
+            || glyph.matrix[4] < host.body_x - 1.5
+        {
+            continue;
+        }
+        if baselines
+            .iter()
+            .any(|y: &f32| (*y - glyph.matrix[5]).abs() < 1.2)
+        {
+            continue;
+        }
+        baselines.push(glyph.matrix[5]);
+    }
+    baselines.sort_by(|left, right| right.total_cmp(left));
+    let lead = if baselines.len() >= 2 {
+        (baselines[0] - baselines[1]).abs().max(size * 0.9)
+    } else {
+        size * 1.15
+    };
+    let origin = old_first.y;
+    let sample = old_first;
+    let painted: Vec<Drawn> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let justify = index + 1 != lines.len();
+            Drawn {
+                page: host.page,
+                x: host.body_x,
+                y: origin - index as f32 * lead,
+                size,
+                color: sample.color.clone(),
+                cids: cids_of(line, font),
+                resource: host.resource.clone(),
+                skew: sample.skew,
+                widths: char_widths(line, size, font),
+                gaps: justify_gaps(line, size, width, font, justify),
+                text: line.clone(),
+                supers: vec![false; line.chars().count()],
+                sup_scale: sample.sup_scale,
+                sup_rise: sample.sup_rise,
+                glyph_ids: ids.clone(),
+            }
+        })
+        .collect();
+    let at = host.body_indices[0];
+    Some((at, painted, ids))
+}
+
 fn close_column_holes(
     drawn: &mut [Drawn],
     extraction: &Extraction,
@@ -7052,6 +7468,11 @@ fn close_column_holes(
         // onto the previous line and leave the title behind.
         merge_section_heading_blocks(&mut blocks, drawn);
         blocks.sort_by(|left, right| right.top.total_cmp(&left.top));
+        let mut used_ids = HashSet::new();
+        for line in drawn.iter().filter(|line| line.page == page) {
+            used_ids.extend(line.glyph_ids.iter().copied());
+        }
+        let mut claimed_quotes = HashSet::new();
         let mut shift = 0.0f32;
         let mut prev: Option<ColumnBlock> = None;
         for block in blocks {
@@ -7092,11 +7513,11 @@ fn close_column_holes(
                 // An indented code continuation starts well to the right of
                 // the line above it, then the next bracket returns to the
                 // margin. Both are still the same listing.
-                let same_column = if prev.listing && block.listing {
-                    (prev.left - block.left).abs() < size * 16.0
-                } else {
-                    (prev.left - block.left).abs() < size * 4.0
-                };
+                // An indented code continuation starts well to the right of
+                // the line above it. A prompt label hangs to the left of the
+                // paragraph it follows (`说明：` at 74, `现在…` at 120).
+                // Left edges differ; the column is the overlapping span.
+                let same_column = blocks_share_column(prev, &block, size);
                 // A shorter paragraph used to leave the next block on the
                 // English baseline. Same-baseline marks (a page number beside
                 // its title) have no positive source gap, so they are not pulled.
@@ -7134,6 +7555,18 @@ fn close_column_holes(
             for index in &block.indices {
                 drawn[*index].y += shift;
             }
+            if !block.listing && shift.abs() > 0.4 {
+                let quotes =
+                    quotes_hanging_beside(&block, extraction, page, &used_ids, &claimed_quotes);
+                if !quotes.is_empty() {
+                    claimed_quotes.extend(quotes.iter().copied());
+                    shifts.push(ListingShift {
+                        page,
+                        ids: quotes,
+                        dy: shift,
+                    });
+                }
+            }
             if block.listing && shift.abs() > 0.4 {
                 shifts.push(ListingShift {
                     page,
@@ -7148,6 +7581,55 @@ fn close_column_holes(
         }
     }
     shifts
+}
+
+fn blocks_share_column(prev: &ColumnBlock, block: &ColumnBlock, size: f32) -> bool {
+    let size = size.max(1.0);
+    if prev.listing && block.listing {
+        return (prev.left - block.left).abs() < size * 16.0;
+    }
+    if (prev.left - block.left).abs() < size * 4.0 {
+        return true;
+    }
+    let overlap = prev.right.min(block.right) - prev.left.max(block.left);
+    overlap > size * 1.5
+}
+
+/// A 22pt answer mark is kept in Franklin, so it is not a drawn line. When the
+/// answer moves up, the mark has to move by the same amount or it stays on
+/// the English baseline.
+fn quotes_hanging_beside(
+    block: &ColumnBlock,
+    extraction: &Extraction,
+    page: u32,
+    used: &HashSet<u32>,
+    claimed: &HashSet<u32>,
+) -> Vec<u32> {
+    let size = block.size.max(1.0);
+    let mut ids = Vec::new();
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page
+            || used.contains(&glyph.id)
+            || claimed.contains(&glyph.id)
+            || glyph.invisible
+            || glyph.font_size < 14.0
+            || !is_quote_mark(&glyph.unicode)
+        {
+            continue;
+        }
+        let y = glyph.matrix[5];
+        if y > block.source_top + size * 0.8 || y < block.source_bottom - size * 1.4 {
+            continue;
+        }
+        let x = glyph.matrix[4];
+        let right = glyph_far_right(glyph);
+        if x + 1.0 >= block.left + size * 2.0 || right < block.left - size * 8.0 || x > block.right
+        {
+            continue;
+        }
+        ids.push(glyph.id);
+    }
+    ids
 }
 
 fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) {
@@ -7171,6 +7653,7 @@ fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) 
         let other_top = other.top;
         let other_bottom = other.bottom;
         let other_left = other.left;
+        let other_right = other.right;
         let other_source_top = other.source_top;
         let other_source_bottom = other.source_bottom;
         let other_size = other.size;
@@ -7179,6 +7662,7 @@ fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) 
         block.top = block.top.max(other_top);
         block.bottom = block.bottom.min(other_bottom);
         block.left = block.left.min(other_left);
+        block.right = block.right.max(other_right);
         block.source_top = block.source_top.max(other_source_top);
         block.source_bottom = block.source_bottom.min(other_source_bottom);
         block.size = block.size.max(other_size);
@@ -7262,6 +7746,7 @@ fn column_block(
     let mut top = f32::MIN;
     let mut bottom = f32::MAX;
     let mut left = f32::MAX;
+    let mut right = f32::MIN;
     let mut size = 1.0f32;
     for index in indices {
         let line = &drawn[*index];
@@ -7270,11 +7755,15 @@ fn column_block(
         // A continuation marker hangs in the gutter. It is not the column edge.
         if !lone_bullet_mark(&line.text) {
             left = left.min(line.x);
+            right = right.max(draw_ink_right(line));
         }
         size = size.max(line.size);
     }
     if left == f32::MAX {
         left = drawn[indices[0]].x;
+    }
+    if right < left {
+        right = left + size;
     }
     let mut source_ys = Vec::new();
     for id in &drawn[indices[0]].glyph_ids {
@@ -7297,6 +7786,7 @@ fn column_block(
         top,
         bottom,
         left,
+        right,
         source_top: source_ys[source_ys.len() - 1],
         source_bottom: source_ys[0],
         size,
@@ -7385,6 +7875,7 @@ fn listing_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<Co
                 top: y,
                 bottom: y,
                 left,
+                right,
                 source_top: y,
                 source_bottom: y,
                 size,
@@ -8338,15 +8829,42 @@ fn layout_across_pages(
     Some(drawn)
 }
 
+fn trim_leading_quotes(text: &str) -> String {
+    let rest = text.trim_start_matches(|ch: char| ch.is_whitespace() || is_quote_mark_char(ch));
+    rest.trim_start().to_string()
+}
+
+fn is_quote_mark_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '\''
+            | '“'
+            | '”'
+            | '„'
+            | '«'
+            | '»'
+            | '‘'
+            | '’'
+            | '「'
+            | '」'
+            | '❝'
+            | '❞'
+            | '❛'
+            | '❜'
+    )
+}
+
 fn is_quote_mark(text: &str) -> bool {
     let text = text.trim();
-    !text.is_empty()
-        && text.chars().all(|ch| {
-            matches!(
-                ch,
-                '"' | '\'' | '“' | '”' | '„' | '«' | '»' | '‘' | '’' | '「' | '」'
-            )
-        })
+    !text.is_empty() && text.chars().all(is_quote_mark_char)
+}
+
+/// A decorative quotation mark is a tall narrow path, not a rule or a figure.
+#[cfg(test)]
+fn is_decorative_vector(bbox: [f32; 4]) -> bool {
+    let width = (bbox[2] - bbox[0]).abs();
+    let height = (bbox[3] - bbox[1]).abs();
+    (6.0..=28.0).contains(&width) && (12.0..=48.0).contains(&height) && height >= width * 1.15
 }
 
 /// A prompt sample paints a 22pt quotation mark in the left margin of the
@@ -8399,6 +8917,7 @@ fn detach_decorative_quotes<'a>(ink: &mut Vec<InkLine<'a>>) -> Vec<&'a Glyph> {
 
 struct RunIn {
     label_x: f32,
+    label_right: f32,
     text_x: f32,
     label_ids: Vec<u32>,
     known: bool,
@@ -8420,9 +8939,9 @@ fn run_in_label(ink: &[InkLine<'_>]) -> Option<RunIn> {
     let mut at = None;
     for index in 1..glyphs.len().min(24) {
         let prev = glyphs[index - 1];
-        let prev_right = prev.bbox[0]
-            .max(prev.bbox[2])
-            .max(prev.matrix[4] + prev.advance[0].max(0.0));
+        // Word spacing on `Text Java` is stored in the last letter's advance,
+        // so the visual edge is the ink. A blank still uses the advance.
+        let prev_right = glyph_ink_right(prev);
         let gap = glyphs[index].matrix[4] - prev_right;
         if gap > body * 0.45 {
             at = Some(index);
@@ -8441,36 +8960,100 @@ fn run_in_label(ink: &[InkLine<'_>]) -> Option<RunIn> {
     if !(3..=16).contains(&letters) {
         return None;
     }
+    let word: String = label
+        .iter()
+        .flat_map(|glyph| glyph.unicode.chars())
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
+    // Small caps are mostly capitals with a smaller face. A title-case
+    // `Text` / `Example` in the same column is still that label.
+    let known = known_prompt_label(&word);
     let upper = label
         .iter()
         .filter(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_uppercase()))
         .count();
-    if upper * 2 < letters {
-        return None;
-    }
-    if !label.iter().any(|glyph| glyph.font_size <= body * 0.85) {
-        return None;
+    let small_caps =
+        upper * 2 >= letters && label.iter().any(|glyph| glyph.font_size <= body * 0.85);
+    if !small_caps {
+        // Title case (`Text Java`) is that label. A sentence (`text units`,
+        // `Text classification`) and code (`Text: {chunk}`) are not: the
+        // body does not open with a capital.
+        let body_upper = glyphs[at].unicode.chars().any(|ch| ch.is_ascii_uppercase());
+        if !known || !body_upper {
+            return None;
+        }
     }
     let text_x = glyphs[at].matrix[4];
     let label_x = glyphs[0].matrix[4];
-    if text_x < label_x + body * 0.8 {
+    let label_right = label
+        .iter()
+        .map(|glyph| glyph_ink_right(glyph))
+        .fold(label_x, f32::max);
+    if text_x < label_x + body * 0.8 || label_right > text_x + 1.0 {
         return None;
     }
     if glyphs[at].font_size < body * 0.9 {
         return None;
     }
     let label_ids = glyphs[..at].iter().map(|glyph| glyph.id).collect();
-    let word: String = glyphs[..at]
-        .iter()
-        .flat_map(|glyph| glyph.unicode.chars())
-        .filter(|ch| ch.is_ascii_alphabetic())
-        .collect();
     Some(RunIn {
         label_x,
+        label_right,
         text_x,
         label_ids,
-        known: known_prompt_label(&word),
+        known,
     })
+}
+
+/// How a prompt-label column is aligned, and the shared body x.
+struct PromptColumn {
+    right_aligned: bool,
+    axis: f32,
+    text_x: f32,
+}
+
+/// Labels that share a body x also share one edge: the right edge when the
+/// source small caps are right-aligned, otherwise the left edge.
+fn shared_prompt_axis(extraction: &Extraction, page: u32, run: &RunIn) -> PromptColumn {
+    let mut lefts = Vec::new();
+    let mut rights = Vec::new();
+    let mut texts = Vec::new();
+    for piece in page_text_pieces(extraction, page) {
+        let line = InkLine {
+            glyphs: piece.glyphs,
+            y: piece.y,
+            left: piece.left,
+            right: piece.right,
+        };
+        let Some(other) = run_in_label(std::slice::from_ref(&line)) else {
+            continue;
+        };
+        if !other.known || (other.text_x - run.text_x).abs() > 3.0 {
+            continue;
+        }
+        lefts.push(other.label_x);
+        rights.push(other.label_right);
+        texts.push(other.text_x);
+    }
+    if lefts.is_empty() {
+        lefts.push(run.label_x);
+        rights.push(run.label_right);
+        texts.push(run.text_x);
+    }
+    let span = |values: &[f32]| {
+        values.iter().copied().fold(f32::MIN, f32::max)
+            - values.iter().copied().fold(f32::MAX, f32::min)
+    };
+    let right_aligned = span(&rights) <= span(&lefts) + 0.5;
+    PromptColumn {
+        right_aligned,
+        axis: median_f32(if right_aligned {
+            rights.into_iter()
+        } else {
+            lefts.into_iter()
+        }),
+        text_x: median_f32(texts.into_iter()),
+    }
 }
 
 fn known_prompt_label(word: &str) -> bool {
@@ -8489,32 +9072,68 @@ fn known_prompt_label(word: &str) -> bool {
     )
 }
 
-/// The label must end before the source body x. A colon that does not fit
-/// the small-caps slot is dropped; the gap is the separator, as in the source.
+/// Labels share the source small-caps right edge. The colon is full-width
+/// on every label, and the prose stays at the source body x.
 fn fit_run_in_label(
     label: &str,
-    label_x: f32,
-    text_x: Option<f32>,
+    column: &PromptColumn,
+    text_x: f32,
     size: f32,
     font: &SubsetFont,
-) -> (String, f32) {
-    let mut text = label.trim().to_string();
-    let Some(text_x) = text_x else {
-        return (text, size);
+) -> (String, f32, f32) {
+    let stem = label
+        .trim()
+        .trim_end_matches(['：', ':', '﹕', ' ', '\u{00A0}']);
+    let text = if stem.chars().any(is_han_char) {
+        format!("{stem}：")
+    } else {
+        stem.to_string()
     };
-    let room = text_x - label_x - 1.5;
-    if room <= size {
-        return (text, size);
-    }
-    if measure(&text, size, font) > room && text.ends_with(['：', ':', '﹕']) {
-        text.pop();
-    }
+    let margin = 40.0f32;
     let mut paint = size;
-    let width = measure(&text, paint, font);
-    if width > room && width > 0.0 {
-        paint = (size * room / width).clamp(size * 0.72, size);
+    let place = |paint: f32| -> f32 {
+        let width = measure(&text, paint, font);
+        if column.right_aligned {
+            let axis = column.axis.min(text_x - 2.0);
+            axis - width
+        } else {
+            column.axis
+        }
+    };
+    loop {
+        let x = place(paint);
+        let width = measure(&text, paint, font);
+        let clear = x >= margin - 0.1 && x + width <= text_x - 1.5;
+        if clear || paint <= size * 0.72 + 0.01 {
+            break;
+        }
+        let next = (paint * 0.94).max(size * 0.72);
+        if (next - paint).abs() < 0.01 {
+            break;
+        }
+        paint = next;
     }
-    (text, paint)
+    let x = place(paint);
+    (text, paint, x)
+}
+
+/// Horizontal scaling, in Tz percent, that keeps a decorative quote inside
+/// the source mark. `None` leaves the font's own advance.
+fn quote_tz(line: &Drawn, fonts: &[(String, SubsetFont)]) -> Option<f32> {
+    if line.size < 14.0 || line.text.chars().count() != 1 || !is_quote_mark(&line.text) {
+        return None;
+    }
+    let font = fonts
+        .iter()
+        .find(|(name, _)| name == &line.resource)
+        .map(|(_, font)| font)?;
+    let natural = measure(&line.text, line.size, font);
+    let wanted = line.widths.first().copied().unwrap_or(natural);
+    if natural > 1.0 && wanted > 0.4 && wanted < natural * 0.92 {
+        Some((wanted / natural).clamp(0.35, 1.0) * 100.0)
+    } else {
+        None
+    }
 }
 
 fn sample_sans_ink(ink: &[InkLine<'_>]) -> bool {
@@ -8623,6 +9242,26 @@ fn is_callout_source(source: &str) -> bool {
         })
 }
 
+fn known_han_label(stem: &str) -> bool {
+    matches!(
+        stem,
+        "指令"
+            | "说明"
+            | "示例"
+            | "文本"
+            | "文字"
+            | "输出"
+            | "角色"
+            | "背景"
+            | "输入"
+            | "语气"
+            | "语调"
+            | "输出格式"
+            | "角色设定"
+            | "人设"
+    )
+}
+
 /// `指令：求此序列…` and `示例 33 是一个回文`. The label is the short CJK
 /// prefix; the rest is the hanging body.
 fn split_run_in_label(text: &str) -> Option<(String, String)> {
@@ -8637,7 +9276,12 @@ fn split_run_in_label(text: &str) -> Option<(String, String)> {
     let colon = matches!(chars.get(index), Some('：' | ':' | '﹕'));
     let numbered = chars.get(index) == Some(&' ')
         && chars.get(index + 1).is_some_and(|ch| ch.is_ascii_digit());
-    if !colon && !numbered {
+    let stem: String = chars[..index].iter().collect();
+    // `文本 Java 是一种…` keeps the label and a space, with no colon yet.
+    let spaced_label = known_han_label(&stem)
+        && matches!(chars.get(index), Some(' ' | '\u{00A0}'))
+        && index + 1 < chars.len();
+    if !colon && !numbered && !spaced_label {
         return None;
     }
     index += 1;
@@ -8917,8 +9561,11 @@ fn embed_and_draw(
         // Tc/Tz from the page would move every new glyph off the line box.
         let mut stream = String::from("BT\n0 Tc 0 Tw 100 Tz 0 TL 0 Ts\n");
         for line in lines {
+            let (tz_prefix, tz_suffix) = quote_tz(line, fonts)
+                .map(|tz| (format!("{} Tz ", pdf_num(tz)), "\n100 Tz ".to_string()))
+                .unwrap_or_default();
             stream.push_str(&format!(
-                "0 Tc /{} {} Tf {} 1 0 {} 1 {} {} Tm {}\n",
+                "0 Tc {tz_prefix}/{} {} Tf {} 1 0 {} 1 {} {} Tm {}{tz_suffix}\n",
                 line.resource,
                 pdf_num(line.size),
                 color_ops(&line.color),
@@ -10259,6 +10906,30 @@ mod tests {
         x: f32,
         advance: f32,
         skew: f32,
+    }
+
+    fn letter_glyph(id: u32, x: f32, advance: f32, ink: f32, text: &str) -> Glyph {
+        let mut glyph = ink_glyph(id, x, 400.0, 9.5, text);
+        glyph.advance = [advance, 0.0];
+        glyph.bbox = [x, 398.0, x + ink, 408.0];
+        glyph
+    }
+
+    fn ink_of(glyphs: &[Glyph]) -> InkLine<'_> {
+        let left = glyphs
+            .iter()
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        let right = glyphs
+            .iter()
+            .map(|glyph| glyph.bbox[2])
+            .fold(left, f32::max);
+        InkLine {
+            glyphs: glyphs.iter().collect(),
+            y: 400.0,
+            left,
+            right,
+        }
     }
 
     fn ink_glyph(id: u32, x: f32, y: f32, size: f32, text: &str) -> Glyph {
@@ -16198,6 +16869,29 @@ ET",
                 }
             }
         }
+        // A decorative quote may be a text glyph or a tall narrow path.
+        // Both have to clear the answer line.
+        for glyph in &glyphs {
+            if !glyph.unicode.chars().any(is_han_char) {
+                continue;
+            }
+            for region in &painted.regions {
+                if region.page_index != glyph.page_index
+                    || region.kind != "path"
+                    || !is_decorative_vector(region.bbox)
+                {
+                    continue;
+                }
+                let area = bbox_overlap_area(glyph.bbox, region.bbox);
+                let smaller = bbox_area(glyph.bbox).min(bbox_area(region.bbox)).max(0.1);
+                if area > 1.0 && area > smaller * 0.15 {
+                    panic!(
+                        "decorative vector overlaps {:?} {:?} by {:.1}pt²",
+                        glyph.unicode, region.bbox, area
+                    );
+                }
+            }
+        }
     }
 
     fn bbox_area(bbox: [f32; 4]) -> f32 {
@@ -16210,6 +16904,15 @@ ET",
         let bottom = a[1].min(a[3]).max(b[1].min(b[3]));
         let top = a[1].max(a[3]).min(b[1].max(b[3]));
         (right - left).max(0.0) * (top - bottom).max(0.0)
+    }
+
+    fn margin_colon_rights(painted: &Extraction) -> Vec<f32> {
+        painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "：" && glyph.matrix[4] < 116.0)
+            .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+            .collect()
     }
 
     #[test]
@@ -16255,26 +16958,41 @@ ET",
         let label_x = label_x.expect("missing 指令");
         let body_x = body_x.expect("missing body");
         assert!(
-            (label_x - 65.0).abs() < 4.0,
-            "label drifted to {label_x:.1}"
-        );
-        assert!(
             (body_x - 117.0).abs() < 6.0,
             "prose started at the left margin {body_x:.1}"
         );
         assert!(
-            body_x > label_x + 20.0,
+            body_x > label_x + 8.0,
             "label and prose collapsed: label {label_x:.1} body {body_x:.1}"
         );
         let example_label = example_label.expect("missing 示例");
         let example_body = example_body.expect("missing 33");
         assert!(
-            (example_label - 79.0).abs() < 6.0,
-            "示例 drifted to {example_label:.1}"
+            (example_label - label_x).abs() < 3.0,
+            "示例 and 指令 do not share a left edge: {example_label:.1} vs {label_x:.1}"
         );
         assert!(
             example_body > 110.0,
             "示例 body stayed in the margin at {example_body:.1}"
+        );
+        assert!(
+            (example_body - body_x).abs() < 2.0,
+            "sample bodies do not share an x: {body_x:.1} vs {example_body:.1}"
+        );
+        let colon_rights = margin_colon_rights(&painted);
+        assert!(
+            colon_rights.len() >= 2,
+            "prompt labels lost the full-width colon: {colon_rights:?}"
+        );
+        let colon_span = colon_rights.iter().copied().fold(0.0f32, f32::max)
+            - colon_rights.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            colon_span < 1.5,
+            "label colons are not on one axis: {colon_rights:?}"
+        );
+        assert!(
+            colon_rights.iter().all(|right| *right < body_x - 2.0),
+            "colon crossed the body: {colon_rights:?} body {body_x:.1}"
         );
         assert_no_glyph_overlap(&painted);
     }
@@ -16324,7 +17042,59 @@ ET",
                 );
             }
         }
+        let mut quote_width = None;
+        let mut quote_right = None;
+        let mut answer_x = None;
+        for glyph in &painted.glyphs {
+            if glyph.font_size > 14.0 && is_quote_mark(&glyph.unicode) {
+                let right = glyph.bbox[0].max(glyph.bbox[2]);
+                let left = glyph.bbox[0].min(glyph.bbox[2]);
+                quote_width = Some(right - left);
+                quote_right = Some(right);
+            }
+            if glyph.unicode.chars().any(is_han_char) {
+                answer_x = Some(answer_x.map_or(glyph.matrix[4], |x: f32| x.min(glyph.matrix[4])));
+            }
+        }
+        if let (Some(quote_width), Some(quote_right), Some(answer_x)) =
+            (quote_width, quote_right, answer_x)
+        {
+            assert!(
+                quote_width < 12.0,
+                "decorative quote stayed a full em wide ({quote_width:.1}pt)"
+            );
+            assert!(
+                quote_right + 0.8 < answer_x,
+                "quote right {quote_right:.1} overlaps the answer at {answer_x:.1}"
+            );
+            assert!(
+                (answer_x - 117.0).abs() < 4.0,
+                "answer left the source x: {answer_x:.1}"
+            );
+        }
         assert_no_glyph_overlap(&painted);
+    }
+
+    #[test]
+    fn a_hanging_quote_is_not_repeated_inside_the_answer() {
+        // The 22pt mark is painted from the source glyph. A translation that
+        // still opens with it must not keep that character in the line.
+        assert_eq!(trim_leading_quotes("“ 和 900。"), "和 900。");
+        assert_eq!(trim_leading_quotes("  “和 900。"), "和 900。");
+        assert_eq!(trim_leading_quotes("科技"), "科技");
+        assert_eq!(trim_leading_quotes("“科技”"), "科技”");
+    }
+
+    #[test]
+    fn a_decorative_vector_counts_in_the_overlap_test() {
+        let quote = [102.0, 116.0, 112.3, 138.6];
+        let answer = [117.0, 124.0, 126.0, 134.0];
+        assert!(is_decorative_vector(quote));
+        assert!(!is_decorative_vector([72.0, 100.0, 460.0, 101.2]));
+        assert!(!is_decorative_vector([90.0, 90.0, 200.0, 160.0]));
+        assert!(bbox_overlap_area(quote, answer) < 0.1);
+        let wide = [102.0, 116.0, 124.0, 138.6];
+        assert!(bbox_overlap_area(wide, answer) > 1.0);
     }
 
     #[test]
@@ -16396,14 +17166,354 @@ ET",
         let label_x = label_x.expect("missing 文本");
         let body_x = body_x.expect("missing 耳机");
         assert!(
-            (label_x - 94.0).abs() < 6.0,
-            "label drifted to {label_x:.1}"
-        );
-        assert!(
             (body_x - 117.0).abs() < 8.0,
             "example body started at {body_x:.1}"
         );
         assert!(body_x > label_x + 8.0, "label and body collapsed");
+        let colon_rights = margin_colon_rights(&painted);
+        assert!(
+            colon_rights.len() >= 2,
+            "说明 and 文本 need full-width colons, got {colon_rights:?}"
+        );
+        let colon_span = colon_rights.iter().copied().fold(0.0f32, f32::max)
+            - colon_rights.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            colon_span < 1.5,
+            "说明 and 文本 colons are not on one axis: {colon_rights:?}"
+        );
+        assert_no_glyph_overlap(&painted);
+    }
+
+    #[test]
+    fn prompt_labels_share_one_colon_axis() {
+        let chars: Vec<u32> = "说明：文本指令示例".chars().map(|ch| ch as u32).collect();
+        let font = subset_ttf(&box_ttf(&chars), &chars).expect("font");
+        let column = PromptColumn {
+            right_aligned: true,
+            axis: 111.0,
+            text_x: 117.0,
+        };
+        let (instruction, _, instruction_x) = fit_run_in_label("说明", &column, 117.0, 9.0, &font);
+        let (text, _, text_x) = fit_run_in_label("文本", &column, 117.0, 9.0, &font);
+        assert!(instruction.ends_with('：'), "{instruction}");
+        assert!(text.ends_with('：'), "{text}");
+        assert!(!instruction.contains(':') && !text.contains(':'));
+        let instruction_right = instruction_x + measure(&instruction, 9.0, &font);
+        let text_right = text_x + measure(&text, 9.0, &font);
+        assert!(
+            (instruction_right - 111.0).abs() < 0.2 && (text_right - instruction_right).abs() < 0.2,
+            "colons at {instruction_right:.2} and {text_right:.2}"
+        );
+        assert!(instruction_right < 117.0 - 2.0);
+    }
+
+    #[test]
+    fn a_decorative_quote_scales_to_the_source_width() {
+        let chars = vec!['“' as u32];
+        let font = subset_ttf(&box_ttf(&chars), &chars).expect("font");
+        let natural = measure("“", 22.0, &font);
+        assert!(natural > 12.0, "fixture quote is already narrow: {natural}");
+        let line = Drawn {
+            page: 0,
+            x: 102.2,
+            y: 121.1,
+            size: 22.0,
+            color: Color::black(),
+            cids: cids_of("“", &font),
+            resource: "F1".into(),
+            skew: 0.0,
+            text: "“".into(),
+            glyph_ids: vec![1],
+            widths: vec![10.1],
+            gaps: Vec::new(),
+            supers: vec![false],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let tz = quote_tz(&line, &[("F1".into(), font)]).expect("quote should scale");
+        let painted = natural * tz / 100.0;
+        assert!(
+            (painted - 10.1).abs() < 0.15,
+            "scaled quote is {painted:.2}pt (tz {tz:.1})"
+        );
+    }
+
+    #[test]
+    fn a_scaled_quote_is_its_own_operator_and_clears_the_answer() {
+        // The 22pt mark shares the answer segment, so it is redrawn in the
+        // CJK face and squeezed back to the source width. `100 Tz` has to be
+        // a separate operator; glued onto `Tj` it drops the mark.
+        let bytes = contents_pdf_named(
+            b"BT \
+/F1 22 Tf 1 0 0 1 102.2 193 Tm (\") Tj \
+/F1 9.5 Tf 1 0 0 1 117.2 200 Tm (The text should be classified as tech because it discusses products.) Tj \
+ET",
+            "FranklinGothic-Book",
+        );
+        let saved = paint_bytes(
+            &bytes,
+            &[(
+                0,
+                "文本应被归类为科技，因为它讨论了相关产品及其功能。".into(),
+            )],
+        );
+        assert!(
+            !saved.windows(5).any(|window| window == b"Tj100"),
+            "horizontal scale was glued onto Tj"
+        );
+        let painted = PdfDocument::open_bytes(&saved).unwrap().extract();
+        let quote = painted
+            .glyphs
+            .iter()
+            .find(|glyph| is_quote_mark(&glyph.unicode) && glyph.font_size >= 14.0);
+        let quote = quote.expect("decorative quote was not painted");
+        let width = (quote.bbox[2] - quote.bbox[0]).abs();
+        assert!(width < 12.0, "quote is still {width:.1}pt wide");
+        let answer = painted
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "文")
+            .expect("answer");
+        assert!(
+            answer.matrix[4] > quote.bbox[0].max(quote.bbox[2]) + 2.0,
+            "answer at {:.1} does not clear the quote ending at {:.1}",
+            answer.matrix[4],
+            quote.bbox[0].max(quote.bbox[2])
+        );
+        assert_no_glyph_overlap(&painted);
+    }
+
+    #[test]
+    fn a_hanging_prompt_label_closes_the_gap_above_it() {
+        // The paragraph above shrank from two source lines to one. The next
+        // prompt label hangs at x=74 while the paragraph starts at x=120, so
+        // a left-edge chain misses it. The spans still overlap. The 22pt
+        // answer mark is not a drawn line and has to ride with the answer.
+        let size = 9.0;
+        let glyphs = vec![
+            ink_glyph(1, 102.0, 340.0, size, "N"),
+            ink_glyph(2, 102.0, 326.0, size, "t"),
+            ink_glyph(10, 74.0, 310.0, size, "I"),
+            ink_glyph(11, 126.0, 296.0, size, "H"),
+            ink_glyph(20, 111.0, 289.0, 22.0, "“"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut body = test_draw(
+            120.0,
+            340.0,
+            size,
+            "现在应用相同的提示对另一个句子进行分类",
+            vec![1, 2],
+        );
+        body.widths = vec![8.0; body.text.chars().count()];
+        let mut label = test_draw(74.0, 310.0, size, "说明：", vec![10]);
+        label.widths = vec![8.0; label.text.chars().count()];
+        let mut prose = test_draw(126.0, 310.0, size, "将以下文本归类到其中一个类别", vec![10]);
+        prose.widths = vec![8.0; prose.text.chars().count()];
+        let mut answer = test_draw(126.0, 296.0, size, "历史分类", vec![11]);
+        answer.widths = vec![8.0; answer.text.chars().count()];
+        let mut drawn = vec![body, label, prose, answer];
+        let shifts = close_column_holes(&mut drawn, &extraction, &by_id);
+        let label_y = drawn.iter().find(|item| item.text == "说明：").unwrap().y;
+        assert!(
+            label_y > 310.0 + 8.0,
+            "the hanging label stayed on the English baseline at y={label_y}"
+        );
+        let answer_y = drawn.iter().find(|item| item.text == "历史分类").unwrap().y;
+        assert!(
+            answer_y > 296.0 + 8.0,
+            "the answer stayed on the English baseline at y={answer_y}"
+        );
+        let quote = shifts
+            .iter()
+            .find(|shift| shift.ids.contains(&20))
+            .expect("decorative quote was left on the English baseline");
+        assert!(
+            (quote.dy - (answer_y - 296.0)).abs() < 0.4,
+            "quote dy {} answer move {}",
+            quote.dy,
+            answer_y - 296.0
+        );
+    }
+
+    #[test]
+    fn a_prompt_continuation_fills_the_source_line() {
+        // `TEXT … in the` and `demise …` are two segments. The Chinese of the
+        // first line used to stop early instead of taking the continuation.
+        let head =
+            "Julius Caesar was a Roman general and statesman who played a pivotal role in the";
+        let tail = "demise of the Roman Republic and the rise of the Roman Empire.";
+        let content = format!(
+            "BT \
+/F1 9.5 Tf 1 0 0 1 103 400 Tm (T) Tj \
+/F1 7.6 Tf 1 0 0 1 108 400 Tm (EXT) Tj \
+/F1 9.5 Tf 1 0 0 1 126 400 Tm ({head}) Tj \
+/F1 9.5 Tf 1 0 0 1 126 386 Tm ({tail}) Tj \
+/F1 9.5 Tf 1 0 0 1 92 372 Tm (O) Tj \
+/F1 7.6 Tf 1 0 0 1 97 372 Tm (UTPUT) Tj \
+/F1 9.5 Tf 1 0 0 1 126 372 Tm (only the category) Tj \
+ET"
+        );
+        let bytes = contents_pdf_named(content.as_bytes(), "FranklinGothic-Book");
+        let painted = paint_translation(
+            &bytes,
+            &[
+                (0, "文本尤利乌斯凯撒是一位罗马将军和政治家，他在".into()),
+                (1, "罗马共和国的衰落和罗马帝国的兴起。".into()),
+                (2, "输出：仅输出分类".into()),
+            ],
+        );
+        let han: Vec<&Glyph> = painted
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().any(is_han_char))
+            .collect();
+        let kai = han.iter().find(|glyph| glyph.unicode == "凯").expect("凯");
+        let luo = han
+            .iter()
+            .find(|glyph| glyph.unicode == "落")
+            .expect("continuation 落 was dropped");
+        assert!(
+            (kai.matrix[5] - luo.matrix[5]).abs() < 2.0,
+            "落 stayed on its own line at {:.1}, 凯 at {:.1}",
+            luo.matrix[5],
+            kai.matrix[5]
+        );
+        let right = han
+            .iter()
+            .filter(|glyph| (glyph.matrix[5] - kai.matrix[5]).abs() < 1.5)
+            .map(|glyph| glyph.bbox[2].max(glyph.bbox[0]))
+            .fold(kai.matrix[4], f32::max);
+        assert!(
+            right > 126.0 + 160.0,
+            "the Julius line still ends early at {right:.1}"
+        );
+        let output = han
+            .iter()
+            .find(|glyph| glyph.unicode == "输")
+            .expect("输出");
+        assert!(
+            output.matrix[5] > 372.0 + 6.0,
+            "the unused wrap left 输出 at {:.1}",
+            output.matrix[5]
+        );
+        let body_x = han
+            .iter()
+            .filter(|glyph| {
+                (glyph.matrix[5] - kai.matrix[5]).abs() < 1.5
+                    && glyph.unicode != "文"
+                    && glyph.unicode != "本"
+            })
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            (body_x - 126.0).abs() < 4.0,
+            "continuation content x is {body_x:.1}"
+        );
+    }
+
+    #[test]
+    fn a_title_case_label_uses_the_ink_edge_not_the_word_space() {
+        let mut glyphs = vec![
+            letter_glyph(1, 103.08, 4.76, 4.74, "T"),
+            letter_glyph(2, 107.84, 5.14, 5.12, "e"),
+            letter_glyph(3, 112.99, 4.14, 4.17, "x"),
+            // The advance reaches `Java`; the ink stops at the stem of `t`.
+            letter_glyph(4, 117.13, 9.06, 3.03, "t"),
+            letter_glyph(5, 126.19, 3.78, 3.79, "J"),
+            letter_glyph(6, 129.97, 5.16, 5.12, "a"),
+        ];
+        let run = run_in_label(&[ink_of(&glyphs)]).expect("Text Java");
+        assert!((run.text_x - 126.19).abs() < 0.05, "text x {}", run.text_x);
+        assert!(
+            (run.label_right - 120.16).abs() < 0.2,
+            "label right followed the word space: {}",
+            run.label_right
+        );
+        // `Text: {chunk}` has the same column gap, and it is code.
+        glyphs[4].unicode = "{".into();
+        assert!(run_in_label(&[ink_of(&glyphs)]).is_none());
+        // `Text classification` opens with a lowercase body.
+        glyphs[4].unicode = "c".into();
+        assert!(run_in_label(&[ink_of(&glyphs)]).is_none());
+    }
+
+    #[test]
+    fn a_title_case_prompt_label_shares_the_colon_axis() {
+        // `Text Java` is title case, not small caps. The word space lives in
+        // the advance of `t`, and the translation is `文本 Java` with no colon.
+        let (label, rest) =
+            split_run_in_label("文本 Java 是一种流行的编程语言").expect("spaced 文本");
+        assert!(label.starts_with("文本"), "{label}");
+        assert!(rest.starts_with("Java"), "{rest}");
+        assert!(split_run_in_label("文本分类是标题").is_none());
+        assert!(split_run_in_label("输出一个表格").is_none());
+        let bytes = contents_pdf_named(
+            b"BT \
+/F1 9.5 Tf 1 0 0 1 74 420 Tm (I) Tj \
+/F1 7.6 Tf 1 0 0 1 79 420 Tm (NSTRUCTION) Tj \
+/F1 9.5 Tf 1 0 0 1 126 420 Tm (Add the square numbers.) Tj \
+/F1 9.5 Tf 1 0 0 1 101 400 Tm (Text) Tj \
+/F1 9.5 Tf 1 0 0 1 126 400 Tm (Java is a popular programming language.) Tj \
+/F1 9.5 Tf 1 0 0 1 102 376 Tm (Text classification is a heading here.) Tj \
+ET",
+            "FranklinGothic-Book",
+        );
+        let painted = paint_translation(
+            &bytes,
+            &[
+                (0, "指令：把这些平方数相加。".into()),
+                (1, "文本 Java 是一种流行的编程语言。".into()),
+                (2, "文本分类是这里的标题。".into()),
+            ],
+        );
+        let mut java_x = None;
+        let mut class_x = None;
+        let mut class_label = None;
+        for glyph in &painted.glyphs {
+            if glyph.unicode == "J" {
+                java_x = Some(glyph.matrix[4]);
+            }
+            if glyph.unicode == "分" {
+                class_x = Some(glyph.matrix[4]);
+            }
+            if glyph.unicode == "文" && glyph.matrix[5] < 390.0 {
+                class_label = Some(glyph.matrix[4]);
+            }
+        }
+        let java_x = java_x.expect("Java");
+        assert!(
+            (java_x - 126.0).abs() < 4.0,
+            "Java left the source body x: {java_x:.1}"
+        );
+        let colon_rights = margin_colon_rights(&painted);
+        assert!(
+            colon_rights.len() >= 2,
+            "指令 and 文本 need colons, got {colon_rights:?}"
+        );
+        let colon_span = colon_rights.iter().copied().fold(0.0f32, f32::max)
+            - colon_rights.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            colon_span < 1.5,
+            "title-case 文本 is not on the label axis: {colon_rights:?}"
+        );
+        assert!(
+            colon_rights.iter().all(|right| *right < java_x - 2.0),
+            "colon crossed Java: {colon_rights:?} java {java_x:.1}"
+        );
+        let class_x = class_x.expect("分类");
+        let class_label = class_label.expect("文本分类");
+        assert!(
+            (class_x - class_label).abs() < 12.0,
+            "Text classification was split into a hanging label: 文 {class_label:.1} 分 {class_x:.1}"
+        );
         assert_no_glyph_overlap(&painted);
     }
 
@@ -16502,6 +17612,12 @@ ET",
     }
 
     fn paint_translation(bytes: &[u8], which: &[(usize, String)]) -> Extraction {
+        PdfDocument::open_bytes(&paint_bytes(bytes, which))
+            .unwrap()
+            .extract()
+    }
+
+    fn paint_bytes(bytes: &[u8], which: &[(usize, String)]) -> Vec<u8> {
         let mut doc = PdfDocument::open_bytes(bytes).unwrap();
         let mut extraction = doc.extract();
         let segmentation = crate::segment::segment_placed(
@@ -16557,9 +17673,7 @@ ET",
             },
         )
         .unwrap();
-        PdfDocument::open_bytes(&doc.save_bytes().unwrap())
-            .unwrap()
-            .extract()
+        doc.save_bytes().unwrap()
     }
 
     fn glyph_lines(extraction: &Extraction) -> Vec<String> {
