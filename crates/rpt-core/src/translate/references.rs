@@ -523,7 +523,10 @@ fn bibliography_follows(
         let text = line.text.trim();
         if text.chars().count() < 8 {
             // `[1]` is often its own segment, ahead of the author line.
-            if starts_bracket_marker(text) || starts_numbered_marker(text) {
+            if starts_bracket_marker(text)
+                || starts_numbered_marker(text)
+                || starts_alpha_cite_key(text)
+            {
                 return true;
             }
             continue;
@@ -716,13 +719,60 @@ pub(crate) fn is_reference_entry(text: &str) -> bool {
     if trimmed.chars().count() < 8 {
         return false;
     }
-    if starts_bracket_marker(trimmed) {
+    if starts_bracket_marker(trimmed) || starts_alpha_cite_key(trimmed) {
         return true;
     }
     if starts_numbered_marker(trimmed) && (contains_year(trimmed) || looks_author_list(trimmed)) {
         return true;
     }
     looks_author_year_start(trimmed) && contains_year(trimmed)
+}
+
+/// `[AGTG21]`, `[BE98]`, and `[AHK+ 02]`. A numeric `[1]` is handled
+/// separately. `[Note]` has no year digits and is not a key.
+fn starts_alpha_cite_key(text: &str) -> bool {
+    let rest = text.trim_start();
+    let Some(after) = rest.strip_prefix('[').or_else(|| rest.strip_prefix('［')) else {
+        return false;
+    };
+    let bytes = after.as_bytes();
+    if bytes.first().is_none_or(|byte| !byte.is_ascii_alphabetic()) {
+        return false;
+    }
+    let mut index = 0usize;
+    let mut letters = 0usize;
+    let mut digits = 0usize;
+    while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'+') {
+        if bytes[index].is_ascii_alphabetic() {
+            letters += 1;
+        }
+        if bytes[index].is_ascii_digit() {
+            digits += 1;
+        }
+        index += 1;
+        if index > 12 {
+            return false;
+        }
+    }
+    if letters < 2 {
+        return false;
+    }
+    if index < bytes.len() && bytes[index] == b' ' {
+        index += 1;
+        let year = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index - year != 2 {
+            return false;
+        }
+        digits += 2;
+    }
+    digits > 0
+        && after[index..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == ']' || ch == '］')
 }
 
 fn starts_bracket_marker(text: &str) -> bool {
@@ -1338,6 +1388,93 @@ mod tests {
             "acknowledgements before the heading were kept"
         );
         assert!(!kept.contains("Time complexity"), "appendix was kept");
+    }
+
+    #[test]
+    fn an_alpha_bibliography_stays_original_and_stops_at_the_appendix() {
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            720.0,
+            "The bound holds for every metric space.",
+        );
+        line(&mut glyphs, &mut id, 0, 72.0, 690.0, "References");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            670.0,
+            "[AGTG21] C. J. Argue, Anupam Gupta, and Guru Guruganesh. Chasing convex bodies",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            90.0,
+            656.0,
+            "with linear competitive ratio. J. ACM, 68(5):32:1-32:10, 2021.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            636.0,
+            "[AHK+ 02] Eric J. Anderson and Michael E. Saks. On list update.",
+        );
+        line(&mut glyphs, &mut id, 0, 72.0, 400.0, "A     Omitted proofs");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            360.0,
+            "Proof. By the work function recurrence, we have the bound.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(kept.contains("References"), "{kept}");
+        assert!(kept.contains("Chasing convex bodies"), "{kept}");
+        assert!(kept.contains("Anderson"), "{kept}");
+        assert!(kept.contains("competitive ratio"), "{kept}");
+        assert!(!kept.contains("metric space"), "{kept}");
+        assert!(!kept.contains("Omitted"), "{kept}");
+        assert!(!kept.contains("work function"), "{kept}");
+        assert!(!starts_alpha_cite_key("[Note]"));
+        assert!(!starts_alpha_cite_key("[1]"));
+        assert!(starts_alpha_cite_key("[BE98]"));
+        assert!(starts_alpha_cite_key("[AHK+ 02]"));
+    }
+
+    #[test]
+    fn the_k_server_alpha_keys_stay_original_through_the_appendix() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/cache/arxiv-2609.15979.pdf");
+        if !path.is_file() {
+            return;
+        }
+        let pdf = PdfDocument::open(&path).unwrap();
+        let extracted = pdf.extract();
+        let ids = reference_glyph_ids(&extracted.glyphs);
+        let kept = text_of(&extracted.glyphs, &ids);
+        assert!(
+            kept.contains("Chasingconvexbodies"),
+            "title was translated or dropped"
+        );
+        assert!(kept.contains("Onlistupdate"), "entry was dropped");
+        assert!(
+            !kept.contains("Omitted"),
+            "appendix heading was kept with the bibliography"
+        );
+        assert!(
+            !kept.contains("workfunctionrecurrence"),
+            "the appendix proof was kept"
+        );
     }
 
     #[test]

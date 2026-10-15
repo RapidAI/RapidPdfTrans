@@ -441,6 +441,10 @@ fn tail_starts_upper(text: &str) -> bool {
         .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
+pub(crate) fn is_run_in_label(text: &str) -> bool {
+    known_run_in(text)
+}
+
 fn known_run_in(label: &str) -> bool {
     let word = label
         .split_whitespace()
@@ -825,9 +829,147 @@ fn ocr_rule_noise(text: &str) -> bool {
     marks * 5 >= chars.len() * 4
 }
 
+/// A page of OCR with no sentence and several garbage tokens. `TOILETTE`
+/// and `PEFARTMENT` look like words; `POBUtfttCO` and `3jOV£9rOIit` do not.
+/// Two of those, and no sentence, means the page is the scan image.
+fn detach_junk_ocr_pages(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
+    let mut pages: Vec<u32> = lines.iter().map(|line| line.page).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    let mut drop = std::collections::HashSet::new();
+    for page in pages {
+        let page_lines: Vec<&VisualLine> = lines.iter().filter(|line| line.page == page).collect();
+        if page_lines.is_empty() || page_has_prose(&page_lines) {
+            continue;
+        }
+        let junk: usize = page_lines
+            .iter()
+            .map(|line| junk_token_count(&line.text))
+            .sum();
+        if junk < 2 {
+            continue;
+        }
+        for line in page_lines {
+            for glyph in &line.glyphs {
+                drop.insert(glyph.id);
+            }
+        }
+    }
+    drop_glyphs_as(lines, drop, "ocr")
+}
+
+fn page_has_prose(lines: &[&VisualLine<'_>]) -> bool {
+    let joined = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    prose_ocr_sentence(&joined)
+}
+
+fn prose_ocr_sentence(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 6 {
+        return false;
+    }
+    const FUNCTION: &[&str] = &[
+        "the", "and", "are", "is", "was", "were", "this", "that", "with", "for", "from", "using",
+        "may", "can", "not", "also", "their", "these", "those", "of", "in", "on", "to", "a", "an",
+    ];
+    words.iter().any(|word| {
+        let bare: String = word
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        FUNCTION.contains(&bare.as_str())
+    })
+}
+
+fn junk_token_count(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|token| junk_ocr_token(token))
+        .count()
+}
+
+/// A token OCR did not read as a word. A normal English word, including
+/// `LaFollette` and `Constraints`, is not junk.
+fn junk_ocr_token(token: &str) -> bool {
+    let chars: Vec<char> = token.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if chars.len() < 3 {
+        return false;
+    }
+    if chars.iter().copied().any(junk_ocr_symbol) {
+        return true;
+    }
+    if digit_touches_letter(&chars) {
+        return true;
+    }
+    consonant_run(&chars) >= 4 && !plain_word_case(&chars)
+}
+
+fn junk_ocr_symbol(ch: char) -> bool {
+    if ch.is_alphanumeric() {
+        return false;
+    }
+    // Brackets, CJK stops, and `*` are ordinary text. `£` inside `3jOV£9rOIit`
+    // is a misread and is not in this set.
+    !".,;:!?\"'`’“”‘—–-()[]{}<>/\\+*=&@#%^_|~…·•、。《》「」『』【】（），：；！？".contains(ch)
+}
+
+fn digit_touches_letter(chars: &[char]) -> bool {
+    chars.windows(2).any(|pair| {
+        (pair[0].is_ascii_digit() && pair[1].is_ascii_alphabetic())
+            || (pair[1].is_ascii_digit() && pair[0].is_ascii_alphabetic())
+    })
+}
+
+fn consonant_run(chars: &[char]) -> usize {
+    let mut best = 0usize;
+    let mut run = 0usize;
+    for ch in chars {
+        if ch.is_ascii_alphabetic()
+            && !matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u')
+        {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+
+/// All lower, all upper, or one leading capital. `POBUtfttCO` and `TttH` are
+/// neither. `LaFollette` is not this shape either, and it has no consonant run.
+fn plain_word_case(chars: &[char]) -> bool {
+    let letters: Vec<char> = chars
+        .iter()
+        .copied()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
+    if letters.is_empty() {
+        return true;
+    }
+    if letters.iter().all(|ch| ch.is_ascii_lowercase())
+        || letters.iter().all(|ch| ch.is_ascii_uppercase())
+    {
+        return true;
+    }
+    letters[0].is_ascii_uppercase() && letters[1..].iter().all(|ch| ch.is_ascii_lowercase())
+}
+
 fn drop_glyphs(
     lines: &mut Vec<VisualLine<'_>>,
     drop: std::collections::HashSet<u32>,
+) -> Vec<(u32, String)> {
+    drop_glyphs_as(lines, drop, "margin")
+}
+
+fn drop_glyphs_as(
+    lines: &mut Vec<VisualLine<'_>>,
+    drop: std::collections::HashSet<u32>,
+    reason: &str,
 ) -> Vec<(u32, String)> {
     if drop.is_empty() {
         return Vec::new();
@@ -838,7 +980,7 @@ fn drop_glyphs(
         let mut body = Vec::new();
         for glyph in line.glyphs {
             if drop.contains(&glyph.id) {
-                kept.push((glyph.id, "margin".into()));
+                kept.push((glyph.id, reason.into()));
             } else {
                 body.push(glyph);
             }
@@ -901,6 +1043,9 @@ fn assemble(
     }
     kept.extend(detach_border_rules(&mut lines));
     kept.extend(detach_rule_noise(&mut lines));
+    // A scanned cover whose OCR is `3jOV£9rOIit` has no sentence. Painting a
+    // translation covers the photograph with gibberish. The image stays.
+    kept.extend(detach_junk_ocr_pages(&mut lines));
     attach_markers(&mut lines);
     attach_math_scripts(&mut lines);
     kept.extend(detach_toc_marks(&mut lines));
@@ -8835,6 +8980,63 @@ mod tests {
         );
         assert!(
             seg.kept.iter().any(|(_, reason)| reason == "margin"),
+            "{:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn a_junk_ocr_cover_stays_out_of_the_segments() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let cover = [
+            "TOILETTE",
+            "*ILLUSION*",
+            "3jOV£9rOIit",
+            "POBUtfttCO BV TttH",
+            "LITERATURE PEFARTMENT",
+            "1113 W. WASHINGTON ST.",
+        ];
+        for (row, text) in cover.iter().enumerate() {
+            let mut item = glyph(id, 72.0, 700.0 - row as f32 * 16.0, text, false);
+            item.page_index = 0;
+            item.invisible = true;
+            glyphs.push(item);
+            id += 1;
+        }
+        let mut sentence = glyph(
+            id,
+            72.0,
+            700.0,
+            "The ideas are expressed every day in the pages.",
+            false,
+        );
+        sentence.page_index = 1;
+        glyphs.push(sentence);
+        id += 1;
+        let mut title = glyph(id, 72.0, 700.0, "Constraints", false);
+        title.page_index = 2;
+        glyphs.push(title);
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().all(|text| !text.contains("POBUtfttCO")
+                && !text.contains("3jOV")
+                && !text.contains("TOILETTE")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("expressed every day")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("Constraints")),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept.iter().any(|(_, reason)| reason == "ocr"),
             "{:?}",
             seg.kept
         );

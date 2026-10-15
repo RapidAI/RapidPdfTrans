@@ -8,7 +8,7 @@ Three new documents, each a different layout. Translated English to Chinese on c
 | fosdem-2025-welcome | 36, landscape 720×405 | `/opt/cursor/artifacts/pdfs/fosdem-2025-welcome-zh.pdf` |
 | lafollette-illusion-1924 | first 12 of 52, OCR text layer | `/opt/cursor/artifacts/pdfs/lafollette-1924-p1-12-zh.pdf` |
 
-`arxiv-2609.15979` was already in `corpus/manifest.json`. The FOSDEM 2025 deck and the LaFollette OCR text layer were added there (URL, license, sha256). Manning body slices stayed regression-only: `rpt-core` lib tests, including the definition join, the NOTE callout, and the listing annotation, still pass (340 passed, 1 ignored).
+`arxiv-2609.15979` was already in `corpus/manifest.json`. The FOSDEM 2025 deck and the LaFollette OCR text layer were added there (URL, license, sha256). Manning body slices stayed regression-only: `rpt-core` lib tests, including the definition join, the NOTE callout, and the listing annotation, still pass (345 passed, 1 ignored).
 
 ## Fixes
 
@@ -20,14 +20,24 @@ Three new documents, each a different layout. Translated English to Chinese on c
 
 The slide title now has to stay within 1.2× the list line. A rule column is the repeated x, including a short run glued to a rule character. A stray letter on that column is dropped with the rules. A spaceless line that is mostly `l` and `|` is not a sentence.
 
+A second pass closed the three gaps that pass left open:
+
+| defect | where it showed |
+| --- | --- |
+| Alpha keys `[AGTG21]` and `[AHK+ 02]` were not bibliography entries, so titles were translated. A following sentence with “and” kept the detector from opening the section. | k-server pages 14–17. |
+| `Proof.` is its own draw on the paragraph’s first baseline. Closing the hole above the paragraph left `证明。` between 特 and 别. The body indent then started under the label. | k-server page 8. |
+| The cover’s OCR (`POBUtfttCO`, `3jOV£9rOIit`) was painted as Chinese over the photograph. | Scan page 1. |
+
+An alpha key is two or more letters, optional `+`, and a year, inside brackets. The section still stops at `A Omitted proofs`. A one-line `Proof.` moves with the paragraph, and the first line starts at the source x of the word after the label. A page with no sentence and at least two junk tokens is not translated; a later page that contains a sentence still is.
+
 ## k-server (18 pages)
 
 Body, lemmas, and the appendix proofs are Chinese. Display math, subscripts, and citation keys stay as set. Coverage is complete.
 
 - Pages 1–3. Title and abstract in Chinese. Christian Coester stays Latin; Elias Koutsoupias and Marek Zbysiński are translated because the surname is long or not ASCII. Definitions and the proof sketch read as prose around the formulas.
-- Pages 4–13. Theorems and proofs in Chinese. Formulas stay formulas. A few proof labels sit on their own line between the two halves of a wrapped word (page 8, 特别是 split around 证明。). That is a placement leftover, not an English body line.
-- Pages 14–17. The bibliography heading is Chinese and some entry titles were translated. Author names and years stay Latin. References are meant to stay English; this section is the remaining gap.
-- Page 18. Appendix proofs in Chinese, with the displayed equations kept.
+- Pages 4–13. Theorems and proofs in Chinese. Formulas stay formulas. On page 8, `证明。` shares the first baseline with `初始化` and ends before that word (x 72–101, body from 106). `特别是` stays one word on the next line.
+- Pages 14–17. The bibliography stays English, including `References`, `[AGTG21]`, and `Chasing convex bodies`. No Chinese on page 14.
+- Page 18. Appendix heading and proofs in Chinese (`A 省略的证明`, `证明。由工作函数递推`), with the displayed equations kept.
 
 ## FOSDEM 2025 welcome (36 pages)
 
@@ -50,7 +60,7 @@ Coverage complete: kept 4630, rewritten 3886, english_body 0. ○ items are sepa
 
 The source is an InvisibleOCR text layer. Painted text is the review. `pdftotext` still extracts the invisible rule glyphs on the advertisement. Coverage is complete, english_body 0. Pages 13–52 of the file were not translated.
 
-- Page 1. Cover OCR is still garbage (洗手间 for the title, a broken byline). Accepted.
+- Page 1. The cover is the photograph only. The OCR tokens are kept and not painted, so there is no Chinese overlay. A text extract still sees the invisible layer (`TOILETTE`, `POBUtfttCO`); the painted page does not.
 - Page 2. The ad paints in Chinese. 您的想法, the Daily Worker lines, the price, and the Chicago address. No `\|`, `§`, `j§`, or `S` in the painted lines. The rule row of `l` is not redrawn.
 - Page 3. Title page in Chinese. Jay Lovestone is translated. “Coolidge” stays.
 - Page 4. Blank.
@@ -59,7 +69,6 @@ The source is an InvisibleOCR text layer. Painted text is the review. `pdftotext
 
 ## Left open
 
-- k-server bibliography titles are partly Chinese.
-- A proof label can land between the two halves of a wrapped word.
-- The scan’s invisible OCR layer is still in the content stream, so a text extract of page 2 shows the old rule characters beside the Chinese.
+- The scan’s invisible OCR layer is still in the content stream, so a text extract of page 2 shows the old rule characters beside the Chinese. The painted lines do not.
+- One preface sentence still contains the English word “effects”.
 - Devroom and stand names on the FOSDEM deck stay English on purpose.

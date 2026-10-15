@@ -5832,6 +5832,42 @@ fn ends_with_sentence(text: &str) -> bool {
         || text.ends_with('！')
 }
 
+/// `Proof.` sits in the first-line gap. The body must start at the source x
+/// of the word after the label, or `证明。` lands on `初始化`.
+fn run_in_label_indent(
+    extraction: &Extraction,
+    segment: &[&Glyph],
+    page: u32,
+    y: f32,
+    column_left: f32,
+    body_x: f32,
+    size: f32,
+) -> Option<f32> {
+    let ids: HashSet<u32> = segment.iter().map(|glyph| glyph.id).collect();
+    let mut side: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == page
+                && !ids.contains(&glyph.id)
+                && !glyph.unicode.trim().is_empty()
+                && (glyph.matrix[5] - y).abs() <= size * 0.45
+                && glyph.matrix[4] >= column_left - 1.0
+                && glyph.matrix[4] < body_x - size * 0.3
+        })
+        .collect();
+    if side.is_empty() {
+        return None;
+    }
+    side.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let text: String = side.iter().map(|glyph| glyph.unicode.as_str()).collect();
+    if !crate::segment::is_run_in_label(text.trim()) {
+        return None;
+    }
+    let indent = body_x - column_left;
+    (indent > size * 0.6).then_some(indent)
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -5928,6 +5964,9 @@ fn layout_segment(
         .fold(block_left, f32::max);
     // An English first line may sit to the right of the column. Chinese
     // indent is measured from the body edge, not added on top of that gap.
+    // `Proof.` occupies that gap. A two-em indent then starts under 证明。
+    // The first line keeps the source x, beside the label.
+    let mut label_indent: Option<f32> = None;
     if spans.len() >= 2 {
         let body_left = spans[1..]
             .iter()
@@ -5935,6 +5974,15 @@ fn layout_segment(
             .fold(f32::MAX, f32::min);
         if spans[0].0 > body_left + source_size * 0.6 {
             block_left = body_left;
+            label_indent = run_in_label_indent(
+                extraction,
+                glyphs,
+                page,
+                ink[0].y,
+                body_left,
+                spans[0].0,
+                source_size,
+            );
         }
     }
     block_right = block_right.min(media[2] - 1.0);
@@ -5999,6 +6047,9 @@ fn layout_segment(
         list_outdent(&ink, source_size)
     };
     let mut indent_ems = cjk_indent_ems(ink.len(), source_size, bold, text);
+    if label_indent.is_some() {
+        indent_ems = 0.0;
+    }
     // A list marker hangs left of the wrapped lines. Continuations share one
     // indent; the marker line outdents by that same amount.
     if let Some(shift) = hanging {
@@ -6084,10 +6135,13 @@ fn layout_segment(
         }
     }
     let scale = scale_for_heading(level, source_size, metrics);
-    let callout_indent = callout.as_ref().and_then(|lead| {
-        callout_paint.as_ref()?;
-        Some((lead.text_x - block_left).max(0.0))
-    });
+    let callout_indent = callout
+        .as_ref()
+        .and_then(|lead| {
+            callout_paint.as_ref()?;
+            Some((lead.text_x - block_left).max(0.0))
+        })
+        .or(label_indent);
     let fit_box = |left: f32, right: f32| {
         let width = (right - left).max(source_size);
         fit_cjk_block_with(
@@ -7546,6 +7600,9 @@ fn close_column_holes(
         // pull, so `text_chunks_chain` rose and `| summarize_map_chain`
         // stayed on the English baseline. One listing moves as one block.
         fuse_listing_runs(&mut blocks);
+        // `Proof.` is its own draw on the paragraph's first baseline. Pulling
+        // the paragraph without the label leaves `证明。` between 特 and 别.
+        fuse_run_in_labels(&mut blocks, drawn, extraction, by_id);
         // `1.3` and `Typical LLM use cases` are two draws of one row. The
         // index is short, so closing the hole above it used to lift `1.3`
         // onto the previous line and leave the title behind.
@@ -7688,6 +7745,115 @@ fn close_column_holes(
         seat_listing_annotations(drawn, extraction, by_id, &placed_lines);
     }
     shifts
+}
+
+/// A one-line `Proof.` / `Lemma.` sits on the first baseline of the
+/// paragraph it labels. They have to move as one block. A later hole closer
+/// otherwise lifts only the paragraph, and the label lands inside a word.
+fn fuse_run_in_labels(
+    blocks: &mut Vec<ColumnBlock>,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) {
+    let labels: Vec<usize> = (0..blocks.len())
+        .filter(|&index| is_inline_label_block(&blocks[index], drawn, extraction, by_id))
+        .collect();
+    let mut drop = Vec::new();
+    for label_index in labels {
+        if drop.contains(&label_index) {
+            continue;
+        }
+        let mut best: Option<(usize, f32)> = None;
+        for body_index in 0..blocks.len() {
+            if body_index == label_index || drop.contains(&body_index) || blocks[body_index].listing
+            {
+                continue;
+            }
+            if is_inline_label_block(&blocks[body_index], drawn, extraction, by_id) {
+                continue;
+            }
+            if !label_introduces(&blocks[label_index], &blocks[body_index]) {
+                continue;
+            }
+            let distance = (blocks[label_index].source_top - blocks[body_index].source_top).abs();
+            if best.is_none_or(|(_, previous)| distance < previous) {
+                best = Some((body_index, distance));
+            }
+        }
+        let Some((body_index, _)) = best else {
+            continue;
+        };
+        let indices = blocks[label_index].indices.clone();
+        let top = blocks[label_index].top;
+        let bottom = blocks[label_index].bottom;
+        let left = blocks[label_index].left;
+        let right = blocks[label_index].right;
+        let source_top = blocks[label_index].source_top;
+        let source_bottom = blocks[label_index].source_bottom;
+        let host = &mut blocks[body_index];
+        host.indices.extend(indices);
+        host.top = host.top.max(top);
+        host.bottom = host.bottom.min(bottom);
+        host.left = host.left.min(left);
+        host.right = host.right.max(right);
+        host.source_top = host.source_top.max(source_top);
+        host.source_bottom = host.source_bottom.min(source_bottom);
+        drop.push(label_index);
+    }
+    drop.sort_unstable();
+    drop.dedup();
+    for index in drop.into_iter().rev() {
+        blocks.remove(index);
+    }
+}
+
+fn is_inline_label_block(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    if block.listing || block.indices.len() != 1 {
+        return false;
+    }
+    let text = block_source_text(block, drawn, extraction, by_id);
+    let trimmed = text.trim();
+    !trimmed.is_empty() && trimmed.chars().count() <= 24 && crate::segment::is_run_in_label(trimmed)
+}
+
+fn block_source_text(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> String {
+    let mut glyphs = Vec::new();
+    for index in &block.indices {
+        for id in &drawn[*index].glyph_ids {
+            let Some(&slot) = by_id.get(id) else {
+                continue;
+            };
+            if let Some(glyph) = extraction.glyphs.get(slot) {
+                glyphs.push(glyph);
+            }
+        }
+    }
+    glyphs.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    glyphs.iter().map(|glyph| glyph.unicode.as_str()).collect()
+}
+
+/// The label is on the paragraph's first baseline, or one line above it,
+/// and it sits at the left of that paragraph.
+fn label_introduces(label: &ColumnBlock, body: &ColumnBlock) -> bool {
+    let size = label.size.max(body.size).max(1.0);
+    let dy = label.source_top - body.source_top;
+    if !(-size * 0.45..size * 1.7).contains(&dy) {
+        return false;
+    }
+    label.left <= body.left + size * 0.5
+        && body.right > label.right
+        && body.left - label.left < size * 12.0
 }
 
 struct ListingSlot {
@@ -12100,6 +12266,194 @@ mod tests {
         );
         assert!((lines[0].y - 402.0).abs() < 0.5);
         assert!((lines[1].y - 389.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_proof_label_moves_with_the_word_it_splits() {
+        // The paragraph above got shorter, so the proof body is pulled up.
+        // `Proof.` shares the first baseline. Leaving it behind puts `证明。`
+        // between 特 and 别.
+        let glyphs = vec![
+            ink_glyph(1, 72.0, 500.0, 12.0, "The"),
+            ink_glyph(2, 72.0, 480.0, 12.0, "bound"),
+            ink_glyph(10, 120.0, 460.0, 12.0, "special"),
+            ink_glyph(11, 120.0, 446.0, 12.0, "case"),
+            ink_glyph(20, 72.0, 460.0, 12.0, "Proof."),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let wide = vec![12.0; 16];
+        let mut drawn = vec![
+            Drawn {
+                page: 0,
+                x: 72.0,
+                y: 488.0,
+                size: 12.0,
+                color: Color::black(),
+                cids: vec![1],
+                resource: "F1".into(),
+                skew: 0.0,
+                text: "上一句缩短了".into(),
+                glyph_ids: vec![1, 2],
+                widths: wide.clone(),
+                gaps: vec![0.0; 15],
+                supers: vec![false],
+                sup_scale: 0.6,
+                sup_rise: 0.3,
+            },
+            Drawn {
+                page: 0,
+                x: 120.0,
+                y: 460.1,
+                size: 12.0,
+                color: Color::black(),
+                cids: vec![2],
+                resource: "F1".into(),
+                skew: 0.0,
+                text: "初始化是特".into(),
+                glyph_ids: vec![10, 11],
+                widths: wide.clone(),
+                gaps: vec![0.0; 15],
+                supers: vec![false],
+                sup_scale: 0.6,
+                sup_rise: 0.3,
+            },
+            Drawn {
+                page: 0,
+                x: 120.0,
+                y: 446.0,
+                size: 12.0,
+                color: Color::black(),
+                cids: vec![3],
+                resource: "F1".into(),
+                skew: 0.0,
+                text: "别是后文".into(),
+                glyph_ids: vec![10, 11],
+                widths: wide,
+                gaps: vec![0.0; 15],
+                supers: vec![false],
+                sup_scale: 0.6,
+                sup_rise: 0.3,
+            },
+            Drawn {
+                page: 0,
+                x: 72.0,
+                y: 460.0,
+                size: 12.0,
+                color: Color::black(),
+                cids: vec![4],
+                resource: "F1".into(),
+                skew: 0.0,
+                text: "证明。".into(),
+                glyph_ids: vec![20],
+                widths: vec![12.0; 3],
+                gaps: vec![0.0; 2],
+                supers: vec![false],
+                sup_scale: 0.6,
+                sup_rise: 0.3,
+            },
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let label = drawn.iter().find(|line| line.text == "证明。").unwrap();
+        let head = drawn.iter().find(|line| line.text.contains('特')).unwrap();
+        let tail = drawn
+            .iter()
+            .find(|line| line.text.starts_with('别'))
+            .unwrap();
+        assert!(head.y > 464.0, "the paragraph was not pulled: {}", head.y);
+        assert!(
+            (label.y - head.y).abs() < 1.0,
+            "label {} left the first line {}",
+            label.y,
+            head.y
+        );
+        assert!(
+            (label.y - tail.y).abs() > 8.0,
+            "label {} sits inside the word, between {} and {}",
+            label.y,
+            head.y,
+            tail.y
+        );
+    }
+
+    #[test]
+    fn a_proof_label_does_not_cover_the_first_word() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut place = |text: &str, x0: f32, y: f32, font: &str| {
+            let mut x = x0;
+            for ch in text.chars() {
+                let mut glyph = ink_glyph(id, x, y, 10.0, &ch.to_string());
+                id += 1;
+                glyph.font_name = font.into();
+                glyph.bbox = [x, y - 2.0, x + 5.2, y + 8.0];
+                glyph.advance = [5.4, 0.0];
+                glyphs.push(glyph);
+                x += 5.4;
+            }
+        };
+        place("Proof.", 72.0, 400.0, "CMTI10");
+        place("The initialization is ready now.", 110.0, 400.0, "CMR10");
+        place(
+            "The bound follows from the lemma directly and stays.",
+            72.0,
+            386.0,
+            "CMR10",
+        );
+        let translated =
+            "初始化是特。别是后文也要从引理得到这个界并且保持第一行从标签之后开始排版。";
+        let points: Vec<u32> = translated.chars().map(|ch| ch as u32).collect();
+        let font = subset_ttf(&box_ttf(&points), &points).expect("font");
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs: glyphs.clone(),
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let body: Vec<&Glyph> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.id >= 6)
+            .collect();
+        let metrics = CjkMeasure::resolve(0.0, 0.0);
+        let drawn = layout_segment(
+            &body,
+            translated,
+            &font,
+            &extraction,
+            false,
+            "F1",
+            0.0,
+            metrics,
+        )
+        .expect("layout");
+        let first = drawn
+            .iter()
+            .max_by(|left, right| left.y.total_cmp(&right.y))
+            .unwrap();
+        assert!(
+            first.x >= 108.0,
+            "first line {} starts under the label",
+            first.x
+        );
+        assert!(first.text.starts_with('初'), "{:?}", first.text);
     }
 
     #[test]
