@@ -20982,12 +20982,16 @@ ET",
     }
 
     fn assert_viewer_text(pdf: &[u8], needle: &str) {
-        let path = std::env::temp_dir().join(format!("rpt-viewers-{}.pdf", std::process::id()));
+        // Both viewer tests run in one process. A path keyed only by the pid
+        // lets one test OCR the other test's page.
+        let slot = viewer_slot();
+        let path =
+            std::env::temp_dir().join(format!("rpt-viewers-{}-{slot}.pdf", std::process::id()));
         std::fs::write(&path, pdf).unwrap();
         let mut saw = false;
         if !tool_missing("pdftoppm") && !tool_missing("tesseract") {
             saw = true;
-            let text = ocr_pngs(&render_poppler(&path), needle);
+            let text = ocr_pngs(&render_poppler(&path, slot), needle);
             assert!(
                 text.contains(needle),
                 "poppler paint dropped glyphs: {text}"
@@ -20995,12 +20999,12 @@ ET",
         }
         if !tool_missing("mutool") && !tool_missing("tesseract") {
             saw = true;
-            let text = ocr_pngs(&render_mutool(&path), needle);
+            let text = ocr_pngs(&render_mutool(&path, slot), needle);
             assert!(text.contains(needle), "mupdf paint dropped glyphs: {text}");
         }
         if pdfjs_ready() && !tool_missing("tesseract") {
             saw = true;
-            let text = ocr_pngs(&render_pdfjs(&path), needle);
+            let text = ocr_pngs(&render_pdfjs(&path, slot), needle);
             assert!(text.contains(needle), "pdf.js paint dropped glyphs: {text}");
         }
         if std::env::var_os("CI").is_some() {
@@ -21009,8 +21013,14 @@ ET",
         let _ = std::fs::remove_file(&path);
     }
 
-    fn render_poppler(pdf: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let dir = std::env::temp_dir().join(format!("rpt-poppler-{}", std::process::id()));
+    fn viewer_slot() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn render_poppler(pdf: &std::path::Path, slot: u64) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("rpt-poppler-{}-{slot}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let status = std::process::Command::new("pdftoppm")
@@ -21023,8 +21033,8 @@ ET",
         pngs_in(&dir)
     }
 
-    fn render_mutool(pdf: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let dir = std::env::temp_dir().join(format!("rpt-mupdf-{}", std::process::id()));
+    fn render_mutool(pdf: &std::path::Path, slot: u64) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("rpt-mupdf-{}-{slot}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("page.png");
@@ -21040,8 +21050,8 @@ ET",
         pngs_in(&dir)
     }
 
-    fn render_pdfjs(pdf: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let dir = std::env::temp_dir().join(format!("rpt-pdfjs-{}", std::process::id()));
+    fn render_pdfjs(pdf: &std::path::Path, slot: u64) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("rpt-pdfjs-{}-{slot}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("page.png");
