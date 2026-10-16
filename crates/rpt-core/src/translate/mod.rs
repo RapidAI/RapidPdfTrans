@@ -1058,12 +1058,29 @@ fn translate_batch(
                     translator,
                     calls,
                 ))),
-                Err(_) => Ok(polish(
-                    indexes
+                Err(_) => {
+                    // A long paragraph can drop a few of many placeholders in
+                    // one reply and still translate cleanly one sentence at a
+                    // time. Keeping the English source fails the whole PDF.
+                    let fallback = indexes
                         .iter()
-                        .map(|&index| (index, segments[index].text.clone()))
-                        .collect(),
-                )),
+                        .map(|&index| {
+                            let text =
+                                translate_sentences(&segments[index].text, opts, translator, calls)
+                                    .or_else(|| {
+                                        translate_fallback(
+                                            &segments[index].text,
+                                            opts,
+                                            translator,
+                                            calls,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| segments[index].text.clone());
+                            (index, text)
+                        })
+                        .collect();
+                    Ok(polish(fallback))
+                }
             }
         }
         Err(err) => Err(err),
@@ -4673,6 +4690,48 @@ mod tests {
         assert!(report.segments[0]
             .translated
             .contains("https://example.com/a"));
+    }
+
+    /// One reply that drops a placeholder from a two-sentence paragraph is
+    /// not a reason to keep the English. Each sentence still round-trips.
+    struct DropPlaceholderWhenTwoSentences;
+    impl Translator for DropPlaceholderWhenTwoSentences {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap();
+                    let text = if text.matches('⟦').count() > 1 {
+                        match text.rsplit_once('⟦') {
+                            Some((head, _)) => format!("译文 {head}"),
+                            None => format!("译文 {text}"),
+                        }
+                    } else {
+                        format!("译文 {text}")
+                    };
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_dropped_placeholder_in_a_long_paragraph_is_split_into_sentences() {
+        let mut ex = extraction_from_lines(&["Theorem 4.1 holds. The bound is 0.5."]);
+        let report = translate_extraction(
+            &mut ex,
+            &TranslateOptions::default(),
+            &DropPlaceholderWhenTwoSentences,
+        )
+        .unwrap();
+        let translated = &report.segments[0].translated;
+        assert!(translated.contains("译文"), "{translated}");
+        assert!(translated.contains("4.1"), "{translated}");
+        assert!(translated.contains("0.5"), "{translated}");
+        assert!(report.calls >= 4, "calls {}", report.calls);
     }
 
     #[test]

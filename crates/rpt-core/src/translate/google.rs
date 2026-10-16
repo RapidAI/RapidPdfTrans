@@ -278,7 +278,13 @@ impl GoogleTranslator {
             GoogleApi::V3 => self.translate_v3(texts),
             GoogleApi::Unofficial => texts
                 .iter()
-                .map(|text| self.translate_unofficial(text))
+                .map(|text| {
+                    // ⟦N⟧ is a shielded number. The unofficial endpoint rewrites
+                    // `section ⟦3⟧` into `第 3 节`, restore fails, and the
+                    // paragraph stays English. `XPHNX` is copied through.
+                    self.translate_unofficial(&hide_placeholders(text))
+                        .map(|text| show_placeholders(&text))
+                })
                 .collect(),
         }
     }
@@ -681,6 +687,72 @@ fn unescape_html(text: &str) -> String {
     out
 }
 
+/// `⟦N⟧` → `XPHNX`. The unofficial endpoint copies the ASCII token and
+/// rewrites the bracket form into a bare digit.
+fn hide_placeholders(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('⟦') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        if let Some(rel_end) = after.find('⟧') {
+            let token = &after[..rel_end + '⟧'.len_utf8()];
+            if is_placeholder(token) {
+                let inner = token
+                    .strip_prefix('⟦')
+                    .and_then(|s| s.strip_suffix('⟧'))
+                    .unwrap_or("");
+                out.push_str("XPH");
+                out.push_str(inner);
+                out.push('X');
+                rest = &after[token.len()..];
+                continue;
+            }
+        }
+        out.push('⟦');
+        rest = &rest[start + '⟦'.len_utf8()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `XPHNX` → `⟦N⟧`, including a spaced `XPH 10 X` if the endpoint splits it.
+fn show_placeholders(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let lower_bytes = lower.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < text.len() {
+        if i + 5 <= lower_bytes.len() && lower_bytes[i..i + 3] == *b"xph" {
+            let mut j = i + 3;
+            while j < lower_bytes.len() && lower_bytes[j] == b' ' {
+                j += 1;
+            }
+            let digit_start = j;
+            while j < lower_bytes.len() && lower_bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > digit_start {
+                let mut k = j;
+                while k < lower_bytes.len() && lower_bytes[k] == b' ' {
+                    k += 1;
+                }
+                if k < lower_bytes.len() && lower_bytes[k] == b'x' {
+                    out.push('⟦');
+                    out.push_str(&text[digit_start..j]);
+                    out.push('⟧');
+                    i = k + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = text[i..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 fn percent_encode(text: &str) -> String {
     let mut out = String::new();
     for byte in text.as_bytes() {
@@ -896,6 +968,28 @@ mod tests {
         assert!(captured.contains("client=gtx"));
         assert!(captured.contains("translate_a/single"));
         assert!(captured.contains("q=Hello"));
+    }
+
+    #[test]
+    fn unofficial_hides_placeholders_before_the_request() {
+        assert_eq!(
+            hide_placeholders("section ⟦3⟧ and ⟦10⟧"),
+            "section XPH3X and XPH10X"
+        );
+        assert_eq!(
+            show_placeholders("如第 XPH3X 节和 XPH 10 X"),
+            "如第 ⟦3⟧ 节和 ⟦10⟧"
+        );
+        let response = r#"[[["如第 XPH3X 节所示。","source",null,null,1]],null,"en"]"#;
+        let mock = Mock::start(response.into());
+        let client = GoogleTranslator::unofficial("en", "zh").with_base_url(&mock.base);
+        let user = r#"{"segments":[{"id":1,"text":"as shown in section ⟦3⟧."}]}"#;
+        let out = client.complete("", user).unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["translations"][0]["text"], "如第 ⟦3⟧ 节所示。");
+        let captured = mock.body.lock().unwrap().clone();
+        assert!(captured.contains("XPH3X"));
+        assert!(!captured.contains("%E2%9F%A6"));
     }
 
     fn test_pem() -> String {

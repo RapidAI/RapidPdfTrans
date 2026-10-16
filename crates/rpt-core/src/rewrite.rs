@@ -4644,6 +4644,10 @@ fn place_segments(
                     // A contents crumb narrower than the translation. Leaving
                     // the English is not an unfinished body paragraph.
                     "tight"
+                } else if url_keeps_original(&segment.source) {
+                    // A footnote URL wider than the column does not fit a CJK
+                    // line. Leave the printed URL. It is not an unfinished paragraph.
+                    "url"
                 } else {
                     "overflow"
                 };
@@ -4653,6 +4657,28 @@ fn place_segments(
             }
         }
     }
+}
+
+/// A footnote that is a URL, not a paragraph that merely mentions one.
+/// `1 http://image-net.org/challenges/LSVRC/2015/ and` does not fit a column
+/// once the conjunction is translated, and failing the whole PDF drops every
+/// page that did fit.
+fn url_keeps_original(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let Some(start) = lower.find("http://").or_else(|| lower.find("https://")) else {
+        return false;
+    };
+    let rest = &lower[start..];
+    let url_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    if url_len < 12 {
+        return false;
+    }
+    let url_letters = rest[..url_len]
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count();
+    let all_letters = text.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    all_letters.saturating_sub(url_letters) <= 8
 }
 
 fn segment_crosses_column(glyphs: &[&Glyph], neighbors: &[&Glyph], size: f32) -> bool {
@@ -15692,6 +15718,19 @@ mod tests {
         TranslatedSegment, Translator,
     };
     use lopdf::dictionary;
+
+    #[test]
+    fn a_footnote_url_is_not_an_unfinished_paragraph() {
+        assert!(url_keeps_original(
+            "1 http://image-net.org/challenges/LSVRC/2015/ and"
+        ));
+        assert!(url_keeps_original(
+            "1http://image-net.org/challenges/LSVRC/2015/ and"
+        ));
+        assert!(!url_keeps_original(
+            "Deep residual nets are foundations of our submissions to ILSVRC and COCO 2015 competitions, where we also won the 1st places. See http://image-net.org/challenges/LSVRC/2015/ for the task."
+        ));
+    }
 
     #[test]
     fn a_planck_constant_stands_in_for_italic_h() {

@@ -1482,6 +1482,17 @@ fn mark_urls(chars: &[char], sticky: &mut [bool]) {
         let end = index + len;
         if len > 4 {
             for boundary in index..end.saturating_sub(1) {
+                // A slash after the scheme may start the next line. A footnote
+                // URL wider than the column otherwise cannot be placed at all.
+                // The slashes in `http://` stay glued to the host.
+                let scheme_slash = chars.get(boundary).copied() == Some('/')
+                    && matches!(
+                        chars.get(boundary.saturating_sub(1)).copied(),
+                        Some(':') | Some('/')
+                    );
+                if chars.get(boundary).copied() == Some('/') && !scheme_slash {
+                    continue;
+                }
                 if let Some(flag) = sticky.get_mut(boundary) {
                     *flag = true;
                 }
@@ -2330,6 +2341,39 @@ mod tests {
             units_per_em: 1000,
             glyphs,
         }
+    }
+
+    #[test]
+    fn a_footnote_url_wider_than_the_column_breaks_after_a_slash() {
+        let text = "1 http://image-net.org/challenges/LSVRC/2015/ and";
+        let metrics = CjkMeasure::resolve(1.0, 1.15);
+        let fitted = fit_cjk_block(
+            text,
+            9.0,
+            1.0,
+            220.0,
+            0.0,
+            80.0,
+            &uniform_font(text),
+            metrics,
+        )
+        .expect("long url wraps");
+        let flat = fitted.0.join("\n");
+        assert!(fitted.0.len() > 1, "url stayed on one line: {flat}");
+        assert!(
+            fitted
+                .0
+                .iter()
+                .any(|line| line.contains("http://image-net.org/")),
+            "host was split from the scheme: {flat}"
+        );
+        assert!(
+            !fitted
+                .0
+                .iter()
+                .any(|line| line.contains("http://") && !line.contains("image-net.org")),
+            "scheme was left behind: {flat}"
+        );
     }
 
     #[test]
