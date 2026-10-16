@@ -1927,7 +1927,20 @@ fn script_atoms(glyphs: &[&Glyph], body: f32, used: &HashSet<u32>) -> Vec<Vec<u3
         let marks_only = cluster.iter().all(|&index| {
             citation_mark_text(&glyphs[index].unicode) && !is_math_font(&glyphs[index].font_name)
         });
-        if marks_only || (!mathish && !bases.iter().any(|glyph| is_math_font(&glyph.font_name))) {
+        // `Grisha Perelman∗`: the star is CMSY, so it looks like a script on
+        // the last letter. A footnote mark on a roman word is not that script.
+        // A math italic `n∗` still keeps its base, because that base is math.
+        let footnote_on_prose = cluster
+            .iter()
+            .all(|&index| is_footnote_symbol(&glyphs[index].unicode))
+            && bases.iter().all(|glyph| {
+                !is_math_font(&glyph.font_name)
+                    && glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+            });
+        if footnote_on_prose
+            || marks_only
+            || (!mathish && !bases.iter().any(|glyph| is_math_font(&glyph.font_name)))
+        {
             continue;
         }
         ids.extend(bases.iter().map(|glyph| glyph.id));
@@ -2043,6 +2056,7 @@ fn citation_mark_text(text: &str) -> bool {
         && text.chars().count() <= 2
         && text.chars().all(|ch| {
             ch.is_ascii_digit()
+                || is_footnote_symbol(text)
                 || matches!(ch, '+' | '-' | '*' | '†' | '‡' | '\u{2212}' | '\u{207A}')
         })
 }
@@ -9667,10 +9681,13 @@ fn adopt_unchanged_body_lines(
         line.sort_by(|&left, &right| {
             extraction.glyphs[left].matrix[4].total_cmp(&extraction.glyphs[right].matrix[4])
         });
-        let text: String = line
+        let glyphs: Vec<&Glyph> = line
             .iter()
-            .map(|&index| extraction.glyphs[index].unicode.as_str())
+            .map(|&index| &extraction.glyphs[index])
             .collect();
+        // The source often has no space character. Word spaces are TJ kerning
+        // or a Td gap. Joining the unicode paints `AttentionIsAllYouNeed`.
+        let text = spaced_glyph_run(&glyphs);
         let trimmed = text.trim();
         if trimmed.chars().count() < 12
             || is_section_index_text(trimmed)
@@ -9697,10 +9714,6 @@ fn adopt_unchanged_body_lines(
         if y > media_top - 48.0 || y < media_bottom + 36.0 {
             continue;
         }
-        let glyphs: Vec<&Glyph> = line
-            .iter()
-            .map(|&index| &extraction.glyphs[index])
-            .collect();
         if !operators_are_private(&glyphs, owners) {
             continue;
         }
@@ -15505,6 +15518,39 @@ fn split_span(span: [f32; 4], links: &[LinkRef]) -> Vec<[f32; 4]> {
         .collect()
 }
 
+/// Join glyphs that share a baseline. A gap wider than about three quarters
+/// of a word space (a quarter of the em) is a space the PDF never stored.
+fn spaced_glyph_run(glyphs: &[&Glyph]) -> String {
+    let mut out = String::new();
+    let mut previous: Option<&Glyph> = None;
+    for glyph in glyphs {
+        if let Some(prev) = previous {
+            if positional_word_gap(prev, glyph) {
+                out.push(' ');
+            }
+        }
+        out.push_str(&glyph.unicode);
+        previous = Some(glyph);
+    }
+    out
+}
+
+fn positional_word_gap(prev: &Glyph, next: &Glyph) -> bool {
+    if prev.unicode.chars().all(char::is_whitespace)
+        || next.unicode.chars().all(char::is_whitespace)
+    {
+        return false;
+    }
+    if prev.unicode.chars().any(is_han_char) && next.unicode.chars().any(is_han_char) {
+        return false;
+    }
+    let size = prev.font_size.max(next.font_size).max(1.0);
+    let space = size * 0.25;
+    let bbox_gap = next.bbox[0].min(next.matrix[4]) - prev.bbox[2].max(prev.matrix[4]);
+    let pen_gap = next.matrix[4] - (prev.matrix[4] + prev.advance[0].max(0.0));
+    bbox_gap.max(pen_gap) > space * 0.72
+}
+
 fn glyphs_text(glyphs: &[&Glyph]) -> String {
     let mut out = String::new();
     let mut prev: Option<&Glyph> = None;
@@ -20793,6 +20839,139 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
         }
+    }
+
+    #[test]
+    fn positioned_word_gaps_survive_an_unchanged_redraw() {
+        let content = b"BT /F1 17 Tf \
+1 0 0 1 72 640 Tm [(Attention) -250 (Is) -250 (All) -250 (You) -250 (Need)] TJ \
+/F1 10 Tf \
+1 0 0 1 72 610 Tm [(avaswani@google.com) -800 (noam@google.com)] TJ \
+1 0 0 1 72 580 Tm (llion@google.com) Tj 180 0 Td (aidan@cs.toronto.edu) Tj \
+/F1 12 Tf \
+1 0 0 1 72 550 Tm [(Aidan) -280 (N.) -280 (Gomez)] TJ \
+1 0 0 1 72 530 Tm [(Illia) -280 (Polosukhin)] TJ \
+1 0 0 1 72 500 Tm [(Google) -250 (Research)] TJ 90 0 Td [(Google) -250 (Brain)] TJ \
+/F1 11 Tf \
+1 0 0 1 72 460 Tm (The dominant sequence transduction models are based on attention.) Tj \
+ET";
+        let bytes = contents_pdf(content);
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let report = translate_extraction(
+            &mut extraction,
+            &TranslateOptions::default(),
+            &EchoExceptBody,
+        )
+        .unwrap();
+        let drawn = report
+            .segments
+            .iter()
+            .map(|segment| segment.translated.as_str())
+            .collect::<String>();
+        let mut codes: Vec<u32> = drawn.chars().map(|ch| ch as u32).collect();
+        codes.extend(
+            extraction
+                .glyphs
+                .iter()
+                .flat_map(|glyph| glyph.unicode.chars().map(|ch| ch as u32)),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&codes)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        extraction.assert_complete().unwrap();
+        let saved = doc.save_bytes().unwrap();
+        let again = PdfDocument::open_bytes(&saved).unwrap().extract();
+        let text = again.plain_text();
+        assert!(text.contains("Attention Is All You Need"), "{text}");
+        assert!(!text.contains("AttentionIsAllYouNeed"), "{text}");
+        assert!(
+            text.contains("avaswani@google.com noam@google.com"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("avaswani@google.comnoam@google.com"),
+            "{text}"
+        );
+        assert!(
+            text.contains("llion@google.com aidan@cs.toronto.edu"),
+            "{text}"
+        );
+        assert!(text.contains("Aidan N. Gomez"), "{text}");
+        assert!(!text.contains("AidanN.Gomez"), "{text}");
+        assert!(text.contains("Illia Polosukhin"), "{text}");
+        assert!(!text.contains("IlliaPolosukhin"), "{text}");
+        assert!(text.contains("Google Research"), "{text}");
+        assert!(text.contains("Google Brain"), "{text}");
+        assert!(!text.contains("GoogleResearch"), "{text}");
+        assert!(!text.contains("ResearchGoogle"), "{text}");
+    }
+
+    struct EchoExceptBody;
+    impl Translator for EchoExceptBody {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+            let translations: Vec<serde_json::Value> = payload["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap_or("");
+                    let translated = if text.contains("dominant") {
+                        "主流序列模型基于注意力机制"
+                    } else {
+                        text
+                    };
+                    serde_json::json!({"id": seg["id"], "text": translated})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_footnote_star_on_a_roman_name_keeps_the_last_letter() {
+        let name = "Grisha Perelman";
+        let mut glyphs = Vec::new();
+        let mut x = 200.0f32;
+        let y = 500.0f32;
+        let size = 14.0f32;
+        let mut id = 0u32;
+        for ch in name.chars() {
+            if ch == ' ' {
+                x += size * 0.32;
+                continue;
+            }
+            let mut glyph = ink_glyph(id, x, y, size, &ch.to_string());
+            id += 1;
+            glyph.font_name = "NimbusRomNo9L-Regu".into();
+            glyphs.push(glyph);
+            x += size * 0.52;
+        }
+        let n = glyphs.last().unwrap();
+        let mut star = ink_glyph(
+            id,
+            n.matrix[4] + size * 0.2,
+            y + size * 0.36,
+            size * 0.62,
+            "∗",
+        );
+        star.font_name = "CMSY10".into();
+        glyphs.push(star);
+        let merged = merge_stacked_paragraphs(crate::segment::segment_glyphs(&glyphs), &glyphs);
+        let text = merged
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Perelman"), "{text}");
+        assert!(!text.contains("Perelma⟦"), "{text}");
     }
 
     #[test]

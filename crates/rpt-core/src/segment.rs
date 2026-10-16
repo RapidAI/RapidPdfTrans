@@ -1716,9 +1716,10 @@ fn assemble(
 /// arrow in front of that line is the marker, not body text. A sentence that
 /// only borrows a few monospace words keeps those words.
 fn listing_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
+    let prose = mono_prose_block(lines);
     let mut kept = Vec::new();
-    for line in lines {
-        if !listing_line(line) {
+    for (index, line) in lines.iter().enumerate() {
+        if prose[index] || !listing_line(line) {
             continue;
         }
         for glyph in &line.glyphs {
@@ -1751,6 +1752,81 @@ fn listing_line(line: &VisualLine<'_>) -> bool {
         }
     }
     other == 0 && (mono_letters >= 2 || (mono_letters == 0 && mono_marks >= 1))
+}
+
+/// Several stacked monospace lines of ordinary sentences are a license or a
+/// preface, not a listing. One mono sentence stays code.
+fn mono_prose_block(lines: &[VisualLine<'_>]) -> Vec<bool> {
+    let mut prose = vec![false; lines.len()];
+    let mut index = 0usize;
+    while index < lines.len() {
+        if !mono_prose_line(&lines[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < lines.len()
+            && mono_prose_line(&lines[index])
+            && mono_lines_stack(&lines[index - 1], &lines[index])
+        {
+            index += 1;
+        }
+        if index - start >= 3 {
+            for flag in &mut prose[start..index] {
+                *flag = true;
+            }
+        }
+    }
+    prose
+}
+
+fn mono_prose_line(line: &VisualLine<'_>) -> bool {
+    if !listing_line(line) {
+        return false;
+    }
+    let letters = line
+        .text
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count();
+    let words = line.text.split_whitespace().count();
+    let symbols = line
+        .text
+        .chars()
+        .filter(|ch| {
+            matches!(
+                ch,
+                '{' | '}'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | ';'
+                    | '='
+                    | '<'
+                    | '>'
+                    | '#'
+                    | '`'
+                    | '|'
+                    | '\\'
+                    | '/'
+                    | '_'
+                    | '$'
+                    | '%'
+                    | '&'
+            )
+        })
+        .count();
+    letters >= 25 && words >= 5 && symbols * 4 <= letters.max(1)
+}
+
+fn mono_lines_stack(above: &VisualLine<'_>, below: &VisualLine<'_>) -> bool {
+    if above.page != below.page {
+        return false;
+    }
+    let size = above.size.max(below.size).max(1.0);
+    (above.y - below.y).abs() <= size * 2.4 && (above.left - below.left).abs() <= size * 3.0
 }
 
 pub(crate) fn mono_face(name: &str) -> bool {
@@ -9042,6 +9118,57 @@ mod tests {
                 .iter()
                 .any(|(id, reason)| *id == 1 && reason == "code"),
             "{:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn a_monospace_license_block_is_prose_and_a_listing_stays_code() {
+        let license = [
+            "Project Gutenberg's Alice's Adventures in Wonderland, by Lewis Carroll.",
+            "This eBook is for the use of anyone anywhere at no cost and with",
+            "almost no restrictions whatsoever. You may copy it, give it away or",
+        ];
+        let mut glyphs = Vec::new();
+        for (index, line) in license.iter().enumerate() {
+            let mut item = wide(
+                index as u32,
+                72.0,
+                700.0 - index as f32 * 14.0,
+                line,
+                460.0,
+                11.0,
+            );
+            item.font_name = "Courier-Oblique".into();
+            glyphs.push(item);
+        }
+        let mut listing = wide(10, 72.0, 640.0, "print(response)", 140.0, 11.0);
+        listing.font_name = "Courier".into();
+        glyphs.push(listing);
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("anyone anywhere")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("Project Gutenberg")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().all(|text| !text.contains("print")),
+            "{texts:?}"
+        );
+        assert!(
+            seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 10 && reason == "code"),
+            "{:?}",
+            seg.kept
+        );
+        assert!(
+            seg.kept.iter().all(|(id, _)| *id == 10),
+            "license glyphs were kept as code: {:?}",
             seg.kept
         );
     }
