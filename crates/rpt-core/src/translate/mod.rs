@@ -90,9 +90,13 @@ pub struct TranslateOptions {
     /// Leave table cells and headers original. Only the caption is translated.
     pub skip_tables: bool,
     /// Song/serif CJK font file. Empty uses `RPT_CJK_FONT`, then Noto Serif CJK.
+    /// A trailing `#N` selects face N of a collection (`simsun.ttc#0`).
     pub cjk_font: Option<String>,
-    /// Sans CJK font file for regular sans text.
+    /// Sans CJK font file for regular sans text. Empty uses Song Bold.
     pub cjk_sans: Option<String>,
+    /// Song Bold for titles, section names, and sans source faces.
+    /// Empty uses `RPT_CJK_BOLD_FONT`, then Noto Serif CJK Bold.
+    pub cjk_bold_font: Option<String>,
     /// Chinese body size as a fraction of the source size. `0` uses 0.90,
     /// or `RPT_CJK_SIZE_SCALE` when that is set.
     pub cjk_size_scale: f32,
@@ -185,6 +189,7 @@ impl Default for TranslateOptions {
             skip_tables: true,
             cjk_font: None,
             cjk_sans: None,
+            cjk_bold_font: None,
             cjk_size_scale: 0.0,
             cjk_leading: 0.0,
             output_mode: OutputMode::Replace,
@@ -318,6 +323,9 @@ impl TranslateOptions {
         }
         if let Some(v) = string_field(&value, &["cjk_sans"]) {
             opts.cjk_sans = Some(v);
+        }
+        if let Some(v) = string_field(&value, &["cjk_bold_font", "cjk_bold"]) {
+            opts.cjk_bold_font = Some(v);
         }
         if let Some(v) = float_field(&value, &["cjk_size_scale", "cjkSizeScale"]) {
             opts.cjk_size_scale = v;

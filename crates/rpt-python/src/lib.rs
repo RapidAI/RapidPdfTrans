@@ -72,6 +72,9 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
 /// `options_json` selects the output: `{"output_mode":"replace"}` (pure
 /// translation) or `{"output_mode":"bilingual","bilingual_layout":"side-by-side"}`.
 /// Layouts are `side-by-side`, `alternating`, and `overlay`.
+/// `cjk_font` and `cjk_bold_font` are `.ttf`, `.otf`, or `.ttc` paths;
+/// `#N` selects a collection face. A missing glyph uses Noto Serif CJK
+/// and Python emits a warning.
 #[pyfunction]
 #[pyo3(signature = (path, output, options_json=None))]
 fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
@@ -89,6 +92,7 @@ fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
             mode: opts.output_mode,
             cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
             cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+            cjk_bold: opts.cjk_bold_font.as_ref().map(std::path::PathBuf::from),
             cjk_size_scale: opts.cjk_size_scale,
             cjk_leading: opts.cjk_leading,
             ..RewriteOptions::default()
@@ -98,6 +102,11 @@ fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
     doc.save_file(output).map_err(py_err)?;
     if let Some(warning) = extraction.note_incomplete_coverage() {
         warn_coverage(&warning);
+    }
+    for item in &extraction.diagnostics {
+        if item.message.starts_with("CJK font") {
+            warn_coverage(&item.message);
+        }
     }
     Ok(())
 }

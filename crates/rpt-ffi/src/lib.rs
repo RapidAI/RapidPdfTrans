@@ -209,6 +209,9 @@ pub unsafe extern "C" fn rpt_translate(
 /// `path` and `options_json` are null-terminated UTF-8 strings, or null.
 /// An `api_key` field in JSON is ignored. An LLM needs `RPT_LLM_API_KEY`.
 /// With no translator configured, a reachable Google Translate endpoint is used.
+/// `cjk_font`, `cjk_sans`, and `cjk_bold_font` are TTF, OTF, or TTC paths.
+/// A trailing `#N` selects face N (`simsun.ttc#0`). Characters missing from a
+/// user face are drawn from Noto Serif CJK, and `rpt_last_error` names them.
 /// Returns 0 after the translated PDF is written. A paragraph that is still
 /// English after a retry does not block the write: the file is saved and
 /// `rpt_last_error` holds a warning.
@@ -253,6 +256,10 @@ pub unsafe extern "C" fn rpt_save(
                         .cjk_sans
                         .as_ref()
                         .map(std::path::PathBuf::from),
+                    cjk_bold: translate_opts
+                        .cjk_bold_font
+                        .as_ref()
+                        .map(std::path::PathBuf::from),
                     cjk_size_scale: translate_opts.cjk_size_scale,
                     cjk_leading: translate_opts.cjk_leading,
                     ..RewriteOptions::default()
@@ -260,7 +267,16 @@ pub unsafe extern "C" fn rpt_save(
             )
             .map_err(|e| e.to_string())?;
         inner.pdf.save_file(path).map_err(|e| e.to_string())?;
-        Ok(extraction.note_incomplete_coverage())
+        let mut notes: Vec<String> = extraction
+            .diagnostics
+            .iter()
+            .filter(|item| item.message.starts_with("CJK font"))
+            .map(|item| item.message.clone())
+            .collect();
+        if let Some(warning) = extraction.note_incomplete_coverage() {
+            notes.push(warning);
+        }
+        Ok((!notes.is_empty()).then(|| notes.join("; ")))
     });
     match saved {
         Ok(warning) => {

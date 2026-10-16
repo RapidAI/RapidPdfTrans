@@ -65,8 +65,9 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 | `RPT_GOOGLE_API_KEY` | Cloud Translation v2 | 未设置 |
 | `RPT_GOOGLE_CREDENTIALS` | `google-v3` 服务账号 | 未设置 |
 | `RPT_GOOGLE_ACCESS_TOKEN` | `google-v3` 持有者令牌 | 未设置 |
-| `RPT_CJK_FONT` | 可选，宋体/衬线文件 | Noto Serif CJK，然后是下面的回退列表 |
-| `RPT_CJK_SANS` | 可选，无衬线文件 | Noto Sans CJK |
+| `RPT_CJK_FONT` | 可选，正文宋体文件 | Noto Serif CJK，然后是下面的回退列表 |
+| `RPT_CJK_BOLD_FONT` | 可选，粗宋文件 | Noto Serif CJK Bold |
+| `RPT_CJK_SANS` | 可选，只替换常规无衬线 | 与标题相同的粗宋 |
 | `RPT_TRANSLATE_JOBS` | 可选，并行请求数 | `4`（上限 `8`） |
 | `RPT_CJK_SIZE_SCALE` | 可选 | `0.90` |
 | `RPT_CJK_LEADING` | 可选 | `1.60` |
@@ -75,9 +76,19 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 
 ### 字体
 
-`--cjk-font` 和 `--cjk-sans` 接受 TTF、TTC 或 OTF。同样的路径也可以写成 `RPT_CJK_FONT` 和 `RPT_CJK_SANS`。粗体在安装了 `/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc` 时仍用这个字体集的第 2 个面。
+标题、章节名、「摘要」，以及其它粗体或无衬线源字体，都画成粗宋。正文仍是常规宋体。整页是同一套衬线。
 
-衬线路径未设置时，正文优先用已安装的 Noto Serif CJK SC Light（`~/.local/share/fonts/NotoSerifCJKsc-Light.otf`、`/usr/local/share/fonts/NotoSerifCJKsc-Light.otf` 或 `/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf`），否则用 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc`（第 2 个面）。无衬线用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`（第 2 个面）。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。
+`--cjk-font` 是正文。`--cjk-bold-font` 是粗宋，用于这些粗体和无衬线。设置了 `--cjk-sans` 时，它仍只替换常规无衬线。三个参数都接受 `.ttf`、`.otf` 或 `.ttc`。路径末尾加 `#N` 选择字体集的第 N 个面（常见的 `simsun.ttc#0` 是宋体，`simsun.ttc#1` 是新宋体）。同样的字符串也可以写成环境变量 `RPT_CJK_FONT`、`RPT_CJK_BOLD_FONT` 和 `RPT_CJK_SANS`。Python 的 `save` / `translate` 和 C 的 `rpt_save` / `rpt_translate` 在选项 JSON 里用 `cjk_font`、`cjk_bold_font` 和 `cjk_sans`（`cjk_bold` 与 `cjk_bold_font` 相同）。
+
+只嵌入这一页用到的字形。用户字体没有的字改用内置思源宋体，并给出警告：
+
+```text
+rpt: warning: CJK font /path/to/face.ttf has no glyph for U+4E2D; those characters use Noto Serif CJK
+```
+
+思源宋体和思源黑体是 SIL Open Font License 1.1。字体文件不放进 wheel，也不放进 SDK。安装系统包 `fonts-noto-cjk`，许可证在 `/usr/share/doc/fonts-noto-cjk/copyright`。简体中文是字体集的第 2 个面。这个包装没有单独的 SemiBold 文件，粗体用 Bold。
+
+正文路径未设置时，正文优先用已安装的 Noto Serif CJK SC Light（`~/.local/share/fonts/NotoSerifCJKsc-Light.otf`、`/usr/local/share/fonts/NotoSerifCJKsc-Light.otf` 或 `/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf`），否则用 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc`（第 2 个面）。粗体和无衬线用 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc`（第 2 个面）。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。
 
 ### 翻译
 
@@ -102,7 +113,7 @@ export RPT_LLM_API_KEY=...
 | `--translate-references` | 翻译参考文献。默认保留原文。 |
 | `--translate-figures` | 翻译图内文字。默认只翻译图注。 |
 | `--translate-tables` | 翻译单元格和表头。默认只翻译表注。 |
-| `--cjk-font`、`--cjk-sans` | TTF、TTC 或 OTF。 |
+| `--cjk-font`、`--cjk-bold-font`、`--cjk-sans` | TTF、OTF 或 TTC。`#N` 选择字体集里的面。 |
 | `--cjk-size-scale`、`--cjk-leading` | 默认 `0.90` 和 `1.60`。 |
 | `--batch-size` | 每次请求的段落数。默认 `8`。 |
 | `--jobs` | 并行请求数。默认 `4`，或 `RPT_TRANSLATE_JOBS`，上限 `8`。排版仍是单线程。 |
@@ -132,15 +143,14 @@ rpt: translation failed: no translator is configured and Google Translate is unr
 
 **没有翻译器。** 什么都没配置时会探测 Google Translate。要改用 LLM 网关，在 `rpt translate`、Python 的 `save` / `translate`、C++ 的 `save` 或 `rpt_save` 之前导出 `RPT_LLM_API_KEY`。写在选项 JSON 里的密钥会被忽略。
 
-**豆腐块（空白方框）。** 选中的中文字体没有这个字的轮廓。该字形保持原文，原因是 `missing-glyph`。换成包含这些字的字体：
+**用户字体缺字。** 缺的字改用思源宋体绘制，并打印 `CJK font … has no glyph for U+…`。路径不是文件时，在发出请求之前就失败：`rpt: CJK font not found: ...`。
 
 ```bash
 ./target/release/rpt translate paper.pdf --from en --to zh \
-  --cjk-font /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc \
+  --cjk-font /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc#2 \
+  --cjk-bold-font /usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc#2 \
   --output paper.zh.pdf
 ```
-
-`RPT_CJK_FONT` 是同一条路径。路径不是文件时，在发出请求之前就失败：`rpt: CJK font not found: ...`。
 
 ## 目录
 
@@ -221,7 +231,7 @@ export RPT_LLM_API_KEY=...
 
 设置了 `RPT_LLM_API_KEY` 时，这条命令请求 `RPT_LLM_BASE_URL`（未设置时是 `https://hub.mypapers.top/api/llm/v1`），模型是 `RPT_LLM_MODEL`（未设置时是 `auto`）。密钥只有 `RPT_LLM_API_KEY`。没有 LLM 设置、也没有 `RPT_TRANSLATOR` 时，探测成功就改用 Google Translate。`--glossary transformer=Transformer` 是可选项，在调用前本地替换。并行请求默认是 4。
 
-中文字形从本机字体嵌入。`RPT_CJK_FONT` 是宋体/衬线文件，`RPT_CJK_SANS` 是黑体/无衬线文件。都未设置时，粗体用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc`（字体集第 2 个面），衬线优先用已安装的 Noto Serif CJK SC Light，否则用 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc`（第 2 个面），无衬线用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`（第 2 个面）。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。嵌入的是 glyf 子集（Identity-H 和 ToUnicode）。水平前进量来自 `hmtx`，没有做 OpenType GSUB。
+中文字形从本机字体嵌入。正文是宋体（`RPT_CJK_FONT`，然后是 Noto Serif CJK SC Light 或 Regular 的第 2 个面）。标题、章节名和无衬线源字体是粗宋（`RPT_CJK_BOLD_FONT`，然后是 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc` 的第 2 个面）。只有设置了 `RPT_CJK_SANS` 时，它才替换常规无衬线。路径可以以 `#N` 结尾来选择字体集里的面。嵌入的是这一页用到的字形子集（Identity-H 和 ToUnicode）。用户字体缺的字改用思源宋体，并在警告里列出。思源字体是 SIL OFL 1.1，不放进 wheel 或 SDK；请安装 `fonts-noto-cjk`。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。水平前进量来自 `hmtx`，没有做 OpenType GSUB。
 
 默认输出是纯译文：译文在原位替换原文。双语是可选项。`--mode side-by-side` 左页原文、右页译文。`--mode alternating` 先放原文页，再放译文页。`--mode overlay` 保留原文并在同一页画出译文。`--bilingual` 选择左右并排；用 `--layout alternating` 或 `--layout overlay` 改版式。只写 `--layout` 不会改变默认。C ABI 的 `rpt_save`、C++ `save` 和 Python `save` 同样默认 `output_mode` 为 `replace`；只有明确要求双语时，`bilingual_layout` 才生效。单独的 layout 字段仍是纯译文。`--max-pages N` 只处理前 N 页。放不下、或与公式等保留字形共用操作符的段落，仍留原文。
 

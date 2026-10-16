@@ -18,6 +18,11 @@ pub struct SubsetFont {
     pub units_per_em: u16,
     /// Unicode scalar → (new glyph id, advance in font units).
     pub glyphs: HashMap<u32, (u16, u16)>,
+    /// Built-in Song outlines for scalars this face does not cover.
+    /// Drawn with a second CID font so a missing character is not tofu.
+    pub fallback: Option<Box<SubsetFont>>,
+    /// Shown when a user face lacked glyphs, or could not be subset.
+    pub notice: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -49,7 +54,7 @@ pub fn face_style(font_name: &str) -> FaceStyle {
     .iter()
     .any(|needle| upper.contains(needle));
     // Medium (NimbusRom-Medi) stays a regular Song face. SemiBold and Bold
-    // use the heiti face.
+    // use Song Bold, the same family as the body.
     let bold = ["BOLD", "BLACK", "HEAVY", "SEMIBOLD", "DEMIBOLD", "CMBX"]
         .iter()
         .any(|needle| upper.contains(needle));
@@ -63,49 +68,122 @@ pub fn face_style(font_name: &str) -> FaceStyle {
     }
 }
 
-/// Optional faces that replace the bundled Noto CJK files.
+/// Optional faces that replace the installed Noto Serif CJK files.
 #[derive(Clone, Debug, Default)]
 pub struct FontSources {
-    /// Song/serif face for regular body text (`RPT_CJK_FONT` when unset).
+    /// Song face for regular body text (`RPT_CJK_FONT` when unset).
     pub serif: Option<std::path::PathBuf>,
-    /// Sans face for regular sans text (`RPT_CJK_SANS` when unset).
+    /// Optional sans file. When unset, a sans source face uses Song Bold.
     pub sans: Option<std::path::PathBuf>,
+    /// Song Bold for titles, section heads, and sans source faces
+    /// (`RPT_CJK_BOLD_FONT` when unset).
+    pub bold: Option<std::path::PathBuf>,
 }
 
-/// Subset a style-matched CJK face. Bold text uses Noto Sans CJK Bold.
-/// Regular serif text uses the configured Song face, then Noto Serif CJK.
+/// A font path, plus an optional collection face (`simsun.ttc#0`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontSpec {
+    pub path: std::path::PathBuf,
+    pub face: Option<u32>,
+}
+
+/// `path#N` selects face N of a TTC or OTC. A file whose name itself
+/// contains `#` is left unchanged.
+pub fn parse_font_spec(raw: &str) -> FontSpec {
+    let raw = raw.trim();
+    if let Some((path, index)) = raw.rsplit_once('#') {
+        if !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()) {
+            if let Ok(face) = index.parse::<u32>() {
+                let bare = std::path::PathBuf::from(path);
+                if bare.is_file() || !std::path::Path::new(raw).is_file() {
+                    return FontSpec {
+                        path: bare,
+                        face: Some(face),
+                    };
+                }
+            }
+        }
+    }
+    FontSpec {
+        path: std::path::PathBuf::from(raw),
+        face: None,
+    }
+}
+
+/// Subset a style-matched CJK face.
+///
+/// Body serif uses the configured Song face, then Noto Serif CJK Regular
+/// (Light when that SC file is installed). Bold source faces, and sans
+/// source faces with no `--cjk-sans`, use Noto Serif CJK Bold so the page
+/// is one Song family. A character the user face does not cover is taken
+/// from that built-in Song face and named in `notice`.
 pub fn subset_for_style(
     style: FaceStyle,
     codepoints: &[u32],
     sources: &FontSources,
 ) -> Option<SubsetFont> {
-    if style.bold {
-        if let Some(font) = noto_subset(false, true, codepoints) {
+    let song_bold = style.bold || !style.serif;
+    if !style.bold && !style.serif {
+        if let Some(spec) = sources.sans.clone().or_else(|| env_font("RPT_CJK_SANS")) {
+            if let Some(font) = subset_user_with_fallback(&spec, codepoints, true) {
+                return Some(font);
+            }
+        }
+    }
+    if song_bold {
+        if let Some(spec) = sources
+            .bold
+            .clone()
+            .or_else(|| env_font("RPT_CJK_BOLD_FONT"))
+        {
+            if let Some(font) = subset_user_with_fallback(&spec, codepoints, true) {
+                return Some(font);
+            }
+        }
+        if let Some(font) = noto_subset(true, true, codepoints) {
             return Some(font);
         }
-    } else if style.serif {
-        let path = sources.serif.clone().or_else(|| env_font("RPT_CJK_FONT"));
-        if let Some(path) = path {
-            if let Some(font) = subset_user_font(&path, codepoints) {
+    } else {
+        let spec = sources.serif.clone().or_else(|| env_font("RPT_CJK_FONT"));
+        if let Some(spec) = spec {
+            if let Some(font) = subset_user_with_fallback(&spec, codepoints, false) {
                 return Some(font);
             }
         }
         if let Some(font) = noto_subset(true, false, codepoints) {
             return Some(font);
         }
-    } else {
-        let path = sources.sans.clone().or_else(|| env_font("RPT_CJK_SANS"));
-        if let Some(path) = path {
-            if let Some(font) = subset_user_font(&path, codepoints) {
-                return Some(font);
-            }
-        }
-        if let Some(font) = noto_subset(false, false, codepoints) {
-            return Some(font);
-        }
     }
     let bytes = load_cjk_font()?;
     subset_ttf(&bytes, codepoints)
+}
+
+impl SubsetFont {
+    pub fn has(&self, cp: u32) -> bool {
+        self.cid(cp).is_some()
+    }
+
+    /// Advance as a fraction of an em, from this face or its Song fallback.
+    pub fn em_advance(&self, cp: u32) -> Option<f32> {
+        if let Some((_, advance)) = self.glyphs.get(&cp) {
+            return Some(*advance as f32 / self.units_per_em.max(1) as f32);
+        }
+        let fallback = self.fallback.as_ref()?;
+        let (_, advance) = fallback.glyphs.get(&cp)?;
+        Some(*advance as f32 / fallback.units_per_em.max(1) as f32)
+    }
+
+    /// Glyph id, and whether it lives in the fallback face.
+    pub fn cid(&self, cp: u32) -> Option<(u16, bool)> {
+        if let Some((gid, _)) = self.glyphs.get(&cp) {
+            return Some((*gid, false));
+        }
+        self.fallback
+            .as_ref()?
+            .glyphs
+            .get(&cp)
+            .map(|(gid, _)| (*gid, true))
+    }
 }
 
 fn env_font(name: &str) -> Option<std::path::PathBuf> {
@@ -125,10 +203,12 @@ fn noto_subset(serif: bool, bold: bool, codepoints: &[u32]) -> Option<SubsetFont
             return Some(font);
         }
     }
-    let (path, face) = match (serif, bold) {
-        (_, true) => ("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 2),
-        (true, false) => ("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc", 2),
-        (false, false) => ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
+    // Bold and sans share Song Bold. The Debian Noto CJK package has no
+    // separate SemiBold file; Bold is the installed heavy weight.
+    let (path, face) = if bold || !serif {
+        ("/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc", 2)
+    } else {
+        ("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc", 2)
     };
     std::path::Path::new(path)
         .is_file()
@@ -159,10 +239,83 @@ fn light_song_subset(codepoints: &[u32]) -> Option<SubsetFont> {
     None
 }
 
-fn subset_user_font(path: &std::path::Path, codepoints: &[u32]) -> Option<SubsetFont> {
+fn subset_user_with_fallback(
+    spec: &std::path::Path,
+    codepoints: &[u32],
+    bold: bool,
+) -> Option<SubsetFont> {
+    let parsed = parse_font_spec(&spec.to_string_lossy());
+    if !parsed.path.is_file() {
+        return None;
+    }
+    let face_note = parsed
+        .face
+        .map(|face| format!(" face {face}"))
+        .unwrap_or_default();
+    let Some(mut font) = subset_user_font(&parsed.path, parsed.face, codepoints) else {
+        let mut builtin = noto_subset(true, bold, codepoints)?;
+        builtin.notice = Some(format!(
+            "CJK font {}{} could not be subset; using Noto Serif CJK",
+            parsed.path.display(),
+            face_note
+        ));
+        return Some(builtin);
+    };
+    let missing: Vec<u32> = codepoints
+        .iter()
+        .copied()
+        .filter(|cp| (1..=0xFFFF).contains(cp) && !font.glyphs.contains_key(cp))
+        .collect();
+    if missing.is_empty() {
+        return Some(font);
+    }
+    let Some(fallback) = noto_subset(true, bold, &missing) else {
+        return Some(font);
+    };
+    let covered: Vec<u32> = missing
+        .iter()
+        .copied()
+        .filter(|cp| fallback.glyphs.contains_key(cp))
+        .collect();
+    if covered.is_empty() {
+        return Some(font);
+    }
+    font.notice = Some(missing_glyph_notice(&parsed.path, &covered));
+    font.fallback = Some(Box::new(fallback));
+    Some(font)
+}
+
+fn missing_glyph_notice(path: &std::path::Path, covered: &[u32]) -> String {
+    let shown: Vec<String> = covered
+        .iter()
+        .take(8)
+        .map(|cp| format!("U+{cp:04X}"))
+        .collect();
+    let extra = covered.len().saturating_sub(shown.len());
+    let more = if extra > 0 {
+        format!(" and {extra} more")
+    } else {
+        String::new()
+    };
+    format!(
+        "CJK font {} has no glyph for {}{}; those characters use Noto Serif CJK",
+        path.display(),
+        shown.join(" "),
+        more
+    )
+}
+
+fn subset_user_font(
+    path: &std::path::Path,
+    face: Option<u32>,
+    codepoints: &[u32],
+) -> Option<SubsetFont> {
     let bytes = cached_font_bytes(path)?;
     if is_cff_font(&bytes) {
         let path = path.to_str()?;
+        if let Some(face) = face {
+            return subset_cff(path, face, codepoints);
+        }
         let mut best: Option<SubsetFont> = None;
         let mut best_count = 0usize;
         for face in 0..6 {
@@ -177,7 +330,7 @@ fn subset_user_font(path: &std::path::Path, codepoints: &[u32]) -> Option<Subset
         }
         best
     } else {
-        subset_ttf(&bytes, codepoints)
+        subset_ttf_face(&bytes, face, codepoints)
     }
 }
 
@@ -319,6 +472,8 @@ json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
         bytes,
         units_per_em: upem.max(1),
         glyphs,
+        fallback: None,
+        notice: None,
     })
 }
 
@@ -387,9 +542,23 @@ pub fn box_ttf(codepoints: &[u32]) -> Vec<u8> {
 }
 
 pub fn subset_ttf(data: &[u8], codepoints: &[u32]) -> Option<SubsetFont> {
+    subset_ttf_face(data, None, codepoints)
+}
+
+fn subset_ttf_face(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> Option<SubsetFont> {
+    let directories = face_directories(data);
+    let selected: Vec<usize> = if let Some(index) = face {
+        directories
+            .get(index as usize)
+            .copied()
+            .into_iter()
+            .collect()
+    } else {
+        directories
+    };
     let mut best: Option<SubsetFont> = None;
     let mut best_count = 0usize;
-    for directory in face_directories(data) {
+    for directory in selected {
         let Some(subset) = subset_face(data, directory, codepoints) else {
             continue;
         };
@@ -488,6 +657,8 @@ fn subset_face(file: &[u8], directory: usize, codepoints: &[u32]) -> Option<Subs
         bytes,
         units_per_em: upem,
         glyphs: glyph_map,
+        fallback: None,
+        notice: None,
     })
 }
 
@@ -1015,5 +1186,143 @@ for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
             .expect("python3");
         let _ = std::fs::remove_file(&otf);
         assert!(check.success(), "CFF charset CIDs are not glyph indexes");
+    }
+
+    fn face_name_contains(bytes: &[u8], needle: &str) -> bool {
+        let wide: Vec<u8> = needle
+            .encode_utf16()
+            .flat_map(|unit| unit.to_be_bytes())
+            .collect();
+        bytes
+            .windows(wide.len())
+            .any(|window| window == wide.as_slice())
+            || bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+    }
+
+    #[test]
+    fn bold_and_sans_use_noto_serif_cjk_sc() {
+        let bold_path = "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc";
+        if !std::path::Path::new(bold_path).is_file() {
+            return;
+        }
+        let codes = [0x4E2Du32, 0x6587];
+        let bold = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: true,
+                italic: false,
+            },
+            &codes,
+            &FontSources::default(),
+        )
+        .expect("serif bold");
+        let sans = subset_for_style(
+            FaceStyle {
+                serif: false,
+                bold: false,
+                italic: false,
+            },
+            &codes,
+            &FontSources::default(),
+        )
+        .expect("sans");
+        let body = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &codes,
+            &FontSources::default(),
+        )
+        .expect("body");
+        assert!(
+            face_name_contains(&bold.bytes, "Noto Serif CJK SC"),
+            "bold title face is not Song"
+        );
+        assert!(
+            face_name_contains(&sans.bytes, "Noto Serif CJK SC"),
+            "sans source face is not Song"
+        );
+        assert!(face_name_contains(&body.bytes, "Noto Serif CJK"));
+        assert!(!face_name_contains(&bold.bytes, "Noto Sans"));
+        assert!(bold.fallback.is_none() && bold.notice.is_none());
+    }
+
+    #[test]
+    fn a_collection_face_index_selects_that_face() {
+        let path = "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc";
+        if !std::path::Path::new(path).is_file() {
+            return;
+        }
+        let spec = parse_font_spec(&format!("{path}#0"));
+        assert_eq!(spec.face, Some(0));
+        assert!(spec.path.ends_with("NotoSerifCJK-Regular.ttc"));
+        let missing = parse_font_spec("/no/such/simsun.ttc#1");
+        assert_eq!(missing.face, Some(1));
+        assert!(missing.path.ends_with("simsun.ttc"));
+        let sources = FontSources {
+            serif: Some(format!("{path}#0").into()),
+            ..FontSources::default()
+        };
+        let font = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &[0x4E2D],
+            &sources,
+        )
+        .expect("jp face");
+        assert!(
+            face_name_contains(&font.bytes, "Noto Serif CJK JP"),
+            "face 0 was not selected"
+        );
+        assert!(font.fallback.is_none());
+    }
+
+    #[test]
+    fn a_user_font_missing_a_character_falls_back_to_noto_serif() {
+        let bold_path = "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc";
+        if !std::path::Path::new(bold_path).is_file() {
+            return;
+        }
+        let path = std::env::temp_dir().join(format!(
+            "rpt-user-font-{}-{}.ttf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, box_ttf(&[b'A' as u32])).unwrap();
+        let sources = FontSources {
+            serif: Some(path.clone()),
+            ..FontSources::default()
+        };
+        let font = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &[b'A' as u32, 0x4E2D],
+            &sources,
+        )
+        .expect("user font");
+        assert!(font.glyphs.contains_key(&(b'A' as u32)));
+        assert!(!font.glyphs.contains_key(&0x4E2D));
+        let fallback = font.fallback.as_ref().expect("song fallback");
+        assert!(fallback.glyphs.contains_key(&0x4E2D));
+        assert!(face_name_contains(&fallback.bytes, "Noto Serif CJK"));
+        let note = font.notice.as_deref().expect("missing-glyph warning");
+        assert!(note.contains("U+4E2D"), "{note}");
+        assert!(note.contains("Noto Serif CJK"), "{note}");
+        assert!(font.has(0x4E2D));
+        assert!(font.em_advance(0x4E2D).is_some());
+        let _ = std::fs::remove_file(&path);
     }
 }

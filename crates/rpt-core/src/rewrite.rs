@@ -41,8 +41,10 @@ pub struct RewriteOptions {
     pub font_bytes: Option<Vec<u8>>,
     /// Song/serif CJK file used for regular body text.
     pub cjk_serif: Option<std::path::PathBuf>,
-    /// Sans CJK file used for regular sans text. Bold text stays Noto Sans CJK.
+    /// Sans CJK file used for regular sans text. Unset uses Song Bold.
     pub cjk_sans: Option<std::path::PathBuf>,
+    /// Song Bold for titles, section names, and sans source faces.
+    pub cjk_bold: Option<std::path::PathBuf>,
     /// Chinese body size as a fraction of the source size. `0` uses 0.90,
     /// or `RPT_CJK_SIZE_SCALE` when that is set. Titles stay a little larger.
     pub cjk_size_scale: f32,
@@ -477,6 +479,7 @@ pub fn rewrite_translation(
                 .push((*index, text.clone()));
         }
         let mut slot = 0u32;
+        let mut font_notices: HashSet<String> = HashSet::new();
         for (style, group) in groups {
             let chars = cover_with_fallbacks(
                 group
@@ -496,6 +499,7 @@ pub fn rewrite_translation(
                 &FontSources {
                     serif: opts.cjk_serif.clone(),
                     sans: opts.cjk_sans.clone(),
+                    bold: opts.cjk_bold.clone(),
                 },
             ) else {
                 for (index, _) in &group {
@@ -505,6 +509,14 @@ pub fn rewrite_translation(
                 }
                 continue;
             };
+            if let Some(note) = font.notice.clone() {
+                if font_notices.insert(note.clone()) {
+                    extraction.diagnostics.push(crate::glyph::Diagnostic {
+                        page_index: None,
+                        message: note,
+                    });
+                }
+            }
             let resource = format!("RPT{slot}");
             slot += 1;
             let skew = if style.italic { 0.25 } else { 0.0 };
@@ -3296,7 +3308,7 @@ fn draw_original_glyphs(
         }
         let Some((resource, font)) = embedded.iter().find(|(_, font)| {
             text.chars()
-                .all(|ch| ch.is_whitespace() || font.glyphs.contains_key(&(ch as u32)))
+                .all(|ch| ch.is_whitespace() || font.has(ch as u32))
         }) else {
             continue;
         };
@@ -3888,10 +3900,7 @@ fn draw_toc_run(
 
 fn glyph_chars_covered(glyph: &Glyph, font: &SubsetFont) -> bool {
     let text = glyph.unicode.trim();
-    !text.is_empty()
-        && text
-            .chars()
-            .all(|ch| font.glyphs.contains_key(&(ch as u32)))
+    !text.is_empty() && text.chars().all(|ch| font.has(ch as u32))
 }
 
 fn font_for_page<'a>(
@@ -4050,7 +4059,7 @@ fn place_leader_run(
             .chars()
             .find(|ch| matches!(*ch, '.' | '·' | '…' | '•' | '⋅' | '‧' | '․'))
     })?;
-    if !font.glyphs.contains_key(&(dot as u32)) {
+    if !font.has(dot as u32) {
         return None;
     }
     let sample = dot.to_string();
@@ -4487,7 +4496,7 @@ fn layout_joined_contents_title(
     }
     if text
         .chars()
-        .any(|ch| !ch.is_whitespace() && !font.glyphs.contains_key(&(ch as u32)))
+        .any(|ch| !ch.is_whitespace() && !font.has(ch as u32))
     {
         return None;
     }
@@ -4678,10 +4687,7 @@ fn place_segments(
             None => {
                 let reason = if text.contains('⟦') {
                     "math-block"
-                } else if text
-                    .chars()
-                    .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
-                {
+                } else if text.chars().any(|ch| !font.has(ch as u32)) {
                     "missing-glyph"
                 } else if is_folio_segment(&glyphs) {
                     // `xvi` translated to 十六 does not fit the folio box.
@@ -5051,15 +5057,12 @@ fn latin_base(ch: char) -> Option<char> {
 fn substitute_covered(text: &str, font: &SubsetFont) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        if font.glyphs.contains_key(&(ch as u32)) {
+        if font.has(ch as u32) {
             out.push(ch);
             continue;
         }
         if let Some(ligature) = expand_ligature(ch) {
-            if ligature
-                .chars()
-                .all(|part| font.glyphs.contains_key(&(part as u32)))
-            {
+            if ligature.chars().all(|part| font.has(part as u32)) {
                 out.push_str(ligature);
                 continue;
             }
@@ -5067,24 +5070,24 @@ fn substitute_covered(text: &str, font: &SubsetFont) -> String {
         if let Some(alt) = coverage_fallbacks(ch)
             .iter()
             .copied()
-            .find(|alt| font.glyphs.contains_key(&(*alt as u32)))
+            .find(|alt| font.has(*alt as u32))
         {
             out.push(alt);
             continue;
         }
         if let Some(base) = latin_base(ch) {
-            if font.glyphs.contains_key(&(base as u32)) {
+            if font.has(base as u32) {
                 out.push(base);
                 continue;
             }
         }
         if let Some(plain) = math_plain(ch) {
-            if font.glyphs.contains_key(&(plain as u32)) {
+            if font.has(plain as u32) {
                 out.push(plain);
                 continue;
             }
             if let Some(ascii) = greek_ascii(plain) {
-                if font.glyphs.contains_key(&(ascii as u32)) {
+                if font.has(ascii as u32) {
                     out.push(ascii);
                     continue;
                 }
@@ -6936,7 +6939,7 @@ fn run_text_covered(run: &SubentryRun, font: &SubsetFont) -> bool {
 
 fn text_covered(text: &str, font: &SubsetFont) -> bool {
     text.chars()
-        .all(|ch| ch.is_whitespace() || font.glyphs.contains_key(&(ch as u32)))
+        .all(|ch| ch.is_whitespace() || font.has(ch as u32))
 }
 
 fn layout_subentry_flow(
@@ -7572,9 +7575,7 @@ fn layout_label_value_list(
         let text = text.trim();
         if text.is_empty()
             || text.chars().count() > 48
-            || text
-                .chars()
-                .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
+            || text.chars().any(|ch| !font.has(ch as u32))
         {
             return None;
         }
@@ -7592,7 +7593,7 @@ fn layout_label_value_list(
         )]);
     }
     let (label, value) = split_translated_label(text)?;
-    let colon = if label.chars().any(is_han_char) && font.glyphs.contains_key(&('：' as u32)) {
+    let colon = if label.chars().any(is_han_char) && font.has('：' as u32) {
         "："
     } else {
         ":"
@@ -7601,7 +7602,7 @@ fn layout_label_value_list(
     if label_text
         .chars()
         .chain(value.chars())
-        .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
+        .any(|ch| !font.has(ch as u32))
     {
         return None;
     }
@@ -8104,10 +8105,7 @@ fn expand_stack_placeholders(
     glyphs: &[&Glyph],
     font: &SubsetFont,
 ) -> (String, HashMap<usize, f32>) {
-    if !text.contains('⟦')
-        || !font.glyphs.contains_key(&0x3000)
-        || !font.glyphs.contains_key(&u32::from(b'0'))
-    {
+    if !text.contains('⟦') || !font.has(0x3000) || !font.has(u32::from(b'0')) {
         return (text.to_string(), HashMap::new());
     }
     let body = prose_body_size(glyphs);
@@ -8921,7 +8919,7 @@ fn layout_segment(
     let covered = substitute_covered(text, font);
     let raw_mask = superscript_mask(&covered);
     let (normalized, body_mask) = fullwidth_han_digits(&covered, &raw_mask, font);
-    let (normalized, body_mask) = if font.glyphs.contains_key(&0x20) {
+    let (normalized, body_mask) = if font.has(0x20) {
         crate::layout::space_cjk_latin_mask(&normalized, &body_mask)
     } else {
         (normalized, body_mask)
@@ -8950,10 +8948,7 @@ fn layout_segment(
     let text = without_mark.as_deref().unwrap_or(text);
     let (expanded, holes) = expand_stack_placeholders(text, glyphs, font);
     let text = expanded.as_str();
-    if text
-        .chars()
-        .any(|ch| !font.glyphs.contains_key(&(ch as u32)))
-    {
+    if text.chars().any(|ch| !font.has(ch as u32)) {
         return None;
     }
     let pages = pages_of(glyphs);
@@ -9672,14 +9667,13 @@ fn layout_segment(
     }
     for glyph in &quotes {
         let raw = glyph.unicode.trim();
-        let mark =
-            if raw.chars().all(|ch| font.glyphs.contains_key(&(ch as u32))) && !raw.is_empty() {
-                raw.to_string()
-            } else if font.glyphs.contains_key(&('“' as u32)) {
-                "“".to_string()
-            } else {
-                continue;
-            };
+        let mark = if raw.chars().all(|ch| font.has(ch as u32)) && !raw.is_empty() {
+            raw.to_string()
+        } else if font.has('“' as u32) {
+            "“".to_string()
+        } else {
+            continue;
+        };
         let size = glyph.font_size.max(1.0);
         let natural = char_widths(&mark, size, font);
         let source_width = (glyph.bbox[2] - glyph.bbox[0]).abs();
@@ -10350,7 +10344,7 @@ fn adopt_unchanged_body_lines(
         }
         let Some((resource, font)) = embedded.iter().find(|(_, font)| {
             text.chars()
-                .all(|ch| ch.is_whitespace() || font.glyphs.contains_key(&(ch as u32)))
+                .all(|ch| ch.is_whitespace() || font.has(ch as u32))
         }) else {
             continue;
         };
@@ -10813,9 +10807,7 @@ fn join_wrapped_lines(lines: &[&Drawn], font: &SubsetFont) -> String {
         }
         if let Some(prev) = out.chars().last() {
             let next = piece.chars().next().unwrap_or(' ');
-            if prev.is_ascii_alphanumeric()
-                && next.is_ascii_alphanumeric()
-                && font.glyphs.contains_key(&(' ' as u32))
+            if prev.is_ascii_alphanumeric() && next.is_ascii_alphanumeric() && font.has(' ' as u32)
             {
                 out.push(' ');
             }
@@ -13550,7 +13542,7 @@ fn cover_unhit_clusters(
                 line.text
                     .chars()
                     .rev()
-                    .find(|ch| !ch.is_whitespace() && font.glyphs.contains_key(&(*ch as u32)))
+                    .find(|ch| !ch.is_whitespace() && font.has(*ch as u32))
             }) else {
                 continue;
             };
@@ -13657,14 +13649,14 @@ fn cluster_source(cluster: &[&Glyph], font: &SubsetFont) -> String {
 }
 
 fn paintable(ch: char, font: &SubsetFont) -> Option<char> {
-    if font.glyphs.contains_key(&(ch as u32)) {
+    if font.has(ch as u32) {
         return Some(ch);
     }
     coverage_fallbacks(ch)
         .iter()
         .copied()
-        .find(|alt| font.glyphs.contains_key(&(*alt as u32)))
-        .or_else(|| latin_base(ch).filter(|alt| font.glyphs.contains_key(&(*alt as u32))))
+        .find(|alt| font.has(*alt as u32))
+        .or_else(|| latin_base(ch).filter(|alt| font.has(*alt as u32)))
 }
 
 fn drawn_hits(drawn: &[Drawn], font: &SubsetFont, page: u32, bbox: [f32; 4]) -> bool {
@@ -15100,6 +15092,13 @@ fn embed_and_draw(
             name.clone(),
             embed_font(doc, font, &format!("RPTCJK-{name}")),
         );
+        if let Some(fallback) = font.fallback.as_ref() {
+            let fallback_name = format!("{name}FB");
+            font_ids.insert(
+                fallback_name.clone(),
+                embed_font(doc, fallback, &format!("RPTCJK-{fallback_name}")),
+            );
+        }
     }
     let mut by_page: HashMap<u32, Vec<&Drawn>> = HashMap::new();
     for line in drawn {
@@ -15131,7 +15130,13 @@ fn embed_and_draw(
                 pdf_num(line.skew),
                 pdf_num(line.x),
                 pdf_num(line.y),
-                show_text(line)
+                show_text(
+                    line,
+                    fonts
+                        .iter()
+                        .find(|(name, _)| name == &line.resource)
+                        .map(|(_, font)| font)
+                )
             ));
         }
         stream.push_str("ET\n");
@@ -15951,7 +15956,10 @@ fn widths_with_superscripts(
     widths
 }
 
-fn show_text(line: &Drawn) -> String {
+fn show_text(line: &Drawn, font: Option<&SubsetFont>) -> String {
+    if font.is_some_and(|font| font.fallback.is_some()) {
+        return show_mixed_face(line, font.expect("checked"));
+    }
     let count = line.text.chars().count();
     let raised = line.cids.len() == count
         && line.supers.len() == count
@@ -15986,6 +15994,68 @@ fn show_text(line: &Drawn) -> String {
         index = end;
     }
     out.push_str("0 Ts ");
+    out
+}
+
+/// A user face and Noto Serif on one line. Each run keeps the text position,
+/// so a missing character is drawn from the fallback CID font in place.
+fn show_mixed_face(line: &Drawn, font: &SubsetFont) -> String {
+    let chars: Vec<char> = line.text.chars().collect();
+    let fallback_name = format!("{}FB", line.resource);
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let from_fallback = font
+            .cid(chars[index] as u32)
+            .is_some_and(|(_, fallback)| fallback);
+        let sup = line.supers.get(index).copied().unwrap_or(false);
+        let mut end = index + 1;
+        while end < chars.len() {
+            let next_fallback = font
+                .cid(chars[end] as u32)
+                .is_some_and(|(_, fallback)| fallback);
+            let next_sup = line.supers.get(end).copied().unwrap_or(false);
+            if next_fallback != from_fallback || next_sup != sup {
+                break;
+            }
+            end += 1;
+        }
+        let face = if from_fallback {
+            font.fallback.as_deref().unwrap_or(font)
+        } else {
+            font
+        };
+        let resource = if from_fallback {
+            fallback_name.as_str()
+        } else {
+            line.resource.as_str()
+        };
+        let cids: Vec<u16> = chars[index..end]
+            .iter()
+            .filter_map(|ch| face.glyphs.get(&(*ch as u32)).map(|(gid, _)| *gid))
+            .collect();
+        if cids.is_empty() {
+            index = end;
+            continue;
+        }
+        let size = if sup {
+            (line.size * line.sup_scale).max(0.5)
+        } else {
+            line.size
+        };
+        let rise = if sup { line.size * line.sup_rise } else { 0.0 };
+        out.push_str(&format!(
+            "{} Ts /{} {} Tf {} ",
+            pdf_num(rise),
+            resource,
+            pdf_num(size),
+            show_run(&cids, &line.gaps, index, size)
+        ));
+        index = end;
+    }
+    if line.supers.iter().any(|flag| *flag) {
+        out.push_str("0 Ts ");
+    }
     out
 }
 
@@ -18004,6 +18074,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs: codes,
+
+            fallback: None,
+            notice: None,
         };
         let (expanded, holes) = super::expand_stack_placeholders("前⟦0⟧⟦1⟧后", &refs, &font);
         assert!(
@@ -19141,6 +19214,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs: map,
+
+            fallback: None,
+            notice: None,
         };
         let mut lines = vec![Drawn {
             page: 0,
@@ -19255,6 +19331,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+
+            fallback: None,
+            notice: None,
         };
         let lines = title_lines_with_page(text, "310", 72.0, 10.0, &font, 5.0).expect("wrap");
         let joined = lines.join("\n");
@@ -19745,6 +19824,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+
+            fallback: None,
+            notice: None,
         };
         assert_eq!(substitute_covered("中ę文", &font), "中e文");
         assert_eq!(substitute_covered("\u{f0a1}中", &font), "■中");
@@ -19761,6 +19843,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs: icons,
+
+            fallback: None,
+            notice: None,
         };
         assert_eq!(substitute_covered("✅已杀死👽", &icons), "✓已杀死•");
         assert_eq!(substitute_covered("ﬁle", &icons), "file");
@@ -19776,6 +19861,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+
+            fallback: None,
+            notice: None,
         };
         let mask = superscript_mask("第4章构建");
         let (text, flags) = fullwidth_han_digits("第4章构建", &mask, &font);
@@ -20520,6 +20608,9 @@ mod tests {
                 bytes: Vec::new(),
                 units_per_em: 1000,
                 glyphs: map,
+
+                fallback: None,
+                notice: None,
             }
         };
         let head_font = font_for(head_text);
@@ -20628,6 +20719,9 @@ mod tests {
                 bytes: Vec::new(),
                 units_per_em: 1000,
                 glyphs: map,
+
+                fallback: None,
+                notice: None,
             }
         };
         let head_font = font_for(head_text);
@@ -20824,6 +20918,9 @@ mod tests {
                 bytes: Vec::new(),
                 units_per_em: 1000,
                 glyphs: map,
+
+                fallback: None,
+                notice: None,
             }
         };
         let head_font = font_for(head_text);
@@ -20973,6 +21070,9 @@ mod tests {
                 bytes: Vec::new(),
                 units_per_em: 1000,
                 glyphs: map,
+
+                fallback: None,
+                notice: None,
             }
         };
         let head_font = font_for(head_text);
@@ -21111,6 +21211,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+
+            fallback: None,
+            notice: None,
         };
         // 22em ends at "上". The old wrapper jumped back to the space in "et al.".
         let lines = wrap_text(text, 10.0, 220.0, 220.0, &font).unwrap();
@@ -21132,6 +21235,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs: cjk_glyphs,
+
+            fallback: None,
+            notice: None,
         };
         let count = cjk.chars().count();
         let width = count as f32 * 10.0 + 2.0;
@@ -21149,6 +21255,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs: mixed_glyphs,
+
+            fallback: None,
+            notice: None,
         };
         let mixed_width = measure(mixed, 10.0, &mixed_font) + 0.6;
         let mixed_gaps = justify_gaps(mixed, 10.0, mixed_width, &mixed_font, true);
@@ -21172,6 +21281,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+
+            fallback: None,
+            notice: None,
         };
         // 14em fits "包括SelfCompact、" (14 chars) but not the following name.
         let lines = wrap_text(
@@ -21247,6 +21359,8 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+            fallback: None,
+            notice: None,
         }
     }
 
@@ -23039,7 +23153,7 @@ ET";
 
     #[test]
     fn a_bold_italic_chapter_title_keeps_a_bold_face() {
-        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc").is_file() {
+        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc").is_file() {
             return;
         }
         let bytes = contents_pdf_named(
@@ -23091,8 +23205,9 @@ ET",
         let saved = doc.save_bytes().unwrap();
         let saved_text = String::from_utf8_lossy(&saved);
         assert!(
-            saved_text.contains("NotoSansCJKjp-Bold") || saved_text.contains("NotoSansCJK-Bold"),
-            "chapter title was not painted with the bold face"
+            saved_text.contains("NotoSerifCJKjp-Bold")
+                || saved_text.contains("NotoSerifCJKsc-Bold"),
+            "chapter title was not painted with Song Bold"
         );
         let painted = PdfDocument::open_bytes(&saved).unwrap().extract();
         let title: Vec<_> = painted
@@ -27178,6 +27293,9 @@ ET",
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs: cmap,
+
+            fallback: None,
+            notice: None,
         };
         let extraction = Extraction {
             coordinate_space: "pdf",
@@ -27308,6 +27426,9 @@ ET",
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs: cmap,
+
+            fallback: None,
+            notice: None,
         };
         let extraction = Extraction {
             coordinate_space: "pdf",

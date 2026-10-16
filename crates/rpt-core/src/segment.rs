@@ -3706,39 +3706,63 @@ fn find_page_continuation(
     // A hyphenated right column finishes at the top of the next page's left
     // column (`de-` / `tecting`). That column can sit far from this margin.
     if soft_hyphen_stem(&upper.text).is_some() {
-        let mut best: Option<(usize, f32, f32)> = None;
-        for &(index, left, y) in &next_page {
-            let replace = match best {
-                None => true,
-                Some((_, best_left, best_y)) => {
-                    left < best_left - 28.0 || ((left - best_left).abs() <= 28.0 && y > best_y)
-                }
-            };
-            if replace {
-                best = Some((index, left, y));
-            }
-        }
-        if let Some((_, anchor, _)) = best {
-            let mut column: Vec<(usize, f32)> = next_page
-                .iter()
-                .filter(|(_, left, _)| (left - anchor).abs() <= 28.0)
-                .map(|(index, _, y)| (*index, *y))
-                .collect();
-            column.sort_by(|left, right| right.1.total_cmp(&left.1));
-            if let Some(index) = first_body_continuation(current, paragraphs, &column) {
-                return Some(index);
-            }
+        if let Some(index) = leftmost_page_continuation(current, paragraphs, &next_page) {
+            return Some(index);
         }
     }
     // The sentence keeps this margin. A gutter index (`3.1.1`, `2.5`) is
     // further left and must not hide `word.` or `explain`.
     let mut band: Vec<(usize, f32)> = next_page
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|(_, left, _)| (left - upper.left).abs() <= 36.0)
         .map(|(index, _, y)| (index, y))
         .collect();
     band.sort_by(|left, right| right.1.total_cmp(&left.1));
-    first_body_continuation(current, paragraphs, &band)
+    if let Some(index) = first_body_continuation(current, paragraphs, &band) {
+        return Some(index);
+    }
+    // The right column ends mid-sentence (`presented`) and the next page's
+    // right column is a table. The continuation is the left column
+    // (`mixed results`). A line already on that left margin stays put.
+    if sentence_end(upper.text.trim_end()) {
+        return None;
+    }
+    let left_edge = next_page
+        .iter()
+        .map(|(_, left, _)| *left)
+        .fold(f32::MAX, f32::min);
+    if upper.left <= left_edge + 36.0 {
+        return None;
+    }
+    leftmost_page_continuation(current, paragraphs, &next_page)
+}
+
+fn leftmost_page_continuation(
+    current: &[VisualLine<'_>],
+    paragraphs: &[Vec<VisualLine<'_>>],
+    next_page: &[(usize, f32, f32)],
+) -> Option<usize> {
+    let mut best: Option<(usize, f32, f32)> = None;
+    for &(index, left, y) in next_page {
+        let replace = match best {
+            None => true,
+            Some((_, best_left, best_y)) => {
+                left < best_left - 28.0 || ((left - best_left).abs() <= 28.0 && y > best_y)
+            }
+        };
+        if replace {
+            best = Some((index, left, y));
+        }
+    }
+    let (_, anchor, _) = best?;
+    let mut column: Vec<(usize, f32)> = next_page
+        .iter()
+        .filter(|(_, left, _)| (left - anchor).abs() <= 28.0)
+        .map(|(index, _, y)| (*index, *y))
+        .collect();
+    column.sort_by(|left, right| right.1.total_cmp(&left.1));
+    first_body_continuation(current, paragraphs, &column)
 }
 
 /// Top of the column first. A running head or a section title may sit above
@@ -3938,7 +3962,15 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
             .text
             .trim_start()
             .starts_with(|ch: char| ch.is_ascii_lowercase());
-    if (upper.left - lower.left).abs() > 36.0 && !finishes_hyphen {
+    // `presented` at the right margin continues as `mixed results` on the
+    // next page's left margin. A finished sentence does not.
+    let later_column = upper.left > lower.left + 36.0
+        && !sentence_end(upper.text.trim_end())
+        && lower
+            .text
+            .trim_start()
+            .starts_with(|ch: char| ch.is_ascii_lowercase());
+    if (upper.left - lower.left).abs() > 36.0 && !finishes_hyphen && !later_column {
         return false;
     }
     prose_continues(upper, lower) || list_carries_over(prev, lower)
@@ -7424,6 +7456,84 @@ mod tests {
         assert_eq!(texts.len(), 2, "{texts:?}");
         assert!(texts.iter().any(|text| text.ends_with("finished.")));
         assert!(texts.iter().any(|text| text.starts_with("the next page")));
+    }
+
+    #[test]
+    fn a_right_column_sentence_continues_on_the_next_page() {
+        // BERT page 8 ends the right column with `presented`. Page 9's left
+        // column starts `mixed results`, and its right column is a table.
+        let mut left = glyph(
+            0,
+            72.0,
+            76.0,
+            "significantly improve results on SQuAD, but the",
+            false,
+        );
+        left.font_size = 10.0;
+        let mut right_top = glyph(
+            1,
+            307.0,
+            700.0,
+            "results are still far worse than those of the pretrained models.",
+            false,
+        );
+        right_top.font_size = 10.0;
+        let mut right_bot = glyph(2, 307.0, 76.0, "Peters et al. (2018b) presented", false);
+        right_bot.font_size = 10.0;
+        let mut next = glyph(
+            3,
+            72.0,
+            710.0,
+            "mixed results on the downstream task impact.",
+            false,
+        );
+        next.page_index = 1;
+        next.font_size = 10.0;
+        let mut table = glyph(4, 317.0, 700.0, "System Dev F1 Test F1", false);
+        table.page_index = 1;
+        table.font_size = 10.0;
+        let texts: Vec<_> = segment_glyphs(&[left, right_top, right_bot, next, table])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("presented") && text.contains("mixed results")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("presented") && text.contains("System Dev")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn bert_presented_joins_the_next_page_when_the_pdf_is_present() {
+        let path = std::path::Path::new("/tmp/rpt-e2e/pdfs/bert.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(path).unwrap();
+        let extraction = doc.extract();
+        let placed = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let merged = crate::rewrite::merge_stacked_paragraphs(placed.segments, &extraction.glyphs);
+        let hit = merged
+            .iter()
+            .find(|item| item.text.contains("Peters et al. (2018b) presented"))
+            .expect("presented fragment");
+        assert!(
+            hit.text.contains("mixed results"),
+            "page 8 right column stayed split: {}",
+            hit.text.chars().rev().take(80).collect::<String>()
+        );
     }
 
     #[test]

@@ -6,8 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use rpt_core::{
-    replay_extraction, translate_extraction, ExtractOptions, OpenOptions, OutputMode, PdfDocument,
-    RewriteOptions, TranslateOptions, TranslatedSegment, TranslatorBackend,
+    parse_font_spec, replay_extraction, translate_extraction, ExtractOptions, OpenOptions,
+    OutputMode, PdfDocument, RewriteOptions, TranslateOptions, TranslatedSegment,
+    TranslatorBackend,
 };
 
 #[derive(Parser)]
@@ -74,11 +75,16 @@ enum Command {
         #[arg(long)]
         translate_tables: bool,
         /// Song/serif CJK font (TTF, TTC, or OTF). Overrides Noto Serif CJK for body text.
+        /// Append `#N` to select face N of a collection (`simsun.ttc#0`).
         #[arg(long)]
         cjk_font: Option<PathBuf>,
-        /// Sans CJK font for regular sans text. Bold text still uses Noto Sans CJK Bold.
+        /// Sans CJK font for regular sans text. Unset uses Song Bold.
         #[arg(long)]
         cjk_sans: Option<PathBuf>,
+        /// Song Bold for titles, section names, and sans source faces.
+        /// Unset uses Noto Serif CJK Bold. `#N` selects a collection face.
+        #[arg(long)]
+        cjk_bold_font: Option<PathBuf>,
         /// Chinese body size as a fraction of the English size. Default 0.90.
         #[arg(long)]
         cjk_size_scale: Option<f32>,
@@ -129,6 +135,7 @@ fn main() -> ExitCode {
             translate_tables,
             cjk_font,
             cjk_sans,
+            cjk_bold_font,
             cjk_size_scale,
             cjk_leading,
             batch_size,
@@ -155,13 +162,21 @@ fn main() -> ExitCode {
             };
             let bilingual_mode = OutputMode::parse("bilingual", Some(&layout)).ok();
             if let Some(path) = cjk_font.as_ref() {
-                if !path.is_file() {
-                    return fail(format!("CJK font not found: {}", path.display()));
+                let spec = parse_font_spec(&path.display().to_string());
+                if !spec.path.is_file() {
+                    return fail(format!("CJK font not found: {}", spec.path.display()));
                 }
             }
             if let Some(path) = cjk_sans.as_ref() {
-                if !path.is_file() {
-                    return fail(format!("CJK sans font not found: {}", path.display()));
+                let spec = parse_font_spec(&path.display().to_string());
+                if !spec.path.is_file() {
+                    return fail(format!("CJK sans font not found: {}", spec.path.display()));
+                }
+            }
+            if let Some(path) = cjk_bold_font.as_ref() {
+                let spec = parse_font_spec(&path.display().to_string());
+                if !spec.path.is_file() {
+                    return fail(format!("CJK bold font not found: {}", spec.path.display()));
                 }
             }
             run_translate(
@@ -178,6 +193,9 @@ fn main() -> ExitCode {
                     skip_tables: !translate_tables,
                     cjk_font: cjk_font.as_ref().map(|path| path.display().to_string()),
                     cjk_sans: cjk_sans.as_ref().map(|path| path.display().to_string()),
+                    cjk_bold_font: cjk_bold_font
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
                     cjk_size_scale: cjk_size_scale.unwrap_or(0.0),
                     cjk_leading: cjk_leading.unwrap_or(0.0),
                     batch_size,
@@ -274,6 +292,7 @@ fn run_translate(
                 mode: opts.output_mode,
                 cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
                 cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+                cjk_bold: opts.cjk_bold_font.as_ref().map(std::path::PathBuf::from),
                 cjk_size_scale: opts.cjk_size_scale,
                 cjk_leading: opts.cjk_leading,
                 ..RewriteOptions::default()
@@ -287,6 +306,7 @@ fn run_translate(
         if let Some(warning) = extraction.note_incomplete_coverage() {
             eprintln!("rpt: warning: {warning}");
         }
+        warn_cjk_font(&extraction);
     }
     if let Some(bilingual_output) = bilingual_output.as_ref() {
         let Some(mode) = bilingual_mode else {
@@ -307,6 +327,7 @@ fn run_translate(
                 mode,
                 cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
                 cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+                cjk_bold: opts.cjk_bold_font.as_ref().map(std::path::PathBuf::from),
                 cjk_size_scale: opts.cjk_size_scale,
                 cjk_leading: opts.cjk_leading,
                 ..RewriteOptions::default()
@@ -320,6 +341,7 @@ fn run_translate(
         if let Some(warning) = bilingual_extraction.note_incomplete_coverage() {
             eprintln!("rpt: warning: {warning}");
         }
+        warn_cjk_font(&bilingual_extraction);
     }
     let mut value = match extraction.to_json_value() {
         Ok(value) => value,
@@ -342,6 +364,14 @@ fn run_translate(
         );
     }
     emit(&value, compact)
+}
+
+fn warn_cjk_font(extraction: &rpt_core::Extraction) {
+    for item in &extraction.diagnostics {
+        if item.message.starts_with("CJK font") {
+            eprintln!("rpt: warning: {}", item.message);
+        }
+    }
 }
 
 fn load_replay(path: &std::path::Path) -> Result<Vec<TranslatedSegment>, String> {

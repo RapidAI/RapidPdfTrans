@@ -724,9 +724,8 @@ pub(crate) fn is_cjk_body(ch: char) -> bool {
 pub(crate) fn char_widths(text: &str, size: f32, font: &SubsetFont) -> Vec<f32> {
     text.chars()
         .map(|ch| {
-            font.glyphs
-                .get(&(ch as u32))
-                .map(|(_, advance)| *advance as f32 * size / font.units_per_em as f32)
+            font.em_advance(ch as u32)
+                .map(|em| em * size)
                 .unwrap_or(size)
         })
         .collect()
@@ -735,9 +734,8 @@ pub(crate) fn char_widths(text: &str, size: f32, font: &SubsetFont) -> Vec<f32> 
 pub(crate) fn measure(text: &str, size: f32, font: &SubsetFont) -> f32 {
     text.chars()
         .map(|ch| {
-            font.glyphs
-                .get(&(ch as u32))
-                .map(|(_, advance)| *advance as f32 * size / font.units_per_em as f32)
+            font.em_advance(ch as u32)
+                .map(|em| em * size)
                 .unwrap_or(size)
         })
         .sum()
@@ -745,7 +743,7 @@ pub(crate) fn measure(text: &str, size: f32, font: &SubsetFont) -> f32 {
 
 pub(crate) fn cids_of(text: &str, font: &SubsetFont) -> Vec<u16> {
     text.chars()
-        .filter_map(|ch| font.glyphs.get(&(ch as u32)).map(|(gid, _)| *gid))
+        .filter_map(|ch| font.cid(ch as u32).map(|(gid, _)| gid))
         .collect()
 }
 
@@ -1048,9 +1046,8 @@ fn snap_line_compounds(
 }
 
 fn char_advance(ch: char, size: f32, font: &SubsetFont) -> f32 {
-    font.glyphs
-        .get(&(ch as u32))
-        .map(|(_, advance)| *advance as f32 * size / font.units_per_em as f32)
+    font.em_advance(ch as u32)
+        .map(|em| em * size)
         .unwrap_or(size)
 }
 
@@ -2187,6 +2184,8 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+            fallback: None,
+            notice: None,
         }
     }
 
@@ -2206,6 +2205,8 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+            fallback: None,
+            notice: None,
         }
     }
 
@@ -2340,6 +2341,8 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+            fallback: None,
+            notice: None,
         }
     }
 
@@ -3210,6 +3213,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs,
+
+            fallback: None,
+            notice: None,
         };
         let mut holes = HashMap::new();
         holes.insert(0, 9.6);
@@ -3267,6 +3273,9 @@ mod tests {
             bytes: Vec::new(),
             units_per_em: 1000,
             glyphs: wide_glyphs,
+
+            fallback: None,
+            notice: None,
         };
         let mut wide_holes = HashMap::new();
         wide_holes.insert(15, 70.0);
