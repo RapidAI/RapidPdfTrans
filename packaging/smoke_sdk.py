@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -41,9 +42,9 @@ def find_exe(build: Path, name: str) -> Path:
 def windows_crt_dir(archive_name: str) -> Path | None:
     """Directory of the MSVC redist that matches this SDK archive.
 
-    Rust's cdylib imports vcruntime140.dll by name. The smoke executable finds
-    that DLL through its manifest, but the loader still searches PATH for the
-    import on the DLL itself. The Visual Studio redist is not on PATH.
+    Rust's cdylib imports vcruntime140.dll by name. The loader checks the
+    executable directory, then System32, then PATH. A System32 copy must not
+    win, so the caller also copies this directory's DLLs next to the exe.
     """
     redist = os.environ.get("VCToolsRedistDir")
     if not redist or os.name != "nt":
@@ -133,6 +134,17 @@ def main() -> None:
         path_parts.append(env.get("PATH", ""))
         env["PATH"] = os.pathsep.join(path_parts)
         emulator = shlex.split(args.emulator)
+        if os.name == "nt":
+            exe_dir = find_exe(build, "smoke_shared").parent
+            for folder in (Path(bin_dir), crt):
+                if folder is None or not folder.is_dir():
+                    continue
+                for dll in folder.glob("*.dll"):
+                    shutil.copy2(dll, exe_dir / dll.name)
+                    print(f"staged {exe_dir / dll.name}", flush=True)
+            shared = exe_dir / "rapidpdftrans.dll"
+            if shared.is_file() and shutil.which("dumpbin"):
+                subprocess.run(["dumpbin", "/dependents", str(shared)], check=False)
 
         for name in ("smoke_shared", "smoke_static"):
             exe = find_exe(build, name)
