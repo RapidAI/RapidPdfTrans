@@ -20921,6 +20921,66 @@ mod tests {
         assert_viewer_text(&saved, needle);
     }
 
+    #[test]
+    fn viewers_paint_a_kept_affiliation_and_email() {
+        // ResNet leaves the author names in the original Type 1 font, but the
+        // affiliation and the email are blanked and redrawn with the CJK subset
+        // so the column can close up. A viewer that caches every face named
+        // RPTCJK then paints those Identity-H CIDs with the other subset, and
+        // a/e/i/o/@ disappear while the names stay intact.
+        let bytes = contents_pdf(
+            b"BT /F1 12 Tf \
+1 0 0 1 36 640 Tm (Deep residual learning for image recognition is the body line.) Tj \
+/F1 11 Tf \
+1 0 0 1 36 600 Tm (Microsoft Research) Tj \
+1 0 0 1 36 580 Tm ({kahe, v-xiangz}@microsoft.com) Tj \
+ET",
+        );
+        let saved = paint_system_cjk(&bytes, &[(0, "用于图像识别的深度残差学习".into())]);
+        let painted = PdfDocument::open_bytes(&saved)
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(
+            painted.contains("Microsoft Research"),
+            "affiliation was not rewritten: {painted}"
+        );
+        assert!(
+            painted.contains("@microsoft.com"),
+            "email was not rewritten: {painted}"
+        );
+        assert!(
+            painted.contains("用于图像识别"),
+            "title was not rewritten: {painted}"
+        );
+        let loaded = Document::load_mem(&saved).unwrap();
+        let mut names = Vec::new();
+        for object in loaded.objects.values() {
+            let Ok(dict) = object.as_dict() else {
+                continue;
+            };
+            let Ok(subtype) = dict.get(b"Subtype").and_then(|obj| obj.as_name()) else {
+                continue;
+            };
+            if subtype != b"Type0" {
+                continue;
+            }
+            let Ok(name) = dict.get(b"BaseFont").and_then(|obj| obj.as_name()) else {
+                continue;
+            };
+            names.push(String::from_utf8_lossy(name).into_owned());
+        }
+        assert!(
+            names.iter().all(|name| name.starts_with("RPTCJK-")),
+            "shared BaseFont: {names:?}"
+        );
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "duplicate BaseFont: {names:?}");
+        assert_viewer_text(&saved, "MicrosoftResearch{kahe,v-xiangz}@microsoft.com");
+    }
+
     fn assert_viewer_text(pdf: &[u8], needle: &str) {
         let path = std::env::temp_dir().join(format!("rpt-viewers-{}.pdf", std::process::id()));
         std::fs::write(&path, pdf).unwrap();
