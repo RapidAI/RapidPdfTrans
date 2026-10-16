@@ -18,7 +18,7 @@ jobs:
       - name: Download corpus
         run: python3 corpus/fetch.py
       - name: Fidelity report
-        run: cargo run -p rpt-qa --release -- --render-pages 2
+        run: cargo run -p rpt-qa --release --bin rpt-qa -- --render-pages 2
       - name: Upload report
         uses: actions/upload-artifact@v4
         with:

@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 description = "Fidelity checks for the RapidPdfTrans corpus"
 repository.workspace = true
+default-run = "rpt-qa"
 
 [[bin]]
 name = "rpt-qa"
