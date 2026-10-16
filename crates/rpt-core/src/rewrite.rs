@@ -15,7 +15,7 @@
 //! does not call a model. Bilingual page layouts are composed here from the
 //! two PDFs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
@@ -764,7 +764,34 @@ pub fn rewrite_translation(
     // stored under a CIDFontType0C subtype. Unwrap after compose so both
     // the translated file and the imported copy lose the mismatch.
     unwrap_opentype_cid_fonts(doc);
+    record_unfitted_line_warnings(extraction);
     Ok(())
+}
+
+/// A short line whose translation did not fit is kept as printed. The rest of
+/// the document still saves. The warning names the source line.
+fn record_unfitted_line_warnings(extraction: &mut Extraction) {
+    let mut groups: BTreeMap<(u32, i32), String> = BTreeMap::new();
+    for glyph in &extraction.glyphs {
+        let Disposition::KeptOriginal { reason } = &glyph.disposition else {
+            continue;
+        };
+        if reason != "line-kept" {
+            continue;
+        }
+        let key = (glyph.page_index, (glyph.matrix[5] * 2.0).round() as i32);
+        groups.entry(key).or_default().push_str(&glyph.unicode);
+    }
+    for ((page, _), text) in groups {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        extraction.diagnostics.push(crate::glyph::Diagnostic {
+            page_index: Some(page),
+            message: format!("kept the original line because the translation did not fit: {text}"),
+        });
+    }
 }
 
 /// Place each original page beside, or just before, its translated page.
@@ -4667,6 +4694,11 @@ fn place_segments(
                     // A footnote URL wider than the column does not fit a CJK
                     // line. Leave the printed URL. It is not an unfinished paragraph.
                     "url"
+                } else if short_centered_fragment(&glyphs, extraction) {
+                    // A centered header fragment (`scholarly works.`) whose
+                    // translation is longer than the block. The original line
+                    // stays, and the rest of the document is still written.
+                    "line-kept"
                 } else {
                     "overflow"
                 };
@@ -5060,6 +5092,95 @@ fn substitute_covered(text: &str, font: &SubsetFont) -> String {
         out.push(ch);
     }
     out
+}
+
+/// A short centered line is only as wide as its own English ink. Chinese may
+/// use the neighboring lines of the same block, then the page measure, and
+/// the open gap under the baseline. `room` is that gap in points.
+fn short_line_block_box(
+    extraction: &Extraction,
+    line: &InkLine<'_>,
+    source_size: f32,
+    media: [f32; 4],
+    own: &[&Glyph],
+) -> Option<(f32, f32, f32)> {
+    if line.glyphs.is_empty() {
+        return None;
+    }
+    let width = (line.right - line.left).max(0.0);
+    // A full column already had its measure. This path is the fragment.
+    if width > source_size * 22.0 {
+        return None;
+    }
+    let mid = (line.left + line.right) * 0.5;
+    let page_left = media[0];
+    let page_right = media[2];
+    let page_mid = (page_left + page_right) * 0.5;
+    let page_width = page_right - page_left;
+    if page_width < 200.0 {
+        return None;
+    }
+    let centered = (mid - page_mid).abs() <= source_size * 3.0
+        && line.left - page_left > source_size * 2.0
+        && page_right - line.right > source_size * 2.0;
+    if !centered {
+        return None;
+    }
+    let margin = (page_width * 0.11).clamp(54.0, 78.0);
+    let mut left = page_left + margin;
+    let mut right = page_right - margin;
+    let page = line.glyphs[0].page_index;
+    let mut sibling_left = f32::MAX;
+    let mut sibling_right = f32::MIN;
+    let mut found_sibling = false;
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page || own.iter().any(|item| item.id == glyph.id) {
+            continue;
+        }
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        let dy = (glyph.matrix[5] - line.y).abs();
+        if dy < source_size * 0.35 || dy > source_size * 2.6 {
+            continue;
+        }
+        if (glyph.font_size - source_size).abs() > source_size * 0.25 {
+            continue;
+        }
+        sibling_left = sibling_left.min(glyph.bbox[0].min(glyph.matrix[4]));
+        sibling_right = sibling_right.max(glyph.bbox[2].max(glyph.matrix[4]));
+        found_sibling = true;
+    }
+    if found_sibling && sibling_right - sibling_left > width + source_size {
+        left = sibling_left.min(left).max(page_left + 36.0);
+        right = sibling_right.max(line.right).min(page_right - 36.0);
+    }
+    if right - left < width + source_size * 2.0 {
+        return None;
+    }
+    let room = next_line_below(extraction, page, line.y, source_size, own)
+        .map(|(next_y, next_size)| {
+            let clearance = next_size * 0.85 + 2.0;
+            (line.y - next_y - clearance).max(0.0)
+        })
+        .unwrap_or(source_size * 2.2);
+    Some((left, right, room))
+}
+
+fn short_centered_fragment(glyphs: &[&Glyph], extraction: &Extraction) -> bool {
+    let ink = ink_lines(glyphs);
+    if ink.len() != 1 || ink[0].glyphs.is_empty() {
+        return false;
+    }
+    let page = ink[0].glyphs[0].page_index;
+    let media = extraction
+        .pages
+        .iter()
+        .find(|info| info.index == page)
+        .map(|info| info.media_box)
+        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let source_size = crate::segment::representative_size(&ink[0].glyphs).max(1.0);
+    short_line_block_box(extraction, &ink[0], source_size, media, glyphs).is_some()
 }
 
 /// A centered title is only as wide as the English ink. Chinese can use the
@@ -8704,6 +8825,7 @@ fn layout_segment(
             &holes,
         )
     };
+    let mut center_block = false;
     let (block_left, block_right, lines, mut size, leading, indent) =
         if let Some((lines, size, leading, indent)) = fit_box(block_left, block_right) {
             (block_left, block_right, lines, size, leading, indent)
@@ -8712,6 +8834,48 @@ fn layout_segment(
         {
             let (lines, size, leading, indent) = fit_box(left, right)?;
             (left, right, lines, size, leading, indent)
+        } else if ink.len() == 1 {
+            match short_line_block_box(extraction, &ink[0], source_size, media, glyphs).and_then(
+                |(left, right, room)| {
+                    let width = (right - left).max(source_size);
+                    // Shrink onto one line of the block measure first. The
+                    // gap under the line can hold another line of the same
+                    // block when one line is still too narrow.
+                    let fitted = fit_cjk_block_with(
+                        text,
+                        source_size,
+                        scale,
+                        width,
+                        0.0,
+                        0.0,
+                        font,
+                        metrics,
+                        None,
+                        &holes,
+                    )
+                    .or_else(|| {
+                        fit_cjk_block_with(
+                            text,
+                            source_size,
+                            scale,
+                            width,
+                            0.0,
+                            room,
+                            font,
+                            metrics,
+                            None,
+                            &holes,
+                        )
+                    })?;
+                    Some((left, right, fitted))
+                },
+            ) {
+                Some((left, right, (lines, size, leading, indent))) => {
+                    center_block = true;
+                    (left, right, lines, size, leading, indent)
+                }
+                None => return None,
+            }
         } else {
             return None;
         };
@@ -8905,6 +9069,19 @@ fn layout_segment(
                     glyph_ids,
                 },
             );
+        }
+    }
+    if center_block {
+        let mid = (block_left + block_right) * 0.5;
+        for item in &mut drawn {
+            let advance = item.widths.iter().sum::<f32>() + item.gaps.iter().sum::<f32>();
+            if advance <= 0.0 {
+                continue;
+            }
+            let x = mid - advance * 0.5;
+            if x >= media[0] + 18.0 && x + advance <= media[2] - 18.0 {
+                item.x = x;
+            }
         }
     }
     // A title page is right-aligned. Chinese is shorter than the English, so
@@ -20924,6 +21101,123 @@ ET";
         assert!(text.contains("Google Brain"), "{text}");
         assert!(!text.contains("GoogleResearch"), "{text}");
         assert!(!text.contains("ResearchGoogle"), "{text}");
+    }
+
+    struct HeaderFragment;
+    impl Translator for HeaderFragment {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+            let translations: Vec<serde_json::Value> = payload["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap_or("");
+                    let translated = if text.contains("scholarly") {
+                        "学术作品之目的复制本文中的表格和图片。".to_string()
+                    } else if text.contains("reproduce") {
+                        "仅为新闻或学术用途复制本文中的表格和图片。".to_string()
+                    } else if text.contains("dominant") {
+                        "主流序列模型基于注意力机制。".to_string()
+                    } else if text.contains("centered header") {
+                        "的".repeat(180)
+                    } else {
+                        text.to_string()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": translated})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    fn rewrite_with(content: &[u8]) -> (Extraction, String) {
+        let bytes = contents_pdf(content);
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let report = translate_extraction(
+            &mut extraction,
+            &TranslateOptions::default(),
+            &HeaderFragment,
+        )
+        .unwrap();
+        let drawn = report
+            .segments
+            .iter()
+            .map(|segment| segment.translated.as_str())
+            .collect::<String>();
+        let mut codes: Vec<u32> = drawn.chars().map(|ch| ch as u32).collect();
+        codes.extend(
+            extraction
+                .glyphs
+                .iter()
+                .flat_map(|glyph| glyph.unicode.chars().map(|ch| ch as u32)),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&codes)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        extraction.assert_complete().unwrap();
+        let saved = doc.save_bytes().unwrap();
+        let text = PdfDocument::open_bytes(&saved)
+            .unwrap()
+            .extract()
+            .plain_text();
+        (extraction, text)
+    }
+
+    #[test]
+    fn a_centered_header_fragment_that_does_not_fit_still_saves() {
+        // The second line of a permission header is only as wide as
+        // "scholarly works." The model expands it into the whole sentence.
+        // That line uses the block width instead of aborting the document.
+        let fitted = b"BT /F1 11 Tf \
+1 0 0 1 86 720 Tm (reproduce the tables and figures in this paper solely for use in journalistic or) Tj \
+1 0 0 1 262 706 Tm (scholarly works.) Tj \
+1 0 0 1 72 620 Tm (The dominant sequence transduction models are based on attention.) Tj \
+ET";
+        let (extraction, text) = rewrite_with(fitted);
+        assert!(
+            text.contains("学术作品之目的复制本文中的表格和图片"),
+            "{text}"
+        );
+        assert!(
+            extraction
+                .glyphs
+                .iter()
+                .all(|glyph| !matches!(glyph.disposition, Disposition::KeptOriginal { ref reason } if reason == "line-kept")),
+            "the header fit and should have been drawn"
+        );
+
+        // No gap under the line, and the translation is longer than the page
+        // even at the size floor. Keep the original line and warn.
+        let kept = b"BT /F1 12 Tf \
+1 0 0 1 258 400 Tm (centered header.) Tj \
+1 0 0 1 72 388 Tm (The dominant sequence transduction models are based on attention.) Tj \
+ET";
+        let (extraction, text) = rewrite_with(kept);
+        assert!(
+            text.contains("centered header"),
+            "the original short line stays in the file: {text}"
+        );
+        assert!(
+            extraction.diagnostics.iter().any(|item| {
+                item.message.contains("did not fit") && item.message.contains("centered header")
+            }),
+            "{:?}",
+            extraction.diagnostics
+        );
+        assert!(
+            extraction.glyphs.iter().any(|glyph| {
+                matches!(glyph.disposition, Disposition::KeptOriginal { ref reason } if reason == "line-kept")
+            }),
+            "the unfittable line should be kept"
+        );
     }
 
     struct EchoExceptBody;
