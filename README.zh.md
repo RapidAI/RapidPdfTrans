@@ -4,6 +4,142 @@
 
 它打开 PDF，把内容流解释到单个字形，并检查每个字形都还在。翻译器给这些字形标上译文。不加 `--output` 的 `rpt translate` 只报告译文，不写文件。加上 `--output` 会把字形重写进 PDF，并删掉已经改写的那些字形原来的文本绘制指令。
 
+英文说明在 [README.md](README.md)。
+
+## 用法
+
+### 安装
+
+需要 Rust stable（1.88 及以上，工作区锁定 `stable`）：
+
+```bash
+cargo build -p rpt-cli --release
+./target/release/rpt extract testdata/hello.pdf --compact
+```
+
+`rpt extract` 把 JSON 打到标准输出，不写 PDF。`testdata/hello.pdf` 的纯文本是 `Hello`，覆盖率里 `"pending": 5`。
+
+Python（需要 `python3-dev`）。这个模块直接调 Rust 核心，不经过 C ABI：
+
+```bash
+cargo build -p rpt-python --release
+cp target/release/librapidpdftrans.so rapidpdftrans.so
+python3 -c 'import rapidpdftrans; print(rapidpdftrans.version()); print("Hello" in rapidpdftrans.extract("testdata/hello.pdf"))'
+```
+
+`rapidpdftrans.translate(path)` 返回 JSON，不写文件。`rapidpdftrans.save(path, output)` 写出 PDF。
+
+C++ 是 C ABI 上只有头文件的包装：
+
+```bash
+cargo build -p rpt-ffi --release
+g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
+  target/release/librapidpdftrans.a -ldl -lm -lpthread -lgcc_s -o smoke
+./smoke testdata/hello.pdf
+```
+
+`rpt::Document::extract` 返回 JSON。`save` 写出 PDF；没设置 `RPT_LLM_API_KEY` 时抛异常。
+
+Go 在 `bindings/go` 里，先有上面的静态库：
+
+```bash
+go test ./...
+```
+
+```go
+text, err := rapidpdftrans.Extract("testdata/hello.pdf")
+```
+
+`Translate` 返回 JSON，不写 PDF。写文件的 C 函数是 `rpt_save`。
+
+### 环境变量
+
+密钥只放在环境变量里。选项 JSON 中的 `api_key` 会被忽略。
+
+| 变量 | 何时需要 | 默认 |
+| --- | --- | --- |
+| `RPT_LLM_API_KEY` | 真实翻译必须有 | 未设置 |
+| `RPT_LLM_BASE_URL` | 可选 | `https://hub.mypapers.top/api/llm/v1` |
+| `RPT_LLM_MODEL` | 可选 | `auto` |
+| `RPT_TRANSLATOR` | 可选 | `maclaw` |
+| `RPT_GOOGLE_API_KEY` | `google` 和 `google-v2` | 未设置 |
+| `RPT_GOOGLE_CREDENTIALS` | `google-v3` 服务账号 | 未设置 |
+| `RPT_GOOGLE_ACCESS_TOKEN` | `google-v3` 持有者令牌 | 未设置 |
+| `RPT_CJK_FONT` | 可选，宋体/衬线文件 | Noto Serif CJK，然后是下面的回退列表 |
+| `RPT_CJK_SANS` | 可选，无衬线文件 | Noto Sans CJK |
+| `RPT_TRANSLATE_JOBS` | 可选 | `1` |
+| `RPT_CJK_SIZE_SCALE` | 可选 | `0.90` |
+| `RPT_CJK_LEADING` | 可选 | `1.60` |
+
+`RPT_TRANSLATOR` 可以是 `maclaw`（默认）、`openai`、`google`、`google-v2`、`google-v3` 或 `google-unofficial`。非官方客户端必须显式打开，不会作为静默回退。
+
+### 字体
+
+`--cjk-font` 和 `--cjk-sans` 接受 TTF、TTC 或 OTF。同样的路径也可以写成 `RPT_CJK_FONT` 和 `RPT_CJK_SANS`。粗体在安装了 `/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc` 时仍用这个字体集的第 2 个面。
+
+衬线路径未设置时，正文优先用已安装的 Noto Serif CJK SC Light（`~/.local/share/fonts/NotoSerifCJKsc-Light.otf`、`/usr/local/share/fonts/NotoSerifCJKsc-Light.otf` 或 `/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf`），否则用 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc`（第 2 个面）。无衬线用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`（第 2 个面）。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。
+
+### 翻译
+
+```bash
+export RPT_LLM_API_KEY=...
+./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf
+```
+
+`rpt translate` 上实际存在的参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `--output` | 写出译文 PDF。不加就不写 PDF。 |
+| `--from`、`--to` | 源语言和目标语言。默认 `en` 和 `zh`。 |
+| `--mode` | `replace`（默认）、`bilingual`、`side-by-side`、`alternating` 或 `overlay`。 |
+| `--bilingual` | 双语输出。版式由 `--layout` 决定。 |
+| `--layout` | `side-by-side`（默认）、`alternating` 或 `overlay`。配合 `--bilingual` 或 `--mode bilingual`。 |
+| `--bilingual-output` | 用同一次翻译再写一份双语 PDF。 |
+| `--max-pages N` | 只处理前 N 页。 |
+| `--model`、`--base-url` | 覆盖这一次的 `RPT_LLM_MODEL` 和 `RPT_LLM_BASE_URL`。 |
+| `--glossary source=target` | 可重复。调用前在本地替换。 |
+| `--translate-references` | 翻译参考文献。默认保留原文。 |
+| `--translate-figures` | 翻译图内文字。默认只翻译图注。 |
+| `--translate-tables` | 翻译单元格和表头。默认只翻译表注。 |
+| `--cjk-font`、`--cjk-sans` | TTF、TTC 或 OTF。 |
+| `--cjk-size-scale`、`--cjk-leading` | 默认 `0.90` 和 `1.60`。 |
+| `--batch-size` | 每次请求的段落数。默认 `8`。 |
+| `--jobs` | 并行请求数。默认 `1`，或 `RPT_TRANSLATE_JOBS`。排版仍是单线程。 |
+| `--replay file.json` | 复用以前的翻译 JSON，不再请求模型。 |
+| `--compact` | 标准输出上一行 JSON。 |
+| `--json` | 为兼容而保留。JSON 总会写到标准输出。 |
+
+`--json` 不指定文件。`--output` 成功之后，进程还会打印抽取 JSON，其中有 `translations` 数组和 `translator` 对象（`model`、`backend`、`base_url`、`calls`、`cache_hits`）。
+
+### 示例输出
+
+`testdata/hello.pdf` 抽出的纯文本是 `Hello`。这时还没有翻译，覆盖率不算完成：
+
+```json
+{"complete": false, "pending": 5, "total": 5}
+```
+
+没有密钥时，翻译以状态 1 退出，并且不写文件：
+
+```text
+rpt: translation failed: RPT_LLM_API_KEY is not set; the API key is accepted only from that environment variable
+```
+
+### 排错
+
+**没有密钥。** 在 `rpt translate`、Python 的 `save` / `translate`、C++ 的 `save` 或 `rpt_save` 之前导出 `RPT_LLM_API_KEY`。写在选项 JSON 里的密钥会被忽略。上面那一行就是全部报错。
+
+**豆腐块（空白方框）。** 选中的中文字体没有这个字的轮廓。该字形保持原文，原因是 `missing-glyph`。换成包含这些字的字体：
+
+```bash
+./target/release/rpt translate paper.pdf --from en --to zh \
+  --cjk-font /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc \
+  --output paper.zh.pdf
+```
+
+`RPT_CJK_FONT` 是同一条路径。路径不是文件时，在发出请求之前就失败：`rpt: CJK font not found: ...`。
+
 ## 目录
 
 | 路径 | 作用 |
@@ -95,7 +231,7 @@ export RPT_LLM_API_KEY=...
 
 `translated_pending_rewrite` 只记下译文，在重写完成前仍算未解决。因此只做抽取时，报告里的未解决数量等于字形数量。哪条抽取路径悄悄丢掉字形，对应测试就会失败。
 
-每条字形记录包含：页码、Unicode（可以是多个字符；映射失败时为空）、字符码字节、已知时的 GID、字体名和字号、文本渲染矩阵、近似包围盒、前进量、颜色、渲染模式、不可见和裁剪标记，以及来源位置（页面内容流、Form XObject、注释外观或 Type3 字形过程，含操作符序号和字节范围）。后面的里程碑用这个位置精确删掉原来的文本绘制操作符。
+每条字形记录包含：页码、Unicode（可以是多个字符；映射失败时为空）、字符码字节、已知时的 GID、字体名和字号、文本渲染矩阵、近似包围盒、前进量、颜色、渲染模式、不可见和裁剪标记，以及来源位置（页面内容流、Form XObject、注释外观或 Type3 字形过程，含操作符序号和字节范围）。`rpt translate --output` 用这个位置删掉每个已改写字形原来的文本绘制操作符。
 
 ## 解释器目前覆盖的内容
 
@@ -116,7 +252,7 @@ export RPT_LLM_API_KEY=...
 
 ## 里程碑
 
-1. **M1（当前）。** 内容流解释器、字形守恒、可替换翻译器、C / Python / Go / C++ 骨架、命令行。
+1. **M1.** 内容流解释器、字形守恒、可替换翻译器、C / Python / Go / C++ 骨架、命令行。
 2. **M2.** 版面分析、在现有占位符之外保护更多结构、把缓存和术语表接进版面模型。
 3. **M3（已开始）。** 用 `hmtx` 前进量、中文断行和字体子集重排，精确删除原文本操作符，写出 PDF，并支持双语。`rpt_save` 会写文件。GSUB 整形和完整段落版面还没做。
 4. **M4.** 更完整的版面模型、对不是真文字的页面做 OCR、用 PDFium 做渲染对比。

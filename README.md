@@ -4,6 +4,142 @@ Format-preserving PDF translation. The goal is to replace [BabelDOC](https://git
 
 It opens a PDF, interprets content streams down to individual glyphs, and checks that every glyph is still accounted for. A pluggable translator marks those glyphs as translated. `rpt translate` without `--output` reports that translation and does not write a file. `rpt translate --output` rewrites the glyphs into a PDF and removes the original text-showing operators for the glyphs it rewrote.
 
+The Chinese page is [README.zh.md](README.zh.md).
+
+## Usage
+
+### Install
+
+Rust stable (1.88 or newer; the workspace pins `stable`):
+
+```bash
+cargo build -p rpt-cli --release
+./target/release/rpt extract testdata/hello.pdf --compact
+```
+
+`rpt extract` prints JSON to stdout and does not write a PDF. On `testdata/hello.pdf` the plain text is `Hello` and the coverage object has `"pending": 5`.
+
+Python (needs `python3-dev`). The module calls the Rust core directly:
+
+```bash
+cargo build -p rpt-python --release
+cp target/release/librapidpdftrans.so rapidpdftrans.so
+python3 -c 'import rapidpdftrans; print(rapidpdftrans.version()); print("Hello" in rapidpdftrans.extract("testdata/hello.pdf"))'
+```
+
+`rapidpdftrans.translate(path)` returns JSON and does not write a file. `rapidpdftrans.save(path, output)` writes a PDF.
+
+C++ is a header-only wrapper over the C ABI:
+
+```bash
+cargo build -p rpt-ffi --release
+g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
+  target/release/librapidpdftrans.a -ldl -lm -lpthread -lgcc_s -o smoke
+./smoke testdata/hello.pdf
+```
+
+`rpt::Document::extract` returns JSON. `save` writes a PDF and throws when `RPT_LLM_API_KEY` is unset.
+
+Go, from `bindings/go`, after that static library exists:
+
+```bash
+go test ./...
+```
+
+```go
+text, err := rapidpdftrans.Extract("testdata/hello.pdf")
+```
+
+`Translate` returns JSON and does not write a PDF. The C function that writes a file is `rpt_save`.
+
+### Environment
+
+Set the key in the environment. An `api_key` field in options JSON is ignored.
+
+| Variable | When | Default |
+| --- | --- | --- |
+| `RPT_LLM_API_KEY` | required for a live translation | unset |
+| `RPT_LLM_BASE_URL` | optional | `https://hub.mypapers.top/api/llm/v1` |
+| `RPT_LLM_MODEL` | optional | `auto` |
+| `RPT_TRANSLATOR` | optional | `maclaw` |
+| `RPT_GOOGLE_API_KEY` | `google` and `google-v2` | unset |
+| `RPT_GOOGLE_CREDENTIALS` | `google-v3` service account | unset |
+| `RPT_GOOGLE_ACCESS_TOKEN` | `google-v3` bearer token | unset |
+| `RPT_CJK_FONT` | optional Song/serif file | Noto Serif CJK, then the fallback list below |
+| `RPT_CJK_SANS` | optional sans file | Noto Sans CJK |
+| `RPT_TRANSLATE_JOBS` | optional | `1` |
+| `RPT_CJK_SIZE_SCALE` | optional | `0.90` |
+| `RPT_CJK_LEADING` | optional | `1.60` |
+
+`RPT_TRANSLATOR` is `maclaw` (default), `openai`, `google`, `google-v2`, `google-v3`, or `google-unofficial`. The unofficial client is opt-in only. It is never used as a silent fallback.
+
+### Fonts
+
+`--cjk-font` and `--cjk-sans` take a TTF, TTC, or OTF. The same paths can be given as `RPT_CJK_FONT` and `RPT_CJK_SANS`. Bold text still uses `/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc` (collection face 2) when that file is installed.
+
+When the serif path is unset, body text uses Noto Serif CJK SC Light if it is installed (`~/.local/share/fonts/NotoSerifCJKsc-Light.otf`, `/usr/local/share/fonts/NotoSerifCJKsc-Light.otf`, or `/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf`), otherwise `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc` (face 2). Sans text uses `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` (face 2). If those faces cannot be subset, the fallback is `RPT_CJK_FONT` when it is set, then `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`, `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`, and `NotoSansCJK-Regular.ttc` under `/usr/share/fonts/opentype/noto` or `/usr/share/fonts/truetype/noto`.
+
+### Translate
+
+```bash
+export RPT_LLM_API_KEY=...
+./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf
+```
+
+Flags that exist on `rpt translate`:
+
+| Flag | Meaning |
+| --- | --- |
+| `--output` | Write the translated PDF. Without it, no PDF is written. |
+| `--from`, `--to` | Source and target language. Default `en` and `zh`. |
+| `--mode` | `replace` (default), `bilingual`, `side-by-side`, `alternating`, or `overlay`. |
+| `--bilingual` | Bilingual output. Layout is `--layout`. |
+| `--layout` | `side-by-side` (default), `alternating`, or `overlay`. Used with `--bilingual` or `--mode bilingual`. |
+| `--bilingual-output` | Also write a bilingual PDF from the same translation. |
+| `--max-pages N` | Only the first N pages. |
+| `--model`, `--base-url` | Override `RPT_LLM_MODEL` and `RPT_LLM_BASE_URL` for this run. |
+| `--glossary source=target` | Repeat for more than one term. Applied locally before the call. |
+| `--translate-references` | Translate the bibliography. Default is to keep it. |
+| `--translate-figures` | Translate text inside figures. Default is the caption only. |
+| `--translate-tables` | Translate cells and headers. Default is the caption only. |
+| `--cjk-font`, `--cjk-sans` | TTF, TTC, or OTF. |
+| `--cjk-size-scale`, `--cjk-leading` | Default `0.90` and `1.60`. |
+| `--batch-size` | Segments per model call. Default `8`. |
+| `--jobs` | Parallel model requests. Default `1`, or `RPT_TRANSLATE_JOBS`. Layout stays single-threaded. |
+| `--replay file.json` | Reuse a previous translation JSON. No model call. |
+| `--compact` | One-line JSON on stdout. |
+| `--json` | Accepted for compatibility. JSON is always written to stdout. |
+
+`--json` does not select a file. After `--output` succeeds, the process also prints the extraction JSON, including a `translations` array and a `translator` object (`model`, `backend`, `base_url`, `calls`, `cache_hits`).
+
+### Example output
+
+`testdata/hello.pdf` extracts as plain text `Hello`. Coverage is not complete, because nothing has been translated:
+
+```json
+{"complete": false, "pending": 5, "total": 5}
+```
+
+With no key, translate exits 1 and writes nothing:
+
+```text
+rpt: translation failed: RPT_LLM_API_KEY is not set; the API key is accepted only from that environment variable
+```
+
+### Troubleshooting
+
+**Missing key.** Export `RPT_LLM_API_KEY` before `rpt translate`, Python `save` / `translate`, C++ `save`, or `rpt_save`. A key placed in options JSON is ignored. The message above is the whole failure.
+
+**Tofu (empty boxes).** The chosen CJK face has no outline for that character. The glyph stays original with reason `missing-glyph`. Pass a face that contains it:
+
+```bash
+./target/release/rpt translate paper.pdf --from en --to zh \
+  --cjk-font /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc \
+  --output paper.zh.pdf
+```
+
+`RPT_CJK_FONT` is the same path. A path that is not a file fails before any request: `rpt: CJK font not found: ...`.
+
 ## Layout
 
 | Path | Role |
@@ -97,7 +233,7 @@ Every extracted glyph starts as `pending`. A document is complete only when each
 
 `translated_pending_rewrite` records a translation and stays unresolved until rewrite. Extraction alone therefore reports every glyph as unresolved. A test fails if an extraction path skips a glyph and shrinks that list.
 
-Glyph records include the page, Unicode (which may be several characters, or empty when unmapped), character-code bytes, GID when known, font name and size, the text rendering matrix, an approximate bounding box, advance, colors, render mode, invisible and clip flags, and the source location (content stream, Form XObject, annotation appearance, or Type3 char proc, plus operator index and byte range). Later milestones use that location to delete exactly the original text-showing operator.
+Glyph records include the page, Unicode (which may be several characters, or empty when unmapped), character-code bytes, GID when known, font name and size, the text rendering matrix, an approximate bounding box, advance, colors, render mode, invisible and clip flags, and the source location (content stream, Form XObject, annotation appearance, or Type3 char proc, plus operator index and byte range). `rpt translate --output` uses that location to delete the original text-showing operator for each rewritten glyph.
 
 ## What the interpreter covers
 
@@ -120,7 +256,7 @@ Glyph records include the page, Unicode (which may be several characters, or emp
 
 ## Roadmap
 
-1. **M1 (this tree).** Content-stream interpreter, glyph coverage, pluggable translator, C / Python / Go / C++ skeletons, CLI.
+1. **M1.** Content-stream interpreter, glyph coverage, pluggable translator, C / Python / Go / C++ skeletons, CLI.
 2. **M2.** Layout analysis, placeholder protection beyond the current shield, translator caching and glossary integration in the layout model.
 3. **M3 (started).** Re-layout with `hmtx` advances, CJK line breaking, font subsetting, deletion of the original text operators, bilingual mode, and a working `rpt_save`. GSUB shaping and full paragraph layout are still open.
 4. **M4.** Richer layout, OCR for pages that are not real text, render-diff checks against PDFium.
