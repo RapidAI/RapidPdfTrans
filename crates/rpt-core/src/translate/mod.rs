@@ -37,9 +37,11 @@ pub use references::{identical_reference_operators, reference_glyph_ids, referen
 
 use crate::error::{Error, Result};
 use crate::extract::Extraction;
+use crate::glyph::Diagnostic;
 use crate::segment;
 use prompt::{
-    fallback_prompt, lint_prompt, parse_translations, system_prompt, user_payload, PromptSegment,
+    fallback_prompt, lint_prompt, parse_translations, solo_retry_prompt, system_prompt,
+    user_payload, PromptSegment,
 };
 use protect::{restore, shield};
 
@@ -472,12 +474,36 @@ pub fn translate_extraction(
     // One owner per distinct source string. A repeated paragraph is filled
     // from that owner after the workers join, so two jobs never translate it.
     let batches = plan_unique_batches(&segments, &translated, opts.batch_size);
-    let rendered = dispatch_batches(
+    let dispatched = dispatch_batches(
         &segments, &shielded, &batches, opts, translator, jobs, &mut calls,
     )?;
-    for (i, text) in rendered {
-        cache.insert(segments[i].text.clone(), text.clone());
-        translated[i] = Some(text);
+    let rendered = dispatched.rendered;
+    let failed = dispatched.failed;
+    // Workers publish by segment index. A later echo must not replace a
+    // translation that already landed on that paragraph.
+    apply_rendered(&segments, &mut translated, &mut cache, rendered);
+    for batch in failed {
+        match translate_batch(&segments, &shielded, &batch, opts, translator, &mut calls) {
+            Ok(part) => apply_rendered(&segments, &mut translated, &mut cache, part),
+            Err(err) => {
+                // One batch failed. The paragraphs already translated stay.
+                // This batch is kept as source so the PDF can still be saved.
+                let preview_err = err.to_string();
+                for index in batch {
+                    if translated[index].is_some() {
+                        continue;
+                    }
+                    translated[index] = Some(segments[index].text.clone());
+                    let preview: String = segments[index].text.chars().take(80).collect();
+                    extraction.diagnostics.push(Diagnostic {
+                        page_index: Some(segments[index].page_index),
+                        message: format!(
+                            "left a paragraph unchanged after the translation request failed: {preview} ({preview_err})"
+                        ),
+                    });
+                }
+            }
+        }
     }
     for i in 0..segments.len() {
         if translated[i].is_some() {
@@ -489,6 +515,20 @@ pub fn translate_extraction(
         cache_hits += 1;
         translated[i] = Some(text);
     }
+    // A paragraph that was sent to the model and is still English is asked
+    // once more, alone. References, URLs, and formulas were filled in earlier
+    // and are not in `batches`, so this pass does not translate them.
+    let attempted: HashSet<usize> = batches.iter().flatten().copied().collect();
+    retry_english_leftovers(
+        &segments,
+        &mut translated,
+        &mut cache,
+        &attempted,
+        opts,
+        translator,
+        jobs,
+        &mut calls,
+    );
 
     finish_report(
         extraction,
@@ -954,8 +994,17 @@ fn plan_unique_batches(
         .collect()
 }
 
+struct BatchDispatch {
+    /// Translations keyed by segment index.
+    rendered: Vec<(usize, String)>,
+    /// Batches whose request failed. Their paragraphs are not in `rendered`.
+    failed: Vec<Vec<usize>>,
+}
+
 /// Run each batch on a worker. `jobs == 1` stays on this thread, in order.
 /// Workers share the translator only as `&self` and never share a segment index.
+/// A failed batch is returned separately. Successful paragraphs stay, keyed by
+/// segment index, and are not discarded when another batch fails.
 fn dispatch_batches(
     segments: &[Segment],
     shielded: &[protect::Shielded],
@@ -964,31 +1013,34 @@ fn dispatch_batches(
     translator: &dyn Translator,
     jobs: usize,
     calls: &mut usize,
-) -> Result<Vec<(usize, String)>> {
+) -> Result<BatchDispatch> {
     if batches.is_empty() {
-        return Ok(Vec::new());
+        return Ok(BatchDispatch {
+            rendered: Vec::new(),
+            failed: Vec::new(),
+        });
     }
     if jobs <= 1 {
         let mut rendered = Vec::new();
+        let mut failed = Vec::new();
         for batch in batches {
-            rendered.extend(translate_batch(
-                segments, shielded, batch, opts, translator, calls,
-            )?);
+            match translate_batch(segments, shielded, batch, opts, translator, calls) {
+                Ok(part) => rendered.extend(part),
+                Err(_) => failed.push(batch.clone()),
+            }
         }
-        return Ok(rendered);
+        return Ok(BatchDispatch { rendered, failed });
     }
 
     let next = std::sync::atomic::AtomicUsize::new(0);
     let call_count = std::sync::atomic::AtomicUsize::new(0);
-    let outputs = std::sync::Mutex::new(Vec::new());
-    let failure: std::sync::Mutex<Option<Error>> = std::sync::Mutex::new(None);
+    // One slot per segment. Workers write only the indexes in their batch.
+    let slots = std::sync::Mutex::new(vec![None; segments.len()]);
+    let failed = std::sync::Mutex::new(Vec::new());
     let workers = jobs.min(batches.len());
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| loop {
-                if failure.lock().map(|guard| guard.is_some()).unwrap_or(true) {
-                    break;
-                }
                 let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if index >= batches.len() {
                     break;
@@ -1005,42 +1057,142 @@ fn dispatch_batches(
                     Ok(part) => {
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
                         append_checkpoint(segments, &part);
-                        match outputs.lock() {
-                            Ok(mut slot) => slot.extend(part),
-                            Err(_) => {
-                                if let Ok(mut slot) = failure.lock() {
-                                    if slot.is_none() {
-                                        *slot = Some(Error::Translate(
-                                            "translation worker lock poisoned".into(),
-                                        ));
-                                    }
-                                }
-                                break;
+                        let Ok(mut guard) = slots.lock() else {
+                            break;
+                        };
+                        for (seg_index, text) in part {
+                            if let Some(slot) = guard.get_mut(seg_index) {
+                                *slot = Some(prefer_translation(
+                                    &segments[seg_index].text,
+                                    slot.take(),
+                                    text,
+                                ));
                             }
                         }
                     }
-                    Err(err) => {
-                        if let Ok(mut slot) = failure.lock() {
-                            if slot.is_none() {
-                                *slot = Some(err);
-                            }
+                    Err(_) => {
+                        call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                        // Keep going. Other workers still own other paragraphs.
+                        if let Ok(mut guard) = failed.lock() {
+                            guard.push(batches[index].clone());
                         }
-                        break;
                     }
                 }
             });
         }
     });
     *calls += call_count.load(std::sync::atomic::Ordering::SeqCst);
-    let failure = failure
+    let slots = slots
         .into_inner()
         .map_err(|_| Error::Translate("translation worker lock poisoned".into()))?;
-    if let Some(err) = failure {
-        return Err(err);
-    }
-    outputs
+    let failed = failed
         .into_inner()
-        .map_err(|_| Error::Translate("translation worker lock poisoned".into()))
+        .map_err(|_| Error::Translate("translation worker lock poisoned".into()))?;
+    let rendered = slots
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, text)| text.map(|text| (index, text)))
+        .collect();
+    Ok(BatchDispatch { rendered, failed })
+}
+
+fn prefer_translation(source: &str, previous: Option<String>, next: String) -> String {
+    match previous {
+        Some(prev) if !needs_english_retry(source, &prev) && needs_english_retry(source, &next) => {
+            prev
+        }
+        _ => next,
+    }
+}
+
+fn apply_rendered(
+    segments: &[Segment],
+    translated: &mut [Option<String>],
+    cache: &mut HashMap<String, String>,
+    rendered: Vec<(usize, String)>,
+) {
+    for (index, text) in rendered {
+        let Some(segment) = segments.get(index) else {
+            continue;
+        };
+        let chosen = prefer_translation(segment.text.as_str(), translated[index].clone(), text);
+        cache.insert(segment.text.clone(), chosen.clone());
+        translated[index] = Some(chosen);
+    }
+}
+
+/// Paragraphs still in English, one request each, stored on that index.
+fn retry_english_leftovers(
+    segments: &[Segment],
+    translated: &mut [Option<String>],
+    cache: &mut HashMap<String, String>,
+    attempted: &HashSet<usize>,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    jobs: usize,
+    calls: &mut usize,
+) {
+    let pending: Vec<usize> = translated
+        .iter()
+        .enumerate()
+        .filter(|(index, text)| {
+            attempted.contains(index)
+                && text
+                    .as_ref()
+                    .is_some_and(|text| needs_english_retry(&segments[*index].text, text))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let improved = if jobs <= 1 || pending.len() == 1 {
+        let mut improved = Vec::new();
+        for index in pending {
+            if let Some(text) = translate_solo(&segments[index].text, opts, translator, calls) {
+                improved.push((index, text));
+            }
+        }
+        improved
+    } else {
+        let call_count = std::sync::atomic::AtomicUsize::new(0);
+        let improved = std::sync::Mutex::new(Vec::new());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = jobs.min(pending.len());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if slot >= pending.len() {
+                        break;
+                    }
+                    let index = pending[slot];
+                    let mut local_calls = 0usize;
+                    if let Some(text) =
+                        translate_solo(&segments[index].text, opts, translator, &mut local_calls)
+                    {
+                        call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                        if let Ok(mut guard) = improved.lock() {
+                            guard.push((index, text));
+                        }
+                    } else {
+                        call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        *calls += call_count.load(std::sync::atomic::Ordering::SeqCst);
+        improved.into_inner().unwrap_or_default()
+    };
+    for (index, text) in improved {
+        let source = segments[index].text.clone();
+        for (slot, segment) in translated.iter_mut().zip(segments.iter()) {
+            if segment.text == source {
+                *slot = Some(text.clone());
+            }
+        }
+        cache.insert(source, text);
+    }
 }
 
 fn translate_batch(
@@ -1320,6 +1472,40 @@ fn translate_fallback(
     let text = parsed
         .iter()
         .find(|(id, _)| *id == 0)
+        .map(|(_, text)| text.clone())?;
+    let restored = restore_expanded(&text, &shielded.slots).ok()?;
+    if needs_english_retry(source, &restored) {
+        None
+    } else {
+        Some(restored)
+    }
+}
+
+/// One paragraph, no neighbors, and a prompt that is not the batch echo retry.
+/// Returns nothing when the reply is still an English body, so a failed retry
+/// cannot overwrite the paragraph with another copy of the source.
+fn translate_solo(
+    source: &str,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+) -> Option<String> {
+    let shielded = shield(source, &opts.glossary);
+    let prompt = PromptSegment {
+        id: 0,
+        text: shielded.text,
+        context_before: Vec::new(),
+        context_after: Vec::new(),
+    };
+    let user = user_payload(std::slice::from_ref(&prompt)).ok()?;
+    let system = solo_retry_prompt(&opts.target_lang);
+    *calls += 1;
+    let raw = translator.complete(&system, &user).ok()?;
+    let parsed = parse_translations(&raw).ok()?;
+    let text = parsed
+        .iter()
+        .find(|(id, _)| *id == 0)
+        .or_else(|| (parsed.len() == 1).then(|| &parsed[0]))
         .map(|(_, text)| text.clone())?;
     let restored = restore_expanded(&text, &shielded.slots).ok()?;
     if needs_english_retry(source, &restored) {
@@ -2965,23 +3151,48 @@ pub(crate) fn whole_line_is_personal_name(text: &str) -> bool {
 
 /// Two to five title-case tokens, and none of them a function word or an
 /// organization. `Julie McNamee` is a person. `The Model Context Protocol`
-/// is a title, so the Chinese translation stays.
+/// is a title, so the Chinese translation stays. A longer author line is
+/// [`is_name_byline`]: it is still not body prose, but a Chinese rendering
+/// of that line is kept.
 fn is_personal_name(text: &str) -> bool {
+    name_tokens(text, 5).is_some()
+}
+
+/// `Jacob Devlin Ming-Wei Chang Kenton Lee Kristina Toutanova` is one byline
+/// (49 letters, eight tokens). The five-token cap on [`is_personal_name`]
+/// used to call that an English body paragraph and refuse to save the PDF.
+pub(crate) fn is_name_byline(text: &str) -> bool {
+    name_tokens(text, 24).is_some()
+}
+
+/// Title-case name tokens, at least two, at most `max_tokens`.
+/// `Archibald` (9) is still a surname. A byline may include `Uszkoreit` (10).
+/// `Infinitary` is a heading word, so the short-name cap stays at 9.
+fn name_tokens(text: &str, max_tokens: usize) -> Option<Vec<&str>> {
     let trimmed = text.trim();
     // `Overall Objective.` and `Mask Segmentation Loss.` are run-in headings.
     // A byline (`Roberto Infante`) does not end in a period after a full word.
     if heading_period(trimmed) {
-        return false;
+        return None;
     }
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    (2..=5).contains(&tokens.len())
-        && tokens.iter().all(|token| {
-            is_name_token(token)
-                && !is_org_token(token)
-                && !is_function_word(token)
-                && !compound_title_token(token)
-                && !long_title_word(token)
-        })
+    if !(2..=max_tokens).contains(&tokens.len()) {
+        return None;
+    }
+    let names = tokens.iter().all(|token| {
+        let letters = token.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+        let too_long = if max_tokens <= 5 {
+            long_title_word(token)
+        } else {
+            letters > 12
+        };
+        is_name_token(token)
+            && !is_org_token(token)
+            && !is_function_word(token)
+            && !compound_title_token(token)
+            && !too_long
+    });
+    names.then_some(tokens)
 }
 
 /// `Archibald` (9) is still a surname. `Infinitary` (10) is a heading word.
@@ -3791,6 +4002,26 @@ mod tests {
             restore_credit_names("How Mutation Testing Got Practical", "变异测试如何变得实用"),
             "变异测试如何变得实用"
         );
+    }
+
+    #[test]
+    fn bert_author_byline_is_a_name_line_and_keeps_a_chinese_rendering() {
+        let byline = "Jacob Devlin Ming-Wei Chang Kenton Lee Kristina Toutanova";
+        assert_eq!(
+            byline.chars().filter(|ch| ch.is_ascii_alphabetic()).count(),
+            49
+        );
+        assert!(is_name_byline(byline));
+        assert!(!is_personal_name(byline));
+        assert!(!whole_line_is_personal_name(byline));
+        assert!(needs_english_retry(byline, byline));
+        let chinese = "雅各布·德夫林 张明威 李肯顿 克里斯蒂娜·托塔诺娃";
+        assert!(!needs_english_retry(byline, chinese));
+        assert_eq!(restore_credit_names(byline, chinese), chinese);
+        assert!(!is_name_byline("The Model Context Protocol"));
+        assert!(!is_name_byline(
+            "The transformer architecture replaces recurrence with self attention over the input."
+        ));
     }
 
     #[test]
@@ -5117,6 +5348,218 @@ mod tests {
             .collect();
         assert_eq!(hellos.len(), 2);
         assert_eq!(hellos[0].translated, hellos[1].translated);
+    }
+
+    #[test]
+    fn a_failed_batch_does_not_drop_sibling_paragraphs() {
+        let lines = [
+            "Alpha paragraph stays on its own line.",
+            "Beta paragraph stays on its own line.",
+            "Gamma paragraph stays on its own line.",
+            "Delta paragraph stays on its own line.",
+        ];
+        let opts = TranslateOptions {
+            batch_size: 1,
+            jobs: 4,
+            context_window: 0,
+            ..TranslateOptions::default()
+        };
+        let mut doc = extraction_from_lines(&lines);
+        let report = translate_extraction(
+            &mut doc,
+            &opts,
+            &FailFirstThenTranslate {
+                n: AtomicUsize::new(0),
+            },
+        )
+        .unwrap();
+        for line in lines {
+            let seg = report
+                .segments
+                .iter()
+                .find(|seg| seg.source == line)
+                .unwrap_or_else(|| panic!("missing {line}"));
+            assert!(
+                seg.translated.contains('译') && seg.translated.contains(&line[..5]),
+                "paragraph was not filled back: {} -> {}",
+                seg.source,
+                seg.translated
+            );
+            for other in lines {
+                if other == line {
+                    continue;
+                }
+                assert!(
+                    !seg.translated.contains(&other[..5]),
+                    "paragraph {} took text from {}",
+                    line,
+                    other
+                );
+            }
+        }
+    }
+
+    struct FailFirstThenTranslate {
+        n: AtomicUsize,
+    }
+
+    impl Translator for FailFirstThenTranslate {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            if self.n.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(Error::Translate("gateway rejected the batch".into()));
+            }
+            let mut translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    serde_json::json!({
+                        "id": seg["id"],
+                        "text": format!("译{}", seg["text"].as_str().unwrap()),
+                    })
+                })
+                .collect();
+            translations.reverse();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_hard_failure_keeps_that_paragraph_and_its_siblings() {
+        let lines = [
+            "Alpha paragraph stays on its own line.",
+            "Beta paragraph stays on its own line.",
+            "Gamma paragraph stays on its own line.",
+        ];
+        let opts = TranslateOptions {
+            batch_size: 1,
+            jobs: 4,
+            context_window: 0,
+            ..TranslateOptions::default()
+        };
+        let mut doc = extraction_from_lines(&lines);
+        let report = translate_extraction(&mut doc, &opts, &FailAlpha).unwrap();
+        let alpha = report
+            .segments
+            .iter()
+            .find(|seg| seg.source.starts_with("Alpha"))
+            .unwrap();
+        assert_eq!(alpha.translated, alpha.source);
+        assert!(doc
+            .diagnostics
+            .iter()
+            .any(|item| { item.message.contains("Alpha") && item.message.contains("unchanged") }));
+        for stem in ["Beta", "Gamma"] {
+            let seg = report
+                .segments
+                .iter()
+                .find(|seg| seg.source.starts_with(stem))
+                .unwrap();
+            assert!(seg.translated.contains('译'), "{}", seg.translated);
+            assert!(!seg.translated.contains("Alpha"), "{}", seg.translated);
+        }
+    }
+
+    struct FailAlpha;
+
+    impl Translator for FailAlpha {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            if segs
+                .iter()
+                .any(|seg| seg["text"].as_str().unwrap_or("").contains("Alpha"))
+            {
+                return Err(Error::Translate("gateway rejected the batch".into()));
+            }
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    serde_json::json!({
+                        "id": seg["id"],
+                        "text": format!("译{}", seg["text"].as_str().unwrap()),
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn an_echoed_paragraph_is_retried_alone_and_written_back() {
+        let prose = "The transformer architecture replaces recurrence with self attention and trains on a large corpus.";
+        let other = "Hello.";
+        let opts = TranslateOptions {
+            batch_size: 1,
+            jobs: 4,
+            context_window: 0,
+            ..TranslateOptions::default()
+        };
+        let mut doc = extraction_from_lines(&[prose, other]);
+        let report = translate_extraction(&mut doc, &opts, &EchoUntilSolo).unwrap();
+        let body = report
+            .segments
+            .iter()
+            .find(|seg| seg.source == prose)
+            .unwrap();
+        assert!(
+            body.translated.contains('译') && body.translated.contains("transformer"),
+            "{}",
+            body.translated
+        );
+        assert_ne!(body.translated, prose);
+        let hello = report
+            .segments
+            .iter()
+            .find(|seg| seg.source == other)
+            .unwrap();
+        assert_eq!(hello.translated, other);
+        assert!(!hello.translated.contains("transformer"));
+    }
+
+    struct EchoUntilSolo;
+
+    impl Translator for EchoUntilSolo {
+        fn complete(&self, system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap();
+                    let text = if system.contains("separate attempt") {
+                        format!("译{text}")
+                    } else {
+                        text.to_string()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn incomplete_coverage_warns_and_keeps_the_glyphs() {
+        let mut ex = extraction_from_lines(&[
+            "The transformer architecture replaces recurrence with attention.",
+        ]);
+        for glyph in &mut ex.glyphs {
+            if glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) {
+                glyph.disposition = Disposition::KeptOriginal {
+                    reason: "english-body".into(),
+                };
+            } else {
+                glyph.disposition = Disposition::KeptOriginal {
+                    reason: "unchanged".into(),
+                };
+            }
+        }
+        let warning = ex.note_incomplete_coverage().expect("warning");
+        assert!(warning.contains("saved the PDF"), "{warning}");
+        assert!(warning.contains("English body"), "{warning}");
+        assert_eq!(ex.diagnostics.len(), 1);
+        assert!(!ex.glyphs.is_empty());
     }
 
     struct IsolatedTranslator {

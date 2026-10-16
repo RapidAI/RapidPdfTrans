@@ -278,6 +278,7 @@ pub fn rewrite_translation(
         if job_translates
             && !translated.chars().any(is_han_char)
             && comma_list_english(&segment.source)
+            && !crate::translate::is_name_byline(&segment.source)
         {
             for id in &segment.glyph_ids {
                 keep.insert(*id, "english-body".into());
@@ -333,11 +334,7 @@ pub fn rewrite_translation(
             }
         }
         if translated == segment.source {
-            let reason = if job_translates && english_body_source(&segment.source) {
-                "english-body"
-            } else {
-                "unchanged"
-            };
+            let reason = kept_source_reason(&segment.source, job_translates);
             for id in &segment.glyph_ids {
                 keep.insert(*id, reason.into());
             }
@@ -15221,6 +15218,22 @@ fn version_token(chars: &[char], start: usize) -> bool {
     uppers >= 2
 }
 
+/// A byline left in Latin is a name, not an untranslated body paragraph.
+/// Body prose the model echoed is `english-body`. Everything else is `unchanged`.
+fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
+    // A long byline (`Jacob Devlin Ming-Wei Chang …`, 49 letters) is not body
+    // prose. Shorter name lines stay `unchanged` so word-gap redraw still runs.
+    if job_translates && english_body_source(source) {
+        if crate::translate::is_name_byline(source) {
+            "name"
+        } else {
+            "english-body"
+        }
+    } else {
+        "unchanged"
+    }
+}
+
 fn english_body_source(text: &str) -> bool {
     // Author email lines stay in Latin. They are not a body paragraph the
     // model left untranslated.
@@ -19789,6 +19802,16 @@ mod tests {
         assert!(english_body_source("Ada, Go, Rust, PostgreSQL, LLVM, Nix"));
         assert!(!comma_list_english("能源、法律与政策、LLVM、Go、Rust"));
         assert!(!english_body_source("Go, Rust"));
+        let byline = "Jacob Devlin Ming-Wei Chang Kenton Lee Kristina Toutanova";
+        assert_eq!(kept_source_reason(byline, true), "name");
+        assert_eq!(
+            kept_source_reason(
+                "The transformer architecture replaces recurrence with attention over the whole input sequence.",
+                true
+            ),
+            "english-body"
+        );
+        assert_eq!(kept_source_reason("Hello.", true), "unchanged");
     }
 
     #[test]

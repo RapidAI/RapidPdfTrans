@@ -216,6 +216,25 @@ impl Extraction {
         coverage::assert_complete(&self.glyphs)
     }
 
+    /// Record that some glyphs are still unresolved. The caller saves the PDF
+    /// anyway. Returns the warning, or nothing when coverage is complete.
+    pub fn note_incomplete_coverage(&mut self) -> Option<String> {
+        let report = self.coverage_report();
+        if report.complete {
+            return None;
+        }
+        let message = format!(
+            "coverage incomplete: {} glyphs unresolved, {} left in an English body paragraph; saved the PDF and left those paragraphs unchanged",
+            report.unresolved_ids.len(),
+            report.english_body
+        );
+        self.diagnostics.push(Diagnostic {
+            page_index: None,
+            message: message.clone(),
+        });
+        Some(message)
+    }
+
     pub fn mark_rewritten(&mut self, id: u32, text: impl Into<String>) -> Result<()> {
         coverage::mark(
             &mut self.glyphs,

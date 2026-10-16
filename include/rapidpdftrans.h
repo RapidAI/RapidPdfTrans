@@ -53,7 +53,9 @@ char *rpt_translate(struct RptDocument *doc, const char *options_json);
  * `path` and `options_json` are null-terminated UTF-8 strings, or null.
  * An `api_key` field in JSON is ignored. An LLM needs `RPT_LLM_API_KEY`.
  * With no translator configured, a reachable Google Translate endpoint is used.
- * Returns 0 after the translated PDF is written.
+ * Returns 0 after the translated PDF is written. A paragraph that is still
+ * English after a retry does not block the write: the file is saved and
+ * `rpt_last_error` holds a warning.
  */
 int rpt_save(struct RptDocument *doc, const char *path, const char *options_json);
 

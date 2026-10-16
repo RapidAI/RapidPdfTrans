@@ -66,7 +66,8 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
 }
 
 /// Translate and write a PDF. Uses `RPT_LLM_API_KEY` when set, otherwise a
-/// reachable Google Translate endpoint.
+/// reachable Google Translate endpoint. A paragraph that is still English
+/// after a retry does not block the write; Python emits a warning.
 ///
 /// `options_json` selects the output: `{"output_mode":"replace"}` (pure
 /// translation) or `{"output_mode":"bilingual","bilingual_layout":"side-by-side"}`.
@@ -94,8 +95,20 @@ fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
         },
     )
     .map_err(py_err)?;
-    extraction.assert_complete().map_err(py_err)?;
-    doc.save_file(output).map_err(py_err)
+    doc.save_file(output).map_err(py_err)?;
+    if let Some(warning) = extraction.note_incomplete_coverage() {
+        warn_coverage(&warning);
+    }
+    Ok(())
+}
+
+fn warn_coverage(message: &str) {
+    Python::attach(|py| {
+        let Ok(warnings) = py.import("warnings") else {
+            return;
+        };
+        let _ = warnings.call_method1("warn", (message,));
+    });
 }
 
 #[pymodule]

@@ -53,6 +53,20 @@ Keep every ⟦N⟧ placeholder and every URL exactly as written.",
     prompt
 }
 
+/// One paragraph, after the batch echo retry still came back in English.
+/// The wording differs from [`fallback_prompt`] so a cached echo is not reused.
+pub fn solo_retry_prompt(target_lang: &str) -> String {
+    let dst = language_name(target_lang);
+    format!(
+        "You translate one document paragraph into {dst}. \
+This is a separate attempt for this paragraph alone. Earlier replies copied the English source. \
+Reply with JSON only, no markdown, in exactly this shape: \
+{{\"translations\":[{{\"id\":0,\"text\":\"...\"}}]}}. \
+The text must be {dst}. Translate the paragraph, including a list of author names. \
+Keep numbers, URLs, and every ⟦N⟧ placeholder unchanged. Do not add notes."
+    )
+}
+
 /// A second prompt for a segment that stayed English after the echo retry.
 /// The wording is deliberately different so a deterministic model is not
 /// asked the same question again.

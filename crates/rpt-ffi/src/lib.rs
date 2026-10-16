@@ -209,7 +209,9 @@ pub unsafe extern "C" fn rpt_translate(
 /// `path` and `options_json` are null-terminated UTF-8 strings, or null.
 /// An `api_key` field in JSON is ignored. An LLM needs `RPT_LLM_API_KEY`.
 /// With no translator configured, a reachable Google Translate endpoint is used.
-/// Returns 0 after the translated PDF is written.
+/// Returns 0 after the translated PDF is written. A paragraph that is still
+/// English after a retry does not block the write: the file is saved and
+/// `rpt_last_error` holds a warning.
 #[no_mangle]
 pub unsafe extern "C" fn rpt_save(
     doc: *mut RptDocument,
@@ -257,13 +259,16 @@ pub unsafe extern "C" fn rpt_save(
                 },
             )
             .map_err(|e| e.to_string())?;
-        extraction.assert_complete().map_err(|e| e.to_string())?;
         inner.pdf.save_file(path).map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(extraction.note_incomplete_coverage())
     });
     match saved {
-        Ok(()) => {
-            clear_error();
+        Ok(warning) => {
+            if let Some(message) = warning {
+                set_error(&message);
+            } else {
+                clear_error();
+            }
             0
         }
         Err(message) => {

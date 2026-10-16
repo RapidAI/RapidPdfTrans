@@ -281,12 +281,11 @@ fn run_translate(
         ) {
             return fail(err);
         }
-        let coverage_err = extraction.assert_complete().err();
         if let Err(err) = doc.save_file(output) {
             return fail(err);
         }
-        if let Some(err) = coverage_err {
-            return fail(err);
+        if let Some(warning) = extraction.note_incomplete_coverage() {
+            eprintln!("rpt: warning: {warning}");
         }
     }
     if let Some(bilingual_output) = bilingual_output.as_ref() {
@@ -315,12 +314,11 @@ fn run_translate(
         ) {
             return fail(err);
         }
-        let coverage_err = bilingual_extraction.assert_complete().err();
         if let Err(err) = copy.save_file(bilingual_output) {
             return fail(err);
         }
-        if let Some(err) = coverage_err {
-            return fail(err);
+        if let Some(warning) = bilingual_extraction.note_incomplete_coverage() {
+            eprintln!("rpt: warning: {warning}");
         }
     }
     let mut value = match extraction.to_json_value() {
