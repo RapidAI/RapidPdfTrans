@@ -126,6 +126,48 @@ def newest_hashed(directory: Path, pattern: str) -> Path:
     return max(matched, key=lambda path: path.stat().st_mtime)
 
 
+def windows_machine(target: str) -> str:
+    if "aarch64" in target or "arm64" in target:
+        return "ARM64"
+    if "i686" in target or "i586" in target:
+        return "X86"
+    return "X64"
+
+
+def rewrite_windows_implib(dll: Path, implib: Path, target: str) -> None:
+    """Cargo names the DLL rapidpdftrans-<hash>.dll inside the import library.
+
+    The archive ships rapidpdftrans.dll, so relink the import library against
+    that filename. Otherwise a consumer looks for the hashed name and the
+    loader returns STATUS_DLL_NOT_FOUND.
+    """
+    if shutil.which("dumpbin") is None or shutil.which("lib") is None:
+        sys.exit("dumpbin and lib are required to retarget the Windows import library")
+    text = subprocess.check_output(["dumpbin", "/EXPORTS", str(dll)], text=True, errors="replace")
+    names = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit() and parts[2].startswith("0"):
+            names.append(parts[3])
+    if not names:
+        sys.exit(f"dumpbin /EXPORTS produced no symbols for {dll}:\n{text}")
+    def_path = implib.with_name("rapidpdftrans.def")
+    def_path.write_text(
+        "LIBRARY rapidpdftrans.dll\nEXPORTS\n" + "".join(f"    {name}\n" for name in names),
+        encoding="ascii",
+    )
+    subprocess.check_call(
+        [
+            "lib",
+            f"/DEF:{def_path}",
+            f"/OUT:{implib}",
+            f"/MACHINE:{windows_machine(target)}",
+            "/NOLOGO",
+        ]
+    )
+    print(f"import library references rapidpdftrans.dll ({len(names)} exports)", flush=True)
+
+
 def promote_shared(target: str, directory: Path) -> None:
     """Cargo only copies crate-types listed in Cargo.toml. The cdylib is requested
     with an extra rustc flag, so it stays under deps/ until we promote it."""
@@ -134,7 +176,9 @@ def promote_shared(target: str, directory: Path) -> None:
         dll = newest_hashed(deps, "rapidpdftrans-*.dll")
         implib = newest_hashed(deps, "rapidpdftrans-*.dll.lib")
         shutil.copy2(dll, directory / "rapidpdftrans.dll")
-        shutil.copy2(implib, directory / "rapidpdftrans.dll.lib")
+        out_implib = directory / "rapidpdftrans.dll.lib"
+        shutil.copy2(implib, out_implib)
+        rewrite_windows_implib(directory / "rapidpdftrans.dll", out_implib, target)
         return
     if "apple" in target:
         shared = newest_hashed(deps, "librapidpdftrans-*.dylib")
