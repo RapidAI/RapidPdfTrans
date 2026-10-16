@@ -17840,7 +17840,7 @@ mod tests {
         let mut below = ink_glyph(5, 104.0, 186.0, 10.0, "c");
         below.bbox = [104.0, 184.0, 110.0, 194.0];
         below.advance = [6.0, 0.0];
-        let glyphs = vec![q, hat, sub, below];
+        let glyphs = [q, hat, sub, below];
         let refs: Vec<&Glyph> = glyphs.iter().collect();
         let by_id = super::glyph_index_refs(&refs);
         let width = super::formula_hole_width(&[2, 3], &refs, &by_id, 10.0, Some('q'));
@@ -17856,7 +17856,7 @@ mod tests {
         let mut paren = ink_glyph(4, 200.0, 200.0, 10.0, ")");
         paren.bbox = [200.0, 198.0, 204.0, 208.0];
         paren.advance = [8.0, 0.0];
-        let plain = vec![paren];
+        let plain = [paren];
         let plain_refs: Vec<&Glyph> = plain.iter().collect();
         let plain_ids = super::glyph_index_refs(&plain_refs);
         let plain_width = super::formula_hole_width(&[4], &plain_refs, &plain_ids, 10.0, None);

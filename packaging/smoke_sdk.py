@@ -31,7 +31,7 @@ def extract(archive: Path, dest: Path) -> Path:
 
 
 def find_exe(build: Path, name: str) -> Path:
-    wanted = name + ".exe" if os.name == "nt" else name
+    wanted = name if name.endswith(".exe") or os.name != "nt" else f"{name}.exe"
     matches = [path for path in build.rglob(wanted) if path.is_file() and os.access(path, os.X_OK)]
     if not matches:
         sys.exit(f"did not find {wanted} under {build}")
@@ -93,7 +93,7 @@ def main() -> None:
         emulator = shlex.split(args.emulator)
 
         for name in ("smoke_shared", "smoke_static"):
-            exe = find_exe(build, name if os.name != "nt" else f"{name}.exe")
+            exe = find_exe(build, name)
             cmd = [*emulator, str(exe), str(pdf)]
             print("+", " ".join(cmd), flush=True)
             subprocess.check_call(cmd, env=env)
