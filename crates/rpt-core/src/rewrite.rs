@@ -9751,7 +9751,8 @@ fn reflow_bold_run_ins(
     let keys: Vec<Vec<u32>> = groups.keys().cloned().collect();
     let mut used = HashSet::new();
     // drop indices, replacement lines, body glyph ids, slide, first baseline
-    let mut plans: Vec<(Vec<usize>, Vec<Drawn>, Vec<u32>, f32, f32)> = Vec::new();
+    type Plan = (Vec<usize>, Vec<Drawn>, Vec<u32>, f32, f32);
+    let mut plans: Vec<Plan> = Vec::new();
     for key in &keys {
         if used.contains(key) {
             continue;
@@ -15000,6 +15001,11 @@ fn version_token(chars: &[char], start: usize) -> bool {
 }
 
 fn english_body_source(text: &str) -> bool {
+    // Author email lines stay in Latin. They are not a body paragraph the
+    // model left untranslated.
+    if text.contains('@') {
+        return false;
+    }
     // An HTML row echoed by the model is markup, not a paragraph that failed
     // to translate. Four tags is a table fragment; a sentence is not.
     let tags = text.matches('<').count();
@@ -15042,7 +15048,7 @@ fn english_body_source(text: &str) -> bool {
 /// line of that list used to fall under the 40-letter floor, so coverage
 /// reported `english_body: 0` while the paragraph was still English.
 fn comma_list_english(text: &str) -> bool {
-    if text.chars().any(is_han_char) {
+    if text.chars().any(is_han_char) || text.contains('@') {
         return false;
     }
     if text.matches(',').count() < 3 {
@@ -18103,7 +18109,7 @@ mod tests {
         let mut below = ink_glyph(5, 104.0, 186.0, 10.0, "c");
         below.bbox = [104.0, 184.0, 110.0, 194.0];
         below.advance = [6.0, 0.0];
-        let glyphs = vec![q, hat, sub, below];
+        let glyphs = [q, hat, sub, below];
         let refs: Vec<&Glyph> = glyphs.iter().collect();
         let by_id = super::glyph_index_refs(&refs);
         let width = super::formula_hole_width(&[2, 3], &refs, &by_id, 10.0, Some('q'));
@@ -18119,7 +18125,7 @@ mod tests {
         let mut paren = ink_glyph(4, 200.0, 200.0, 10.0, ")");
         paren.bbox = [200.0, 198.0, 204.0, 208.0];
         paren.advance = [8.0, 0.0];
-        let plain = vec![paren];
+        let plain = [paren];
         let plain_refs: Vec<&Glyph> = plain.iter().collect();
         let plain_ids = super::glyph_index_refs(&plain_refs);
         let plain_width = super::formula_hole_width(&[4], &plain_refs, &plain_ids, 10.0, None);
@@ -19263,9 +19269,15 @@ mod tests {
 
     #[test]
     fn a_sentence_with_one_math_glyph_is_still_translated() {
-        let Some(font) = crate::font::load_cjk_font() else {
-            return;
-        };
+        // A synthetic glyf font, not the host CJK file. GitHub runners ship
+        // Noto CJK as CFF, and subset_ttf does not subset CFF faces.
+        let translated = "该方法与我们的做法相似。";
+        let codes: Vec<u32> = "The method is similar to our approach.xy"
+            .chars()
+            .chain(translated.chars())
+            .map(|ch| ch as u32)
+            .collect();
+        let font = box_ttf(&codes);
         let mut doc = Document::with_version("1.4");
         doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
         let pages_id = doc.new_object_id();

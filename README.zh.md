@@ -184,6 +184,8 @@ g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
   target/release/librapidpdftrans.a -ldl -lm -lpthread -lgcc_s -o smoke
 ```
 
+同一次 `rpt-ffi` 构建还会生成 C 共享库：`target/release/librapidpdftrans.so`（macOS 为 `.dylib`，Windows 为 `rapidpdftrans.dll`）。需要在 rustc 参数里加上 `--crate-type cdylib`。`rpt-python` 会写出同名文件，所以先构建并复制其中一个，再构建另一个。
+
 Go（先打好 release 静态库，再在 `bindings/go` 里）：
 
 ```bash
@@ -191,6 +193,12 @@ go test ./...
 ```
 
 `rpt_save` 会翻译已打开的文档并写出 PDF。没有设置 `RPT_LLM_API_KEY` 时返回 -1，并且不会创建文件。
+
+## 预编译包
+
+`.github/workflows/sdk.yml` 为每个平台打包头文件、共享库和静态库，并带上 CMake 配置和 Unix pkg-config。`.github/workflows/wheels.yml` 用 cibuildwheel 构建 CPython 3.10+ 的 abi3 wheel（每个平台一个 wheel，可在 3.10 及更新的 CPython 上加载）。两个工作流在 pull request、`workflow_dispatch` 和 `v*` tag 上运行。pull request 只上传构建产物。tag 名必须与 `Cargo.toml` 里的 `workspace.package.version` 一致（版本 `0.1.0` 对应 tag `v0.1.0`），才会把压缩包、wheel 和 sdist 挂到 GitHub Release，并把 wheel 和 sdist 发布到 PyPI。
+
+不构建 32 位 macOS：没有对应的托管 runner，当前 CPython 也不提供 32 位 macOS 安装包。musllinux wheel 只覆盖 x86_64 和 aarch64，因为 Rust 没有 `i686-unknown-linux-musl` 或 `armv7-unknown-linux-musleabihf` 的宿主编译器，而 cibuildwheel 在目标容器里编译。Intel macOS 使用 `macos-15-intel`；GitHub 已不再提供 `macos-13`。PyPI 上传使用仓库 secret `PYPI_APIKEY`（PyPI API token），并设置 `skip-existing`。不使用 trusted publishing。
 
 ## 翻译器
 

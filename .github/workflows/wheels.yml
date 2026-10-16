@@ -1,0 +1,286 @@
+# Python wheels via cibuildwheel. rpt-python enables PyO3 abi3-py310, so each
+# platform builds one cp310-abi3 wheel that installs on CPython 3.10 and newer.
+# Free-threaded CPython (3.13t / 3.14t) cannot load an abi3 wheel and is omitted.
+#
+# Matrix
+#   linux-x86_64    ubuntu-24.04       manylinux + musllinux x86_64
+#   linux-i686      ubuntu-24.04       manylinux i686 via QEMU
+#   linux-aarch64   ubuntu-24.04-arm   manylinux + musllinux aarch64 (native)
+#   linux-armv7     ubuntu-24.04       manylinux armv7l via QEMU (manylinux_2_31)
+#   macos-x86_64    macos-15-intel     macosx_x86_64
+#   macos-arm64     macos-14           macosx_arm64
+#   macos-universal2 macos-14          macosx_universal2 (lipo of both slices)
+#   windows-x64     windows-2025       win_amd64
+#   windows-x86     windows-2025       win32
+#   windows-arm64   windows-11-arm     win_arm64 (native)
+#
+# Not built
+#   32-bit macOS: no runner and no current CPython 32-bit macOS installer.
+#   macos-13: retired. Intel macOS is macos-15-intel; Apple Silicon is macos-14.
+#   musllinux i686 and musllinux armv7l: Rust publishes no host rustc for
+#   i686-unknown-linux-musl or armv7-unknown-linux-musleabihf, and cibuildwheel
+#   runs the compiler inside the target image.
+#
+# Pull requests and workflow_dispatch upload wheels and an sdist as artifacts.
+# A tag v<Cargo.toml version> uploads them to a GitHub Release and publishes
+# the same files to PyPI with the PYPI_APIKEY repository secret (a PyPI API
+# token). Attestations stay off: PEP 740 signing in this action only works
+# with trusted publishing.
+
+name: Python wheels
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            archs: x86_64
+            qemu: ""
+            rust-targets: ""
+            before-all-windows: ""
+            msvc: ""
+            retest: true
+            timeout: 90
+          - name: linux-i686
+            runner: ubuntu-24.04
+            archs: i686
+            qemu: "386"
+            rust-targets: ""
+            before-all-windows: ""
+            msvc: ""
+            retest: false
+            timeout: 180
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            archs: aarch64
+            qemu: ""
+            rust-targets: ""
+            before-all-windows: ""
+            msvc: ""
+            retest: true
+            timeout: 120
+          - name: linux-armv7
+            runner: ubuntu-24.04
+            archs: armv7l
+            qemu: arm
+            rust-targets: ""
+            before-all-windows: ""
+            msvc: ""
+            retest: false
+            timeout: 360
+          - name: macos-x86_64
+            runner: macos-15-intel
+            archs: x86_64
+            qemu: ""
+            rust-targets: ""
+            before-all-windows: ""
+            msvc: ""
+            retest: false
+            timeout: 90
+          - name: macos-arm64
+            runner: macos-14
+            archs: arm64
+            qemu: ""
+            rust-targets: ""
+            before-all-windows: ""
+            msvc: ""
+            retest: false
+            timeout: 90
+          - name: macos-universal2
+            runner: macos-14
+            archs: universal2
+            qemu: ""
+            rust-targets: x86_64-apple-darwin
+            before-all-windows: ""
+            msvc: ""
+            retest: false
+            timeout: 120
+          - name: windows-x64
+            runner: windows-2025
+            archs: AMD64
+            qemu: ""
+            rust-targets: ""
+            before-all-windows: ""
+            msvc: x64
+            retest: false
+            timeout: 90
+          - name: windows-x86
+            runner: windows-2025
+            archs: x86
+            qemu: ""
+            rust-targets: i686-pc-windows-msvc
+            before-all-windows: rustup target add i686-pc-windows-msvc
+            msvc: x86
+            retest: false
+            timeout: 120
+          - name: windows-arm64
+            runner: windows-11-arm
+            archs: ARM64
+            qemu: ""
+            rust-targets: ""
+            before-all-windows: ""
+            msvc: arm64
+            retest: false
+            timeout: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os != 'Linux' && matrix.rust-targets == ''
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os != 'Linux' && matrix.rust-targets != ''
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Prepare MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc }}
+
+      - name: Set up QEMU
+        if: matrix.qemu != ''
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.qemu }}
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.3.1
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+          CIBW_BEFORE_ALL_WINDOWS: ${{ matrix.before-all-windows }}
+
+      - name: Retest the abi3 wheel on the runner Python
+        if: matrix.retest
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv
+          python3 -m venv /tmp/rpt-whl
+          /tmp/rpt-whl/bin/pip install wheelhouse/*manylinux*.whl
+          /tmp/rpt-whl/bin/python bindings/python/smoke.py testdata/hello.pdf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          if-no-files-found: error
+          path: wheelhouse/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the source distribution
+        run: |
+          python -m pip install "build>=1.2" "maturin>=1.9.4,<2"
+          python -m build --sdist --outdir dist
+          python - <<'PY'
+          import tarfile
+          from pathlib import Path
+          archives = sorted(Path("dist").glob("*.tar.gz"))
+          if len(archives) != 1:
+              raise SystemExit(f"expected one sdist, found {archives}")
+          names = tarfile.open(archives[0]).getnames()
+          required = [
+              "Cargo.lock",
+              "crates/rpt-core/src/lib.rs",
+              "crates/rpt-python/src/lib.rs",
+              "pyproject.toml",
+          ]
+          missing = [item for item in required if not any(name.endswith(item) for name in names)]
+          if missing:
+              raise SystemExit(f"{archives[0].name} missing {missing}")
+          print(f"{archives[0].name} contains {', '.join(required)}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          if-no-files-found: error
+          path: dist/*.tar.gz
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, sdist]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - name: Upload wheels and sdist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh packaging/publish-release.sh dist SHA256SUMS-wheels.txt
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, sdist]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - name: Require the tag to match Cargo.toml
+        run: |
+          version=$(python3 - <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path("Cargo.toml").read_text()
+          match = re.search(r'(?m)^version = "([^"]+)"', text)
+          if not match:
+              sys.exit("Cargo.toml has no version")
+          print(match.group(1))
+          PY
+          )
+          if [ "$GITHUB_REF_NAME" != "v${version}" ]; then
+            echo "ref ${GITHUB_REF_NAME} does not match Cargo.toml version v${version}" >&2
+            exit 1
+          fi
+          find dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) | sort
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_APIKEY }}
+          packages-dir: dist
+          skip-existing: true
+          attestations: false

@@ -5327,6 +5327,9 @@ mod tests {
     fn digest_page4_chart_labels_leave_the_prose() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/cache/arxiv-2410.22360.pdf");
+        if !path.exists() {
+            return;
+        }
         let doc = crate::extract::PdfDocument::open(&path).unwrap();
         let extraction = doc.extract_with(&crate::extract::ExtractOptions::default());
         let seg = segment_placed(
