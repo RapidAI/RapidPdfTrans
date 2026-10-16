@@ -761,6 +761,10 @@ pub fn rewrite_translation(
     // stored under a CIDFontType0C subtype. Unwrap after compose so both
     // the translated file and the imported copy lose the mismatch.
     unwrap_opentype_cid_fonts(doc);
+    // A non-embedded Times-Roman (the arXiv margin stamp) has no FontFile.
+    // pdf.js without standard font data then drops `i`, `.`, and `:`, so the
+    // stamp paints as `arX` / `csCL` / `M ay`. Embed a real face instead.
+    embed_base14_fonts(doc);
     record_unfitted_line_warnings(extraction);
     Ok(())
 }
@@ -15226,6 +15230,11 @@ fn version_token(chars: &[char], start: usize) -> bool {
 /// A byline left in Latin is a name, not an untranslated body paragraph.
 /// Body prose the model echoed is `english-body`. Everything else is `unchanged`.
 fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
+    // An affiliation (`Google AI Language`) stays in the original embedded
+    // face. `unchanged` would blank it and redraw with the CJK subset.
+    if crate::translate::is_institution_line(source) {
+        return "name";
+    }
     // A long byline (`Jacob Devlin Ming-Wei Chang …`, 49 letters) is not body
     // prose. Shorter name lines stay `unchanged` so word-gap redraw still runs.
     if job_translates && english_body_source(source) {
@@ -15904,6 +15913,127 @@ fn clone_link(doc: &mut Document, source: ObjectId, rect: [f32; 4]) -> Option<Ob
 /// makes Poppler warn "Mismatch between font type and embedded font file".
 /// RPTCJK is already stored as bare CFF; this rewrites source fonts such as
 /// the arXiv margin stamp, including copies imported for a bilingual page.
+fn embed_base14_fonts(doc: &mut Document) {
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    for id in ids {
+        let Some(base) = bare_base14_name(doc, id) else {
+            continue;
+        };
+        let Some(path) = base14_font_path(&base) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let codes: Vec<u32> = (0x20..=0x7E).collect();
+        let Some(font) = subset_ttf(&bytes, &codes) else {
+            continue;
+        };
+        let object = simple_truetype_font(doc, &font, &format!("RPTBase-{base}"));
+        doc.objects.insert(id, object);
+    }
+}
+
+fn bare_base14_name(doc: &Document, id: ObjectId) -> Option<String> {
+    let dict = doc.get_object(id).ok()?.as_dict().ok()?;
+    let subtype = dict.get(b"Subtype").ok()?.as_name().ok()?;
+    if subtype != b"Type1" {
+        return None;
+    }
+    if dict.get(b"FontFile").is_ok()
+        || dict.get(b"FontFile2").is_ok()
+        || dict.get(b"FontFile3").is_ok()
+        || dict.get(b"Widths").is_ok()
+    {
+        return None;
+    }
+    if let Ok(encoding) = dict.get(b"Encoding") {
+        if encoding.as_dict().is_ok() || encoding.as_reference().is_ok() {
+            return None;
+        }
+    }
+    if let Ok(desc) = dict
+        .get(b"FontDescriptor")
+        .and_then(|obj| obj.as_reference())
+    {
+        if let Ok(desc) = doc.get_object(desc).and_then(|obj| obj.as_dict()) {
+            if desc.get(b"FontFile").is_ok()
+                || desc.get(b"FontFile2").is_ok()
+                || desc.get(b"FontFile3").is_ok()
+            {
+                return None;
+            }
+        }
+    }
+    let name = dict.get(b"BaseFont").ok()?.as_name().ok()?;
+    let name = String::from_utf8_lossy(name);
+    let name = name.rsplit('+').next().unwrap_or(name.as_ref());
+    base14_font_path(name).map(|_| name.to_string())
+}
+
+fn base14_font_path(name: &str) -> Option<&'static str> {
+    let path = match name {
+        "Times-Roman" => "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "Times-Bold" => "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+        "Times-Italic" => "/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf",
+        "Times-BoldItalic" => "/usr/share/fonts/truetype/liberation/LiberationSerif-BoldItalic.ttf",
+        "Helvetica" => "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "Helvetica-Bold" => "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "Helvetica-Oblique" => "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+        "Helvetica-BoldOblique" => {
+            "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf"
+        }
+        "Courier" => "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "Courier-Bold" => "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+        "Courier-Oblique" => "/usr/share/fonts/truetype/liberation/LiberationMono-Italic.ttf",
+        "Courier-BoldOblique" => {
+            "/usr/share/fonts/truetype/liberation/LiberationMono-BoldItalic.ttf"
+        }
+        _ => return None,
+    };
+    std::path::Path::new(path).is_file().then_some(path)
+}
+
+fn simple_truetype_font(doc: &mut Document, font: &SubsetFont, base_name: &str) -> Object {
+    let file_id = doc.add_object(Stream::new(Dictionary::new(), font.bytes.clone()));
+    let upem = u32::from(font.units_per_em.max(1));
+    let mut descriptor = Dictionary::new();
+    descriptor.set("Type", "FontDescriptor");
+    descriptor.set("FontName", Object::Name(base_name.as_bytes().to_vec()));
+    descriptor.set("Flags", 32);
+    descriptor.set(
+        "FontBBox",
+        vec![0.into(), (-200).into(), 1000.into(), 800.into()],
+    );
+    descriptor.set("ItalicAngle", 0);
+    descriptor.set("Ascent", 800);
+    descriptor.set("Descent", -200);
+    descriptor.set("CapHeight", 700);
+    descriptor.set("StemV", 80);
+    descriptor.set("FontFile2", file_id);
+    let descriptor_id = doc.add_object(descriptor);
+    let widths: Vec<Object> = (32u32..=126)
+        .map(|code| {
+            let advance = font
+                .glyphs
+                .get(&code)
+                .map(|(_, advance)| u32::from(*advance))
+                .unwrap_or(upem / 4);
+            Object::Integer(i64::from(advance * 1000 / upem))
+        })
+        .collect();
+    let mut face = Dictionary::new();
+    face.set("Type", "Font");
+    face.set("Subtype", "TrueType");
+    face.set("BaseFont", Object::Name(base_name.as_bytes().to_vec()));
+    face.set("FirstChar", 32);
+    face.set("LastChar", 126);
+    face.set("Widths", widths);
+    face.set("Encoding", "WinAnsiEncoding");
+    face.set("FontDescriptor", descriptor_id);
+    Object::Dictionary(face)
+}
+
 fn unwrap_opentype_cid_fonts(doc: &mut Document) {
     let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
     for id in ids {
@@ -20979,6 +21109,53 @@ ET",
         unique.dedup();
         assert_eq!(unique.len(), names.len(), "duplicate BaseFont: {names:?}");
         assert_viewer_text(&saved, "MicrosoftResearch{kahe,v-xiangz}@microsoft.com");
+    }
+
+    #[test]
+    fn viewers_paint_an_embedded_times_stamp() {
+        let path = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
+        if !std::path::Path::new(path).is_file() {
+            return;
+        }
+        let bytes = contents_pdf_named(
+            b"BT /F1 20 Tf 72 700 Td (arXiv:1810.04805v2  [cs.CL]  24 May 2019) Tj ET",
+            "Times-Roman",
+        );
+        // The synthetic helper stores Widths, which a real arXiv stamp does not.
+        // Drop them so the base-14 embedder treats this face like the stamp.
+        let mut doc = Document::load_mem(&bytes).unwrap();
+        let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+        for id in ids {
+            let Some(dict) = doc
+                .get_object_mut(id)
+                .ok()
+                .and_then(|object| object.as_dict_mut().ok())
+            else {
+                continue;
+            };
+            if dict.get(b"BaseFont").and_then(|obj| obj.as_name()).ok()
+                == Some(b"Times-Roman".as_slice())
+            {
+                dict.remove(b"Widths");
+                dict.remove(b"FirstChar");
+                dict.remove(b"LastChar");
+                dict.remove(b"Encoding");
+            }
+        }
+        embed_base14_fonts(&mut doc);
+        let mut saved = Vec::new();
+        doc.save_to(&mut saved).unwrap();
+        let loaded = Document::load_mem(&saved).unwrap();
+        let embedded = loaded.objects.values().any(|object| {
+            object
+                .as_dict()
+                .ok()
+                .and_then(|dict| dict.get(b"Subtype").ok())
+                .and_then(|obj| obj.as_name().ok())
+                == Some(b"TrueType")
+        });
+        assert!(embedded, "Times-Roman stamp was left non-embedded");
+        assert_viewer_text(&saved, "arXiv:1810.04805v2[cs.CL]24May2019");
     }
 
     fn assert_viewer_text(pdf: &[u8], needle: &str) {

@@ -3069,6 +3069,11 @@ pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
 /// A credit line whose personal name was translated. Role words stay in
 /// Chinese; the name is the original Latin (`Copy editor: Julie McNamee`).
 pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
+    // A paper affiliation stays in Latin (`Google AI Language`,
+    // `Microsoft Research`). The model otherwise turns it into Chinese.
+    if is_institution_line(source) {
+        return source.trim().to_string();
+    }
     // The department is an organization, not a person. The cached rendering
     // `特殊销售部` is not the wording used for this line.
     if source
@@ -3216,6 +3221,88 @@ fn heading_period(text: &str) -> bool {
         return false;
     };
     text.trim().ends_with('.') && word.chars().filter(|ch| ch.is_ascii_alphabetic()).count() > 2
+}
+
+/// A paper affiliation, not a sentence and not a section heading.
+/// `Google AI Language` and `Microsoft Research` stay in Latin.
+/// `Computer Science` and `Special Sales Department` do not match.
+pub(crate) fn is_institution_line(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.contains('@') || trimmed.len() > 160 {
+        return false;
+    }
+    if trimmed.ends_with(['.', '?', '!']) {
+        return false;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() > 12 {
+        return false;
+    }
+    let connectors = [
+        "of", "for", "and", "the", "de", "la", "at", "in", "on", "&", "und", "et",
+    ];
+    let title_like = tokens.iter().all(|token| {
+        let bare = token.trim_matches(|ch: char| matches!(ch, ',' | ';' | '(' | ')' | '/' | '+'));
+        if bare.is_empty() {
+            return true;
+        }
+        if connectors.contains(&bare.to_ascii_lowercase().as_str()) {
+            return true;
+        }
+        bare.chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+    });
+    title_like && tokens.iter().any(|token| institution_cue(token))
+}
+
+fn institution_cue(token: &str) -> bool {
+    let bare = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ';' | '(' | ')'));
+    matches!(
+        bare.to_ascii_lowercase().as_str(),
+        "university"
+            | "universite"
+            | "institute"
+            | "institution"
+            | "laboratory"
+            | "laboratories"
+            | "college"
+            | "polytechnic"
+            | "google"
+            | "microsoft"
+            | "facebook"
+            | "meta"
+            | "deepmind"
+            | "openai"
+            | "nvidia"
+            | "ibm"
+            | "adobe"
+            | "amazon"
+            | "apple"
+            | "baidu"
+            | "tencent"
+            | "alibaba"
+            | "huawei"
+            | "samsung"
+            | "intel"
+            | "qualcomm"
+            | "oracle"
+            | "salesforce"
+            | "bytedance"
+            | "sensetime"
+            | "stanford"
+            | "berkeley"
+            | "oxford"
+            | "cambridge"
+            | "mit"
+            | "cmu"
+            | "eth"
+            | "epfl"
+            | "inria"
+            | "research"
+            | "labs"
+            | "lab"
+    )
 }
 
 fn is_org_token(token: &str) -> bool {
@@ -4018,6 +4105,24 @@ mod tests {
         let chinese = "雅各布·德夫林 张明威 李肯顿 克里斯蒂娜·托塔诺娃";
         assert!(!needs_english_retry(byline, chinese));
         assert_eq!(restore_credit_names(byline, chinese), chinese);
+        assert_eq!(
+            restore_credit_names("Google AI Language", "谷歌人工智能语言"),
+            "Google AI Language"
+        );
+        assert_eq!(
+            restore_credit_names("Microsoft Research", "微软研究院"),
+            "Microsoft Research"
+        );
+        assert_eq!(
+            restore_credit_names("Carnegie Mellon University", "卡内基梅隆大学"),
+            "Carnegie Mellon University"
+        );
+        assert!(is_institution_line("Allen Institute for AI"));
+        assert!(!is_institution_line("Computer Science"));
+        assert!(!is_institution_line("Special Sales Department"));
+        assert!(!is_institution_line(
+            "The transformer architecture replaces recurrence with self attention."
+        ));
         assert!(!is_name_byline("The Model Context Protocol"));
         assert!(!is_name_byline(
             "The transformer architecture replaces recurrence with self attention over the input."
