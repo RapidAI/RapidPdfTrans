@@ -163,7 +163,7 @@ Rust stable (1.88 or newer; the workspace pins `stable`):
 ```bash
 cargo test --workspace
 cargo build -p rpt-cli --release
-./target/release/rpt extract file.pdf --json
+./target/release/rpt extract testdata/hello.pdf --json
 ```
 
 `rpt extract` writes per-glyph JSON, a plain-text reconstruction, and a coverage report to stdout. `rpt translate` without `--output` translates that text and does not write a PDF. Pass `--output` to write the translated PDF.

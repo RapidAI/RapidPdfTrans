@@ -163,7 +163,7 @@ rpt: translation failed: RPT_LLM_API_KEY is not set; the API key is accepted onl
 ```bash
 cargo test --workspace
 cargo build -p rpt-cli --release
-./target/release/rpt extract file.pdf --json
+./target/release/rpt extract testdata/hello.pdf --json
 ```
 
 `rpt extract` 把逐字形 JSON、纯文本和覆盖率报告打到标准输出。不加 `--output` 的 `rpt translate` 翻译这些文字，不写 PDF。加上 `--output` 才会写出译文 PDF。
