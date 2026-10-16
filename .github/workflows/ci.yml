@@ -56,4 +56,4 @@ jobs:
           ./target/release/rpt extract testdata/hello.pdf --json > /tmp/hello.json
           python3 -c 'import json; d=json.load(open("/tmp/hello.json")); assert d["plain_text"]=="Hello"'
       - name: Corpus subset fidelity check
-        run: cargo run -p rpt-qa -- --manifest corpus/ci/manifest.json --cache corpus/ci --render-pages 1
+        run: cargo run -p rpt-qa --bin rpt-qa -- --manifest corpus/ci/manifest.json --cache corpus/ci --render-pages 1

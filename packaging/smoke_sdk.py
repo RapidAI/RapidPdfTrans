@@ -142,9 +142,10 @@ def main() -> None:
                 for dll in folder.glob("*.dll"):
                     shutil.copy2(dll, exe_dir / dll.name)
                     print(f"staged {exe_dir / dll.name}", flush=True)
-            shared = exe_dir / "rapidpdftrans.dll"
-            if shared.is_file() and shutil.which("dumpbin"):
-                subprocess.run(["dumpbin", "/dependents", str(shared)], check=False)
+            if shutil.which("dumpbin"):
+                for dumped in (exe_dir / "rapidpdftrans.dll", exe_dir / "smoke_shared.exe"):
+                    if dumped.is_file():
+                        subprocess.run(["dumpbin", "/dependents", str(dumped)], check=False)
 
         for name in ("smoke_shared", "smoke_static"):
             exe = find_exe(build, name)

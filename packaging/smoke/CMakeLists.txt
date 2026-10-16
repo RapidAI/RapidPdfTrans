@@ -12,6 +12,12 @@ set(SMOKE_CPP "${CMAKE_CURRENT_LIST_DIR}/../../bindings/cpp/smoke.cpp")
 add_executable(smoke_shared "${SMOKE_CPP}")
 target_compile_features(smoke_shared PRIVATE cxx_std_17)
 target_link_libraries(smoke_shared PRIVATE rapidpdftrans::shared)
+if(MSVC)
+  # The default manifest asks WinSxS for this MSVC's CRT assembly. The
+  # runner has the DLL files but not that assembly, and the loader reports
+  # STATUS_DLL_NOT_FOUND. The redist DLLs are copied next to the exe.
+  target_link_options(smoke_shared PRIVATE "/MANIFEST:NO")
+endif()
 if(UNIX AND NOT APPLE)
   set_target_properties(smoke_shared PROPERTIES BUILD_RPATH "$ORIGIN")
 elseif(APPLE)
@@ -26,3 +32,6 @@ add_custom_command(TARGET smoke_shared POST_BUILD
 add_executable(smoke_static "${SMOKE_CPP}")
 target_compile_features(smoke_static PRIVATE cxx_std_17)
 target_link_libraries(smoke_static PRIVATE rapidpdftrans::static)
+if(MSVC)
+  target_link_options(smoke_static PRIVATE "/MANIFEST:NO")
+endif()
