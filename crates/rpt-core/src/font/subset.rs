@@ -215,12 +215,15 @@ fn subset_cff(path: &str, face_index: u32, codepoints: &[u32]) -> Option<SubsetF
         .collect::<Vec<_>>()
         .join(",");
     let dir = std::env::temp_dir();
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
-    let font_out = dir.join(format!("rpt-cff-{stamp}.otf"));
-    let json_out = dir.join(format!("rpt-cff-{stamp}.json"));
+    // cargo test runs cases on many threads. A clock stamp collides, and the
+    // later call deletes the file the earlier call is still reading.
+    let stamp = {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    };
+    let font_out = dir.join(format!("rpt-cff-{}-{stamp}.otf", std::process::id()));
+    let json_out = dir.join(format!("rpt-cff-{}-{stamp}.json", std::process::id()));
     let script = r#"
 import json, sys
 from fontTools.ttLib import TTFont
