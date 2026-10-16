@@ -272,11 +272,13 @@ fn subset_user_with_fallback(
     let Some(fallback) = noto_subset(true, bold, &missing) else {
         return Some(font);
     };
-    let covered: Vec<u32> = missing
+    let mut covered: Vec<u32> = missing
         .iter()
         .copied()
         .filter(|cp| fallback.glyphs.contains_key(cp))
         .collect();
+    covered.sort_unstable();
+    covered.dedup();
     if covered.is_empty() {
         return Some(font);
     }
@@ -1309,7 +1311,7 @@ for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
                 bold: false,
                 italic: false,
             },
-            &[b'A' as u32, 0x4E2D],
+            &[b'A' as u32, 0x4E2D, 0x4E2D],
             &sources,
         )
         .expect("user font");
@@ -1319,7 +1321,7 @@ for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
         assert!(fallback.glyphs.contains_key(&0x4E2D));
         assert!(face_name_contains(&fallback.bytes, "Noto Serif CJK"));
         let note = font.notice.as_deref().expect("missing-glyph warning");
-        assert!(note.contains("U+4E2D"), "{note}");
+        assert_eq!(note.matches("U+4E2D").count(), 1, "{note}");
         assert!(note.contains("Noto Serif CJK"), "{note}");
         assert!(font.has(0x4E2D));
         assert!(font.em_advance(0x4E2D).is_some());
