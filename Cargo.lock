@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "rpt-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "rpt-core",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "rpt-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "encoding_rs",
  "jsonwebtoken",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "rpt-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cbindgen",
  "rpt-core",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "rpt-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pyo3",
  "rpt-core",
@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "rpt-qa"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "image",
