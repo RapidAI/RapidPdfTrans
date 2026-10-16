@@ -21066,6 +21066,22 @@ mod tests {
 1 0 0 1 36 580 Tm ({kahe, v-xiangz}@microsoft.com) Tj \
 ET",
         );
+        // Affiliation stays in the original face. A real paper embeds that
+        // face; this fixture's Helvetica does not, so drop Widths and let the
+        // base-14 embedder supply the outlines pdf.js would otherwise skip.
+        let mut carrier = Document::load_mem(&bytes).unwrap();
+        for object in carrier.objects.values_mut() {
+            let Ok(dict) = object.as_dict_mut() else {
+                continue;
+            };
+            if dict.get(b"BaseFont").and_then(|obj| obj.as_name()).ok()
+                == Some(b"Helvetica".as_slice())
+            {
+                dict.remove(b"Widths");
+            }
+        }
+        let mut bytes = Vec::new();
+        carrier.save_to(&mut bytes).unwrap();
         let saved = paint_system_cjk(&bytes, &[(0, "用于图像识别的深度残差学习".into())]);
         let painted = PdfDocument::open_bytes(&saved)
             .unwrap()
@@ -21490,7 +21506,7 @@ ET",
 /F1 12 Tf \
 1 0 0 1 72 550 Tm [(Aidan) -280 (N.) -280 (Gomez)] TJ \
 1 0 0 1 72 530 Tm [(Illia) -280 (Polosukhin)] TJ \
-1 0 0 1 72 500 Tm [(Google) -250 (Research)] TJ 90 0 Td [(Google) -250 (Brain)] TJ \
+1 0 0 1 72 500 Tm [(Mountain) -250 (View)] TJ 90 0 Td [(Salt) -250 (Lake)] TJ \
 /F1 11 Tf \
 1 0 0 1 72 460 Tm (The dominant sequence transduction models are based on attention.) Tj \
 ET";
@@ -21546,10 +21562,10 @@ ET";
         assert!(!text.contains("AidanN.Gomez"), "{text}");
         assert!(text.contains("Illia Polosukhin"), "{text}");
         assert!(!text.contains("IlliaPolosukhin"), "{text}");
-        assert!(text.contains("Google Research"), "{text}");
-        assert!(text.contains("Google Brain"), "{text}");
-        assert!(!text.contains("GoogleResearch"), "{text}");
-        assert!(!text.contains("ResearchGoogle"), "{text}");
+        assert!(text.contains("Mountain View"), "{text}");
+        assert!(text.contains("Salt Lake"), "{text}");
+        assert!(!text.contains("MountainView"), "{text}");
+        assert!(!text.contains("ViewSalt"), "{text}");
     }
 
     struct HeaderFragment;
