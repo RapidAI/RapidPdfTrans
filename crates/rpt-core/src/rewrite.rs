@@ -14876,6 +14876,11 @@ fn version_token(chars: &[char], start: usize) -> bool {
 }
 
 fn english_body_source(text: &str) -> bool {
+    // Author email lines stay in Latin. They are not a body paragraph the
+    // model left untranslated.
+    if text.contains('@') {
+        return false;
+    }
     // An HTML row echoed by the model is markup, not a paragraph that failed
     // to translate. Four tags is a table fragment; a sentence is not.
     let tags = text.matches('<').count();
@@ -14918,7 +14923,7 @@ fn english_body_source(text: &str) -> bool {
 /// line of that list used to fall under the 40-letter floor, so coverage
 /// reported `english_body: 0` while the paragraph was still English.
 fn comma_list_english(text: &str) -> bool {
-    if text.chars().any(is_han_char) {
+    if text.chars().any(is_han_char) || text.contains('@') {
         return false;
     }
     if text.matches(',').count() < 3 {

@@ -60,9 +60,18 @@ def windows_crt_dir(archive_name: str) -> Path | None:
         for path in root.rglob("vcruntime140.dll")
         if arch in {part.lower() for part in path.parts}
     ]
-    if not matches:
+    # onecore and spectre copies are a different CRT. The desktop redist is
+    # the one rustc linked against.
+    desktop = [
+        path
+        for path in matches
+        if "onecore" not in {part.lower() for part in path.parts}
+        and "spectre" not in {part.lower() for part in path.parts}
+    ]
+    chosen = desktop or matches
+    if not chosen:
         return None
-    return matches[0].parent
+    return chosen[0].parent
 
 
 def main() -> None:
