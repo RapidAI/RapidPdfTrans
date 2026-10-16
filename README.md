@@ -2,7 +2,7 @@
 
 Format-preserving PDF translation. The goal is to replace [BabelDOC](https://github.com/funstory-ai/BabelDOC): keep the layout, and never silently drop text.
 
-This repository is milestone 1. It opens a PDF, interprets content streams down to individual glyphs, and checks that every glyph is still accounted for. A pluggable translator can mark those glyphs as translated. Rewriting the PDF comes later, so nothing here deletes a text-showing operator.
+It opens a PDF, interprets content streams down to individual glyphs, and checks that every glyph is still accounted for. A pluggable translator marks those glyphs as translated. `rpt translate` without `--output` reports that translation and does not write a file. `rpt translate --output` rewrites the glyphs into a PDF and removes the original text-showing operators for the glyphs it rewrote.
 
 ## Layout
 
@@ -30,7 +30,7 @@ cargo build -p rpt-cli --release
 ./target/release/rpt extract file.pdf --json
 ```
 
-`rpt extract` writes per-glyph JSON, a plain-text reconstruction, and a coverage report to stdout. `rpt translate` translates that text and still does not write a PDF.
+`rpt extract` writes per-glyph JSON, a plain-text reconstruction, and a coverage report to stdout. `rpt translate` without `--output` translates that text and does not write a PDF. Pass `--output` to write the translated PDF.
 
 Python (needs `python3-dev`):
 
@@ -72,11 +72,14 @@ An `api_key` field in options JSON is ignored. Explicit options win over environ
 
 ```bash
 export RPT_LLM_API_KEY=...
-./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf \
-  --glossary transformer=Transformer
+./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf
 ```
 
-The default output is pure target-language text: the translation replaces the original in place. Bilingual output is opt-in. `--mode side-by-side` puts the original page on the left and the translation on the right. `--mode alternating` writes the original page, then the translated page. `--mode overlay` keeps the original operators and draws the translation on the same page. `--bilingual` selects side-by-side unless `--layout alternating` or `--layout overlay` is set. `--layout` alone does not change the default. The same choice is `output_mode` (default `replace`) and, only when bilingual is requested, `bilingual_layout` in options JSON for `rpt_save`, the C++ `save`, and Python `save`. A layout field by itself leaves the PDF as pure translation. `--max-pages N` limits extraction to the first N pages. The CJK face is `RPT_CJK_FONT`, or Droid Sans Fallback / WenQuanYi / Noto Sans CJK when one of those is installed. The embedded font is a glyf subset (Identity-H, ToUnicode). Horizontal advances come from `hmtx`; OpenType GSUB is not applied. A segment that does not fit, or that shares an operator with a formula or another kept glyph, stays original.
+That command uses the defaults: it posts to the gateway at `RPT_LLM_BASE_URL` (`https://hub.mypapers.top/api/llm/v1` when unset) with model `RPT_LLM_MODEL` (`auto` when unset). The key is only `RPT_LLM_API_KEY`. Nothing else has to be set. `--glossary transformer=Transformer` is optional and is applied locally before the call.
+
+CJK glyphs are embedded from a face on the machine. `RPT_CJK_FONT` is the Song/serif file and `RPT_CJK_SANS` is the sans file. When those are unset, bold text uses `/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc` (collection face 2), serif text uses Noto Serif CJK SC Light when that file is installed and otherwise `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc` (face 2), and sans text uses `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` (face 2). When those faces cannot be subset, the fallback is `RPT_CJK_FONT` if it is set, then `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`, `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`, and `NotoSansCJK-Regular.ttc` under `/usr/share/fonts/opentype/noto` or `/usr/share/fonts/truetype/noto`. The embedded font is a glyf subset (Identity-H, ToUnicode). Horizontal advances come from `hmtx`; OpenType GSUB is not applied.
+
+The default output is pure target-language text: the translation replaces the original in place. Bilingual output is opt-in. `--mode side-by-side` puts the original page on the left and the translation on the right. `--mode alternating` writes the original page, then the translated page. `--mode overlay` keeps the original operators and draws the translation on the same page. `--bilingual` selects side-by-side unless `--layout alternating` or `--layout overlay` is set. `--layout` alone does not change the default. The same choice is `output_mode` (default `replace`) and, only when bilingual is requested, `bilingual_layout` in options JSON for `rpt_save`, the C++ `save`, and Python `save`. A layout field by itself leaves the PDF as pure translation. `--max-pages N` limits extraction to the first N pages. A segment that does not fit, or that shares an operator with a formula or another kept glyph, stays original.
 
 Before the call, URLs, email addresses, `{brace}` groups, numbers, in-text citations (`[12]`, `[1-3]`, `(Smith et al., 2020)`, `Smith (2019)`), and glossary terms are replaced with `⟦N⟧` placeholders and restored afterwards. Glossary terms are substituted locally (longest match, ASCII word boundaries), so the model does not have to obey a glossary table. A dropped placeholder is retried once and then reported as an error.
 

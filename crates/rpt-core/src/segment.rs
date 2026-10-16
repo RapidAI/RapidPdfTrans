@@ -8602,6 +8602,54 @@ mod tests {
     }
 
     #[test]
+    fn a_two_column_prose_line_stays_out_of_the_notation_column() {
+        let path = std::path::Path::new("/tmp/enduser/2610.20248.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(path).unwrap();
+        let extraction = doc.extract();
+        let placed = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let merged = crate::rewrite::merge_stacked_paragraphs(placed.segments, &extraction.glyphs);
+        let hit = merged
+            .iter()
+            .find(|item| item.text.contains("Despite these advances"))
+            .expect("intro paragraph");
+        assert!(
+            !hit.text.contains("real numbers"),
+            "notation column joined the prose:\n{}",
+            hit.text.chars().take(400).collect::<String>()
+        );
+        assert!(
+            hit.text.contains("tractable design procedure"),
+            "{}",
+            hit.text.chars().take(200).collect::<String>()
+        );
+        let crosses = |needle: &str, foreign: &str| {
+            merged
+                .iter()
+                .any(|item| item.text.contains(needle) && item.text.contains(foreign))
+        };
+        assert!(
+            !crosses("novel methodology that resolves", "Conceptual figure"),
+            "page 6 caption joined the left column"
+        );
+        assert!(
+            !crosses("piecewise convexity", "robustly stable"),
+            "page 7 proof joined the left column"
+        );
+        assert!(
+            !crosses("Following this construction", "unstructured dynamic"),
+            "page 9 uncertainty set joined the algorithm column"
+        );
+    }
+
+    #[test]
     fn the_manning_definition_is_one_paragraph_across_the_page() {
         let path =
             std::path::Path::new("/opt/cursor/artifacts/pdfs/manning-body-p31-60-source.pdf");

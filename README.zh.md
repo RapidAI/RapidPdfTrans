@@ -2,7 +2,7 @@
 
 尽量保住版式的 PDF 翻译库，用来替换 [BabelDOC](https://github.com/funstory-ai/BabelDOC)。硬性要求是：文字不能悄悄消失，版式尽量与原文一致。
 
-当前是里程碑 1：打开 PDF，把内容流解释到单个字形，并检查每个字形都还在。翻译器可以给字形标上译文。重写 PDF 是后面的里程碑，这里不会删掉原来的文本绘制指令。
+它打开 PDF，把内容流解释到单个字形，并检查每个字形都还在。翻译器给这些字形标上译文。不加 `--output` 的 `rpt translate` 只报告译文，不写文件。加上 `--output` 会把字形重写进 PDF，并删掉已经改写的那些字形原来的文本绘制指令。
 
 ## 目录
 
@@ -30,7 +30,7 @@ cargo build -p rpt-cli --release
 ./target/release/rpt extract file.pdf --json
 ```
 
-`rpt extract` 把逐字形 JSON、纯文本和覆盖率报告打到标准输出。`rpt translate` 翻译这些文字，仍然不写回 PDF。
+`rpt extract` 把逐字形 JSON、纯文本和覆盖率报告打到标准输出。不加 `--output` 的 `rpt translate` 翻译这些文字，不写 PDF。加上 `--output` 才会写出译文 PDF。
 
 Python（需要 `python3-dev`）：
 
@@ -70,11 +70,14 @@ go test ./...
 
 ```bash
 export RPT_LLM_API_KEY=...
-./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf \
-  --glossary transformer=Transformer
+./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf
 ```
 
-默认输出是纯译文：译文在原位替换原文。双语是可选项。`--mode side-by-side` 左页原文、右页译文。`--mode alternating` 先放原文页，再放译文页。`--mode overlay` 保留原文并在同一页画出译文。`--bilingual` 选择左右并排；用 `--layout alternating` 或 `--layout overlay` 改版式。只写 `--layout` 不会改变默认。C ABI 的 `rpt_save`、C++ `save` 和 Python `save` 同样默认 `output_mode` 为 `replace`；只有明确要求双语时，`bilingual_layout` 才生效。单独的 layout 字段仍是纯译文。`--max-pages N` 只处理前 N 页。中文字体来自 `RPT_CJK_FONT`，否则使用已安装的 Droid Sans Fallback、文泉驿或 Noto Sans CJK。嵌入的是 glyf 子集（Identity-H 和 ToUnicode）。水平前进量来自 `hmtx`，没有做 OpenType GSUB。放不下、或与公式等保留字形共用操作符的段落，仍留原文。
+这条命令走默认设置：请求发到 `RPT_LLM_BASE_URL`（未设置时是 `https://hub.mypapers.top/api/llm/v1`），模型是 `RPT_LLM_MODEL`（未设置时是 `auto`）。密钥只有 `RPT_LLM_API_KEY`。不必再设别的变量。`--glossary transformer=Transformer` 是可选项，在调用前本地替换。
+
+中文字形从本机字体嵌入。`RPT_CJK_FONT` 是宋体/衬线文件，`RPT_CJK_SANS` 是黑体/无衬线文件。都未设置时，粗体用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc`（字体集第 2 个面），衬线优先用已安装的 Noto Serif CJK SC Light，否则用 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc`（第 2 个面），无衬线用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`（第 2 个面）。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。嵌入的是 glyf 子集（Identity-H 和 ToUnicode）。水平前进量来自 `hmtx`，没有做 OpenType GSUB。
+
+默认输出是纯译文：译文在原位替换原文。双语是可选项。`--mode side-by-side` 左页原文、右页译文。`--mode alternating` 先放原文页，再放译文页。`--mode overlay` 保留原文并在同一页画出译文。`--bilingual` 选择左右并排；用 `--layout alternating` 或 `--layout overlay` 改版式。只写 `--layout` 不会改变默认。C ABI 的 `rpt_save`、C++ `save` 和 Python `save` 同样默认 `output_mode` 为 `replace`；只有明确要求双语时，`bilingual_layout` 才生效。单独的 layout 字段仍是纯译文。`--max-pages N` 只处理前 N 页。放不下、或与公式等保留字形共用操作符的段落，仍留原文。
 
 调用前会把 URL、邮箱、`{花括号}`、数字、文内引用（`[12]`、`[1-3]`、`(Smith et al., 2020)`、`Smith (2019)`）和术语表替换成 `⟦N⟧` 占位符，译完再还原。术语在本地替换（更长的优先，ASCII 按词边界），不指望模型遵守一张术语表。占位符丢失会重试一次，仍然丢失就报错。
 

@@ -1068,12 +1068,25 @@ fn import_object(
     Ok(new_id)
 }
 
+/// One column of ink. A paragraph that finishes at the top of the next
+/// column is two of these, not the rectangle that covers both.
+#[derive(Clone, Copy)]
+struct ColBox {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
 struct MathSpan {
     page: u32,
     top: f32,
     bottom: f32,
     left: f32,
     right: f32,
+    /// Two columns when a gutter splits the glyphs. The union box is
+    /// `left`/`right`/`top`/`bottom` and covers the other column as well.
+    columns: Option<(ColBox, ColBox)>,
     size: f32,
     structural: bool,
     /// Alphabetic glyphs. A multi-line paragraph is prose, not a formula shard.
@@ -1304,12 +1317,73 @@ fn math_span(glyphs: &[&Glyph]) -> Option<MathSpan> {
         bottom,
         left,
         right,
+        columns: column_gutter(glyphs, body),
         size: body,
         structural: stacked || shard,
         letters,
         head_left,
         margin_left: left,
     })
+}
+
+/// The other column when a gap wider than a word space splits a full line
+/// from the next column. A binomial inside one line is a smaller gap.
+fn column_gutter(glyphs: &[&Glyph], size: f32) -> Option<(ColBox, ColBox)> {
+    if glyphs.len() < 8 {
+        return None;
+    }
+    let size = size.max(1.0);
+    let mut order: Vec<&Glyph> = glyphs.to_vec();
+    order.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut best_gap = 0.0f32;
+    let mut best_at = 0usize;
+    for (index, pair) in order.windows(2).enumerate() {
+        let right = pair[0].bbox[2].max(pair[0].matrix[4]);
+        let left = pair[1].bbox[0].min(pair[1].matrix[4]);
+        let gap = left - right;
+        if gap > best_gap {
+            best_gap = gap;
+            best_at = index + 1;
+        }
+    }
+    if best_gap < size * 1.15 || best_at == 0 || best_at == order.len() {
+        return None;
+    }
+    let (first, second) = order.split_at(best_at);
+    let bounds = |items: &[&Glyph]| ColBox {
+        left: items
+            .iter()
+            .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]))
+            .fold(f32::MAX, f32::min),
+        right: items
+            .iter()
+            .map(|glyph| glyph.bbox[2].max(glyph.matrix[4]))
+            .fold(f32::MIN, f32::max),
+        top: items
+            .iter()
+            .map(|glyph| glyph.matrix[5])
+            .fold(f32::MIN, f32::max),
+        bottom: items
+            .iter()
+            .map(|glyph| glyph.matrix[5])
+            .fold(f32::MAX, f32::min),
+    };
+    let left = bounds(first);
+    let right = bounds(second);
+    if right.left - left.right < size * 1.15 {
+        return None;
+    }
+    if left.right - left.left < size * 8.0 || right.right - right.left < size * 8.0 {
+        return None;
+    }
+    Some((left, right))
+}
+
+fn span_boxes(union: ColBox, columns: Option<(ColBox, ColBox)>) -> Vec<ColBox> {
+    match columns {
+        Some((left, right)) => vec![left, right],
+        None => vec![union],
+    }
 }
 
 /// Three or more formula or script glyphs, close enough to be one symbol,
@@ -2245,6 +2319,7 @@ struct MergeSpan {
     bottom: f32,
     left: f32,
     right: f32,
+    columns: Option<(ColBox, ColBox)>,
     size: f32,
     stacked: bool,
     head_left: f32,
@@ -2289,6 +2364,7 @@ fn merge_span(glyphs: &[&Glyph], stacks: &[Vec<u32>]) -> Option<MergeSpan> {
         bottom,
         left,
         right,
+        columns: column_gutter(glyphs, body),
         size: body,
         stacked,
         head_left,
@@ -2415,11 +2491,7 @@ fn absorb_interior_shards(
     drop
 }
 
-fn merge_spans_chain(left: &MergeSpan, right: &MergeSpan) -> bool {
-    if left.page != right.page {
-        return false;
-    }
-    let size = left.size.max(right.size).max(1.0);
+fn boxes_touch(left: ColBox, right: ColBox, size: f32, hanging: bool) -> bool {
     let gap = if left.bottom > right.top {
         left.bottom - right.top
     } else if right.bottom > left.top {
@@ -2427,11 +2499,6 @@ fn merge_spans_chain(left: &MergeSpan, right: &MergeSpan) -> bool {
     } else {
         0.0
     };
-    let narrow = |span: &MergeSpan| span.stacked && span.right - span.left < size * 4.0;
-    // A binomial glyph run is a couple of ems wide and hangs off its line.
-    // A full line that already contains one is ordinary prose: the next
-    // line of that paragraph is a normal lead, not the next paragraph.
-    let hanging = narrow(left) || narrow(right);
     let gap_limit = if hanging { size * 0.75 } else { size * 1.45 };
     if gap > gap_limit {
         return false;
@@ -2450,9 +2517,56 @@ fn merge_spans_chain(left: &MergeSpan, right: &MergeSpan) -> bool {
         } else {
             0.0
         };
-        if gap_x > size * 1.25 {
+        // A word after a binomial is about one em away. The next column
+        // starts about 1.2em past this one.
+        if gap_x > size * 1.15 {
             return false;
         }
+    }
+    true
+}
+
+fn merge_spans_chain(left: &MergeSpan, right: &MergeSpan) -> bool {
+    if left.page != right.page {
+        return false;
+    }
+    let size = left.size.max(right.size).max(1.0);
+    let narrow = |span: &MergeSpan| span.stacked && span.right - span.left < size * 4.0;
+    // A binomial glyph run is a couple of ems wide and hangs off its line.
+    // A full line that already contains one is ordinary prose: the next
+    // line of that paragraph is a normal lead, not the next paragraph.
+    let hanging = narrow(left) || narrow(right);
+    let gap = if left.bottom > right.top {
+        left.bottom - right.top
+    } else if right.bottom > left.top {
+        right.bottom - left.top
+    } else {
+        0.0
+    };
+    let left_boxes = span_boxes(
+        ColBox {
+            left: left.left,
+            right: left.right,
+            top: left.top,
+            bottom: left.bottom,
+        },
+        left.columns,
+    );
+    let right_boxes = span_boxes(
+        ColBox {
+            left: right.left,
+            right: right.right,
+            top: right.top,
+            bottom: right.bottom,
+        },
+        right.columns,
+    );
+    if !left_boxes.iter().any(|left_box| {
+        right_boxes
+            .iter()
+            .any(|right_box| boxes_touch(*left_box, *right_box, size, hanging))
+    }) {
+        return false;
     }
     let (above, below) = if left.top >= right.top {
         (left, right)
@@ -2646,18 +2760,29 @@ fn math_spans_chain(left: &MathSpan, right: &MathSpan) -> bool {
         return false;
     }
     let size = left.size.max(right.size).max(1.0);
-    let gap = if left.bottom > right.top {
-        left.bottom - right.top
-    } else if right.bottom > left.top {
-        right.bottom - left.top
-    } else {
-        0.0
-    };
-    if gap > size * 1.45 {
-        return false;
-    }
-    let overlap = left.right.min(right.right) - left.left.max(right.left);
-    if overlap <= size * 2.0 {
+    let left_boxes = span_boxes(
+        ColBox {
+            left: left.left,
+            right: left.right,
+            top: left.top,
+            bottom: left.bottom,
+        },
+        left.columns,
+    );
+    let right_boxes = span_boxes(
+        ColBox {
+            left: right.left,
+            right: right.right,
+            top: right.top,
+            bottom: right.bottom,
+        },
+        right.columns,
+    );
+    if !left_boxes.iter().any(|left_box| {
+        right_boxes
+            .iter()
+            .any(|right_box| boxes_touch(*left_box, *right_box, size, false))
+    }) {
         return false;
     }
     // The next paragraph is indented. A formula shard on the line above is
@@ -15640,6 +15765,7 @@ mod tests {
             bottom: 350.0,
             left: 72.0,
             right: 288.0,
+            columns: None,
             size: 10.0,
             structural: true,
             letters: 8,
@@ -15652,6 +15778,7 @@ mod tests {
             bottom: 280.0,
             left: 72.0,
             right: 288.0,
+            columns: None,
             size: 10.0,
             structural: false,
             letters: 200,
@@ -15664,6 +15791,7 @@ mod tests {
             bottom: 348.0,
             left: 72.0,
             right: 200.0,
+            columns: None,
             size: 10.0,
             structural: false,
             letters: 12,
@@ -15676,6 +15804,7 @@ mod tests {
             bottom: 336.0,
             left: 72.0,
             right: 288.0,
+            columns: None,
             size: 10.0,
             structural: false,
             letters: 44,
@@ -16570,6 +16699,141 @@ mod tests {
         );
         let gap = (lines[0].y - lines[1].y).abs();
         assert!(gap > 10.0, "baselines stayed crushed: {gap}");
+    }
+
+    #[test]
+    fn a_column_gutter_does_not_pull_prose_into_the_notation_stack() {
+        // Left column ends, then 1.2em of gutter, then a binomial in the
+        // other column. That gap is not the space after a stack.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut push = |x: f32, y: f32, size: f32, text: &str, font: &str| {
+            let mut glyph = ink_glyph(id, x, y, size, text);
+            glyph.font_name = font.into();
+            glyphs.push(glyph);
+            id += 1;
+        };
+        let mut x = 60.0f32;
+        for ch in "Despite these advances, existing methods either treat esti-".chars() {
+            push(x, 700.0, 10.0, &ch.to_string(), "NimbusRom");
+            x += 4.2;
+        }
+        let left_end = x;
+        let stack_x = left_end + 12.0;
+        for (index, ch) in ["k", "+", "1"].iter().enumerate() {
+            push(
+                stack_x + index as f32 * 6.0,
+                705.0,
+                8.0,
+                ch,
+                "LMMathItalic10",
+            );
+        }
+        push(stack_x + 8.0, 694.0, 8.0, "2", "LMMathItalic10");
+        push(stack_x - 4.0, 710.0, 10.0, "", "LMMathExtension10");
+        push(stack_x + 16.0, 710.0, 10.0, "", "LMMathExtension10");
+        let mut rx = stack_x + 40.0;
+        for ch in "numbers".chars() {
+            push(rx, 700.0, 10.0, &ch.to_string(), "NimbusRom");
+            rx += 4.2;
+        }
+        drop(push);
+        let left: Vec<u32> = glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[4] < left_end && !glyph.unicode.is_empty())
+            .map(|glyph| glyph.id)
+            .collect();
+        let stack: Vec<u32> = glyphs
+            .iter()
+            .filter(|glyph| glyph.font_name.contains("Math"))
+            .map(|glyph| glyph.id)
+            .collect();
+        let segments = vec![
+            crate::segment::Segment {
+                id: 0,
+                page_index: 0,
+                glyph_ids: left,
+                text: "Despite these advances, existing methods either treat esti-".into(),
+            },
+            crate::segment::Segment {
+                id: 1,
+                page_index: 0,
+                glyph_ids: stack,
+                text: String::new(),
+            },
+        ];
+        let merged = merge_stacked_paragraphs(segments, &glyphs);
+        let prose = merged
+            .iter()
+            .find(|item| item.text.contains("Despite"))
+            .expect("prose");
+        assert!(
+            !prose.text.contains("numbers"),
+            "gutter joined the columns: {}",
+            prose.text
+        );
+    }
+
+    #[test]
+    fn a_two_column_proof_is_not_held_as_a_math_block() {
+        let path = std::path::Path::new("/tmp/enduser/2610.20248.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(path).unwrap();
+        let extraction = doc.extract();
+        let placed = crate::segment::segment_placed(
+            &extraction.glyphs,
+            &crate::segment::SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let merged = merge_stacked_paragraphs(placed.segments, &extraction.glyphs);
+        let segments: Vec<crate::translate::TranslatedSegment> = merged
+            .into_iter()
+            .map(|seg| crate::translate::TranslatedSegment {
+                id: seg.id,
+                page_index: seg.page_index,
+                glyph_ids: seg.glyph_ids,
+                translated: "译文".into(),
+                source: seg.text,
+            })
+            .collect();
+        let report = crate::translate::TranslateReport {
+            segments,
+            calls: 0,
+            cache_hits: 0,
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let blocks = super::math_block_segments(&report, &extraction, &by_id);
+        let held = |needle: &str| {
+            report
+                .segments
+                .iter()
+                .enumerate()
+                .any(|(index, seg)| blocks.contains(&index) && seg.source.contains(needle))
+        };
+        assert!(!held("Despite these advances"), "intro stayed a math block");
+        assert!(
+            !held("tractable design procedure"),
+            "intro close stayed a math block"
+        );
+        assert!(
+            !held("Conceptual figure"),
+            "figure caption stayed a math block"
+        );
+        assert!(
+            !held("then the feedback interconnection"),
+            "page 7 proof stayed a math block"
+        );
+        assert!(
+            !held("unstructured dynamic uncertainty"),
+            "page 9 uncertainty set stayed a math block"
+        );
+        assert!(
+            !held("We over-approximate"),
+            "page 9 estimate stayed a math block"
+        );
     }
 
     #[test]
