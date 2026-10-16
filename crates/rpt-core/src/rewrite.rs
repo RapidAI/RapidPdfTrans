@@ -7732,6 +7732,92 @@ fn small_caps_cap_size(sizes: &[f32]) -> Option<f32> {
     Some(large)
 }
 
+fn source_block_align(
+    ink: &[InkLine<'_>],
+    media: [f32; 4],
+    extraction: &Extraction,
+) -> crate::overlap::BlockAlign {
+    let lines: Vec<crate::overlap::AlignLine> = ink
+        .iter()
+        .map(|line| crate::overlap::AlignLine {
+            left: line.left,
+            right: line.right,
+            size: crate::segment::representative_size(&line.glyphs).max(1.0),
+        })
+        .collect();
+    crate::overlap::block_alignment(&lines, media, column_bounds(extraction, ink))
+}
+
+/// Body lines that contain this block's midpoint, excluding the block itself.
+fn column_bounds(extraction: &Extraction, ink: &[InkLine<'_>]) -> Option<(f32, f32)> {
+    let page = ink.first()?.glyphs.first()?.page_index;
+    let size = ink
+        .iter()
+        .map(|line| crate::segment::representative_size(&line.glyphs))
+        .fold(1.0, f32::max)
+        .max(1.0);
+    let mut mids: Vec<f32> = ink
+        .iter()
+        .map(|line| (line.left + line.right) * 0.5)
+        .collect();
+    if mids.is_empty() {
+        return None;
+    }
+    mids.sort_by(|left, right| left.total_cmp(right));
+    let mid = mids[mids.len() / 2];
+    let mut spans: Vec<(f32, f32)> = page_text_pieces(extraction, page)
+        .iter()
+        .filter(|piece| {
+            piece.right - piece.left >= size * 12.0
+                && piece.left + size < mid
+                && piece.right - size > mid
+                && ink
+                    .iter()
+                    .all(|line| (line.y - piece.y).abs() > size * 0.45)
+        })
+        .map(|piece| (piece.left, piece.right))
+        .collect();
+    if spans.len() < 3 {
+        return None;
+    }
+    spans.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let left = spans[spans.len() / 2].0;
+    spans.sort_by(|left, right| left.1.total_cmp(&right.1));
+    let right = spans[spans.len() / 2].1;
+    (right - left > size * 8.0).then_some((left, right))
+}
+
+fn shift_aligned(drawn: &mut [Drawn], align: crate::overlap::BlockAlign, media: [f32; 4]) {
+    match align {
+        crate::overlap::BlockAlign::Center { axis } if axis.is_finite() => {
+            for item in drawn {
+                let width = item.widths.iter().sum::<f32>();
+                if width <= 0.0 {
+                    continue;
+                }
+                let x = axis - width * 0.5;
+                if x >= media[0] + 12.0 && x + width <= media[2] - 12.0 {
+                    item.gaps.fill(0.0);
+                    item.x = x;
+                }
+            }
+        }
+        crate::overlap::BlockAlign::End { edge } => {
+            for item in drawn {
+                let advance = item.widths.iter().sum::<f32>() + item.gaps.iter().sum::<f32>();
+                if advance <= 0.0 {
+                    continue;
+                }
+                let x = edge - advance;
+                if x + 0.4 >= item.x && x >= media[0] + 24.0 {
+                    item.x = x;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A section heading that opens on the body margin is left-aligned. A short
 /// line that merely ends where the heading ends is not a title-page cluster,
 /// and sliding the heading to that edge paints it over the formula.
@@ -9426,7 +9512,18 @@ fn layout_segment(
     // A justified body column also shares a right edge. Sliding a short body
     // line onto it (`“来自一线的 LLM…` at x=270) opens a hole the column
     // closer cannot cross, because the line no longer shares a left edge.
-    if !bilingual && source_size >= 14.0 && !drawn.is_empty() {
+    let align = if bilingual {
+        crate::overlap::BlockAlign::Start
+    } else {
+        source_block_align(&ink, media, extraction)
+    };
+    // A centered title shares its right edge with whatever else happens to
+    // end there (a figure's tick labels). That is not a right-aligned block.
+    if !matches!(align, crate::overlap::BlockAlign::Center { .. })
+        && !bilingual
+        && source_size >= 14.0
+        && !drawn.is_empty()
+    {
         let ink_edge = ink.iter().map(|line| line.right).fold(f32::MIN, f32::max);
         let shared = ink.iter().all(|line| (line.right - ink_edge).abs() <= 2.0);
         let left_min = ink.iter().map(|line| line.left).fold(f32::MAX, f32::min);
@@ -9466,6 +9563,23 @@ fn layout_segment(
                 let crosses_numeral = numeral_left.is_some() && item.x + advance > edge + 0.4;
                 if (x + 0.4 >= item.x || crosses_numeral) && x >= media[0] + 24.0 {
                     item.x = x;
+                }
+            }
+        }
+    }
+    if !bilingual {
+        let marker = bullet.as_ref().map(|item| item.marker_x);
+        match align {
+            crate::overlap::BlockAlign::Center { .. } => shift_aligned(&mut drawn, align, media),
+            crate::overlap::BlockAlign::End { .. } if source_size < 14.0 => {
+                shift_aligned(&mut drawn, align, media);
+            }
+            _ => {}
+        }
+        if let Some(marker_x) = marker {
+            if let Some(item) = bullet.as_ref() {
+                if let Some(mark) = drawn.iter_mut().find(|line| line.text == item.marker) {
+                    mark.x = marker_x;
                 }
             }
         }
@@ -21150,6 +21264,125 @@ mod tests {
             centered_heading_span(HeadingLevel::Body, 14.35, media, 180.0, 416.0).is_none(),
             "body text keeps the ink box"
         );
+    }
+
+    #[test]
+    fn a_shorter_centered_title_stays_on_the_source_axis() {
+        let title = "深度残差学习用于图像识别";
+        let body = "我们提出残差学习框架";
+        let mut points: Vec<u32> = title
+            .chars()
+            .chain(body.chars())
+            .map(|ch| ch as u32)
+            .collect();
+        points.sort_unstable();
+        points.dedup();
+        let Some(font) = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &points,
+            &FontSources::default(),
+        ) else {
+            return;
+        };
+        let page = |glyphs: Vec<Glyph>| Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let band = |id: u32, x: f32, right: f32, y: f32, size: f32, text: &str| {
+            let mut glyph = ink_glyph(id, x, y, size, text);
+            glyph.bbox = [x, y - size * 0.2, right, y + size * 0.8];
+            glyph
+        };
+        let draw = |glyphs: Vec<Glyph>, text: &str| {
+            let refs: Vec<&Glyph> = glyphs.iter().collect();
+            let extraction = page(glyphs.clone());
+            layout_segment(
+                &refs,
+                text,
+                &font,
+                &extraction,
+                false,
+                "RPT",
+                0.0,
+                CjkMeasure::resolve(0.90, 1.60),
+            )
+        };
+        // ResNet's title is one centered line. Chinese is shorter, so leaving
+        // it on the English left edge (or on a tick-label right edge) walks
+        // off the page center.
+        let title_glyphs = vec![band(
+            0,
+            153.4,
+            441.8,
+            680.0,
+            14.3,
+            "Deep Residual Learning for Image Recognition",
+        )];
+        let drawn = draw(title_glyphs, title).expect("title fits");
+        assert_eq!(
+            drawn.len(),
+            1,
+            "{:?}",
+            drawn.iter().map(|line| &line.text).collect::<Vec<_>>()
+        );
+        let advance = drawn[0].widths.iter().sum::<f32>();
+        let mid = drawn[0].x + advance * 0.5;
+        assert!(
+            (mid - 297.6).abs() < 4.0,
+            "title mid {mid:.1} x {:.1} advance {advance:.1}",
+            drawn[0].x
+        );
+        // A column line keeps the left edge.
+        let body_glyphs = vec![band(
+            0,
+            50.0,
+            286.0,
+            400.0,
+            10.0,
+            "present a residual learning framework to ease the training",
+        )];
+        let drawn = draw(body_glyphs, body).expect("body fits");
+        assert!(
+            drawn[0].x < 70.0,
+            "body slid to x {:.1}: {}",
+            drawn[0].x,
+            drawn[0].text
+        );
+        // BERT's title is two centered lines of different widths.
+        let bert = vec![
+            band(
+                0,
+                116.5,
+                481.0,
+                740.0,
+                14.0,
+                "BERT: Pre-training of Deep Bidirectional Transformers for",
+            ),
+            band(1, 220.9, 376.7, 724.0, 14.0, "Language Understanding"),
+        ];
+        let drawn = draw(bert, title).expect("bert title fits");
+        for line in &drawn {
+            let advance = line.widths.iter().sum::<f32>();
+            let mid = line.x + advance * 0.5;
+            assert!(
+                (mid - 298.8).abs() < 6.0,
+                "line mid {mid:.1} x {:.1}: {}",
+                line.x,
+                line.text
+            );
+        }
     }
 
     #[test]

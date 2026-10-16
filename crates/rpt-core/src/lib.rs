@@ -55,7 +55,7 @@ pub use font::minimal_ttf;
 pub use geom::{Matrix, Rect};
 pub use glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKind};
 pub use layout::{fit_paragraph, CjkMeasure, FittedParagraph};
-pub use overlap::{find_overlaps, OverlapHit};
+pub use overlap::{find_alignment_drift, find_overlaps, BlockAlign, OverlapHit};
 pub use rewrite::{rewrite_translation, RewriteOptions};
 pub use segment::{segment_glyphs, segment_with, Segment, SegmentFlags, Segmentation};
 pub use translate::{
