@@ -38,6 +38,33 @@ def find_exe(build: Path, name: str) -> Path:
     return matches[0]
 
 
+def windows_crt_dir(archive_name: str) -> Path | None:
+    """Directory of the MSVC redist that matches this SDK archive.
+
+    Rust's cdylib imports vcruntime140.dll by name. The smoke executable finds
+    that DLL through its manifest, but the loader still searches PATH for the
+    import on the DLL itself. The Visual Studio redist is not on PATH.
+    """
+    redist = os.environ.get("VCToolsRedistDir")
+    if not redist or os.name != "nt":
+        return None
+    if "aarch64" in archive_name:
+        arch = "arm64"
+    elif "i686" in archive_name:
+        arch = "x86"
+    else:
+        arch = "x64"
+    root = Path(redist)
+    matches = [
+        path
+        for path in root.rglob("vcruntime140.dll")
+        if arch in {part.lower() for part in path.parts}
+    ]
+    if not matches:
+        return None
+    return matches[0].parent
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist", type=Path, required=True)
@@ -89,7 +116,13 @@ def main() -> None:
         bin_dir = str(root / "bin")
         env["LD_LIBRARY_PATH"] = lib + os.pathsep + env.get("LD_LIBRARY_PATH", "")
         env["DYLD_LIBRARY_PATH"] = lib + os.pathsep + env.get("DYLD_LIBRARY_PATH", "")
-        env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        path_parts = [bin_dir]
+        crt = windows_crt_dir(archives[0].name)
+        if crt is not None:
+            path_parts.append(str(crt))
+            print(f"using VC CRT {crt}", flush=True)
+        path_parts.append(env.get("PATH", ""))
+        env["PATH"] = os.pathsep.join(path_parts)
         emulator = shlex.split(args.emulator)
 
         for name in ("smoke_shared", "smoke_static"):

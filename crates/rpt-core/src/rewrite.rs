@@ -19000,9 +19000,15 @@ mod tests {
 
     #[test]
     fn a_sentence_with_one_math_glyph_is_still_translated() {
-        let Some(font) = crate::font::load_cjk_font() else {
-            return;
-        };
+        // A synthetic glyf font, not the host CJK file. GitHub runners ship
+        // Noto CJK as CFF, and subset_ttf does not subset CFF faces.
+        let translated = "该方法与我们的做法相似。";
+        let codes: Vec<u32> = "The method is similar to our approach.xy"
+            .chars()
+            .chain(translated.chars())
+            .map(|ch| ch as u32)
+            .collect();
+        let font = box_ttf(&codes);
         let mut doc = Document::with_version("1.4");
         doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
         let pages_id = doc.new_object_id();
