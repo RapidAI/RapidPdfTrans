@@ -14576,7 +14576,12 @@ fn embed_and_draw(
     }
     let mut font_ids: HashMap<String, ObjectId> = HashMap::new();
     for (name, font) in fonts {
-        font_ids.insert(name.clone(), embed_font(doc, font));
+        // BaseFont is the cache key in PDFium and several pdf.js builds. Two
+        // subsets both named RPTCJK paint with whichever program loaded first.
+        font_ids.insert(
+            name.clone(),
+            embed_font(doc, font, &format!("RPTCJK-{name}")),
+        );
     }
     let mut by_page: HashMap<u32, Vec<&Drawn>> = HashMap::new();
     for line in drawn {
@@ -14652,7 +14657,7 @@ fn sfnt_table(font: &[u8], tag: &[u8; 4]) -> Option<Vec<u8>> {
     None
 }
 
-fn embed_font(doc: &mut Document, font: &SubsetFont) -> ObjectId {
+fn embed_font(doc: &mut Document, font: &SubsetFont, base_name: &str) -> ObjectId {
     // A CIDFontType0 FontFile3 must be a bare CFF program. Noto's subset is an
     // OpenType (OTTO) wrapper around that CFF. Embedding the wrapper makes
     // Poppler report "Mismatch between font type and embedded font file" and
@@ -14668,7 +14673,7 @@ fn embed_font(doc: &mut Document, font: &SubsetFont) -> ObjectId {
     };
     let mut descriptor = Dictionary::new();
     descriptor.set("Type", "FontDescriptor");
-    descriptor.set("FontName", "RPTCJK");
+    descriptor.set("FontName", Object::Name(base_name.as_bytes().to_vec()));
     descriptor.set("Flags", 4);
     descriptor.set(
         "FontBBox",
@@ -14708,7 +14713,7 @@ fn embed_font(doc: &mut Document, font: &SubsetFont) -> ObjectId {
     let mut cid = Dictionary::new();
     cid.set("Type", "Font");
     cid.set("Subtype", if cff { "CIDFontType0" } else { "CIDFontType2" });
-    cid.set("BaseFont", "RPTCJK");
+    cid.set("BaseFont", Object::Name(base_name.as_bytes().to_vec()));
     cid.set("CIDSystemInfo", system);
     cid.set("FontDescriptor", descriptor_id);
     cid.set("DW", 1000);
@@ -14719,27 +14724,27 @@ fn embed_font(doc: &mut Document, font: &SubsetFont) -> ObjectId {
     let cid_id = doc.add_object(cid);
     let tounicode = doc.add_object(Stream::new(
         Dictionary::new(),
-        tounicode_cmap(font).into_bytes(),
+        tounicode_cmap(font, base_name).into_bytes(),
     ));
     let mut type0 = Dictionary::new();
     type0.set("Type", "Font");
     type0.set("Subtype", "Type0");
-    type0.set("BaseFont", "RPTCJK");
+    type0.set("BaseFont", Object::Name(base_name.as_bytes().to_vec()));
     type0.set("Encoding", "Identity-H");
     type0.set("DescendantFonts", vec![Object::Reference(cid_id)]);
     type0.set("ToUnicode", tounicode);
     doc.add_object(type0)
 }
 
-fn tounicode_cmap(font: &SubsetFont) -> String {
+fn tounicode_cmap(font: &SubsetFont, base_name: &str) -> String {
     let mut pairs: Vec<(u16, u32)> = font
         .glyphs
         .iter()
         .map(|(unicode, (gid, _))| (*gid, *unicode))
         .collect();
     pairs.sort_unstable();
-    let mut out = String::from(
-        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n/CMapName /RPTCJK def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    let mut out = format!(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n/CMapName /{base_name} def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
     );
     for chunk in pairs.chunks(100) {
         out.push_str(&format!("{} beginbfchar\n", chunk.len()));
@@ -20866,6 +20871,180 @@ mod tests {
         assert_painted_nihao(&saved);
     }
 
+    #[test]
+    fn viewers_paint_aeo0_and_cjk() {
+        // The source line is wide enough that the probe is not rejected as
+        // an overflow. a/e/o/0 are the Standard Encoding slots Noto used as CIDs.
+        let bytes = contents_pdf(
+            b"BT /F1 12 Tf 1 0 0 1 36 700 Tm (Hello world this line is long enough for the probe text.) Tj ET",
+        );
+        let saved = paint_system_cjk(&bytes, &[(0, "aeo0中文Transformer2018".into())]);
+        let painted = PdfDocument::open_bytes(&saved)
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(
+            painted.contains("aeo0"),
+            "translation was not written: {painted}"
+        );
+        let mut names = Vec::new();
+        let loaded = Document::load_mem(&saved).unwrap();
+        for object in loaded.objects.values() {
+            let Ok(dict) = object.as_dict() else {
+                continue;
+            };
+            let Ok(subtype) = dict.get(b"Subtype").and_then(|obj| obj.as_name()) else {
+                continue;
+            };
+            if subtype != b"Type0" {
+                continue;
+            }
+            let Ok(name) = dict.get(b"BaseFont").and_then(|obj| obj.as_name()) else {
+                continue;
+            };
+            names.push(String::from_utf8_lossy(name).into_owned());
+        }
+        assert!(
+            !names.is_empty(),
+            "no Type0 font in {} objects",
+            loaded.objects.len()
+        );
+        assert!(
+            names.iter().all(|name| name.starts_with("RPTCJK-")),
+            "shared BaseFont: {names:?}"
+        );
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "duplicate BaseFont: {names:?}");
+        let needle = "aeo0中文Transformer2018";
+        assert_viewer_text(&saved, needle);
+    }
+
+    fn assert_viewer_text(pdf: &[u8], needle: &str) {
+        let path = std::env::temp_dir().join(format!("rpt-viewers-{}.pdf", std::process::id()));
+        std::fs::write(&path, pdf).unwrap();
+        let mut saw = false;
+        if !tool_missing("pdftoppm") && !tool_missing("tesseract") {
+            saw = true;
+            let text = ocr_pngs(&render_poppler(&path), needle);
+            assert!(
+                text.contains(needle),
+                "poppler paint dropped glyphs: {text}"
+            );
+        }
+        if !tool_missing("mutool") && !tool_missing("tesseract") {
+            saw = true;
+            let text = ocr_pngs(&render_mutool(&path), needle);
+            assert!(text.contains(needle), "mupdf paint dropped glyphs: {text}");
+        }
+        if pdfjs_ready() && !tool_missing("tesseract") {
+            saw = true;
+            let text = ocr_pngs(&render_pdfjs(&path), needle);
+            assert!(text.contains(needle), "pdf.js paint dropped glyphs: {text}");
+        }
+        if std::env::var_os("CI").is_some() {
+            assert!(saw, "CI has no poppler, mupdf, or pdf.js renderer");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn render_poppler(pdf: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("rpt-poppler-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = std::process::Command::new("pdftoppm")
+            .args(["-png", "-r", "144", "-f", "1", "-l", "1"])
+            .arg(pdf)
+            .arg(dir.join("page"))
+            .status()
+            .expect("pdftoppm");
+        assert!(status.success());
+        pngs_in(&dir)
+    }
+
+    fn render_mutool(pdf: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("rpt-mupdf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("page.png");
+        let status = std::process::Command::new("mutool")
+            .args(["draw", "-o"])
+            .arg(&png)
+            .args(["-r", "144"])
+            .arg(pdf)
+            .arg("1")
+            .status()
+            .expect("mutool");
+        assert!(status.success(), "mutool draw failed");
+        pngs_in(&dir)
+    }
+
+    fn render_pdfjs(pdf: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("rpt-pdfjs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("page.png");
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/pdfjs_page.mjs");
+        let status = std::process::Command::new("node")
+            .arg(&script)
+            .arg(pdf)
+            .arg(&png)
+            .status()
+            .expect("node");
+        assert!(status.success(), "pdf.js render failed");
+        pngs_in(&dir)
+    }
+
+    fn pdfjs_ready() -> bool {
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/pdfjs_page.mjs");
+        if !script.is_file() || tool_missing("node") {
+            return false;
+        }
+        std::process::Command::new("node")
+            .arg(&script)
+            .arg("--check")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn pngs_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
+            .collect();
+        paths.sort();
+        assert!(
+            !paths.is_empty(),
+            "renderer wrote no png in {}",
+            dir.display()
+        );
+        paths
+    }
+
+    fn ocr_pngs(paths: &[std::path::PathBuf], _needle: &str) -> String {
+        let mut text = String::new();
+        for png in paths {
+            let ocr = std::process::Command::new("tesseract")
+                .args([
+                    png.to_str().unwrap(),
+                    "stdout",
+                    "-l",
+                    "chi_sim+eng",
+                    "--psm",
+                    "6",
+                ])
+                .output()
+                .expect("tesseract");
+            text.push_str(&String::from_utf8_lossy(&ocr.stdout));
+        }
+        text.chars().filter(|ch| !ch.is_whitespace()).collect()
+    }
+
     fn embedded_cff(pdf: &[u8]) -> Option<Vec<u8>> {
         let doc = Document::load_mem(pdf).ok()?;
         for object in doc.objects.values() {
@@ -25633,7 +25812,7 @@ ET",
         let column_right = 72.0 + first.len() as f32 * 5.0;
         let mut rows: Vec<(f32, f32, f32, String)> = Vec::new();
         for glyph in &painted.glyphs {
-            if !glyph.unicode.chars().any(is_han_char) && glyph.font_name != "RPTCJK" {
+            if !glyph.unicode.chars().any(is_han_char) && !glyph.font_name.starts_with("RPTCJK") {
                 continue;
             }
             let right = glyph.matrix[4] + glyph.advance[0];
@@ -26802,7 +26981,7 @@ ET",
         let mut gold = 0;
         let mut text = 0;
         for glyph in &painted.glyphs {
-            if glyph.font_name != "RPTCJK"
+            if !glyph.font_name.starts_with("RPTCJK")
                 && !glyph.unicode.chars().any(is_han_char)
                 && glyph.unicode != "■"
                 && glyph.unicode != "-"
@@ -26885,7 +27064,15 @@ ET",
             .extract()
     }
 
+    fn paint_system_cjk(bytes: &[u8], which: &[(usize, String)]) -> Vec<u8> {
+        paint_rewritten(bytes, which, false)
+    }
+
     fn paint_bytes(bytes: &[u8], which: &[(usize, String)]) -> Vec<u8> {
+        paint_rewritten(bytes, which, true)
+    }
+
+    fn paint_rewritten(bytes: &[u8], which: &[(usize, String)], box_font: bool) -> Vec<u8> {
         let mut doc = PdfDocument::open_bytes(bytes).unwrap();
         let mut extraction = doc.extract();
         let segmentation = crate::segment::segment_placed(
@@ -26936,7 +27123,7 @@ ET",
                 cache_hits: 0,
             },
             &RewriteOptions {
-                font_bytes: Some(box_ttf(&chars)),
+                font_bytes: box_font.then(|| box_ttf(&chars)),
                 ..RewriteOptions::default()
             },
         )

@@ -3,8 +3,10 @@
 //! Glyf faces become a CIDFontType2 payload with Identity glyph ids. CFF faces
 //! (Noto CJK) are subset with fontTools; the saved bytes are an OpenType file
 //! whose `CFF ` table is what a CIDFontType0 FontFile3 must embed. Glyph ids in
-//! `glyphs` are the charset CIDs (`cidNNNNN`), which is what Identity-H writes.
-//! Shaping is one glyph per character. OpenType GSUB is not applied.
+//! `glyphs` are identity charset CIDs (glyph index, not the source `cidNNNNN`).
+//! A viewer that paints CID as GID, and one that caches fonts by BaseFont, both
+//! then see the same outlines. Shaping is one glyph per character. OpenType
+//! GSUB is not applied.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -222,7 +224,8 @@ fn subset_cff(path: &str, face_index: u32, codepoints: &[u32]) -> Option<SubsetF
     let font_out = dir.join(format!("rpt-cff-{}-{stamp}.otf", std::process::id()));
     let json_out = dir.join(format!("rpt-cff-{}-{stamp}.json", std::process::id()));
     let script = r#"
-import json, sys
+import json, sys, types
+from io import BytesIO
 from fontTools.ttLib import TTFont
 from fontTools.subset import Subsetter, Options
 src, face, unicodes, out_font, out_json = sys.argv[1:]
@@ -235,7 +238,34 @@ font = TTFont(src, fontNumber=int(face))
 subsetter = Subsetter(options=opt)
 subsetter.populate(unicodes=codes)
 subsetter.subset(font)
-font.save(out_font)
+# Source Han keeps Adobe-Identity CIDs in the glyph name (`cid00066` is "a",
+# `cid00017` is "0"). Those values are also Standard Encoding slots, and the
+# subset packs the outlines at glyph index 0..N. Identity-H must address the
+# glyph index. Rewriting cmap/hmtx to match breaks fontTools; splice a CFF
+# whose charset CID equals the glyph index into the subset instead.
+buf = BytesIO()
+font.save(buf)
+top = font["CFF "].cff.topDictIndex[0]
+if "ROS" in getattr(top, "rawDict", {}):
+    mut = TTFont(BytesIO(buf.getvalue()))
+    top = mut["CFF "].cff.topDictIndex[0]
+    old = list(top.charset)
+    new = [".notdef" if i == 0 else f"cid{i:05d}" for i in range(len(old))]
+    cs = top.CharStrings
+    rebuilt = {new[i]: cs.charStrings[name] for i, name in enumerate(old) if name in cs.charStrings}
+    cs.charStrings.clear()
+    cs.charStrings.update(rebuilt)
+    top.charset = list(new)
+    top.rawDict["CIDCount"] = len(new)
+    raw = bytes(mut["CFF "].compile(mut))
+    out = TTFont(BytesIO(buf.getvalue()))
+    def compile_raw(self, ttFont, payload=raw):
+        return payload
+    out["CFF "].compile = types.MethodType(compile_raw, out["CFF "])
+    out.save(out_font)
+else:
+    font.save(out_font)
+font = TTFont(out_font)
 cmap = {}
 for table in font["cmap"].tables:
     if table.platformID == 3 and table.platEncID in (1, 10):
@@ -933,5 +963,57 @@ mod tests {
         assert!(baskerville.serif && !baskerville.bold && !baskerville.italic);
         let baskerville_italic = face_style("NewBaskerville-Italic");
         assert!(baskerville_italic.serif && baskerville_italic.italic && !baskerville_italic.bold);
+    }
+
+    #[test]
+    fn cff_subset_cids_are_glyph_indexes() {
+        let path = "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc";
+        if !std::path::Path::new(path).is_file() {
+            return;
+        }
+        let codes = [0x61u32, 0x65, 0x6f, 0x30, 0x4e2d, 0x6587];
+        let Some(font) = subset_cff(path, 2, &codes) else {
+            return;
+        };
+        // Source Han's original CIDs for these letters are the Standard
+        // Encoding slots. Identity-H must not keep them.
+        assert_ne!(font.glyphs[&0x61].0, 66, "a");
+        assert_ne!(font.glyphs[&0x65].0, 70, "e");
+        assert_ne!(font.glyphs[&0x6f].0, 80, "o");
+        assert_ne!(font.glyphs[&0x30].0, 17, "0");
+        let otf = std::env::temp_dir().join(format!("rpt-ident-{}.otf", std::process::id()));
+        std::fs::write(&otf, &font.bytes).unwrap();
+        let check = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(
+                r#"
+import sys
+from fontTools.ttLib import TTFont
+font = TTFont(sys.argv[1])
+order = font.getGlyphOrder()
+bad = []
+for index, name in enumerate(order):
+    expect = ".notdef" if index == 0 else f"cid{index:05d}"
+    if name != expect:
+        bad.append(f"{index}:{name}")
+if bad:
+    raise SystemExit("charset is not identity: " + ", ".join(bad[:8]))
+cmap = {}
+for table in font["cmap"].tables:
+    if table.platformID == 3 and table.platEncID in (1, 10):
+        cmap.update(table.cmap)
+for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
+    name = cmap.get(code)
+    if name is None or not name.startswith("cid"):
+        raise SystemExit(f"missing cmap for U+{code:04X}")
+    if int(name[3:]) != order.index(name):
+        raise SystemExit(f"U+{code:04X} cid {name} is not its glyph index")
+"#,
+            )
+            .arg(&otf)
+            .status()
+            .expect("python3");
+        let _ = std::fs::remove_file(&otf);
+        assert!(check.success(), "CFF charset CIDs are not glyph indexes");
     }
 }
