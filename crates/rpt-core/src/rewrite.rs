@@ -1134,7 +1134,10 @@ fn math_block_segments(
         // equation on the other side still reaches the heading by walking
         // through that paragraph. Stopping at the placeholder paints the
         // heading into the binomial hole (`4 请求时的势及其增量` over U∗/0W).
-        if span.structural && !segment.translated.contains('⟦') {
+        // A display equation is a seed. A paragraph that also contains a
+        // stack is still that paragraph: seeding it kept the whole column
+        // in English (`This result represents…` under the proof).
+        if span.structural && span.letters <= 120 && !segment.translated.contains('⟦') {
             seeds.push(index);
         }
         spans.push(Some(span));
@@ -2810,7 +2813,9 @@ fn prose_paragraph(span: &MathSpan) -> bool {
     // letters on a single baseline, and a height check left it in the block.
     // `4 The potential…` (26) and the body line under it (27) still have to
     // chain through to the display, or the heading is painted onto it.
-    !span.structural && span.letters > 30
+    // A stacked symbol inside a long paragraph does not make the paragraph
+    // a formula. Chaining through it kept the column in English.
+    span.letters > 120 || (!span.structural && span.letters > 30)
 }
 
 /// A sentence that contains a symbol (`edge ij with c > 0`) is body text.
@@ -16878,6 +16883,14 @@ mod tests {
         assert!(
             !held("We over-approximate"),
             "page 9 estimate stayed a math block"
+        );
+        assert!(
+            !held("This result represents"),
+            "page 7 discussion stayed a math block"
+        );
+        assert!(
+            !held("Despite this progress"),
+            "page 7 convexity paragraph stayed a math block"
         );
     }
 
