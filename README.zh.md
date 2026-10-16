@@ -60,9 +60,9 @@ go test ./...
 
 ## 预编译包
 
-`.github/workflows/sdk.yml` 为每个平台打包头文件、共享库和静态库，并带上 CMake 配置和 Unix pkg-config。`.github/workflows/wheels.yml` 用 cibuildwheel 构建 CPython 3.10+ 的 abi3 wheel（每个平台一个 wheel，可在 3.10 及更新的 CPython 上加载）。两个工作流在 pull request、`workflow_dispatch` 和 `v*` tag 上运行。pull request 只上传构建产物。tag 名必须与 `Cargo.toml` 里的 `workspace.package.version` 一致（版本 `0.1.0` 对应 tag `v0.1.0`），才会把压缩包和 wheel 挂到 GitHub Release。
+`.github/workflows/sdk.yml` 为每个平台打包头文件、共享库和静态库，并带上 CMake 配置和 Unix pkg-config。`.github/workflows/wheels.yml` 用 cibuildwheel 构建 CPython 3.10+ 的 abi3 wheel（每个平台一个 wheel，可在 3.10 及更新的 CPython 上加载）。两个工作流在 pull request、`workflow_dispatch` 和 `v*` tag 上运行。pull request 只上传构建产物。tag 名必须与 `Cargo.toml` 里的 `workspace.package.version` 一致（版本 `0.1.0` 对应 tag `v0.1.0`），才会把压缩包、wheel 和 sdist 挂到 GitHub Release，并把 wheel 和 sdist 发布到 PyPI。
 
-不构建 32 位 macOS：没有对应的托管 runner，当前 CPython 也不提供 32 位 macOS 安装包。musllinux wheel 只覆盖 x86_64 和 aarch64，因为 Rust 没有 `i686-unknown-linux-musl` 或 `armv7-unknown-linux-musleabihf` 的宿主编译器，而 cibuildwheel 在目标容器里编译。Intel macOS 使用 `macos-15-intel`；GitHub 已不再提供 `macos-13`。PyPI 可信发布写在 `wheels.yml` 里，在配置 trusted publisher 之前保持关闭。
+不构建 32 位 macOS：没有对应的托管 runner，当前 CPython 也不提供 32 位 macOS 安装包。musllinux wheel 只覆盖 x86_64 和 aarch64，因为 Rust 没有 `i686-unknown-linux-musl` 或 `armv7-unknown-linux-musleabihf` 的宿主编译器，而 cibuildwheel 在目标容器里编译。Intel macOS 使用 `macos-15-intel`；GitHub 已不再提供 `macos-13`。PyPI 上传使用仓库 secret `PYPI_APIKEY`（PyPI API token），并设置 `skip-existing`。不使用 trusted publishing。
 
 ## 翻译器
 

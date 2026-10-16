@@ -21,12 +21,11 @@
 #   i686-unknown-linux-musl or armv7-unknown-linux-musleabihf, and cibuildwheel
 #   runs the compiler inside the target image.
 #
-# Pull requests and workflow_dispatch upload wheels as artifacts. A tag
-# v<Cargo.toml version> uploads them to a GitHub Release.
-#
-# PyPI trusted publishing is intentionally disabled. To turn it on, create a
-# PyPI trusted publisher for this workflow, uncomment the job below, and add
-# id-token: write on that job.
+# Pull requests and workflow_dispatch upload wheels and an sdist as artifacts.
+# A tag v<Cargo.toml version> uploads them to a GitHub Release and publishes
+# the same files to PyPI with the PYPI_APIKEY repository secret (a PyPI API
+# token). Attestations stay off: PEP 740 signing in this action only works
+# with trusted publishing.
 
 name: Python wheels
 
@@ -186,10 +185,47 @@ jobs:
           if-no-files-found: error
           path: wheelhouse/*.whl
 
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the source distribution
+        run: |
+          python -m pip install "build>=1.2" "maturin>=1.9.4,<2"
+          python -m build --sdist --outdir dist
+          python - <<'PY'
+          import tarfile
+          from pathlib import Path
+          archives = sorted(Path("dist").glob("*.tar.gz"))
+          if len(archives) != 1:
+              raise SystemExit(f"expected one sdist, found {archives}")
+          names = tarfile.open(archives[0]).getnames()
+          required = [
+              "Cargo.lock",
+              "crates/rpt-core/src/lib.rs",
+              "crates/rpt-python/src/lib.rs",
+              "pyproject.toml",
+          ]
+          missing = [item for item in required if not any(name.endswith(item) for name in names)]
+          if missing:
+              raise SystemExit(f"{archives[0].name} missing {missing}")
+          print(f"{archives[0].name} contains {', '.join(required)}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          if-no-files-found: error
+          path: dist/*.tar.gz
+
   release:
     name: GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, sdist]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -200,25 +236,51 @@ jobs:
           pattern: wheels-*
           merge-multiple: true
           path: dist
-      - name: Upload wheels
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - name: Upload wheels and sdist
         env:
           GH_TOKEN: ${{ github.token }}
         run: sh packaging/publish-release.sh dist SHA256SUMS-wheels.txt
 
-  # publish-pypi:
-  #   name: Publish to PyPI
-  #   if: startsWith(github.ref, 'refs/tags/v')
-  #   needs: build
-  #   runs-on: ubuntu-24.04
-  #   permissions:
-  #     id-token: write
-  #   steps:
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         pattern: wheels-*
-  #         merge-multiple: true
-  #         path: dist
-  #     - uses: pypa/gh-action-pypi-publish@release/v1
-  #       with:
-  #         packages-dir: dist
-  #         skip-existing: true
+  publish-pypi:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, sdist]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - name: Require the tag to match Cargo.toml
+        run: |
+          version=$(python3 - <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path("Cargo.toml").read_text()
+          match = re.search(r'(?m)^version = "([^"]+)"', text)
+          if not match:
+              sys.exit("Cargo.toml has no version")
+          print(match.group(1))
+          PY
+          )
+          if [ "$GITHUB_REF_NAME" != "v${version}" ]; then
+            echo "ref ${GITHUB_REF_NAME} does not match Cargo.toml version v${version}" >&2
+            exit 1
+          fi
+          find dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) | sort
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_APIKEY }}
+          packages-dir: dist
+          skip-existing: true
+          attestations: false
