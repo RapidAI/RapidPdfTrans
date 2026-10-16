@@ -9626,7 +9626,8 @@ fn reflow_bold_run_ins(
     let keys: Vec<Vec<u32>> = groups.keys().cloned().collect();
     let mut used = HashSet::new();
     // drop indices, replacement lines, body glyph ids, slide, first baseline
-    let mut plans: Vec<(Vec<usize>, Vec<Drawn>, Vec<u32>, f32, f32)> = Vec::new();
+    type Plan = (Vec<usize>, Vec<Drawn>, Vec<u32>, f32, f32);
+    let mut plans: Vec<Plan> = Vec::new();
     for key in &keys {
         if used.contains(key) {
             continue;

@@ -160,7 +160,7 @@ jobs:
         run: python packaging/package_sdk.py --target ${{ matrix.target }} --out dist
 
       - name: Smoke test SDK
-        run: python packaging/smoke_sdk.py --dist dist --pdf testdata/hello.pdf --cxx "${{ matrix.cxx }}" --cflags "${{ matrix.cflags }}" --emulator "${{ matrix.emulator }}" --cmake-args "${{ matrix.cmake_args }}"
+        run: python packaging/smoke_sdk.py --dist dist --pdf testdata/hello.pdf --cxx="${{ matrix.cxx }}" --cflags="${{ matrix.cflags }}" --emulator="${{ matrix.emulator }}" --cmake-args="${{ matrix.cmake_args }}"
 
       - uses: actions/upload-artifact@v4
         with:
