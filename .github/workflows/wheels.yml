@@ -207,6 +207,7 @@ jobs:
           names = tarfile.open(archives[0]).getnames()
           required = [
               "Cargo.lock",
+              "LICENSE",
               "crates/rpt-core/src/lib.rs",
               "crates/rpt-python/src/lib.rs",
               "pyproject.toml",

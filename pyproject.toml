@@ -26,6 +26,10 @@ Repository = "https://github.com/RapidAI/RapidPdfTrans"
 manifest-path = "crates/rpt-python/Cargo.toml"
 module-name = "rapidpdftrans"
 bindings = "pyo3"
+# Maturin writes License-File: LICENSE into the sdist metadata from the
+# repository license, but its cargo file list omits that root file. PyPI
+# rejects the upload unless the named file is inside the tarball.
+include = [{ path = "LICENSE", format = "sdist" }]
 # abi3-py310 is enabled on rpt-python, so each platform produces one
 # cp310-abi3 wheel that loads on CPython 3.10 and newer.
 strip = true
