@@ -1,9 +1,15 @@
 //! Select a translator from `RPT_TRANSLATOR` or [`TranslateOptions::translator`].
 //!
-//! `maclaw` is the default. It is the OpenAI-compatible chat preset
-//! (base `https://hub.mypapers.top/api/llm/v1`, model `auto`). The MaClawSrv
-//! agent API at RapidAI/MaClaw speaks that same chat-completions wire; this
-//! crate does not drive its instance/message agent loop.
+//! An explicit name wins. A configured LLM (`RPT_LLM_API_KEY`,
+//! `RPT_LLM_BASE_URL`, `RPT_LLM_MODEL`, or a model/base URL option) is next.
+//! Otherwise an official Google key or credential is used. With none of those
+//! set, a short probe of the unofficial Google endpoint selects it when the
+//! probe succeeds.
+//!
+//! `maclaw` is the OpenAI-compatible chat preset (base
+//! `https://hub.mypapers.top/api/llm/v1`, model `auto`). The MaClawSrv agent
+//! API at RapidAI/MaClaw speaks that same chat-completions wire; this crate
+//! does not drive its instance/message agent loop.
 
 use crate::error::{Error, Result};
 use crate::translate::google::GoogleTranslator;
@@ -20,39 +26,31 @@ pub enum TranslatorBackend {
 }
 
 impl TranslatorBackend {
+    /// Explicit translator, then a configured LLM, then Google (official key
+    /// or a successful unofficial probe), then the missing-key error.
     pub fn from_env(opts: &TranslateOptions) -> Result<Self> {
-        let name = opts.resolved_translator().to_ascii_lowercase();
-        match name.as_str() {
-            "maclaw" | "llm" => Ok(Self::OpenAi(LlmTranslator::from_env(opts)?)),
-            "openai" => {
-                let mut opts = opts.clone();
-                if opts.base_url.as_deref().map(str::trim).unwrap_or("").is_empty()
-                    && std::env::var("RPT_LLM_BASE_URL")
-                        .ok()
-                        .map(|v| v.trim().is_empty())
-                        .unwrap_or(true)
+        match choose(
+            explicit_translator(opts).as_deref(),
+            llm_configured(opts),
+            google_v2_configured(),
+            google_v3_configured(),
+        ) {
+            BackendChoice::Named(name) => named(opts, &name),
+            BackendChoice::Llm => Ok(Self::OpenAi(LlmTranslator::from_env(opts)?)),
+            BackendChoice::GoogleV2 => Ok(Self::Google(google_v2(opts)?)),
+            BackendChoice::GoogleV3 => Ok(Self::Google(google_v3(opts)?)),
+            BackendChoice::Probe => {
+                if let Some(client) =
+                    GoogleTranslator::probe_unofficial(&opts.source_lang, &opts.target_lang)
                 {
-                    opts.base_url = Some(OPENAI_DEFAULT_BASE_URL.into());
+                    Ok(Self::Google(client))
+                } else {
+                    Err(Error::Translate(
+                        "no translator is configured and Google Translate is unreachable; set RPT_LLM_API_KEY or RPT_TRANSLATOR"
+                            .into(),
+                    ))
                 }
-                if opts.model.as_deref().map(str::trim).unwrap_or("").is_empty()
-                    && std::env::var("RPT_LLM_MODEL")
-                        .ok()
-                        .map(|v| v.trim().is_empty())
-                        .unwrap_or(true)
-                {
-                    opts.model = Some(OPENAI_DEFAULT_MODEL.into());
-                }
-                Ok(Self::OpenAi(LlmTranslator::from_env(&opts)?))
             }
-            "google" | "google-v2" => Ok(Self::Google(google_v2(opts)?)),
-            "google-v3" => Ok(Self::Google(google_v3(opts)?)),
-            "google-unofficial" | "google-web" => Ok(Self::Google(GoogleTranslator::unofficial(
-                &opts.source_lang,
-                &opts.target_lang,
-            ))),
-            other => Err(Error::Translate(format!(
-                "unknown translator `{other}`; expected maclaw, openai, google-v2, google-v3, or google-unofficial"
-            ))),
         }
     }
 
@@ -90,6 +88,117 @@ impl Translator for TranslatorBackend {
             Self::OpenAi(client) => client.complete(system, user),
             Self::Google(client) => client.complete(system, user),
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BackendChoice {
+    Named(String),
+    Llm,
+    GoogleV2,
+    GoogleV3,
+    Probe,
+}
+
+/// Selection order: explicit name, configured LLM, official Google, probe.
+fn choose(explicit: Option<&str>, llm: bool, google_key: bool, google_v3: bool) -> BackendChoice {
+    if let Some(name) = explicit.map(str::trim).filter(|name| !name.is_empty()) {
+        return BackendChoice::Named(name.to_ascii_lowercase());
+    }
+    if llm {
+        return BackendChoice::Llm;
+    }
+    if google_key {
+        return BackendChoice::GoogleV2;
+    }
+    if google_v3 {
+        return BackendChoice::GoogleV3;
+    }
+    BackendChoice::Probe
+}
+
+fn explicit_translator(opts: &TranslateOptions) -> Option<String> {
+    if let Some(name) = opts
+        .translator
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return Some(name.to_string());
+    }
+    std::env::var("RPT_TRANSLATOR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_set(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn llm_configured(opts: &TranslateOptions) -> bool {
+    env_set("RPT_LLM_API_KEY")
+        || env_set("RPT_LLM_BASE_URL")
+        || env_set("RPT_LLM_MODEL")
+        || opts
+            .model
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || opts
+            .base_url
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+}
+
+fn google_v2_configured() -> bool {
+    env_set("RPT_GOOGLE_API_KEY")
+}
+
+fn google_v3_configured() -> bool {
+    env_set("RPT_GOOGLE_ACCESS_TOKEN")
+        || env_set("RPT_GOOGLE_CREDENTIALS")
+        || env_set("RPT_GOOGLE_CREDENTIALS_JSON")
+}
+
+fn named(opts: &TranslateOptions, name: &str) -> Result<TranslatorBackend> {
+    match name {
+        "maclaw" | "llm" => Ok(TranslatorBackend::OpenAi(LlmTranslator::from_env(opts)?)),
+        "openai" => {
+            let mut opts = opts.clone();
+            if opts.base_url.as_deref().map(str::trim).unwrap_or("").is_empty()
+                && std::env::var("RPT_LLM_BASE_URL")
+                    .ok()
+                    .map(|v| v.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                opts.base_url = Some(OPENAI_DEFAULT_BASE_URL.into());
+            }
+            if opts.model.as_deref().map(str::trim).unwrap_or("").is_empty()
+                && std::env::var("RPT_LLM_MODEL")
+                    .ok()
+                    .map(|v| v.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                opts.model = Some(OPENAI_DEFAULT_MODEL.into());
+            }
+            Ok(TranslatorBackend::OpenAi(LlmTranslator::from_env(&opts)?))
+        }
+        "google" | "google-v2" => Ok(TranslatorBackend::Google(google_v2(opts)?)),
+        "google-v3" => Ok(TranslatorBackend::Google(google_v3(opts)?)),
+        "google-unofficial" | "google-web" => {
+            Ok(TranslatorBackend::Google(GoogleTranslator::unofficial(
+                &opts.source_lang,
+                &opts.target_lang,
+            )))
+        }
+        other => Err(Error::Translate(format!(
+            "unknown translator `{other}`; expected maclaw, openai, google-v2, google-v3, or google-unofficial"
+        ))),
     }
 }
 
@@ -163,4 +272,40 @@ fn google_v3(opts: &TranslateOptions) -> Result<GoogleTranslator> {
         }
     }
     Ok(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_order_is_explicit_then_llm_then_google_then_probe() {
+        assert_eq!(
+            choose(Some("maclaw"), true, true, true),
+            BackendChoice::Named("maclaw".into())
+        );
+        assert_eq!(
+            choose(Some(" Google-Unofficial "), false, false, false),
+            BackendChoice::Named("google-unofficial".into())
+        );
+        assert_eq!(choose(None, true, true, true), BackendChoice::Llm);
+        assert_eq!(choose(None, false, true, true), BackendChoice::GoogleV2);
+        assert_eq!(choose(None, false, false, true), BackendChoice::GoogleV3);
+        assert_eq!(choose(None, false, false, false), BackendChoice::Probe);
+        assert_eq!(
+            choose(Some("  "), false, false, false),
+            BackendChoice::Probe
+        );
+    }
+
+    #[test]
+    fn an_explicit_unofficial_translator_does_not_need_a_key() {
+        let opts = TranslateOptions {
+            translator: Some("google-unofficial".into()),
+            ..TranslateOptions::default()
+        };
+        let client = TranslatorBackend::from_env(&opts).unwrap();
+        assert_eq!(client.label(), "google-unofficial");
+        assert!(client.endpoint().contains("translate.googleapis.com"));
+    }
 }

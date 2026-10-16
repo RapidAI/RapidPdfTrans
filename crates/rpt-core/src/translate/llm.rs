@@ -9,6 +9,8 @@
 //! The API key is read only from `RPT_LLM_API_KEY`. It is never taken from
 //! options JSON, and [`Debug`] prints it as `redacted`.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -23,6 +25,11 @@ pub struct LlmTranslator {
     temperature: f32,
     max_tokens: Option<u32>,
     timeout: Duration,
+    /// Shared pool. Cloning the agent into a timeout thread reuses idle TLS
+    /// connections. A stalled call keeps only the connection it checked out.
+    agent: ureq::Agent,
+    /// Successful `(system, user)` replies. Errors are not stored.
+    cache: Mutex<HashMap<(String, String), String>>,
 }
 
 impl std::fmt::Debug for LlmTranslator {
@@ -53,6 +60,10 @@ impl LlmTranslator {
     pub fn with_key(opts: &TranslateOptions, api_key: impl Into<String>) -> Result<Self> {
         let api_key = api_key.into();
         let timeout = Duration::from_secs(opts.timeout_secs.max(1));
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .proxy(None)
+            .build();
         Ok(Self {
             base_url: opts.resolved_base_url(),
             model: opts.resolved_model(),
@@ -60,6 +71,8 @@ impl LlmTranslator {
             temperature: opts.temperature,
             max_tokens: opts.max_tokens,
             timeout,
+            agent: config.into(),
+            cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -74,11 +87,22 @@ impl LlmTranslator {
 
 impl Translator for LlmTranslator {
     fn complete(&self, system: &str, user: &str) -> Result<String> {
+        let key = (system.to_string(), user.to_string());
+        if let Ok(guard) = self.cache.lock() {
+            if let Some(hit) = guard.get(&key) {
+                return Ok(hit.clone());
+            }
+        }
         let mut delay = std::time::Duration::from_secs(2);
         let mut last = None;
         for attempt in 0..4 {
             match self.complete_once(system, user) {
-                Ok(text) => return Ok(text),
+                Ok(text) => {
+                    if let Ok(mut guard) = self.cache.lock() {
+                        guard.insert(key, text.clone());
+                    }
+                    return Ok(text);
+                }
                 Err(err) if http_status_retryable(&err) && attempt < 3 => {
                     std::thread::sleep(delay);
                     delay *= 2;
@@ -107,17 +131,13 @@ impl LlmTranslator {
         }
         // ureq's socket timeout does not always interrupt a stalled TLS read.
         // A thread deadline makes `timeout: global` real so a batch can split.
-        // The stalled thread keeps its socket, so the next call uses a new
-        // agent and does not wait on that connection.
+        // The worker clones the shared agent: idle connections are reused, and
+        // a stalled call holds only the socket it already checked out.
         let api_key = self.api_key.clone();
         let timeout = self.timeout;
+        let agent = self.agent.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let config = ureq::Agent::config_builder()
-                .timeout_global(Some(timeout))
-                .proxy(None)
-                .build();
-            let agent: ureq::Agent = config.into();
             let _ = tx.send(post_chat(&agent, &url, &api_key, body));
         });
         match rx.recv_timeout(timeout) {
@@ -362,5 +382,21 @@ mod tests {
         let cleaned = scrub_secrets(msg, "sk-secret");
         assert!(!cleaned.contains("sk-secret"));
         assert!(cleaned.contains("Bearer [redacted]"));
+    }
+
+    #[test]
+    fn an_identical_prompt_does_not_open_a_second_connection() {
+        let response = r#"{"choices":[{"message":{"content":"cached-reply"}}]}"#;
+        let mock = Mock::start(200, response.into());
+        let opts = TranslateOptions {
+            base_url: Some(mock.base.clone()),
+            timeout_secs: 2,
+            ..TranslateOptions::default()
+        };
+        let client = LlmTranslator::with_key(&opts, "k").unwrap();
+        assert_eq!(client.complete("sys", "same").unwrap(), "cached-reply");
+        assert_eq!(client.complete("sys", "same").unwrap(), "cached-reply");
+        let captured = mock.body.lock().unwrap().clone();
+        assert_eq!(captured.matches("chat/completions").count(), 1);
     }
 }

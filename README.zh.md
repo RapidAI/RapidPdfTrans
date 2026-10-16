@@ -38,7 +38,7 @@ g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
 ./smoke testdata/hello.pdf
 ```
 
-`rpt::Document::extract` 返回 JSON。`save` 写出 PDF；没设置 `RPT_LLM_API_KEY` 时抛异常。
+`rpt::Document::extract` 返回 JSON。`save` 写出 PDF；没有配置翻译器且 Google Translate 不可达时抛异常。
 
 Go 在 `bindings/go` 里，先有上面的静态库：
 
@@ -58,20 +58,20 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 
 | 变量 | 何时需要 | 默认 |
 | --- | --- | --- |
-| `RPT_LLM_API_KEY` | 真实翻译必须有 | 未设置 |
-| `RPT_LLM_BASE_URL` | 可选 | `https://hub.mypapers.top/api/llm/v1` |
-| `RPT_LLM_MODEL` | 可选 | `auto` |
-| `RPT_TRANSLATOR` | 可选 | `maclaw` |
-| `RPT_GOOGLE_API_KEY` | `google` 和 `google-v2` | 未设置 |
+| `RPT_LLM_API_KEY` | 使用 LLM 时必须有 | 未设置 |
+| `RPT_LLM_BASE_URL` | 可选，LLM 网关 | `https://hub.mypapers.top/api/llm/v1` |
+| `RPT_LLM_MODEL` | 可选，LLM 模型 | `auto` |
+| `RPT_TRANSLATOR` | 可选，后端名称 | 未设置（见下文） |
+| `RPT_GOOGLE_API_KEY` | Cloud Translation v2 | 未设置 |
 | `RPT_GOOGLE_CREDENTIALS` | `google-v3` 服务账号 | 未设置 |
 | `RPT_GOOGLE_ACCESS_TOKEN` | `google-v3` 持有者令牌 | 未设置 |
 | `RPT_CJK_FONT` | 可选，宋体/衬线文件 | Noto Serif CJK，然后是下面的回退列表 |
 | `RPT_CJK_SANS` | 可选，无衬线文件 | Noto Sans CJK |
-| `RPT_TRANSLATE_JOBS` | 可选 | `1` |
+| `RPT_TRANSLATE_JOBS` | 可选，并行请求数 | `4`（上限 `8`） |
 | `RPT_CJK_SIZE_SCALE` | 可选 | `0.90` |
 | `RPT_CJK_LEADING` | 可选 | `1.60` |
 
-`RPT_TRANSLATOR` 可以是 `maclaw`（默认）、`openai`、`google`、`google-v2`、`google-v3` 或 `google-unofficial`。非官方客户端必须显式打开，不会作为静默回退。
+`RPT_TRANSLATOR` 可以是 `maclaw`、`openai`、`google`、`google-v2`、`google-v3` 或 `google-unofficial`。它未设置，且没有 `RPT_LLM_API_KEY`、`RPT_LLM_BASE_URL`、`RPT_LLM_MODEL`、`model` 或 `base_url` 时，顺序是：`RPT_GOOGLE_API_KEY`（Cloud Translation v2），然后 v3 凭据（`RPT_GOOGLE_CREDENTIALS` 或 `RPT_GOOGLE_ACCESS_TOKEN`），然后用 3 秒探测 `https://translate.googleapis.com/translate_a/single?client=gtx`。探测成功就用这个端点。探测失败则停止，并提示设置 `RPT_LLM_API_KEY` 或 `RPT_TRANSLATOR`。显式的翻译器名称或 LLM 设置会跳过探测。
 
 ### 字体
 
@@ -105,7 +105,7 @@ export RPT_LLM_API_KEY=...
 | `--cjk-font`、`--cjk-sans` | TTF、TTC 或 OTF。 |
 | `--cjk-size-scale`、`--cjk-leading` | 默认 `0.90` 和 `1.60`。 |
 | `--batch-size` | 每次请求的段落数。默认 `8`。 |
-| `--jobs` | 并行请求数。默认 `1`，或 `RPT_TRANSLATE_JOBS`。排版仍是单线程。 |
+| `--jobs` | 并行请求数。默认 `4`，或 `RPT_TRANSLATE_JOBS`，上限 `8`。排版仍是单线程。 |
 | `--replay file.json` | 复用以前的翻译 JSON，不再请求模型。 |
 | `--compact` | 标准输出上一行 JSON。 |
 | `--json` | 为兼容而保留。JSON 总会写到标准输出。 |
@@ -120,15 +120,17 @@ export RPT_LLM_API_KEY=...
 {"complete": false, "pending": 5, "total": 5}
 ```
 
-没有密钥时，翻译以状态 1 退出，并且不写文件：
+没有 LLM 设置且 Google Translate 不可达时，翻译以状态 1 退出，并且不写文件：
 
 ```text
-rpt: translation failed: RPT_LLM_API_KEY is not set; the API key is accepted only from that environment variable
+rpt: translation failed: no translator is configured and Google Translate is unreachable; set RPT_LLM_API_KEY or RPT_TRANSLATOR
 ```
+
+显式设置 `RPT_TRANSLATOR=maclaw` 但没有密钥时，仍会报告 `RPT_LLM_API_KEY` 未设置。
 
 ### 排错
 
-**没有密钥。** 在 `rpt translate`、Python 的 `save` / `translate`、C++ 的 `save` 或 `rpt_save` 之前导出 `RPT_LLM_API_KEY`。写在选项 JSON 里的密钥会被忽略。上面那一行就是全部报错。
+**没有翻译器。** 什么都没配置时会探测 Google Translate。要改用 LLM 网关，在 `rpt translate`、Python 的 `save` / `translate`、C++ 的 `save` 或 `rpt_save` 之前导出 `RPT_LLM_API_KEY`。写在选项 JSON 里的密钥会被忽略。
 
 **豆腐块（空白方框）。** 选中的中文字体没有这个字的轮廓。该字形保持原文，原因是 `missing-glyph`。换成包含这些字的字体：
 
@@ -192,7 +194,7 @@ Go（先打好 release 静态库，再在 `bindings/go` 里）：
 go test ./...
 ```
 
-`rpt_save` 会翻译已打开的文档并写出 PDF。没有设置 `RPT_LLM_API_KEY` 时返回 -1，并且不会创建文件。
+`rpt_save` 会翻译已打开的文档并写出 PDF。没有配置翻译器且 Google Translate 不可达时返回 -1，并且不会创建文件。
 
 ## 预编译包
 
@@ -210,14 +212,14 @@ go test ./...
 
 选项 JSON 里的 `api_key` 会被忽略。优先级是：显式选项、环境变量、内置默认值。普通测试走进程内的假 HTTP 服务。只有设置了 `RPT_LLM_API_KEY` 时才会打真实接口。
 
-`RPT_TRANSLATOR` 选择后端：`maclaw`（默认）、`openai`、`google` / `google-v2`（`RPT_GOOGLE_API_KEY`）、`google-v3`（`RPT_GOOGLE_CREDENTIALS` 服务账号或 `RPT_GOOGLE_ACCESS_TOKEN`），以及 `google-unofficial`。非官方客户端必须显式打开，不会作为静默回退。
+`RPT_TRANSLATOR` 选择后端：`maclaw`、`openai`、`google` / `google-v2`（`RPT_GOOGLE_API_KEY`）、`google-v3`（`RPT_GOOGLE_CREDENTIALS` 服务账号或 `RPT_GOOGLE_ACCESS_TOKEN`），以及 `google-unofficial`（`translate.googleapis.com/translate_a/single?client=gtx`）。显式配置优先于已配置的 LLM，LLM 优先于 Google。什么都没配置时，3 秒探测成功就会选用非官方端点。占位符 `⟦N⟧` 在这个端点上以 `XPHNX` 发送，返回后再还原。请求会分批，同时最多 4 个，HTTP 429/5xx 会退避重试。
 
 ```bash
 export RPT_LLM_API_KEY=...
 ./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf
 ```
 
-这条命令走默认设置：请求发到 `RPT_LLM_BASE_URL`（未设置时是 `https://hub.mypapers.top/api/llm/v1`），模型是 `RPT_LLM_MODEL`（未设置时是 `auto`）。密钥只有 `RPT_LLM_API_KEY`。不必再设别的变量。`--glossary transformer=Transformer` 是可选项，在调用前本地替换。
+设置了 `RPT_LLM_API_KEY` 时，这条命令请求 `RPT_LLM_BASE_URL`（未设置时是 `https://hub.mypapers.top/api/llm/v1`），模型是 `RPT_LLM_MODEL`（未设置时是 `auto`）。密钥只有 `RPT_LLM_API_KEY`。没有 LLM 设置、也没有 `RPT_TRANSLATOR` 时，探测成功就改用 Google Translate。`--glossary transformer=Transformer` 是可选项，在调用前本地替换。并行请求默认是 4。
 
 中文字形从本机字体嵌入。`RPT_CJK_FONT` 是宋体/衬线文件，`RPT_CJK_SANS` 是黑体/无衬线文件。都未设置时，粗体用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc`（字体集第 2 个面），衬线优先用已安装的 Noto Serif CJK SC Light，否则用 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc`（第 2 个面），无衬线用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`（第 2 个面）。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。嵌入的是 glyf 子集（Identity-H 和 ToUnicode）。水平前进量来自 `hmtx`，没有做 OpenType GSUB。
 

@@ -38,9 +38,11 @@ char *rpt_extract(struct RptDocument *doc, const char *options_json);
  * # Safety
  * `doc` was returned by `rpt_open` and has not been freed.
  * `options_json` is a null-terminated UTF-8 string, or null.
- * `RPT_LLM_API_KEY` must be set. An `api_key` field in JSON is ignored.
+ * An `api_key` field in JSON is ignored. An LLM needs `RPT_LLM_API_KEY`.
  * `jobs` (or `RPT_TRANSLATE_JOBS`) is how many translation requests may run
- * at once; the default is 1. Layout is not parallel.
+ * at once; the default is 4 and the cap is 8. Layout is not parallel.
+ * With no `RPT_TRANSLATOR` and no `RPT_LLM_*` settings, a reachable Google
+ * Translate endpoint is used.
  * The returned string is freed with `rpt_string_free`.
  */
 char *rpt_translate(struct RptDocument *doc, const char *options_json);
@@ -49,7 +51,8 @@ char *rpt_translate(struct RptDocument *doc, const char *options_json);
  * # Safety
  * `doc` was returned by `rpt_open` and has not been freed.
  * `path` and `options_json` are null-terminated UTF-8 strings, or null.
- * `RPT_LLM_API_KEY` must be set. An `api_key` field in JSON is ignored.
+ * An `api_key` field in JSON is ignored. An LLM needs `RPT_LLM_API_KEY`.
+ * With no translator configured, a reachable Google Translate endpoint is used.
  * Returns 0 after the translated PDF is written.
  */
 int rpt_save(struct RptDocument *doc, const char *path, const char *options_json);

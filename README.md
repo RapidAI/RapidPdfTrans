@@ -38,7 +38,7 @@ g++ -std=c++17 -I include -I bindings/cpp bindings/cpp/smoke.cpp \
 ./smoke testdata/hello.pdf
 ```
 
-`rpt::Document::extract` returns JSON. `save` writes a PDF and throws when `RPT_LLM_API_KEY` is unset.
+`rpt::Document::extract` returns JSON. `save` writes a PDF and throws when no translator is configured and Google Translate is unreachable.
 
 Go, from `bindings/go`, after that static library exists:
 
@@ -58,20 +58,20 @@ Set the key in the environment. An `api_key` field in options JSON is ignored.
 
 | Variable | When | Default |
 | --- | --- | --- |
-| `RPT_LLM_API_KEY` | required for a live translation | unset |
-| `RPT_LLM_BASE_URL` | optional | `https://hub.mypapers.top/api/llm/v1` |
-| `RPT_LLM_MODEL` | optional | `auto` |
-| `RPT_TRANSLATOR` | optional | `maclaw` |
-| `RPT_GOOGLE_API_KEY` | `google` and `google-v2` | unset |
+| `RPT_LLM_API_KEY` | live LLM translation | unset |
+| `RPT_LLM_BASE_URL` | optional LLM gateway | `https://hub.mypapers.top/api/llm/v1` |
+| `RPT_LLM_MODEL` | optional LLM model | `auto` |
+| `RPT_TRANSLATOR` | optional backend name | unset (see below) |
+| `RPT_GOOGLE_API_KEY` | Cloud Translation v2 | unset |
 | `RPT_GOOGLE_CREDENTIALS` | `google-v3` service account | unset |
 | `RPT_GOOGLE_ACCESS_TOKEN` | `google-v3` bearer token | unset |
 | `RPT_CJK_FONT` | optional Song/serif file | Noto Serif CJK, then the fallback list below |
 | `RPT_CJK_SANS` | optional sans file | Noto Sans CJK |
-| `RPT_TRANSLATE_JOBS` | optional | `1` |
+| `RPT_TRANSLATE_JOBS` | optional parallel requests | `4` (cap `8`) |
 | `RPT_CJK_SIZE_SCALE` | optional | `0.90` |
 | `RPT_CJK_LEADING` | optional | `1.60` |
 
-`RPT_TRANSLATOR` is `maclaw` (default), `openai`, `google`, `google-v2`, `google-v3`, or `google-unofficial`. The unofficial client is opt-in only. It is never used as a silent fallback.
+`RPT_TRANSLATOR` is `maclaw`, `openai`, `google`, `google-v2`, `google-v3`, or `google-unofficial`. When it is unset and no `RPT_LLM_API_KEY`, `RPT_LLM_BASE_URL`, `RPT_LLM_MODEL`, `model`, or `base_url` is set, the order is: `RPT_GOOGLE_API_KEY` (Cloud Translation v2), then v3 credentials (`RPT_GOOGLE_CREDENTIALS` or `RPT_GOOGLE_ACCESS_TOKEN`), then a 3-second probe of `https://translate.googleapis.com/translate_a/single?client=gtx`. A successful probe uses that endpoint. If the probe fails, translation stops and asks for `RPT_LLM_API_KEY` or `RPT_TRANSLATOR`. An explicit translator name or LLM setting skips the probe.
 
 ### Fonts
 
@@ -105,7 +105,7 @@ Flags that exist on `rpt translate`:
 | `--cjk-font`, `--cjk-sans` | TTF, TTC, or OTF. |
 | `--cjk-size-scale`, `--cjk-leading` | Default `0.90` and `1.60`. |
 | `--batch-size` | Segments per model call. Default `8`. |
-| `--jobs` | Parallel model requests. Default `1`, or `RPT_TRANSLATE_JOBS`. Layout stays single-threaded. |
+| `--jobs` | Parallel model requests. Default `4`, or `RPT_TRANSLATE_JOBS`, capped at `8`. Layout stays single-threaded. |
 | `--replay file.json` | Reuse a previous translation JSON. No model call. |
 | `--compact` | One-line JSON on stdout. |
 | `--json` | Accepted for compatibility. JSON is always written to stdout. |
@@ -120,15 +120,17 @@ Flags that exist on `rpt translate`:
 {"complete": false, "pending": 5, "total": 5}
 ```
 
-With no key, translate exits 1 and writes nothing:
+With no LLM settings and Google Translate unreachable, translate exits 1 and writes nothing:
 
 ```text
-rpt: translation failed: RPT_LLM_API_KEY is not set; the API key is accepted only from that environment variable
+rpt: translation failed: no translator is configured and Google Translate is unreachable; set RPT_LLM_API_KEY or RPT_TRANSLATOR
 ```
+
+An explicit `RPT_TRANSLATOR=maclaw` with no key still reports that `RPT_LLM_API_KEY` is not set.
 
 ### Troubleshooting
 
-**Missing key.** Export `RPT_LLM_API_KEY` before `rpt translate`, Python `save` / `translate`, C++ `save`, or `rpt_save`. A key placed in options JSON is ignored. The message above is the whole failure.
+**Missing translator.** With nothing configured, RapidPdfTrans probes Google Translate. Export `RPT_LLM_API_KEY` before `rpt translate`, Python `save` / `translate`, C++ `save`, or `rpt_save` to use the LLM gateway instead. A key placed in options JSON is ignored.
 
 **Tofu (empty boxes).** The chosen CJK face has no outline for that character. The glyph stays original with reason `missing-glyph`. Pass a face that contains it:
 
@@ -201,7 +203,7 @@ Go (from `bindings/go`, after the release static library exists):
 go test ./...
 ```
 
-`rpt_save` translates the open document and writes a PDF. It returns -1, and does not create the file, when `RPT_LLM_API_KEY` is unset.
+`rpt_save` translates the open document and writes a PDF. It returns -1, and does not create the file, when no translator is configured and Google Translate is unreachable.
 
 ## Prebuilt packages
 
@@ -219,14 +221,14 @@ The default backend is an OpenAI-compatible chat endpoint:
 
 An `api_key` field in options JSON is ignored. Explicit options win over environment variables, which win over the built-in defaults. Tests talk to an in-process mock server. The live test runs only when `RPT_LLM_API_KEY` is set.
 
-`RPT_TRANSLATOR` selects the backend: `maclaw` (default), `openai`, `google` / `google-v2` (`RPT_GOOGLE_API_KEY`), `google-v3` (a service account in `RPT_GOOGLE_CREDENTIALS` or a bearer token in `RPT_GOOGLE_ACCESS_TOKEN`), or `google-unofficial`. The unofficial client is opt-in only. It is never used as a silent fallback.
+`RPT_TRANSLATOR` selects the backend: `maclaw`, `openai`, `google` / `google-v2` (`RPT_GOOGLE_API_KEY`), `google-v3` (a service account in `RPT_GOOGLE_CREDENTIALS` or a bearer token in `RPT_GOOGLE_ACCESS_TOKEN`), or `google-unofficial` (`translate.googleapis.com/translate_a/single?client=gtx`). Explicit config wins over a configured LLM, which wins over Google. With nothing configured, a successful 3-second probe selects the unofficial endpoint. Placeholders `⟦N⟧` are sent as `XPHNX` on that endpoint and restored afterwards. Requests are batched, at most 4 run at once, and HTTP 429/5xx are retried with backoff.
 
 ```bash
 export RPT_LLM_API_KEY=...
 ./target/release/rpt translate paper.pdf --from en --to zh --output paper.zh.pdf
 ```
 
-That command uses the defaults: it posts to the gateway at `RPT_LLM_BASE_URL` (`https://hub.mypapers.top/api/llm/v1` when unset) with model `RPT_LLM_MODEL` (`auto` when unset). The key is only `RPT_LLM_API_KEY`. Nothing else has to be set. `--glossary transformer=Transformer` is optional and is applied locally before the call.
+With `RPT_LLM_API_KEY` set, that command posts to `RPT_LLM_BASE_URL` (`https://hub.mypapers.top/api/llm/v1` when unset) with model `RPT_LLM_MODEL` (`auto` when unset). The key is only `RPT_LLM_API_KEY`. With no LLM settings and no `RPT_TRANSLATOR`, the same command uses Google Translate when the probe succeeds. `--glossary transformer=Transformer` is optional and is applied locally before the call. Parallel requests default to 4.
 
 CJK glyphs are embedded from a face on the machine. `RPT_CJK_FONT` is the Song/serif file and `RPT_CJK_SANS` is the sans file. When those are unset, bold text uses `/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc` (collection face 2), serif text uses Noto Serif CJK SC Light when that file is installed and otherwise `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc` (face 2), and sans text uses `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` (face 2). When those faces cannot be subset, the fallback is `RPT_CJK_FONT` if it is set, then `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`, `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`, and `NotoSansCJK-Regular.ttc` under `/usr/share/fonts/opentype/noto` or `/usr/share/fonts/truetype/noto`. The embedded font is a glyf subset (Identity-H, ToUnicode). Horizontal advances come from `hmtx`; OpenType GSUB is not applied.
 

@@ -1,12 +1,15 @@
-//! Google Cloud Translation API v2 and v3, plus an opt-in unofficial web endpoint.
+//! Google Cloud Translation API v2 and v3, plus the unofficial web endpoint.
 //!
-//! `google-unofficial` calls `translate.googleapis.com/translate_a/single`.
-//! That endpoint is not a documented Google API. It is never selected unless
-//! `RPT_TRANSLATOR=google-unofficial`.
+//! `google-unofficial` calls `translate.googleapis.com/translate_a/single`
+//! with `client=gtx`. It is selected by `RPT_TRANSLATOR=google-unofficial`,
+//! and also when no translator and no `RPT_LLM_*` settings are configured
+//! and a short availability probe succeeds.
 //!
 //! Keys and tokens are read only from the environment or from constructors
 //! used by tests. [`Debug`] redacts them.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -18,8 +21,14 @@ use crate::translate::llm::scrub_secrets;
 use crate::translate::Translator;
 
 const V2_DEFAULT_BASE: &str = "https://translation.googleapis.com";
+const UNOFFICIAL_BASE: &str = "https://translate.googleapis.com";
 const V3_SCOPE: &str = "https://www.googleapis.com/auth/cloud-translation";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const UNOFFICIAL_TIMEOUT: Duration = Duration::from_secs(60);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const UNOFFICIAL_BATCH_CHARS: usize = 1500;
+const UNOFFICIAL_CONCURRENCY: usize = 4;
+const BATCH_MARK: &str = "XPHSEPX";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GoogleApi {
@@ -210,7 +219,7 @@ impl GoogleTranslator {
         ))
     }
 
-    /// Opt-in unofficial web endpoint. Not a Google Cloud API.
+    /// Unofficial web endpoint. Not a Google Cloud API.
     pub fn unofficial(source: impl Into<String>, target: impl Into<String>) -> Self {
         Self::build(
             GoogleApi::Unofficial,
@@ -221,12 +230,38 @@ impl GoogleTranslator {
             "global".into(),
             String::new(),
             None,
-            "https://translate.googleapis.com".into(),
+            UNOFFICIAL_BASE.into(),
         )
+    }
+
+    /// One short request. `Some` only when the endpoint returns text.
+    pub fn probe_unofficial(source: &str, target: &str) -> Option<Self> {
+        Self::probe_at(source, target, UNOFFICIAL_BASE)
+    }
+
+    pub(crate) fn probe_at(source: &str, target: &str, base: &str) -> Option<Self> {
+        let prober = Self::unofficial(source, target)
+            .with_base_url(base)
+            .with_timeout(PROBE_TIMEOUT);
+        match prober.translate_unofficial_once("Hi") {
+            Ok(text) if !text.trim().is_empty() => {
+                Some(Self::unofficial(source, target).with_base_url(base))
+            }
+            _ => None,
+        }
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .proxy(None)
+            .build();
+        self.agent = config.into();
         self
     }
 
@@ -254,7 +289,7 @@ impl GoogleTranslator {
         base_url: String,
     ) -> Self {
         let config = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(60)))
+            .timeout_global(Some(UNOFFICIAL_TIMEOUT))
             .proxy(None)
             .build();
         Self {
@@ -276,17 +311,109 @@ impl GoogleTranslator {
         match self.api {
             GoogleApi::V2 => self.translate_v2(texts),
             GoogleApi::V3 => self.translate_v3(texts),
-            GoogleApi::Unofficial => texts
-                .iter()
-                .map(|text| {
-                    // ⟦N⟧ is a shielded number. The unofficial endpoint rewrites
-                    // `section ⟦3⟧` into `第 3 节`, restore fails, and the
-                    // paragraph stays English. `XPHNX` is copied through.
-                    self.translate_unofficial(&hide_placeholders(text))
-                        .map(|text| show_placeholders(&text))
-                })
-                .collect(),
+            GoogleApi::Unofficial => self.translate_unofficial_many(texts),
         }
+    }
+
+    /// Pack shielded texts into a few `client=gtx` calls and run those calls
+    /// with a small worker cap. A missing separator falls back to one call
+    /// per segment so a batch parse failure cannot drop a paragraph.
+    fn translate_unofficial_many(&self, texts: &[String]) -> Result<Vec<String>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let hidden: Vec<String> = texts.iter().map(|text| hide_placeholders(text)).collect();
+        let groups = pack_unofficial(&hidden);
+        let outputs: Mutex<Vec<Option<Vec<String>>>> = Mutex::new(vec![None; groups.len()]);
+        let failure: Mutex<Option<String>> = Mutex::new(None);
+        let next = AtomicUsize::new(0);
+        let workers = UNOFFICIAL_CONCURRENCY.min(groups.len()).max(1);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    if failure.lock().map(|guard| guard.is_some()).unwrap_or(true) {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    if index >= groups.len() {
+                        break;
+                    }
+                    match self.translate_group(&groups[index]) {
+                        Ok(done) => match outputs.lock() {
+                            Ok(mut slot) => slot[index] = Some(done),
+                            Err(_) => break,
+                        },
+                        Err(err) => {
+                            if let Ok(mut slot) = failure.lock() {
+                                if slot.is_none() {
+                                    *slot = Some(err.to_string());
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(message) = failure
+            .into_inner()
+            .map_err(|_| Error::Translate("Google worker lock poisoned".into()))?
+        {
+            return Err(Error::Translate(message));
+        }
+        let outputs = outputs
+            .into_inner()
+            .map_err(|_| Error::Translate("Google worker lock poisoned".into()))?;
+        let mut translated = Vec::with_capacity(texts.len());
+        for group in outputs {
+            let Some(group) = group else {
+                return Err(Error::Translate(
+                    "Google unofficial batch did not finish".into(),
+                ));
+            };
+            translated.extend(group.into_iter().map(|text| show_placeholders(&text)));
+        }
+        if translated.len() != texts.len() {
+            return Err(Error::Translate(format!(
+                "Google unofficial returned {} translations for {} inputs",
+                translated.len(),
+                texts.len()
+            )));
+        }
+        Ok(translated)
+    }
+
+    fn translate_group(&self, parts: &[String]) -> Result<Vec<String>> {
+        if parts.len() <= 1 {
+            let text = parts.first().map(String::as_str).unwrap_or("");
+            return Ok(vec![self.translate_unofficial_retry(text)?]);
+        }
+        let joined = parts.join(&format!("\n{BATCH_MARK}\n"));
+        let text = self.translate_unofficial_retry(&joined)?;
+        if let Some(split) = split_separator(&text, parts.len()) {
+            return Ok(split);
+        }
+        parts
+            .iter()
+            .map(|part| self.translate_unofficial_retry(part))
+            .collect()
+    }
+
+    fn translate_unofficial_retry(&self, text: &str) -> Result<String> {
+        let mut delay = Duration::from_millis(400);
+        let mut last = None;
+        for attempt in 0..4 {
+            match self.translate_unofficial_once(text) {
+                Ok(text) => return Ok(text),
+                Err(err) if google_retryable(&err) && attempt < 3 => {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                    last = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Translate("Google request failed".into())))
     }
 
     fn translate_v2(&self, texts: &[String]) -> Result<Vec<String>> {
@@ -388,7 +515,7 @@ impl GoogleTranslator {
             .collect()
     }
 
-    fn translate_unofficial(&self, text: &str) -> Result<String> {
+    fn translate_unofficial_once(&self, text: &str) -> Result<String> {
         let url = format!(
             "{}/translate_a/single?client=gtx&sl={}&tl={}&dt=t&q={}",
             self.base_url.trim_end_matches('/'),
@@ -753,6 +880,49 @@ fn show_placeholders(text: &str) -> String {
     out
 }
 
+fn pack_unofficial(texts: &[String]) -> Vec<Vec<String>> {
+    let mut groups = Vec::new();
+    let mut batch = Vec::new();
+    let mut chars = 0usize;
+    for text in texts {
+        let extra = text.chars().count() + BATCH_MARK.chars().count() + 2;
+        if !batch.is_empty() && (batch.len() >= 8 || chars + extra > UNOFFICIAL_BATCH_CHARS) {
+            groups.push(std::mem::take(&mut batch));
+            chars = 0;
+        }
+        batch.push(text.clone());
+        chars += extra;
+    }
+    if !batch.is_empty() {
+        groups.push(batch);
+    }
+    groups
+}
+
+fn split_separator(text: &str, expected: usize) -> Option<Vec<String>> {
+    let needle = BATCH_MARK.to_ascii_lowercase();
+    let mut parts = Vec::new();
+    let mut rest = text;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(pos) = lower.find(&needle) else {
+            parts.push(rest.trim().to_string());
+            break;
+        };
+        parts.push(rest[..pos].trim().to_string());
+        rest = &rest[pos + needle.len()..];
+    }
+    (parts.len() == expected).then_some(parts)
+}
+
+fn google_retryable(err: &Error) -> bool {
+    let msg = err.to_string();
+    ["429", "500", "502", "503"]
+        .iter()
+        .any(|code| msg.contains(&format!("HTTP status {code}")))
+        || crate::translate::llm::connection_dropped(&msg)
+}
+
 fn percent_encode(text: &str) -> String {
     let mut out = String::new();
     for byte in text.as_bytes() {
@@ -990,6 +1160,65 @@ mod tests {
         let captured = mock.body.lock().unwrap().clone();
         assert!(captured.contains("XPH3X"));
         assert!(!captured.contains("%E2%9F%A6"));
+    }
+
+    #[test]
+    fn unofficial_batches_segments_and_restores_placeholders() {
+        let response = "[[[\"见 XPH0X\\nXPHSEPX\\n结束\",\"src\",null,null,1]],null,\"en\"]";
+        let mock = Mock::start(response.into());
+        let client = GoogleTranslator::unofficial("en", "zh").with_base_url(&mock.base);
+        let user = r#"{"segments":[{"id":1,"text":"see ⟦0⟧"},{"id":2,"text":"end"}]}"#;
+        let out = client.complete("", user).unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["translations"][0]["text"], "见 ⟦0⟧");
+        assert_eq!(parsed["translations"][1]["text"], "结束");
+        let captured = mock.body.lock().unwrap().clone();
+        assert_eq!(captured.matches("translate_a/single").count(), 1);
+        assert!(captured.contains("XPH0X"));
+        assert!(captured.contains("XPHSEPX"));
+        assert!(!captured.contains("%E2%9F%A6"));
+    }
+
+    #[test]
+    fn unofficial_retries_http_429() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(0usize));
+        let seen2 = seen.clone();
+        thread::spawn(move || {
+            for status in [429u16, 200] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_request(&mut stream);
+                *seen2.lock().unwrap() += 1;
+                let body = if status == 200 {
+                    r#"[[["重试成功","Hi",null,null,1]],null,"en"]"#
+                } else {
+                    "busy"
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} ERR\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        let client = GoogleTranslator::unofficial("en", "zh")
+            .with_base_url(format!("http://127.0.0.1:{port}"));
+        let out = client
+            .complete("", r#"{"segments":[{"id":1,"text":"Hi"}]}"#)
+            .unwrap();
+        assert!(out.contains("重试成功"));
+        assert_eq!(*seen.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn probe_accepts_a_translation_and_rejects_an_empty_body() {
+        let ok = Mock::start(r#"[[["你好","Hi",null,null,1]],null,"en"]"#.into());
+        let client = GoogleTranslator::probe_at("en", "zh", &ok.base);
+        assert!(client.is_some());
+        assert_eq!(client.unwrap().label(), "google-unofficial");
+        let empty = Mock::start(r#"[[],null,"en"]"#.into());
+        assert!(GoogleTranslator::probe_at("en", "zh", &empty.base).is_none());
     }
 
     fn test_pem() -> String {

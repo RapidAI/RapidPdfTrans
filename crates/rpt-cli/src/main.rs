@@ -88,8 +88,8 @@ enum Command {
         /// Segments per model call.
         #[arg(long, default_value_t = 8)]
         batch_size: usize,
-        /// Parallel translation requests. Default 1, or `RPT_TRANSLATE_JOBS`.
-        /// Layout and rewrite stay single-threaded.
+        /// Parallel translation requests. Default 4, or `RPT_TRANSLATE_JOBS`.
+        /// The count is capped at 8. Layout and rewrite stay single-threaded.
         #[arg(long)]
         jobs: Option<usize>,
         /// Reuse translations from a previous `rpt translate` JSON file.

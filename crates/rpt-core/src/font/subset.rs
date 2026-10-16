@@ -158,10 +158,7 @@ fn light_song_subset(codepoints: &[u32]) -> Option<SubsetFont> {
 }
 
 fn subset_user_font(path: &std::path::Path, codepoints: &[u32]) -> Option<SubsetFont> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
+    let bytes = cached_font_bytes(path)?;
     if is_cff_font(&bytes) {
         let path = path.to_str()?;
         let mut best: Option<SubsetFont> = None;
@@ -297,10 +294,8 @@ json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
 
 pub fn load_cjk_font() -> Option<Vec<u8>> {
     if let Ok(path) = std::env::var("RPT_CJK_FONT") {
-        if let Ok(bytes) = std::fs::read(path.trim()) {
-            if !bytes.is_empty() {
-                return Some(bytes);
-            }
+        if let Some(bytes) = cached_font_bytes(std::path::Path::new(path.trim())) {
+            return Some(bytes.as_ref().clone());
         }
     }
     for path in [
@@ -309,13 +304,31 @@ pub fn load_cjk_font() -> Option<Vec<u8>> {
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     ] {
-        if let Ok(bytes) = std::fs::read(path) {
-            if !bytes.is_empty() {
-                return Some(bytes);
-            }
+        if let Some(bytes) = cached_font_bytes(std::path::Path::new(path)) {
+            return Some(bytes.as_ref().clone());
         }
     }
     None
+}
+
+/// Font files are re-read for every subset. Keep the bytes for the process.
+fn cached_font_bytes(path: &std::path::Path) -> Option<std::sync::Arc<Vec<u8>>> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, std::sync::Arc<Vec<u8>>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().ok()?;
+    if let Some(hit) = guard.get(path) {
+        return Some(std::sync::Arc::clone(hit));
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let bytes = std::sync::Arc::new(bytes);
+    guard.insert(path.to_path_buf(), std::sync::Arc::clone(&bytes));
+    Some(bytes)
 }
 
 /// Rectangle glyphs for tests. Advance is 600 units at 1000 units per em.
@@ -822,6 +835,25 @@ fn i16be(data: &[u8], at: usize) -> Option<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_bytes_are_cached_for_a_path() {
+        let path = std::env::temp_dir().join(format!(
+            "rpt-font-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"not-a-font-but-cached").unwrap();
+        let first = cached_font_bytes(&path).unwrap();
+        std::fs::write(&path, b"rewritten-after-cache").unwrap();
+        let second = cached_font_bytes(&path).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(&first[..], b"not-a-font-but-cached");
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn box_font_roundtrips_through_cmap_and_subset() {

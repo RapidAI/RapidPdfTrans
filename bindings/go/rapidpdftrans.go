@@ -34,8 +34,9 @@ func ExtractOptions(path, options string) (string, error) {
 	}, options)
 }
 
-// Translate extracts and translates. RPT_LLM_API_KEY must be set in the environment.
-// The PDF is not rewritten.
+// Translate extracts and translates. The PDF is not rewritten.
+// An LLM needs RPT_LLM_API_KEY. With no translator and no RPT_LLM_* settings,
+// a reachable Google Translate endpoint is used.
 func Translate(path, options string) (string, error) {
 	doc, err := open(path, options)
 	if err != nil {

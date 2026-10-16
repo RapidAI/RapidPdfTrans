@@ -156,9 +156,11 @@ pub unsafe extern "C" fn rpt_extract(
 /// # Safety
 /// `doc` was returned by `rpt_open` and has not been freed.
 /// `options_json` is a null-terminated UTF-8 string, or null.
-/// `RPT_LLM_API_KEY` must be set. An `api_key` field in JSON is ignored.
+/// An `api_key` field in JSON is ignored. An LLM needs `RPT_LLM_API_KEY`.
 /// `jobs` (or `RPT_TRANSLATE_JOBS`) is how many translation requests may run
-/// at once; the default is 1. Layout is not parallel.
+/// at once; the default is 4 and the cap is 8. Layout is not parallel.
+/// With no `RPT_TRANSLATOR` and no `RPT_LLM_*` settings, a reachable Google
+/// Translate endpoint is used.
 /// The returned string is freed with `rpt_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn rpt_translate(
@@ -205,7 +207,8 @@ pub unsafe extern "C" fn rpt_translate(
 /// # Safety
 /// `doc` was returned by `rpt_open` and has not been freed.
 /// `path` and `options_json` are null-terminated UTF-8 strings, or null.
-/// `RPT_LLM_API_KEY` must be set. An `api_key` field in JSON is ignored.
+/// An `api_key` field in JSON is ignored. An LLM needs `RPT_LLM_API_KEY`.
+/// With no translator configured, a reachable Google Translate endpoint is used.
 /// Returns 0 after the translated PDF is written.
 #[no_mangle]
 pub unsafe extern "C" fn rpt_save(
@@ -366,8 +369,16 @@ mod abi_tests {
             unsafe { rpt_free(doc) };
             return;
         }
+        // Pin maclaw so the missing-key path stays offline. An unconfigured
+        // translator probes Google Translate and may write the file.
+        let previous = std::env::var("RPT_TRANSLATOR").ok();
+        std::env::set_var("RPT_TRANSLATOR", "maclaw");
         let out = CString::new("/tmp/rpt-ffi-should-not-write.pdf").unwrap();
         let rc = unsafe { rpt_save(doc, out.as_ptr(), ptr::null()) };
+        match previous {
+            Some(value) => std::env::set_var("RPT_TRANSLATOR", value),
+            None => std::env::remove_var("RPT_TRANSLATOR"),
+        }
         assert_eq!(rc, -1);
         let err = unsafe { CStr::from_ptr(rpt_last_error()) }
             .to_string_lossy()

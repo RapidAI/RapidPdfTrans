@@ -30,8 +30,10 @@ fn extract(path: &str, options_json: Option<&str>) -> PyResult<String> {
 
 /// Translate extracted text. Requires `RPT_LLM_API_KEY`. Does not write a PDF.
 ///
-/// `options_json` may set `jobs` (default 1, or `RPT_TRANSLATE_JOBS`).
+/// `options_json` may set `jobs` (default 4, or `RPT_TRANSLATE_JOBS`, cap 8).
 /// Parallel workers translate disjoint segments. Layout stays single-threaded.
+/// With no translator and no `RPT_LLM_*` settings, a reachable Google
+/// Translate endpoint is used.
 #[pyfunction]
 #[pyo3(signature = (path, options_json=None))]
 fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
@@ -63,7 +65,8 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
     serde_json::to_string_pretty(&value).map_err(py_err)
 }
 
-/// Translate and write a PDF. Requires `RPT_LLM_API_KEY`.
+/// Translate and write a PDF. Uses `RPT_LLM_API_KEY` when set, otherwise a
+/// reachable Google Translate endpoint.
 ///
 /// `options_json` selects the output: `{"output_mode":"replace"}` (pure
 /// translation) or `{"output_mode":"bilingual","bilingual_layout":"side-by-side"}`.

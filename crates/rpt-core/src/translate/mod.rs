@@ -11,6 +11,8 @@
 //! gateway at `https://hub.mypapers.top/api/llm/v1` with model `auto`.
 //! `RPT_TRANSLATOR` selects `maclaw`, `openai`, `google-v2`, `google-v3`,
 //! or `google-unofficial`. Keys come only from environment variables.
+//! With no translator and no `RPT_LLM_*` settings, a reachable Google
+//! Translate endpoint is used instead.
 
 mod backend;
 mod google;
@@ -43,6 +45,8 @@ use protect::{restore, shield};
 
 pub const DEFAULT_LLM_BASE_URL: &str = "https://hub.mypapers.top/api/llm/v1";
 pub const DEFAULT_LLM_MODEL: &str = "auto";
+const DEFAULT_JOBS: usize = 4;
+const MAX_JOBS: usize = 8;
 
 /// Something that turns a system prompt and a user payload into model text.
 ///
@@ -66,8 +70,9 @@ pub struct TranslateOptions {
     pub glossary: Vec<(String, String)>,
     pub context_window: usize,
     pub batch_size: usize,
-    /// Parallel model requests. `0` uses `RPT_TRANSLATE_JOBS`, then 1.
-    /// Layout and rewrite stay on the calling thread either way.
+    /// Parallel model requests. `0` uses `RPT_TRANSLATE_JOBS`, then 4.
+    /// The resolved count is capped at 8. Layout and rewrite stay on the
+    /// calling thread either way.
     pub jobs: usize,
     pub temperature: f32,
     pub timeout_secs: u64,
@@ -210,30 +215,37 @@ impl TranslateOptions {
         )
     }
 
-    /// How many segment batches may be in flight. The default is one.
+    /// How many segment batches may be in flight.
+    ///
+    /// An explicit `jobs` value wins. Otherwise `RPT_TRANSLATE_JOBS` wins.
+    /// The unset default is 4. The result is clamped to 1..=8 so a large
+    /// setting cannot open an unbounded number of requests. HTTP 429 backoff
+    /// lives in the translator client.
     pub fn resolved_jobs(&self) -> Result<usize> {
-        if self.jobs > 0 {
-            return Ok(self.jobs);
-        }
-        match std::env::var("RPT_TRANSLATE_JOBS") {
-            Ok(value) => {
-                let value = value.trim();
-                if value.is_empty() {
-                    Ok(1)
-                } else {
-                    value
-                        .parse::<usize>()
-                        .ok()
-                        .filter(|n| *n > 0)
-                        .ok_or_else(|| {
-                            Error::Options(format!(
-                                "RPT_TRANSLATE_JOBS must be a positive integer, got `{value}`"
-                            ))
-                        })
+        let requested = if self.jobs > 0 {
+            self.jobs
+        } else {
+            match std::env::var("RPT_TRANSLATE_JOBS") {
+                Ok(value) => {
+                    let value = value.trim();
+                    if value.is_empty() {
+                        DEFAULT_JOBS
+                    } else {
+                        value
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|n| *n > 0)
+                            .ok_or_else(|| {
+                                Error::Options(format!(
+                                    "RPT_TRANSLATE_JOBS must be a positive integer, got `{value}`"
+                                ))
+                            })?
+                    }
                 }
+                Err(_) => DEFAULT_JOBS,
             }
-            Err(_) => Ok(1),
-        }
+        };
+        Ok(requested.clamp(1, MAX_JOBS))
     }
 
     /// Parse translator fields from an options JSON object.
@@ -439,8 +451,20 @@ pub fn translate_extraction(
     let mut calls = 0usize;
     let mut cache_hits = 0usize;
 
+    let glyph_at: HashMap<u32, usize> = extraction
+        .glyphs
+        .iter()
+        .enumerate()
+        .map(|(index, glyph)| (glyph.id, index))
+        .collect();
     for (i, seg) in segments.iter().enumerate() {
-        if translated[i].is_none() && seg.text.trim().is_empty() {
+        if translated[i].is_some() {
+            continue;
+        }
+        if seg.text.trim().is_empty()
+            || url_or_email_only(&seg.text)
+            || formula_shard(seg, &extraction.glyphs, &glyph_at)
+        {
             translated[i] = Some(seg.text.clone());
         }
     }
@@ -3257,6 +3281,55 @@ fn is_acronym_token(word: &str) -> bool {
     !letters.is_empty() && letters.len() <= 5 && letters.chars().all(|ch| ch.is_ascii_uppercase())
 }
 
+/// A display equation (`CMMI`/`CMSY` glyphs, almost no prose letters) is not
+/// a sentence. Copying the source keeps the original glyphs and skips the model.
+fn formula_shard(
+    seg: &Segment,
+    glyphs: &[crate::glyph::Glyph],
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let mut math = 0usize;
+    let mut letters = 0usize;
+    for id in &seg.glyph_ids {
+        let Some(&index) = by_id.get(id) else {
+            continue;
+        };
+        let glyph = &glyphs[index];
+        if formula_glyph(glyph) {
+            math += 1;
+        } else {
+            letters += glyph
+                .unicode
+                .chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .count();
+        }
+    }
+    math >= 3 && letters < 8 && math > letters
+}
+
+fn formula_glyph(glyph: &crate::glyph::Glyph) -> bool {
+    let upper = glyph.font_name.to_ascii_uppercase();
+    let math = [
+        "CMMI",
+        "CMSY",
+        "CMEX",
+        "MSAM",
+        "MSBM",
+        "STIX",
+        "CAMBRIAMATH",
+        "LATINMODERNMATH",
+        "SYMBOL",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle))
+        || upper.contains("MATH");
+    math && !matches!(
+        glyph.unicode.trim(),
+        "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
+    )
+}
+
 fn url_or_email_only(source: &str) -> bool {
     let body = strip_leading_marker(source);
     let words: Vec<&str> = body.split_whitespace().collect();
@@ -4855,7 +4928,7 @@ mod tests {
     }
 
     #[test]
-    fn jobs_default_to_one_and_json_accepts_an_explicit_count() {
+    fn jobs_default_to_four_and_json_accepts_an_explicit_count() {
         assert_eq!(TranslateOptions::default().jobs, 0);
         assert_eq!(TranslateOptions::from_json("{}").unwrap().0.jobs, 0);
         assert_eq!(
@@ -4878,13 +4951,66 @@ mod tests {
             ..TranslateOptions::default()
         };
         assert_eq!(explicit.resolved_jobs().unwrap(), 4);
+        let capped = TranslateOptions {
+            jobs: 32,
+            ..TranslateOptions::default()
+        };
+        assert_eq!(capped.resolved_jobs().unwrap(), 8);
         let unset = TranslateOptions::default().resolved_jobs().unwrap();
         let from_env = std::env::var("RPT_TRANSLATE_JOBS")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|n| *n > 0)
-            .unwrap_or(1);
+            .unwrap_or(4)
+            .clamp(1, 8);
         assert_eq!(unset, from_env);
+    }
+
+    #[test]
+    fn url_and_formula_segments_are_not_sent_to_the_model() {
+        struct Boom;
+        impl Translator for Boom {
+            fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+                panic!("the model was called for a non-translatable segment");
+            }
+        }
+        let opts = TranslateOptions {
+            jobs: 1,
+            ..TranslateOptions::default()
+        };
+        let mut url_doc = extraction_from_lines(&["https://arxiv.org/abs/1706.03762"]);
+        let url = translate_extraction(&mut url_doc, &opts, &Boom).unwrap();
+        assert_eq!(url.calls, 0);
+        assert_eq!(url.segments.len(), 1);
+        assert_eq!(url.segments[0].translated, url.segments[0].source);
+
+        let mut glyphs = Vec::new();
+        for (i, ch) in ["α", "+", "β", "=", "γ"].into_iter().enumerate() {
+            let mut item = glyph(i as u32, i as f32 * 8.0, 700.0, ch);
+            item.font_name = "CMMI10".into();
+            glyphs.push(item);
+        }
+        let mut formula_doc = Extraction {
+            coordinate_space: COORDINATE_SPACE,
+            pages: vec![PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let formula = translate_extraction(&mut formula_doc, &opts, &Boom).unwrap();
+        assert_eq!(formula.calls, 0);
+        assert_eq!(formula.segments.len(), 1);
+        assert_eq!(formula.segments[0].translated, formula.segments[0].source);
+
+        let mut prose = extraction_from_lines(&["The transformer uses self-attention."]);
+        let sent = translate_extraction(&mut prose, &opts, &PrefixTranslator).unwrap();
+        assert!(sent.calls >= 1);
+        assert!(sent.segments[0].translated.contains('译'));
     }
 
     #[test]
