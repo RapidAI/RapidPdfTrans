@@ -8533,6 +8533,292 @@ fn stack_anchor(ids: &[u32], glyphs: &[&Glyph], body: f32) -> (f32, f32) {
     (left, anchor_y)
 }
 
+/// The source block could not hold the translation. Use the blank under the
+/// last baseline, down to the next untranslated glyph in this column, before
+/// leaving the English in place.
+fn fit_into_blank_below(
+    extraction: &Extraction,
+    own: &[&Glyph],
+    text: &str,
+    source_size: f32,
+    scale: f32,
+    block_left: f32,
+    block_right: f32,
+    indent_ems: f32,
+    available: f32,
+    bottom_y: f32,
+    font: &SubsetFont,
+    metrics: CjkMeasure,
+    callout_indent: Option<f32>,
+    holes: &HashMap<usize, f32>,
+    page: u32,
+) -> Option<(Vec<String>, f32, f32, f32)> {
+    let width = (block_right - block_left).max(source_size);
+    let mut next_y = f32::MIN;
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page || own.iter().any(|item| item.id == glyph.id) {
+            continue;
+        }
+        if glyph.invisible || glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        let gy = glyph.matrix[5];
+        if gy >= bottom_y - source_size * 0.3 {
+            continue;
+        }
+        let gx0 = glyph.bbox[0].min(glyph.bbox[2]);
+        let gx1 = glyph.bbox[0].max(glyph.bbox[2]);
+        let overlap = block_right.min(gx1) - block_left.max(gx0);
+        if overlap < source_size * 0.4 {
+            continue;
+        }
+        if gy > next_y {
+            next_y = gy;
+        }
+    }
+    if next_y == f32::MIN {
+        next_y = bottom_y - source_size * 3.2;
+    }
+    let clearance = source_size * 0.9 + 2.0;
+    let room = (bottom_y - next_y - clearance).max(0.0);
+    if room < source_size * 0.8 {
+        return None;
+    }
+    fit_cjk_block_with(
+        text,
+        source_size,
+        scale,
+        width,
+        indent_ems,
+        available + room,
+        font,
+        metrics,
+        callout_indent,
+        holes,
+    )
+}
+
+/// A paragraph that starts at the bottom of one column and continues at the
+/// top of the next. Each piece stays inside its own column. A side-by-side
+/// pair (a caption and the other column one leading lower) is the same shape
+/// and must not be painted across the gutter either.
+fn layout_column_flow(
+    ink: &[InkLine<'_>],
+    text: &str,
+    font: &SubsetFont,
+    resource: &str,
+    skew: f32,
+    source_size: f32,
+    scale: f32,
+    metrics: CjkMeasure,
+    holes: &HashMap<usize, f32>,
+    page: u32,
+) -> Option<Vec<Drawn>> {
+    let (left_col, right_col) = two_column_ink(ink, source_size)?;
+    let left_width = (left_col.right - left_col.left).max(source_size);
+    let right_width = (right_col.right - right_col.left).max(source_size);
+    let width = left_width.min(right_width);
+    let slots = left_col.lines.len() + right_col.lines.len();
+    if slots < 2 {
+        return None;
+    }
+    let lead = (source_size * scale).max(1.0) * metrics.leading_ratio;
+    let available = lead * (slots - 1) as f32;
+    let (mut lines, size, _, _) = fit_cjk_block_with(
+        text,
+        source_size,
+        scale,
+        width,
+        0.0,
+        available,
+        font,
+        metrics,
+        None,
+        holes,
+    )?;
+    if lines.len() > slots {
+        lines.truncate(slots);
+    }
+    let color = ink
+        .first()
+        .and_then(|line| line.glyphs.first())
+        .map(|glyph| glyph.fill_color.clone())
+        .unwrap_or_else(|| Color::gray(0.0));
+    let mut drawn = Vec::new();
+    let n_left = left_col.lines.len().min(lines.len());
+    drawn.extend(paint_column_piece(
+        &lines[..n_left],
+        &left_col,
+        size,
+        color.clone(),
+        font,
+        resource,
+        skew,
+        page,
+    ));
+    if n_left < lines.len() {
+        drawn.extend(paint_column_piece(
+            &lines[n_left..],
+            &right_col,
+            size,
+            color,
+            font,
+            resource,
+            skew,
+            page,
+        ));
+    } else if !right_col.ids.is_empty() && !drawn.is_empty() {
+        // The translation finished in the first column. The continuation's
+        // source glyphs still have to be listed so the English is cleared.
+        drawn[0].glyph_ids.extend(right_col.ids.iter().copied());
+    }
+    (!drawn.is_empty()).then_some(drawn)
+}
+
+struct ColumnInk {
+    lines: Vec<f32>,
+    left: f32,
+    right: f32,
+    ids: Vec<u32>,
+}
+
+fn two_column_ink(ink: &[InkLine<'_>], size: f32) -> Option<(ColumnInk, ColumnInk)> {
+    let size = size.max(1.0);
+    let substantial =
+        |line: &InkLine<'_>| line.right - line.left >= size * 8.0 && line.glyphs.len() >= 8;
+    let mut clusters: Vec<ColumnInk> = Vec::new();
+    for line in ink.iter().filter(|line| substantial(line)) {
+        let host = clusters.iter().position(|col| {
+            let overlap = col.right.min(line.right) - col.left.max(line.left);
+            overlap > size * 0.4 || (line.left - col.left).abs() < size * 4.0
+        });
+        if let Some(host) = host {
+            let col = &mut clusters[host];
+            col.lines.push(line.y);
+            col.left = col.left.min(line.left);
+            col.right = col.right.max(line.right);
+            col.ids.extend(line.glyphs.iter().map(|glyph| glyph.id));
+        } else {
+            clusters.push(ColumnInk {
+                lines: vec![line.y],
+                left: line.left,
+                right: line.right,
+                ids: line.glyphs.iter().map(|glyph| glyph.id).collect(),
+            });
+        }
+    }
+    if clusters.len() != 2 {
+        return None;
+    }
+    clusters.sort_by(|left, right| left.left.total_cmp(&right.left));
+    let gap = clusters[1].left - clusters[0].right;
+    if gap < size * 0.8 {
+        return None;
+    }
+    // A column break runs from the bottom of the left column to the top of
+    // the right one. Two clusters that sit side by side are a caption that
+    // swallowed the other column; painting each in its own box still keeps
+    // the translation off the gutter.
+    for line in ink.iter().filter(|line| !substantial(line)) {
+        let dx0 = (line.left - clusters[0].left).abs();
+        let dx1 = (line.left - clusters[1].left).abs();
+        let host = if dx0 <= dx1 { 0 } else { 1 };
+        clusters[host]
+            .ids
+            .extend(line.glyphs.iter().map(|glyph| glyph.id));
+    }
+    let right = clusters.pop()?;
+    let left = clusters.pop()?;
+    Some((left, right))
+}
+
+fn paint_column_piece(
+    lines: &[String],
+    column: &ColumnInk,
+    size: f32,
+    color: Color,
+    font: &SubsetFont,
+    resource: &str,
+    skew: f32,
+    page: u32,
+) -> Vec<Drawn> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let ys = ys_spread(&column.lines, lines.len());
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let widths = char_widths(line, size, font);
+            Drawn {
+                page,
+                x: column.left,
+                y: ys.get(index).copied().unwrap_or(column.lines[0]),
+                size,
+                color: color.clone(),
+                cids: cids_of(line, font),
+                resource: resource.to_string(),
+                skew,
+                widths,
+                gaps: vec![0.0; line.chars().count().saturating_sub(1)],
+                text: line.clone(),
+                supers: Vec::new(),
+                sup_scale: 1.0,
+                sup_rise: 0.0,
+                glyph_ids: column.ids.clone(),
+            }
+        })
+        .collect()
+}
+
+fn ys_spread(src: &[f32], count: usize) -> Vec<f32> {
+    if src.is_empty() || count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![src[0]];
+    }
+    if count <= src.len() {
+        return src.iter().copied().take(count).collect();
+    }
+    let extra = count - src.len();
+    let mut weight: Vec<f32> = src
+        .windows(2)
+        .map(|pair| (pair[0] - pair[1]).abs())
+        .collect();
+    if weight.is_empty() {
+        let step = 1.0f32;
+        return (0..count)
+            .map(|index| src[0] - index as f32 * step)
+            .collect();
+    }
+    let mut inserts = vec![0usize; src.len() - 1];
+    for _ in 0..extra {
+        let slot = weight
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        inserts[slot] += 1;
+        weight[slot] = (src[slot] - src[slot + 1]).abs() / (inserts[slot] + 1) as f32;
+    }
+    let mut ys = Vec::with_capacity(count);
+    for index in 0..src.len() {
+        ys.push(src[index]);
+        if index + 1 == src.len() {
+            break;
+        }
+        let added = inserts[index];
+        for step in 1..=added {
+            let t = step as f32 / (added + 1) as f32;
+            ys.push(src[index] + (src[index + 1] - src[index]) * t);
+        }
+    }
+    ys
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -8804,6 +9090,28 @@ fn layout_segment(
         }
     }
     let scale = scale_for_heading(level, source_size, metrics);
+    if !bilingual
+        && numbered.is_none()
+        && bullet.is_none()
+        && run_in.is_none()
+        && callout.is_none()
+        && quotes.is_empty()
+    {
+        if let Some(drawn) = layout_column_flow(
+            &ink,
+            text,
+            font,
+            resource,
+            skew,
+            source_size,
+            scale,
+            metrics,
+            &holes,
+            page,
+        ) {
+            return Some(drawn);
+        }
+    }
     let callout_indent = callout
         .as_ref()
         .and_then(|lead| {
@@ -8827,6 +9135,7 @@ fn layout_segment(
         )
     };
     let mut center_block = false;
+    let mut extend_down = false;
     let (block_left, block_right, lines, mut size, leading, indent) =
         if let Some((lines, size, leading, indent)) = fit_box(block_left, block_right) {
             (block_left, block_right, lines, size, leading, indent)
@@ -8877,6 +9186,25 @@ fn layout_segment(
                 }
                 None => return None,
             }
+        } else if let Some((lines, size, leading, indent)) = fit_into_blank_below(
+            extraction,
+            glyphs,
+            text,
+            source_size,
+            scale,
+            block_left,
+            block_right,
+            indent_ems,
+            available,
+            bottom_y,
+            font,
+            metrics,
+            callout_indent,
+            &holes,
+            page,
+        ) {
+            extend_down = true;
+            (block_left, block_right, lines, size, leading, indent)
         } else {
             return None;
         };
@@ -8949,7 +9277,13 @@ fn layout_segment(
             origin_y = top_y - size * 1.2;
         }
     }
-    let mut ys: Vec<f32> = if bilingual {
+    let mut ys: Vec<f32> = if extend_down {
+        // The source block was too short. The lines step down into the blank
+        // under it, stopping before the next untranslated line.
+        (0..lines.len())
+            .map(|index| top_y - index as f32 * leading)
+            .collect()
+    } else if bilingual {
         (0..lines.len())
             .map(|index| origin_y - index as f32 * leading)
             .collect()
@@ -10921,6 +11255,70 @@ fn clause_sits_on_kept_formula(
     math >= 4
 }
 
+/// An upward pull must stop under kept ink and under a table rule or a
+/// figure. Closing a hole used to slide a caption onto the rows it captions.
+fn cap_upward_shift(
+    block: &ColumnBlock,
+    shift: f32,
+    page: u32,
+    extraction: &Extraction,
+    used: &HashSet<u32>,
+) -> f32 {
+    if shift <= 0.4 {
+        return shift;
+    }
+    let size = block.size.max(1.0);
+    let mut limit = shift;
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page
+            || used.contains(&glyph.id)
+            || glyph.invisible
+            || glyph.unicode.trim().is_empty()
+        {
+            continue;
+        }
+        let gy = glyph.matrix[5];
+        if gy <= block.top + size * 0.35 {
+            continue;
+        }
+        let gx0 = glyph.bbox[0].min(glyph.bbox[2]);
+        let gx1 = glyph.bbox[0].max(glyph.bbox[2]);
+        let overlap = block.right.min(gx1) - block.left.max(gx0);
+        if overlap < size * 0.3 {
+            continue;
+        }
+        let ceiling = gy - glyph.font_size.max(1.0) * 0.25 - size * 0.85 - 1.5;
+        let room = ceiling - block.top;
+        if room < limit {
+            limit = room.max(0.0);
+        }
+    }
+    for region in &extraction.regions {
+        if region.page_index != page {
+            continue;
+        }
+        let y0 = region.bbox[1].min(region.bbox[3]);
+        let y1 = region.bbox[1].max(region.bbox[3]);
+        let x0 = region.bbox[0].min(region.bbox[2]);
+        let x1 = region.bbox[0].max(region.bbox[2]);
+        let thin = y1 - y0 < 2.5 && x1 - x0 > 30.0;
+        let image = region.kind == "image";
+        if !thin && !image {
+            continue;
+        }
+        let overlap = block.right.min(x1) - block.left.max(x0);
+        if overlap < size * 0.4 || y0 <= block.top + size * 0.2 {
+            continue;
+        }
+        let ceiling = y0 - size * 0.9 - 1.0;
+        let room = ceiling - block.top;
+        if room < limit {
+            limit = room.max(0.0);
+        }
+    }
+    limit
+}
+
 fn close_column_holes(
     drawn: &mut [Drawn],
     extraction: &Extraction,
@@ -11109,6 +11507,8 @@ fn close_column_holes(
                 && clause_sits_on_kept_formula(&block, drawn, extraction, page)
             {
                 0.0
+            } else if shift > 0.4 {
+                cap_upward_shift(&block, shift, page, extraction, &used_ids)
             } else {
                 shift
             };

@@ -3969,10 +3969,16 @@ fn column_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool
     if lower.left <= upper.left + 36.0 || lower.left >= upper.left + 360.0 {
         return false;
     }
+    // A full-width line already covers the other column (`For SQuAD …` running
+    // into `by the LM perplexity`). Its continuation is the next line under
+    // it, or the next page, not that column's top.
+    let size = upper.size.max(lower.size).max(1.0);
+    if prev.iter().any(|line| line.right > lower.left + size * 0.5) {
+        return false;
+    }
     // A line beside this one is the other column's matching row, not the
     // continuation. The next column's text starts near the top of the page,
     // not a folio a few lines above a footer.
-    let size = upper.size.max(lower.size).max(1.0);
     if lower.y < upper.y + size * 8.0 {
         return false;
     }
@@ -4144,8 +4150,14 @@ fn caption_line_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     }
     // `columns.` is the caption's own wrap. The other column's body line
     // (`in the types of aspects…`) is one leading lower and also starts in
-    // lowercase, but it sits on the left margin.
+    // lowercase, but it sits on the left margin. A line in the column to the
+    // right (`expensive as a single…` beside `Table 5:`) misses the caption
+    // entirely. A centered wrap still overlaps the caption line.
     if lower.left + size * 0.4 < upper.left - size {
+        return false;
+    }
+    let overlap = (upper.right.min(lower.right) - upper.left.max(lower.left)).max(0.0);
+    if overlap < size * 0.5 {
         return false;
     }
     let next = lower.text.trim_start();
@@ -11542,6 +11554,91 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("travel assistant") && !text.contains("appendix")),
             "sub-entry missing: {column:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_caption_does_not_take_the_other_column() {
+        // BERT Table 5: the caption's next line is its own wrap. The other
+        // column's lowercase line sits one leading lower and used to be read
+        // as that wrap, so the caption was painted across the gutter.
+        let glyphs = vec![
+            wide(
+                0,
+                72.0,
+                400.0,
+                "Table 5: Ablation over the pre-training tasks using the",
+                218.0,
+                9.0,
+            ),
+            wide(
+                1,
+                307.0,
+                392.0,
+                "expensive as a single bidirectional model and more",
+                210.0,
+                9.0,
+            ),
+            wide(
+                2,
+                72.0,
+                388.0,
+                "architecture remains in the caption column here today.",
+                218.0,
+                9.0,
+            ),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .into_iter()
+            .map(|item| item.text)
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Table 5")
+                && text.contains("architecture remains")
+                && !text.contains("expensive")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("expensive") && !text.contains("Table 5")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_full_width_line_does_not_claim_the_other_column() {
+        let bottom = wide(
+            0,
+            72.0,
+            80.0,
+            "but the line already spans both columns here",
+            450.0,
+            10.0,
+        );
+        let top = wide(
+            1,
+            320.0,
+            700.0,
+            "results are still far worse than the baseline.",
+            200.0,
+            10.0,
+        );
+        let texts: Vec<_> = segment_glyphs(&[bottom, top])
+            .into_iter()
+            .map(|item| item.text)
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("both columns") && !text.contains("results are still")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("results are still") && !text.contains("both columns")),
+            "{texts:?}"
         );
     }
 
