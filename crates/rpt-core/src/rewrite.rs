@@ -21360,6 +21360,37 @@ mod tests {
             drawn[0].x,
             drawn[0].text
         );
+        // Two full lines of a centered header share both edges. A shorter
+        // translation still belongs on that axis, not on the English left.
+        let header = vec![
+            band(
+                0,
+                124.0,
+                488.0,
+                500.0,
+                10.0,
+                "Provided proper attribution is provided, Google hereby grants",
+            ),
+            band(
+                1,
+                124.3,
+                487.9,
+                486.0,
+                10.0,
+                "reproduce the tables and figures in this paper solely for use",
+            ),
+        ];
+        let drawn = draw(header, title).expect("header fits");
+        for line in &drawn {
+            let advance = line.widths.iter().sum::<f32>();
+            let mid = line.x + advance * 0.5;
+            assert!(
+                (mid - 306.0).abs() < 8.0,
+                "header mid {mid:.1} x {:.1}: {}",
+                line.x,
+                line.text
+            );
+        }
         // BERT's title is two centered lines of different widths.
         let bert = vec![
             band(

@@ -75,7 +75,10 @@ pub fn block_alignment(
     let right_min = lines.iter().map(|line| line.right).fold(f32::MAX, f32::min);
     let right_max = lines.iter().map(|line| line.right).fold(f32::MIN, f32::max);
     let flush_both = lines.len() >= 2 && left_max - left_min <= 2.5 && right_max - right_min <= 2.5;
-    let page_centered = !flush_both
+    // Two full lines of a centered header share both edges, the same way a
+    // justified column does. The margin keeps that column out: a body line
+    // sits closer to the page edge than a title.
+    let page_centered = lines.len() <= 4
         && lines.iter().all(|line| {
             (mid(line) - page_mid).abs() <= tol
                 && line.left - page_left >= margin_floor
@@ -121,8 +124,17 @@ pub fn block_alignment(
         }
     }
     let rights_agree = right_max - right_min <= 2.5;
-    let left_slop = if size >= 16.0 { 3.0 } else { 8.0 };
-    if lines.len() >= 2 && rights_agree && left_max - left_min > left_slop && !mids_agree {
+    let left_slop: f32 = if size >= 16.0 { 3.0 } else { 8.0 };
+    let flush_left = lines
+        .iter()
+        .filter(|line| (line.left - left_min).abs() <= 3.0)
+        .count();
+    // A justified column shares the right edge too. An indent is a couple of
+    // ems; a right-aligned title steps much further, and most of its lines
+    // are not flush with the leftmost one.
+    let ragged_enough = left_max - left_min > left_slop.max(size * 3.0);
+    let mostly_flush = flush_left * 2 > lines.len();
+    if lines.len() >= 2 && rights_agree && ragged_enough && !mids_agree && !mostly_flush {
         return BlockAlign::End { edge: right_max };
     }
     BlockAlign::Start
@@ -672,6 +684,22 @@ mod tests {
             matches!(block_alignment(&[body], media, None), BlockAlign::Start),
             "a column line is not a centered title"
         );
+        let header = [
+            AlignLine {
+                left: 124.0,
+                right: 488.0,
+                size: 10.0,
+            },
+            AlignLine {
+                left: 124.3,
+                right: 487.9,
+                size: 10.0,
+            },
+        ];
+        match block_alignment(&header, media, None) {
+            BlockAlign::Center { axis } => assert!((axis - 306.0).abs() < 2.0, "{axis}"),
+            other => panic!("equal centered lines were {other:?}"),
+        }
     }
 
     #[test]
