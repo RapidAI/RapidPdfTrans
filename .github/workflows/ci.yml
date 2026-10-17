@@ -67,7 +67,11 @@ jobs:
   cjk-font-smoke:
     name: CJK font smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -96,7 +100,7 @@ jobs:
           if present:
               sys.exit("clean runner already has a Song face: " + ",".join(present))
           PY
-          cargo test -p rpt-core --lib cached_noto_serves_a_clean_machine -- --exact
+          cargo test -p rpt-core --lib font::subset::tests::cached_noto_serves_a_clean_machine -- --exact
       - name: Replay translation
         shell: bash
         env:
