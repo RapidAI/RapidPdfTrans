@@ -1,12 +1,16 @@
 //! Subset a CJK font down to the characters a translation uses.
 //!
-//! Glyf faces become a CIDFontType2 payload with Identity glyph ids. CFF faces
-//! (Noto CJK) are subset with fontTools; the saved bytes are an OpenType file
-//! whose `CFF ` table is what a CIDFontType0 FontFile3 must embed. Glyph ids in
-//! `glyphs` are identity charset CIDs (glyph index, not the source `cidNNNNN`).
-//! A viewer that paints CID as GID, and one that caches fonts by BaseFont, both
-//! then see the same outlines. Shaping is one glyph per character. OpenType
-//! GSUB is not applied.
+//! Glyf faces become a CIDFontType2 payload with Identity glyph ids. The
+//! subset is a standalone TrueType file: `maxp` maxima cover every outline
+//! (a short `maxContours` makes Windows/OTS drop multi-contour glyphs such as
+//! a, e, o, 0, and most Han), and `OS/2` is present. fontTools writes that
+//! file when Python is available; the in-process subsetter is the fallback.
+//! CFF faces (Noto CJK) are subset with fontTools. The saved bytes are an
+//! OpenType file whose `CFF ` table is what a CIDFontType0 FontFile3 must
+//! embed. Glyph ids in `glyphs` are identity charset CIDs (glyph index, not
+//! the source `cidNNNNN`). A viewer that paints CID as GID, and one that
+//! caches fonts by BaseFont, both then see the same outlines. Shaping is one
+//! glyph per character. OpenType GSUB is not applied.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -210,10 +214,16 @@ fn noto_subset(serif: bool, bold: bool, codepoints: &[u32]) -> Option<SubsetFont
     } else {
         ("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc", 2)
     };
-    std::path::Path::new(path)
-        .is_file()
-        .then(|| subset_cff(path, face, codepoints))
-        .flatten()
+    if std::path::Path::new(path).is_file() {
+        if let Some(font) = subset_cff(path, face, codepoints) {
+            return Some(font);
+        }
+    }
+    // A machine without the system package still gets Song: the SC OTF is
+    // downloaded once into the user cache. It is not stored in the wheel.
+    let cached = ensure_noto_sc(bold || !serif)?;
+    let path = cached.to_str()?;
+    subset_cff(path, 0, codepoints)
 }
 
 /// Source Han Serif / Noto Serif CJK SC Light, when it is installed.
@@ -442,7 +452,8 @@ for cp, name in cmap.items():
     glyphs.append({"cp": int(cp), "cid": cid, "adv": advance})
 json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
 "#;
-    let status = std::process::Command::new("python3")
+    let mut command = python_command()?;
+    let status = command
         .arg("-c")
         .arg(script)
         .arg(path)
@@ -477,6 +488,401 @@ json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
         fallback: None,
         notice: None,
     })
+}
+
+fn python_command() -> Option<std::process::Command> {
+    for name in ["python3", "python"] {
+        let Ok(output) = std::process::Command::new(name).arg("--version").output() else {
+            continue;
+        };
+        if output.status.success() {
+            return Some(std::process::Command::new(name));
+        }
+    }
+    None
+}
+
+fn next_stamp() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Subset a glyf face with fontTools. The result is one TrueType file, not a
+/// collection. Glyph ids are the subset's glyph indexes, so CIDToGIDMap
+/// Identity addresses the outline that was packed.
+fn subset_glyf_fonttools(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> Option<SubsetFont> {
+    if is_cff_font(data) || !font_has_table(data, face, b"OS/2") {
+        return None;
+    }
+    let mut codes: Vec<u32> = codepoints
+        .iter()
+        .copied()
+        .filter(|code| *code > 0 && *code <= 0xFFFF)
+        .collect();
+    codes.push(0x20);
+    codes.sort_unstable();
+    codes.dedup();
+    if codes.is_empty() {
+        return None;
+    }
+    let list = codes
+        .iter()
+        .map(|code| format!("{code:X}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let stamp = next_stamp();
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("rpt-glyf-src-{}-{stamp}.bin", std::process::id()));
+    let font_out = dir.join(format!("rpt-glyf-{}-{stamp}.ttf", std::process::id()));
+    let json_out = dir.join(format!("rpt-glyf-{}-{stamp}.json", std::process::id()));
+    std::fs::write(&src, data).ok()?;
+    let face_arg = face
+        .map(|face| face.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let script = r#"
+import json, struct, sys
+from fontTools.ttLib import TTFont
+from fontTools.subset import Subsetter, Options
+src, face, unicodes, out_font, out_json = sys.argv[1:]
+codes = [int(item, 16) for item in unicodes.split(",") if item]
+raw = open(src, "rb").read(12)
+if raw[:4] == b"ttcf":
+    count = struct.unpack(">I", open(src, "rb").read(12)[8:12])[0]
+else:
+    count = 1
+wanted = [int(face)] if face != "-" else list(range(min(count, 32)))
+
+def cover(font):
+    cmap = font.getBestCmap() or {}
+    return sum(1 for code in codes if code in cmap)
+
+best_face = None
+best_count = -1
+for index in wanted:
+    try:
+        font = TTFont(src, fontNumber=index)
+    except Exception:
+        continue
+    if "glyf" not in font:
+        continue
+    covered = cover(font)
+    if covered > best_count:
+        best_count = covered
+        best_face = index
+if best_face is None or best_count <= 0:
+    raise SystemExit(2)
+opt = Options()
+# "*" pulls every GSUB alternate. Some of those outlines make this
+# fontTools build crash in glyf.trim, and the page does not need them.
+# Component glyphs are still closed over.
+opt.layout_features = []
+opt.notdef_outline = True
+opt.recommended_glyphs = True
+opt.hinting = True
+font = TTFont(src, fontNumber=best_face)
+subsetter = Subsetter(options=opt)
+subsetter.populate(unicodes=codes)
+subsetter.subset(font)
+font.save(out_font)
+font = TTFont(out_font)
+if font.sfntVersion != "\x00\x01\x00\x00":
+    raise SystemExit("subset is not a standalone TrueType file")
+for table in ("cmap", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "name", "post"):
+    if table not in font:
+        raise SystemExit(f"missing {table}")
+maxp = font["maxp"]
+glyf = font["glyf"]
+order = font.getGlyphOrder()
+for name in order:
+    glyph = glyf[name]
+    contours = int(glyph.numberOfContours)
+    if contours > int(getattr(maxp, "maxContours", 0) or 0) and contours >= 0:
+        raise SystemExit(f"{name} has {contours} contours, maxp allows {maxp.maxContours}")
+    if glyph.isComposite():
+        elements = len(glyph.components)
+        if elements > int(getattr(maxp, "maxComponentElements", 0) or 0):
+            raise SystemExit(f"{name} components exceed maxp")
+        for component in glyph.components:
+            if component.glyphName not in glyf:
+                raise SystemExit(f"{name} missing component {component.glyphName}")
+cmap = font.getBestCmap() or {}
+upem = int(font["head"].unitsPerEm)
+glyphs = []
+for cp, name in cmap.items():
+    if name not in order:
+        continue
+    gid = order.index(name)
+    if gid > 65535:
+        continue
+    advance = int(font["hmtx"].metrics.get(name, (upem, 0))[0])
+    glyphs.append({"cp": int(cp), "cid": gid, "adv": min(advance, 65535)})
+if not glyphs:
+    raise SystemExit("empty cmap")
+json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
+"#;
+    let mut command = python_command()?;
+    let status = command
+        .arg("-c")
+        .arg(script)
+        .arg(&src)
+        .arg(face_arg)
+        .arg(&list)
+        .arg(&font_out)
+        .arg(&json_out)
+        .status()
+        .ok();
+    let cleanup = || {
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&font_out);
+        let _ = std::fs::remove_file(&json_out);
+    };
+    if !status.is_some_and(|status| status.success()) {
+        cleanup();
+        return None;
+    }
+    let bytes = match std::fs::read(&font_out) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            cleanup();
+            return None;
+        }
+    };
+    let meta: serde_json::Value = match std::fs::read(&json_out)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(meta) => meta,
+        None => {
+            cleanup();
+            return None;
+        }
+    };
+    cleanup();
+    let upem = meta.get("upem")?.as_u64()? as u16;
+    let mut glyphs = HashMap::new();
+    for item in meta.get("glyphs")?.as_array()? {
+        let cp = item.get("cp")?.as_u64()? as u32;
+        let cid = item.get("cid")?.as_u64()? as u16;
+        let adv = item.get("adv")?.as_u64()?.min(u16::MAX as u64) as u16;
+        glyphs.insert(cp, (cid, adv));
+    }
+    if glyphs.is_empty() {
+        return None;
+    }
+    Some(SubsetFont {
+        bytes,
+        units_per_em: upem.max(1),
+        glyphs,
+        fallback: None,
+        notice: None,
+    })
+}
+
+const NOTO_SC_REGULAR_URL: &str = "https://raw.githubusercontent.com/notofonts/noto-cjk/Serif2.003/Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Regular.otf";
+const NOTO_SC_BOLD_URL: &str = "https://raw.githubusercontent.com/notofonts/noto-cjk/Serif2.003/Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Bold.otf";
+const NOTO_SC_REGULAR_SHA: &str =
+    "2a2eae2628df83556c54018c41e20fa532c1b862c5256ae8b3f23feb918d12ca";
+const NOTO_SC_BOLD_SHA: &str = "8af07d4b6c2e82bcc72a30e066eaf295f11b9424f4aad2eaa9fe0e9c3b38fc73";
+
+/// Directory for the downloaded Noto Serif CJK SC faces.
+///
+/// `RPT_FONT_CACHE` wins. Otherwise this is `%LOCALAPPDATA%\rapidpdftrans`
+/// on Windows, `~/Library/Caches/rapidpdftrans` on macOS, and
+/// `$XDG_CACHE_HOME/rapidpdftrans` or `~/.cache/rapidpdftrans` elsewhere.
+fn font_cache_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("RPT_FONT_CACHE") {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
+    if cfg!(windows) {
+        if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+            if !dir.is_empty() {
+                return std::path::PathBuf::from(dir).join("rapidpdftrans");
+            }
+        }
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join("rapidpdftrans");
+        }
+    }
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir).join("rapidpdftrans");
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home)
+            .join(".cache")
+            .join("rapidpdftrans");
+    }
+    std::env::temp_dir().join("rapidpdftrans")
+}
+
+/// Noto Serif CJK SC Regular or Bold, from the cache, downloading it once
+/// when the file is absent. The OFL text is written beside the faces.
+fn ensure_noto_sc(bold: bool) -> Option<std::path::PathBuf> {
+    use std::sync::Mutex;
+    static FETCH: Mutex<()> = Mutex::new(());
+    let _guard = FETCH.lock().ok()?;
+    let dir = font_cache_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let ofl = dir.join("OFL.txt");
+    if !ofl.is_file() {
+        let _ = std::fs::write(&ofl, include_str!("../../../../assets/fonts/OFL.txt"));
+    }
+    let name = if bold {
+        "NotoSerifCJKsc-Bold.otf"
+    } else {
+        "NotoSerifCJKsc-Regular.otf"
+    };
+    let path = dir.join(name);
+    let sha = if bold {
+        NOTO_SC_BOLD_SHA
+    } else {
+        NOTO_SC_REGULAR_SHA
+    };
+    if path.is_file() && file_sha256_matches(&path, sha) {
+        return Some(path);
+    }
+    let url = if bold {
+        NOTO_SC_BOLD_URL
+    } else {
+        NOTO_SC_REGULAR_URL
+    };
+    let bytes = download_font(url)?;
+    if !sha256_hex(&bytes).eq_ignore_ascii_case(sha) || !bytes.starts_with(b"OTTO") {
+        return None;
+    }
+    let tmp = dir.join(format!("{name}.partial"));
+    std::fs::write(&tmp, &bytes).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(path)
+}
+
+fn download_font(url: &str) -> Option<Vec<u8>> {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(180)))
+        .build();
+    let agent: ureq::Agent = config.into();
+    let mut response = agent
+        .get(url)
+        .header("User-Agent", "rapidpdftrans")
+        .call()
+        .ok()?;
+    response
+        .body_mut()
+        .with_config()
+        .limit(40 * 1024 * 1024)
+        .read_to_vec()
+        .ok()
+}
+
+fn file_sha256_matches(path: &std::path::Path, expect: &str) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    sha256_hex(&bytes).eq_ignore_ascii_case(expect)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    // Compact SHA-256 so the cache check does not need another crate.
+    sha256(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn sha256(message: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut state = [
+        0x6a09e667u32,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let bit_len = (message.len() as u64).saturating_mul(8);
+    let mut data = message.to_vec();
+    data.push(0x80);
+    while (data.len() % 64) != 56 {
+        data.push(0);
+    }
+    data.extend_from_slice(&bit_len.to_be_bytes());
+    for chunk in data.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let mut a = state[0];
+        let mut b = state[1];
+        let mut c = state[2];
+        let mut d = state[3];
+        let mut e = state[4];
+        let mut f = state[5];
+        let mut g = state[6];
+        let mut h = state[7];
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+        state[5] = state[5].wrapping_add(f);
+        state[6] = state[6].wrapping_add(g);
+        state[7] = state[7].wrapping_add(h);
+    }
+    let mut out = [0u8; 32];
+    for (i, word) in state.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
 }
 
 pub fn load_cjk_font() -> Option<Vec<u8>> {
@@ -548,6 +954,9 @@ pub fn subset_ttf(data: &[u8], codepoints: &[u32]) -> Option<SubsetFont> {
 }
 
 fn subset_ttf_face(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> Option<SubsetFont> {
+    if let Some(font) = subset_glyf_fonttools(data, face, codepoints) {
+        return Some(font);
+    }
     let directories = face_directories(data);
     let selected: Vec<usize> = if let Some(index) = face {
         directories
@@ -661,6 +1070,24 @@ fn subset_face(file: &[u8], directory: usize, codepoints: &[u32]) -> Option<Subs
         glyphs: glyph_map,
         fallback: None,
         notice: None,
+    })
+}
+
+fn font_has_table(data: &[u8], face: Option<u32>, tag: &[u8; 4]) -> bool {
+    let directories = face_directories(data);
+    let selected: Vec<usize> = if let Some(index) = face {
+        directories
+            .get(index as usize)
+            .copied()
+            .into_iter()
+            .collect()
+    } else {
+        directories
+    };
+    selected.iter().any(|directory| {
+        read_tables(data, *directory)
+            .and_then(|tables| tables.get(tag.as_slice()).copied())
+            .is_some()
     })
 }
 
@@ -846,12 +1273,14 @@ fn assemble_font(
     cmap.extend_from_slice(&12u32.to_be_bytes());
     cmap.extend_from_slice(&cmap_sub);
     let num = glyphs.len() as u16;
-    let maxp = maxp_table(num);
+    let maxp = maxp_from_glyphs(glyphs);
     let hhea = hhea_table(ascender, descender, num);
     let head = head_table(upem, ascender, descender);
     let post = post_table();
     let name = name_table();
+    let os2 = os2_table(upem, ascender, descender);
     let mut tables = vec![
+        (*b"OS/2", os2),
         (*b"cmap", cmap),
         (*b"glyf", glyf),
         (*b"head", head),
@@ -960,13 +1389,208 @@ fn hhea_table(ascender: i16, descender: i16, n_metrics: u16) -> Vec<u8> {
     t
 }
 
-fn maxp_table(num_glyphs: u16) -> Vec<u8> {
+/// `maxp` version 1.0. The maxima come from the outlines that were packed.
+/// A hard-coded `maxContours` of 1 is what made Windows and OTS drop every
+/// glyph with a counter (a, e, o, 0, B, R, and almost every Han character)
+/// while single-contour letters such as T, r, and E still painted.
+fn maxp_from_glyphs(glyphs: &[Vec<u8>]) -> Vec<u8> {
+    let mut max_points = 0u16;
+    let mut max_contours = 0u16;
+    let mut max_instructions = 0u16;
+    let mut max_elements = 0u16;
+    let mut points = vec![0u16; glyphs.len()];
+    let mut contours = vec![0u16; glyphs.len()];
+    let mut components = Vec::with_capacity(glyphs.len());
+    let mut unparsed = false;
+    for (index, glyph) in glyphs.iter().enumerate() {
+        let Some(parsed) = parse_glyph_header(glyph) else {
+            unparsed = true;
+            components.push(Vec::new());
+            continue;
+        };
+        if parsed.composite {
+            max_elements =
+                max_elements.max(parsed.components.len().min(usize::from(u16::MAX)) as u16);
+            components.push(parsed.components);
+        } else {
+            max_points = max_points.max(parsed.points);
+            max_contours = max_contours.max(parsed.contours);
+            max_instructions = max_instructions.max(parsed.instructions);
+            points[index] = parsed.points;
+            contours[index] = parsed.contours;
+            components.push(Vec::new());
+        }
+    }
+    if unparsed {
+        max_points = max_points.max(4096);
+        max_contours = max_contours.max(64);
+        max_instructions = max_instructions.max(512);
+        max_elements = max_elements.max(16);
+    }
+    let mut max_composite_points = 0u32;
+    let mut max_composite_contours = 0u32;
+    let mut max_depth = 0u16;
+    for index in 0..glyphs.len() {
+        if components[index].is_empty() {
+            continue;
+        }
+        let mut stack = Vec::new();
+        let (sum_points, sum_contours, depth) =
+            expanded_composite(index, &components, &points, &contours, &mut stack);
+        max_composite_points = max_composite_points.max(sum_points);
+        max_composite_contours = max_composite_contours.max(sum_contours);
+        max_depth = max_depth.max(depth);
+    }
+    let hinted = max_instructions > 0;
     let mut t = vec![0u8; 32];
     t[0..4].copy_from_slice(&0x00010000u32.to_be_bytes());
-    t[4..6].copy_from_slice(&num_glyphs.to_be_bytes());
-    t[6..8].copy_from_slice(&4u16.to_be_bytes());
-    t[8..10].copy_from_slice(&1u16.to_be_bytes());
+    t[4..6].copy_from_slice(&(glyphs.len() as u16).to_be_bytes());
+    t[6..8].copy_from_slice(&max_points.max(1).to_be_bytes());
+    t[8..10].copy_from_slice(&max_contours.max(1).to_be_bytes());
+    t[10..12].copy_from_slice(&(max_composite_points.min(u16::MAX as u32) as u16).to_be_bytes());
+    t[12..14].copy_from_slice(&(max_composite_contours.min(u16::MAX as u32) as u16).to_be_bytes());
     t[14..16].copy_from_slice(&2u16.to_be_bytes());
+    let twilight = if hinted { 16u16 } else { 0 };
+    let storage = if hinted { 256u16 } else { 0 };
+    let functions = if hinted { 256u16 } else { 0 };
+    let stack = if hinted { max_instructions.max(512) } else { 0 };
+    t[16..18].copy_from_slice(&twilight.to_be_bytes());
+    t[18..20].copy_from_slice(&storage.to_be_bytes());
+    t[20..22].copy_from_slice(&functions.to_be_bytes());
+    t[24..26].copy_from_slice(&stack.to_be_bytes());
+    t[26..28].copy_from_slice(&max_instructions.to_be_bytes());
+    t[28..30].copy_from_slice(&max_elements.to_be_bytes());
+    t[30..32].copy_from_slice(&max_depth.to_be_bytes());
+    t
+}
+
+struct GlyphHeader {
+    composite: bool,
+    points: u16,
+    contours: u16,
+    instructions: u16,
+    components: Vec<u16>,
+}
+
+fn parse_glyph_header(glyph: &[u8]) -> Option<GlyphHeader> {
+    if glyph.len() < 10 {
+        return Some(GlyphHeader {
+            composite: false,
+            points: 0,
+            contours: 0,
+            instructions: 0,
+            components: Vec::new(),
+        });
+    }
+    let contour_count = i16::from_be_bytes([glyph[0], glyph[1]]);
+    if contour_count < 0 {
+        return Some(GlyphHeader {
+            composite: true,
+            points: 0,
+            contours: 0,
+            instructions: 0,
+            components: composite_gids(glyph),
+        });
+    }
+    if contour_count == 0 {
+        return Some(GlyphHeader {
+            composite: false,
+            points: 0,
+            contours: 0,
+            instructions: 0,
+            components: Vec::new(),
+        });
+    }
+    let count = contour_count as usize;
+    let end_at = 10 + (count - 1) * 2;
+    if end_at + 2 > glyph.len() {
+        return None;
+    }
+    let last = u16::from_be_bytes([glyph[end_at], glyph[end_at + 1]]);
+    let instr_at = 10 + count * 2;
+    let instructions = if instr_at + 2 <= glyph.len() {
+        u16::from_be_bytes([glyph[instr_at], glyph[instr_at + 1]])
+    } else {
+        0
+    };
+    Some(GlyphHeader {
+        composite: false,
+        points: last.saturating_add(1),
+        contours: contour_count as u16,
+        instructions,
+        components: Vec::new(),
+    })
+}
+
+fn expanded_composite(
+    index: usize,
+    components: &[Vec<u16>],
+    points: &[u16],
+    contours: &[u16],
+    stack: &mut Vec<usize>,
+) -> (u32, u32, u16) {
+    if stack.contains(&index) || index >= components.len() {
+        return (0, 0, 0);
+    }
+    if components[index].is_empty() {
+        return (u32::from(points[index]), u32::from(contours[index]), 0);
+    }
+    stack.push(index);
+    let mut sum_points = 0u32;
+    let mut sum_contours = 0u32;
+    let mut depth = 0u16;
+    for gid in &components[index] {
+        let (child_points, child_contours, child_depth) =
+            expanded_composite(*gid as usize, components, points, contours, stack);
+        sum_points = sum_points.saturating_add(child_points);
+        sum_contours = sum_contours.saturating_add(child_contours);
+        depth = depth.max(child_depth);
+    }
+    stack.pop();
+    (sum_points, sum_contours, depth.saturating_add(1))
+}
+
+fn os2_table(upem: u16, ascender: i16, descender: i16) -> Vec<u8> {
+    let mut t = vec![0u8; 96];
+    let put_u16 = |t: &mut [u8], at: usize, value: u16| {
+        t[at..at + 2].copy_from_slice(&value.to_be_bytes());
+    };
+    let put_i16 = |t: &mut [u8], at: usize, value: i16| {
+        t[at..at + 2].copy_from_slice(&value.to_be_bytes());
+    };
+    put_u16(&mut t, 0, 4);
+    put_i16(&mut t, 2, (upem / 2) as i16);
+    put_u16(&mut t, 4, 400);
+    put_u16(&mut t, 6, 5);
+    put_i16(&mut t, 10, (upem / 2) as i16);
+    put_i16(&mut t, 12, (upem / 2) as i16);
+    put_i16(&mut t, 16, (upem / 5) as i16);
+    put_i16(&mut t, 18, (upem / 2) as i16);
+    put_i16(&mut t, 20, (upem / 2) as i16);
+    put_i16(&mut t, 22, (upem / 5) as i16);
+    put_i16(&mut t, 26, upem as i16 / 20);
+    put_i16(&mut t, 28, upem as i16 / 4);
+    // Basic Latin through Latin Extended-B, plus CJK Unified Ideographs.
+    t[42..46].copy_from_slice(&0x0000_00FFu32.to_be_bytes());
+    t[46..50].copy_from_slice(&(1u32 << 27).to_be_bytes());
+    t[50..54].copy_from_slice(&(1u32 << 4).to_be_bytes());
+    t[58..62].copy_from_slice(b"RPT ");
+    // Regular (bit 6) and USE_TYPO_METRICS (bit 7).
+    put_u16(&mut t, 62, 0x00C0);
+    put_u16(&mut t, 64, 0x0020);
+    put_u16(&mut t, 66, 0xFFFF);
+    put_i16(&mut t, 68, ascender);
+    put_i16(&mut t, 70, descender);
+    let win_ascent = ascender.max(0) as u16;
+    let win_descent = descender.min(0).unsigned_abs();
+    put_u16(&mut t, 74, win_ascent);
+    put_u16(&mut t, 76, win_descent);
+    // Latin 1, Japanese, Simplified Chinese, Korean, Traditional Chinese.
+    t[78..82]
+        .copy_from_slice(&(1u32 | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20)).to_be_bytes());
+    put_i16(&mut t, 86, (upem / 2) as i16);
+    put_i16(&mut t, 88, (upem as i16 * 7) / 10);
+    put_u16(&mut t, 92, 0x0020);
     t
 }
 
@@ -977,18 +1601,35 @@ fn post_table() -> Vec<u8> {
 }
 
 fn name_table() -> Vec<u8> {
-    let text = b"RPTCJK";
+    let records = [
+        (1u16, "RPT CJK"),
+        (2, "Regular"),
+        (4, "RPT CJK"),
+        (6, "RPTCJK"),
+    ];
+    let mut storage = Vec::new();
+    let mut entries = Vec::new();
+    for (name_id, text) in records {
+        let wide: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(|unit| unit.to_be_bytes())
+            .collect();
+        entries.extend_from_slice(&3u16.to_be_bytes());
+        entries.extend_from_slice(&1u16.to_be_bytes());
+        entries.extend_from_slice(&0x0409u16.to_be_bytes());
+        entries.extend_from_slice(&name_id.to_be_bytes());
+        entries.extend_from_slice(&(wide.len() as u16).to_be_bytes());
+        entries.extend_from_slice(&(storage.len() as u16).to_be_bytes());
+        storage.extend_from_slice(&wide);
+    }
+    let count = records.len() as u16;
+    let string_offset = 6 + count * 12;
     let mut t = Vec::new();
     t.extend_from_slice(&0u16.to_be_bytes());
-    t.extend_from_slice(&1u16.to_be_bytes());
-    t.extend_from_slice(&18u16.to_be_bytes());
-    t.extend_from_slice(&1u16.to_be_bytes());
-    t.extend_from_slice(&0u16.to_be_bytes());
-    t.extend_from_slice(&0u16.to_be_bytes());
-    t.extend_from_slice(&6u16.to_be_bytes());
-    t.extend_from_slice(&(text.len() as u16).to_be_bytes());
-    t.extend_from_slice(&0u16.to_be_bytes());
-    t.extend_from_slice(text);
+    t.extend_from_slice(&count.to_be_bytes());
+    t.extend_from_slice(&string_offset.to_be_bytes());
+    t.extend_from_slice(&entries);
+    t.extend_from_slice(&storage);
     t
 }
 
@@ -1326,5 +1967,142 @@ for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
         assert!(font.has(0x4E2D));
         assert!(font.em_advance(0x4E2D).is_some());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sha256_matches_known_digests() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn rust_glyf_subset_maxp_covers_multi_contour_letters() {
+        let path = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
+        if !std::path::Path::new(path).is_file() {
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let codes = [0x61u32, 0x65, 0x6f, 0x30, 0x42, 0x52, 0x54, 0x45];
+        let font = subset_face(&bytes, 0, &codes).expect("rust subset");
+        assert!(font.bytes.starts_with(&[0, 1, 0, 0]), "standalone TTF");
+        assert!(font.glyphs.contains_key(&0x61));
+        assert_maxp_covers_glyf(&font.bytes);
+        assert!(
+            table_present(&font.bytes, b"OS/2"),
+            "Windows loaders require OS/2"
+        );
+    }
+
+    #[test]
+    fn uming_collection_subset_keeps_contours_and_composites() {
+        let path = "/usr/share/fonts/truetype/arphic/uming.ttc";
+        if !std::path::Path::new(path).is_file() {
+            return;
+        }
+        let codes = [
+            0x61u32, 0x65, 0x6f, 0x30, 0x42, 0x52, 0x4E2D, 0x6587, 0x8BED,
+        ];
+        let font = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &codes,
+            &FontSources {
+                serif: Some(format!("{path}#0").into()),
+                bold: Some(format!("{path}#0").into()),
+                sans: None,
+            },
+        )
+        .expect("uming");
+        assert!(font.glyphs.contains_key(&0x4E2D), "missing 中");
+        assert!(font.glyphs.contains_key(&0x61), "missing a");
+        assert!(font.glyphs.contains_key(&0x30), "missing 0");
+        assert!(
+            font.bytes.starts_with(&[0, 1, 0, 0]),
+            "FontFile2 must be a TTF, not a TTC: {:02x?}",
+            &font.bytes[..4.min(font.bytes.len())]
+        );
+        assert_maxp_covers_glyf(&font.bytes);
+    }
+
+    #[test]
+    fn cached_noto_serves_a_clean_machine() {
+        if std::env::var("RPT_FONT_SMOKE").ok().as_deref() != Some("1") {
+            return;
+        }
+        let regular = ensure_noto_sc(false).expect("regular download");
+        let bold = ensure_noto_sc(true).expect("bold download");
+        assert!(
+            regular.join("..").join("OFL.txt").is_file()
+                || font_cache_dir().join("OFL.txt").is_file()
+        );
+        for path in [&regular, &bold] {
+            let font = subset_cff(path.to_str().unwrap(), 0, &[0x4E2D, 0x61, 0x30, 0x6587])
+                .expect("subset");
+            assert!(font.glyphs.contains_key(&0x4E2D), "{}", path.display());
+            assert!(font.glyphs.contains_key(&0x61), "{}", path.display());
+            assert!(font.glyphs.contains_key(&0x30), "{}", path.display());
+        }
+    }
+
+    fn table_present(font: &[u8], tag: &[u8; 4]) -> bool {
+        table_offset(font, tag).is_some()
+    }
+
+    fn assert_maxp_covers_glyf(font: &[u8]) {
+        let path = std::env::temp_dir().join(format!(
+            "rpt-maxp-{}-{}.ttf",
+            std::process::id(),
+            next_stamp()
+        ));
+        std::fs::write(&path, font).unwrap();
+        let mut command = python_command().expect("python");
+        let status = command
+            .arg("-c")
+            .arg(
+                r#"
+import sys
+from fontTools.ttLib import TTFont
+font = TTFont(sys.argv[1])
+if font.sfntVersion not in ("\x00\x01\x00\x00",):
+    raise SystemExit(f"not a TTF: {font.sfntVersion!r}")
+required = ["cmap", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "name", "OS/2", "post"]
+missing = [name for name in required if name not in font]
+if missing:
+    raise SystemExit("missing " + ",".join(missing))
+maxp = font["maxp"]
+glyf = font["glyf"]
+for name in font.getGlyphOrder():
+    glyph = glyf[name]
+    contours = glyph.numberOfContours
+    if contours >= 0 and contours > int(maxp.maxContours or 0):
+        raise SystemExit(f"{name} contours {contours} > maxp {maxp.maxContours}")
+    if contours > 0:
+        data = bytes(getattr(glyph, "data", b"") or b"")
+        if len(data) >= 10 + contours * 2:
+            last = int.from_bytes(data[8 + contours * 2 : 10 + contours * 2], "big")
+            if last + 1 > int(maxp.maxPoints or 0):
+                raise SystemExit(f"{name} points {last + 1} > maxp {maxp.maxPoints}")
+    if glyph.isComposite():
+        if len(glyph.components) > int(maxp.maxComponentElements or 0):
+            raise SystemExit(f"{name} components {len(glyph.components)} > maxp")
+        for component in glyph.components:
+            if component.glyphName not in glyf:
+                raise SystemExit(f"{name} dropped {component.glyphName}")
+"#,
+            )
+            .arg(&path)
+            .status()
+            .expect("python");
+        let _ = std::fs::remove_file(&path);
+        assert!(status.success(), "maxp does not cover the glyf outlines");
     }
 }

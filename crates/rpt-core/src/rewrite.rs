@@ -21830,6 +21830,37 @@ mod tests {
     }
 
     #[test]
+    fn viewers_paint_a_truetype_collection() {
+        let path = "/usr/share/fonts/truetype/arphic/uming.ttc#0";
+        if !std::path::Path::new("/usr/share/fonts/truetype/arphic/uming.ttc").is_file() {
+            return;
+        }
+        let bytes = contents_pdf(
+            b"BT /F1 12 Tf 1 0 0 1 36 700 Tm (Hello world this line is long enough for the probe text.) Tj ET",
+        );
+        let saved = paint_user_cjk(&bytes, &[(0, "aeo0中文Transformer2018".into())], path);
+        let painted = PdfDocument::open_bytes(&saved)
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(
+            painted.contains("aeo0"),
+            "TrueType translation was not written: {painted}"
+        );
+        let loaded = Document::load_mem(&saved).unwrap();
+        let truetype = loaded.objects.values().any(|object| {
+            object
+                .as_dict()
+                .ok()
+                .and_then(|dict| dict.get(b"Subtype").ok())
+                .and_then(|obj| obj.as_name().ok())
+                == Some(b"CIDFontType2")
+        });
+        assert!(truetype, "uming was not embedded as CIDFontType2");
+        assert_viewer_text(&saved, "aeo0中文Transformer2018");
+    }
+
+    #[test]
     fn viewers_paint_a_kept_affiliation_and_email() {
         // ResNet leaves the author names in the original Type 1 font, but the
         // affiliation and the email are blanked and redrawn with the CJK subset
@@ -21964,22 +21995,56 @@ ET",
             saw = true;
             let text = ocr_pngs(&render_poppler(&path, slot), needle);
             assert!(
-                text.contains(needle),
+                ocr_has(&text, needle),
                 "poppler paint dropped glyphs: {text}"
             );
         }
         if !tool_missing("mutool") && !tool_missing("tesseract") {
             saw = true;
             let text = ocr_pngs(&render_mutool(&path, slot), needle);
-            assert!(text.contains(needle), "mupdf paint dropped glyphs: {text}");
+            assert!(ocr_has(&text, needle), "mupdf paint dropped glyphs: {text}");
         }
         if pdfjs_ready() && !tool_missing("tesseract") {
             saw = true;
             let text = ocr_pngs(&render_pdfjs(&path, slot), needle);
-            assert!(text.contains(needle), "pdf.js paint dropped glyphs: {text}");
+            assert!(
+                ocr_has(&text, needle),
+                "pdf.js paint dropped glyphs: {text}"
+            );
+        }
+        let mut saw_pdfium = false;
+        if pdfium_ready() && !tool_missing("tesseract") {
+            saw = true;
+            saw_pdfium = true;
+            let text = ocr_pngs(&render_pdfium(&path, slot), needle);
+            assert!(
+                ocr_has(&text, needle),
+                "pdfium paint dropped glyphs: {text}"
+            );
+        }
+        if !tool_missing("gs") && !tool_missing("tesseract") {
+            saw = true;
+            // 144 dpi reads a Song "o" as "0". 288 dpi reads a Times "v" as "Vv".
+            // Either resolution is enough when the outlines are actually there.
+            let mut texts = Vec::new();
+            let mut matched = false;
+            for dpi in ["144", "288"] {
+                let text = ocr_pngs(&render_ghostscript(&path, slot, dpi), needle);
+                if ocr_has(&text, needle) {
+                    matched = true;
+                    break;
+                }
+                texts.push(format!("{dpi}:{text}"));
+            }
+            assert!(
+                matched,
+                "ghostscript paint dropped glyphs: {}",
+                texts.join(" | ")
+            );
         }
         if std::env::var_os("CI").is_some() {
             assert!(saw, "CI has no poppler, mupdf, or pdf.js renderer");
+            assert!(saw_pdfium, "CI has no pdfium renderer");
         }
         let _ = std::fs::remove_file(&path);
     }
@@ -22038,6 +22103,76 @@ ET",
         pngs_in(&dir)
     }
 
+    fn render_pdfium(pdf: &std::path::Path, slot: u64) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("rpt-pdfium-{}-{slot}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("page.png");
+        let status = python_command()
+            .arg("-c")
+            .arg(
+                r#"
+import sys
+import pypdfium2 as pdfium
+doc = pdfium.PdfDocument(sys.argv[1])
+# Scale 2 makes a Song "o" look like "0" to chi_sim.
+doc[0].render(scale=3).to_pil().save(sys.argv[2])
+"#,
+            )
+            .arg(pdf)
+            .arg(&png)
+            .status()
+            .expect("python");
+        assert!(status.success(), "pdfium render failed");
+        pngs_in(&dir)
+    }
+
+    fn render_ghostscript(pdf: &std::path::Path, slot: u64, dpi: &str) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("rpt-gs-{}-{slot}-{dpi}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("page.png");
+        let status = std::process::Command::new("gs")
+            .args([
+                "-dSAFER",
+                "-dBATCH",
+                "-dNOPAUSE",
+                "-sDEVICE=png16m",
+                &format!("-r{dpi}"),
+                "-dFirstPage=1",
+                "-dLastPage=1",
+                &format!("-sOutputFile={}", png.display()),
+            ])
+            .arg(pdf)
+            .status()
+            .expect("gs");
+        assert!(status.success(), "ghostscript render failed");
+        pngs_in(&dir)
+    }
+
+    fn pdfium_ready() -> bool {
+        python_command()
+            .arg("-c")
+            .arg("import pypdfium2")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn python_command() -> std::process::Command {
+        for name in ["python3", "python"] {
+            if std::process::Command::new(name)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+            {
+                return std::process::Command::new(name);
+            }
+        }
+        std::process::Command::new("python3")
+    }
+
     fn pdfjs_ready() -> bool {
         let script =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/pdfjs_page.mjs");
@@ -22065,6 +22200,14 @@ ET",
             dir.display()
         );
         paths
+    }
+
+    /// ASCII case is folded. Tesseract reads a Liberation "v" as "V" at the
+    /// resolution that keeps a Song "o" distinct from "0".
+    fn ocr_has(text: &str, needle: &str) -> bool {
+        let folded =
+            |value: &str| -> String { value.chars().flat_map(|ch| ch.to_lowercase()).collect() };
+        folded(text).contains(&folded(needle))
     }
 
     fn ocr_pngs(paths: &[std::path::PathBuf], _needle: &str) -> String {
@@ -28113,14 +28256,23 @@ ET",
     }
 
     fn paint_system_cjk(bytes: &[u8], which: &[(usize, String)]) -> Vec<u8> {
-        paint_rewritten(bytes, which, false)
+        paint_rewritten(bytes, which, false, None)
     }
 
     fn paint_bytes(bytes: &[u8], which: &[(usize, String)]) -> Vec<u8> {
-        paint_rewritten(bytes, which, true)
+        paint_rewritten(bytes, which, true, None)
     }
 
-    fn paint_rewritten(bytes: &[u8], which: &[(usize, String)], box_font: bool) -> Vec<u8> {
+    fn paint_user_cjk(bytes: &[u8], which: &[(usize, String)], font: &str) -> Vec<u8> {
+        paint_rewritten(bytes, which, false, Some(font))
+    }
+
+    fn paint_rewritten(
+        bytes: &[u8],
+        which: &[(usize, String)],
+        box_font: bool,
+        user_font: Option<&str>,
+    ) -> Vec<u8> {
         let mut doc = PdfDocument::open_bytes(bytes).unwrap();
         let mut extraction = doc.extract();
         let segmentation = crate::segment::segment_placed(
@@ -28172,6 +28324,8 @@ ET",
             },
             &RewriteOptions {
                 font_bytes: box_font.then(|| box_ttf(&chars)),
+                cjk_serif: user_font.map(std::path::PathBuf::from),
+                cjk_bold: user_font.map(std::path::PathBuf::from),
                 ..RewriteOptions::default()
             },
         )
