@@ -584,12 +584,48 @@ fn next_stamp() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+thread_local! {
+    static SKIP_FONTTOOLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `body` with the in-process glyf assembler. Python fontTools is not called.
+#[cfg(test)]
+pub struct RustGlyfOnly {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl RustGlyfOnly {
+    pub fn enter() -> Self {
+        let previous = SKIP_FONTTOOLS.with(|flag| flag.replace(true));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RustGlyfOnly {
+    fn drop(&mut self) {
+        SKIP_FONTTOOLS.with(|flag| flag.set(self.previous));
+    }
+}
+
+enum GlyfAttempt {
+    Ready(SubsetFont),
+    /// Python or a glyf `OS/2` face is not available. The Rust assembler runs.
+    Absent,
+    /// fontTools started and failed. Do not hide that behind the assembler.
+    Failed,
+}
+
 /// Subset a glyf face with fontTools. The result is one TrueType file, not a
 /// collection. Glyph ids are the subset's glyph indexes, so CIDToGIDMap
 /// Identity addresses the outline that was packed.
-fn subset_glyf_fonttools(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> Option<SubsetFont> {
-    if is_cff_font(data) || !font_has_table(data, face, b"OS/2") {
-        return None;
+fn subset_glyf_fonttools(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> GlyfAttempt {
+    if SKIP_FONTTOOLS.with(std::cell::Cell::get)
+        || is_cff_font(data)
+        || !font_has_table(data, face, b"OS/2")
+    {
+        return GlyfAttempt::Absent;
     }
     let mut codes: Vec<u32> = codepoints
         .iter()
@@ -600,7 +636,7 @@ fn subset_glyf_fonttools(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> 
     codes.sort_unstable();
     codes.dedup();
     if codes.is_empty() {
-        return None;
+        return GlyfAttempt::Absent;
     }
     let list = codes
         .iter()
@@ -612,13 +648,16 @@ fn subset_glyf_fonttools(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> 
     let src = dir.join(format!("rpt-glyf-src-{}-{stamp}.bin", std::process::id()));
     let font_out = dir.join(format!("rpt-glyf-{}-{stamp}.ttf", std::process::id()));
     let json_out = dir.join(format!("rpt-glyf-{}-{stamp}.json", std::process::id()));
-    std::fs::write(&src, data).ok()?;
+    if std::fs::write(&src, data).is_err() {
+        return GlyfAttempt::Absent;
+    }
     let face_arg = face
         .map(|face| face.to_string())
         .unwrap_or_else(|| "-".to_string());
     let script = r#"
 import json, struct, sys
 from fontTools.ttLib import TTFont
+from fontTools.ttLib.tables._g_l_y_f import Glyph as RawGlyph
 from fontTools.subset import Subsetter, Options
 src, face, unicodes, out_font, out_json = sys.argv[1:]
 codes = [int(item, 16) for item in unicodes.split(",") if item]
@@ -671,6 +710,13 @@ maxp = font["maxp"]
 glyf = font["glyf"]
 order = font.getGlyphOrder()
 for name in order:
+    raw_glyph = glyf.glyphs[name]
+    raw = bytes(getattr(raw_glyph, "data", b"") or b"")
+    try:
+        RawGlyph(raw).trim(remove_hinting=False)
+    except Exception as exc:
+        raise SystemExit(f"{name} glyf record is not trimmable: {exc}")
+for name in order:
     glyph = glyf[name]
     contours = int(glyph.numberOfContours)
     if contours > int(getattr(maxp, "maxContours", 0) or 0) and contours >= 0:
@@ -697,8 +743,11 @@ if not glyphs:
     raise SystemExit("empty cmap")
 json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
 "#;
-    let mut command = python_command()?;
-    let status = command
+    let Some(mut command) = python_command() else {
+        let _ = std::fs::remove_file(&src);
+        return GlyfAttempt::Absent;
+    };
+    let output = command
         .arg("-c")
         .arg(script)
         .arg(&src)
@@ -706,22 +755,34 @@ json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
         .arg(&list)
         .arg(&font_out)
         .arg(&json_out)
-        .status()
-        .ok();
+        .output();
     let cleanup = || {
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&font_out);
         let _ = std::fs::remove_file(&json_out);
     };
-    if !status.is_some_and(|status| status.success()) {
+    let Ok(output) = output else {
         cleanup();
-        return None;
+        return GlyfAttempt::Absent;
+    };
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let uncovered = output.status.code() == Some(2) && !err.contains("Traceback");
+        cleanup();
+        if uncovered {
+            return GlyfAttempt::Absent;
+        }
+        let message = err.trim();
+        if !message.is_empty() {
+            eprintln!("fontTools glyf subset failed:\n{message}");
+        }
+        return GlyfAttempt::Failed;
     }
     let bytes = match std::fs::read(&font_out) {
         Ok(bytes) => bytes,
         Err(_) => {
             cleanup();
-            return None;
+            return GlyfAttempt::Failed;
         }
     };
     let meta: serde_json::Value = match std::fs::read(&json_out)
@@ -731,22 +792,37 @@ json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
         Some(meta) => meta,
         None => {
             cleanup();
-            return None;
+            return GlyfAttempt::Failed;
         }
     };
     cleanup();
-    let upem = meta.get("upem")?.as_u64()? as u16;
+    let Some(upem) = meta.get("upem").and_then(|value| value.as_u64()) else {
+        return GlyfAttempt::Failed;
+    };
+    let upem = upem as u16;
+    let Some(items) = meta.get("glyphs").and_then(|value| value.as_array()) else {
+        return GlyfAttempt::Failed;
+    };
     let mut glyphs = HashMap::new();
-    for item in meta.get("glyphs")?.as_array()? {
-        let cp = item.get("cp")?.as_u64()? as u32;
-        let cid = item.get("cid")?.as_u64()? as u16;
-        let adv = item.get("adv")?.as_u64()?.min(u16::MAX as u64) as u16;
-        glyphs.insert(cp, (cid, adv));
+    for item in items {
+        let Some(cp) = item.get("cp").and_then(|value| value.as_u64()) else {
+            return GlyfAttempt::Failed;
+        };
+        let Some(cid) = item.get("cid").and_then(|value| value.as_u64()) else {
+            return GlyfAttempt::Failed;
+        };
+        let Some(adv) = item.get("adv").and_then(|value| value.as_u64()) else {
+            return GlyfAttempt::Failed;
+        };
+        if cid > u64::from(u16::MAX) {
+            return GlyfAttempt::Failed;
+        }
+        glyphs.insert(cp as u32, (cid as u16, adv.min(u64::from(u16::MAX)) as u16));
     }
     if glyphs.is_empty() {
-        return None;
+        return GlyfAttempt::Failed;
     }
-    Some(SubsetFont {
+    GlyfAttempt::Ready(SubsetFont {
         bytes,
         units_per_em: upem.max(1),
         glyphs,
@@ -1046,8 +1122,12 @@ pub fn subset_ttf(data: &[u8], codepoints: &[u32]) -> Option<SubsetFont> {
 }
 
 fn subset_ttf_face(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> Option<SubsetFont> {
-    if let Some(font) = subset_glyf_fonttools(data, face, codepoints) {
-        return Some(font);
+    match subset_glyf_fonttools(data, face, codepoints) {
+        GlyfAttempt::Ready(font) => return Some(font),
+        // A crash used to fall through to the assembler, so the IndexError
+        // was only a log line and the test still passed.
+        GlyfAttempt::Failed => return None,
+        GlyfAttempt::Absent => {}
     }
     let directories = face_directories(data);
     let selected: Vec<usize> = if let Some(index) = face {
@@ -1132,7 +1212,7 @@ fn subset_face(file: &[u8], directory: usize, codepoints: &[u32]) -> Option<Subs
     let mut glyphs = Vec::new();
     let mut metrics = Vec::new();
     for gid in &order {
-        let mut bytes = glyph_slice(glyf, &offsets, *gid as usize)?.to_vec();
+        let mut bytes = outline_bytes(glyph_slice(glyf, &offsets, *gid as usize)?);
         rewrite_composites(&mut bytes, &new_of);
         glyphs.push(bytes);
         let adv = hmtx_advance(hmtx, *gid as usize, n_metrics);
@@ -1146,7 +1226,10 @@ fn subset_face(file: &[u8], directory: usize, codepoints: &[u32]) -> Option<Subs
     let descender = i16be(hhea, 6).unwrap_or(-200);
     if codepoints.contains(&0x20) && !mappings.iter().any(|(code, _)| *code == 0x20) {
         let gid = glyphs.len() as u16;
-        glyphs.push(vec![0u8; 10]);
+        // A 10-byte zero header plus loca padding makes fontTools trim() read
+        // yMax as an end point and then walk off the flag array. A zero-length
+        // glyph is the empty outline.
+        glyphs.push(Vec::new());
         push_hmtx(&mut metrics, upem / 4, 0);
         mappings.push((0x20, gid));
     }
@@ -1243,6 +1326,20 @@ fn loca_offsets(loca: &[u8], num_glyphs: usize, long: bool) -> Option<Vec<u32>> 
                 .collect(),
         )
     }
+}
+
+/// Bytes copied into the subset. A zero-contour header is not a legal simple
+/// glyph: `Glyph.trim` reads `yMax` as an end point and then indexes the flag
+/// array. The empty outline is a zero-length glyf record.
+fn outline_bytes(glyph: &[u8]) -> Vec<u8> {
+    if glyph.len() < 10 {
+        return Vec::new();
+    }
+    let contours = i16::from_be_bytes([glyph[0], glyph[1]]);
+    if contours == 0 {
+        return Vec::new();
+    }
+    glyph.to_vec()
 }
 
 fn glyph_slice<'a>(glyf: &'a [u8], offsets: &[u32], gid: usize) -> Option<&'a [u8]> {
@@ -1727,7 +1824,7 @@ fn name_table() -> Vec<u8> {
 
 #[cfg(test)]
 fn empty_glyph() -> Vec<u8> {
-    vec![0u8; 10]
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -2285,12 +2382,13 @@ for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
         ));
         std::fs::write(&path, font).unwrap();
         let mut command = python_command().expect("python");
-        let status = command
+        let output = command
             .arg("-c")
             .arg(
                 r#"
 import sys
 from fontTools.ttLib import TTFont
+from fontTools.ttLib.tables._g_l_y_f import Glyph as RawGlyph
 font = TTFont(sys.argv[1])
 if font.sfntVersion not in ("\x00\x01\x00\x00",):
     raise SystemExit(f"not a TTF: {font.sfntVersion!r}")
@@ -2301,6 +2399,14 @@ if missing:
 maxp = font["maxp"]
 glyf = font["glyf"]
 for name in font.getGlyphOrder():
+    # glyf[name] expands the outline and trim() then skips the raw bytes.
+    # prune_post_subset trims the compact record, which is where the
+    # IndexError was raised.
+    raw = bytes(getattr(glyf.glyphs[name], "data", b"") or b"")
+    try:
+        RawGlyph(raw).trim(remove_hinting=False)
+    except Exception as exc:
+        raise SystemExit(f"{name} glyf record is not trimmable: {exc}")
     glyph = glyf[name]
     contours = glyph.numberOfContours
     if contours >= 0 and contours > int(maxp.maxContours or 0):
@@ -2320,9 +2426,54 @@ for name in font.getGlyphOrder():
 "#,
             )
             .arg(&path)
-            .status()
+            .output()
             .expect("python");
         let _ = std::fs::remove_file(&path);
-        assert!(status.success(), "maxp does not cover the glyf outlines");
+        let detail = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "maxp does not cover the glyf outlines: {detail}"
+        );
+    }
+
+    #[test]
+    fn fonttools_glyf_subset_keeps_the_source_name() {
+        let path = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
+        if !std::path::Path::new(path).is_file() || python_command().is_none() {
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let font = subset_ttf(&bytes, &[0x61, 0x65, 0x6F, 0x30, 0x42])
+            .expect("fontTools glyf subset failed; a crash must not fall back to the assembler");
+        assert!(
+            face_name_contains(&font.bytes, "Liberation"),
+            "glyf subset lost the source name, so the Rust assembler ran"
+        );
+        assert_maxp_covers_glyf(&font.bytes);
+    }
+
+    #[test]
+    fn rust_glyf_subset_of_a_collection_has_legal_flags() {
+        let path = "/usr/share/fonts/truetype/arphic/uming.ttc";
+        if !std::path::Path::new(path).is_file() {
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let _guard = RustGlyfOnly::enter();
+        let font = subset_ttf_face(&bytes, Some(0), &[0x4E2D, 0x6587, 0x61, 0x65, 0x6F, 0x30])
+            .expect("rust glyf subset");
+        drop(_guard);
+        assert!(
+            face_name_contains(&font.bytes, "RPT CJK"),
+            "Rust assembler did not replace the name"
+        );
+        assert!(
+            !face_name_contains(&font.bytes, "UMing"),
+            "collection subset still carries the source name"
+        );
+        assert!(font.glyphs.contains_key(&0x4E2D), "missing 中");
+        if python_command().is_some() {
+            assert_maxp_covers_glyf(&font.bytes);
+        }
     }
 }
