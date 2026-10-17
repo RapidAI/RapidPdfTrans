@@ -690,33 +690,36 @@ fn absorb_one_char_tail(lines: &mut [String]) {
         return;
     }
     let last_index = lines.len() - 1;
-    let last_cjk = lines[last_index]
-        .chars()
-        .filter(|ch| is_cjk_body(*ch))
-        .count();
     // A formula hole disables hanging punctuation, so `实现。` can wrap as
-    // `实现` / `。`. A mark by itself is the same orphan as `组` / `件`.
-    let closing_only = {
-        let marks: Vec<char> = lines[last_index]
+    // `实现` / `。`. Pull ideographs down until the tail has two of them.
+    // One pull would leave `现。`, which is still a one-character line.
+    loop {
+        let last_cjk = lines[last_index]
             .chars()
-            .filter(|ch| !ch.is_whitespace())
-            .collect();
-        !marks.is_empty() && marks.iter().all(|ch| hanging_punct(*ch))
-    };
-    if last_cjk >= 2 || (last_cjk == 0 && !closing_only) {
-        return;
+            .filter(|ch| is_cjk_body(*ch))
+            .count();
+        let closing_only = {
+            let marks: Vec<char> = lines[last_index]
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            !marks.is_empty() && marks.iter().all(|ch| hanging_punct(*ch))
+        };
+        if last_cjk >= 2 || (last_cjk == 0 && !closing_only) {
+            return;
+        }
+        let prev: Vec<char> = lines[last_index - 1].chars().collect();
+        if prev.len() < 3 {
+            return;
+        }
+        let moved = prev[prev.len() - 1];
+        if !is_cjk_body(moved) {
+            return;
+        }
+        lines[last_index - 1] = prev[..prev.len() - 1].iter().collect();
+        let tail = lines[last_index].clone();
+        lines[last_index] = format!("{moved}{tail}");
     }
-    let prev: Vec<char> = lines[last_index - 1].chars().collect();
-    if prev.len() < 3 {
-        return;
-    }
-    let moved = prev[prev.len() - 1];
-    if !is_cjk_body(moved) {
-        return;
-    }
-    lines[last_index - 1] = prev[..prev.len() - 1].iter().collect();
-    let tail = lines[last_index].clone();
-    lines[last_index] = format!("{moved}{tail}");
 }
 
 pub(crate) fn is_cjk_body(ch: char) -> bool {
@@ -3430,9 +3433,15 @@ mod tests {
             }),
             "lone closing mark: {lines:?}"
         );
+        let tail_cjk = lines
+            .last()
+            .unwrap()
+            .chars()
+            .filter(|ch| is_cjk_body(*ch))
+            .count();
         assert!(
-            lines.last().unwrap().contains('现') && lines.last().unwrap().ends_with('。'),
-            "the period left its ideograph: {lines:?}"
+            tail_cjk >= 2 && lines.last().unwrap().ends_with('。'),
+            "the period was left with fewer than two ideographs: {lines:?}"
         );
         let flat: String = lines.concat();
         assert_eq!(flat, text);
