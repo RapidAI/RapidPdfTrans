@@ -83,8 +83,8 @@ pub fn block_alignment(
     // that column also share the page center, and centering them slides the
     // short last line into the middle of the measure. A notice sits further
     // in than a tenth of the page (`124` vs a body at `108`).
-    let body_flush = flush_left * 2 >= lines.len()
-        && left_min - page_left < (page_width * 0.19).max(size * 8.0);
+    let body_flush =
+        flush_left * 2 >= lines.len() && left_min - page_left < (page_width * 0.19).max(size * 8.0);
     // Two full lines of a centered header share both edges, the same way a
     // justified column does. The margin keeps that column out: a body line
     // sits closer to the page edge than a title.

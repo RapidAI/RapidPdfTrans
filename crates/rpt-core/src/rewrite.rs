@@ -10940,9 +10940,7 @@ fn adopt_unchanged_body_lines(
             || is_section_index_text(trimmed)
             || bare_page_label(trimmed)
             || english_body_source(trimmed)
-            || glyphs
-                .iter()
-                .any(|glyph| is_math_font(&glyph.font_name))
+            || glyphs.iter().any(|glyph| is_math_font(&glyph.font_name))
             || crate::segment::display_equation_glyphs(&glyphs)
         {
             continue;
@@ -23606,9 +23604,9 @@ ET";
             "the subscript hole swallowed the previous word: {}",
             multi.text
         );
-        let where_line = merged.iter().find(|segment| {
-            segment.text.contains("where") && segment.text.contains("Attention")
-        });
+        let where_line = merged
+            .iter()
+            .find(|segment| segment.text.contains("where") && segment.text.contains("Attention"));
         let Some(where_line) = where_line else {
             panic!("where head_i = Attention was not segmented");
         };

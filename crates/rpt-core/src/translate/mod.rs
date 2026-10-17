@@ -5468,9 +5468,11 @@ mod tests {
         let kept = translate_extraction(&mut equation, &opts, &Boom).unwrap();
         assert_eq!(kept.calls, 0, "{:?}", kept.segments);
         assert!(kept.segments.iter().all(|segment| {
-            segment.translated == segment.source && !segment.translated.chars().any(|ch| {
-                ('\u{4E00}'..='\u{9FFF}').contains(&ch)
-            })
+            segment.translated == segment.source
+                && !segment
+                    .translated
+                    .chars()
+                    .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
         }));
     }
 

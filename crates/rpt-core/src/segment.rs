@@ -4814,10 +4814,7 @@ fn continues_through_inline_math(line: &[&Glyph], index: usize, size: f32) -> bo
     line[index + 1..].iter().any(|glyph| {
         glyph_left(glyph) - origin <= size * 8.0
             && !math_font_glyph(glyph)
-            && glyph
-                .unicode
-                .chars()
-                .any(|ch| ch.is_ascii_lowercase())
+            && glyph.unicode.chars().any(|ch| ch.is_ascii_lowercase())
     })
 }
 
@@ -4921,7 +4918,8 @@ fn is_display_operator(text: &str) -> bool {
 fn is_prose_function_word(word: &str) -> bool {
     matches!(
         word,
-        "the" | "of"
+        "the"
+            | "of"
             | "and"
             | "for"
             | "with"
@@ -5037,11 +5035,10 @@ fn radical_meets_base(script: &VisualLine<'_>, host: &VisualLine<'_>) -> bool {
     script.glyphs.iter().any(|mark| {
         is_display_operator(&mark.unicode) || mark.font_name.to_ascii_uppercase().contains("CMSY")
     }) && host.glyphs.iter().any(|glyph| {
-        math_font_glyph(glyph)
-            && {
-                let dx = glyph_left(glyph) - script.right;
-                dx >= -size * 0.45 && dx <= size * 0.65
-            }
+        math_font_glyph(glyph) && {
+            let dx = glyph_left(glyph) - script.right;
+            dx >= -size * 0.45 && dx <= size * 0.65
+        }
     })
 }
 
