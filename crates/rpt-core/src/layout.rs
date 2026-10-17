@@ -471,7 +471,12 @@ pub(crate) fn fit_cjk_block_with(
             let room = available / gaps as f32;
             let min_lead = size * metrics.min_leading_ratio;
             let want = size * metrics.leading_ratio;
-            if room + 0.8 >= min_lead {
+            // Neighbors already sit on the English leading (~1.2em). Shrinking
+            // the face so the gap can be 1.4em makes one short paragraph
+            // smaller than the body around it (`ε = 10`). A line that fits
+            // the measure keeps the body size when the source gap is at
+            // least a readable leading.
+            if room + 0.8 >= min_lead || room >= size * 1.15 {
                 return Some((lines, size, want.min(room), indent));
             }
         }
@@ -934,15 +939,37 @@ pub(crate) fn wrap_text_holes(
             // Break at the rightmost legal point. Jumping back to the previous
             // ASCII space throws away CJK that already fit after a citation.
             let fitted = end;
-            while end > start + 1 && !can_break_at(&chars, &sticky, end) {
-                end -= 1;
-            }
-            if end == start + 1 {
-                // The sticky span itself is wider than the measure. Fill the
-                // line at an ordinary boundary instead of one character.
-                end = fitted;
-                while end > start + 1 && !can_break(chars[end - 1], chars[end]) {
+            let cjk_compound = fitted > start
+                && fitted < chars.len()
+                && is_cjk_body(chars[fitted - 1])
+                && is_cjk_body(chars[fitted]);
+            if cjk_compound {
+                // `真实` and `量子` are two characters: back up one. Walking
+                // further through `一个词元` left `预测的下` with the column
+                // empty, so a longer compound breaks at the overflow.
+                let mut near = fitted;
+                if near > start + 1 && !can_break_at(&chars, &sticky, near) {
+                    near -= 1;
+                }
+                if near > start && can_break_at(&chars, &sticky, near) {
+                    end = near;
+                } else {
+                    end = fitted;
+                    while end > start + 1 && !can_break(chars[end - 1], chars[end]) {
+                        end -= 1;
+                    }
+                }
+            } else {
+                // A citation, URL, or email is one sticky span. Breaking at
+                // the overflow cuts `Smith,` from `2020`.
+                while end > start + 1 && !can_break_at(&chars, &sticky, end) {
                     end -= 1;
+                }
+                if end == start + 1 {
+                    end = fitted;
+                    while end > start + 1 && !can_break(chars[end - 1], chars[end]) {
+                        end -= 1;
+                    }
                 }
             }
             // A formula hole that does not fit moves as a whole. Splitting
@@ -1089,8 +1116,18 @@ fn snap_line_compounds(
             lines[index + 1] = upcoming[pulled..].iter().collect();
         } else if after.len() < before.len() {
             let extra: String = before[after.len()..].iter().collect();
+            let next = format!("{extra}{}", lines[index + 1]);
+            // The overflow already broke inside a long compound. Pushing the
+            // left piece onto a full next line paints past the column
+            // (`可以复制本文中的`). Leave the kinsoku split when it does not fit.
+            // A full ideograph past the measure is the overflow the column
+            // test rejects. A fraction of an em still keeps `词元` together.
+            if fit_measure_holes(&next, size, font, holes) > width + size * 0.5 {
+                index += 1;
+                continue;
+            }
             lines[index] = slot[0].clone();
-            lines[index + 1] = format!("{extra}{}", lines[index + 1]);
+            lines[index + 1] = next;
         }
         index += 1;
     }
@@ -2272,9 +2309,10 @@ mod tests {
         let text = "若提供适当的署名特此授予许可以复制本文中的表格和图形仅用于新闻或学术著作";
         let font = uniform_font(text);
         let greedy = wrap_text(text, 10.0, 70.0, 70.0, &font).unwrap();
+        let tail = greedy.last().unwrap().chars().count();
+        let head = greedy[0].chars().count();
         assert!(
-            greedy.len() >= 2
-                && greedy.last().unwrap().chars().count() + 2 < greedy[0].chars().count(),
+            greedy.len() >= 2 && tail + 1 < head,
             "fixture should be a short tail: {greedy:?}"
         );
         let balanced = balance_lines(text, 10.0, 70.0, &font, &HashMap::new()).unwrap();
@@ -3406,21 +3444,17 @@ mod tests {
         // `一个词` overlaps `词元` in `其中一个词元`. Neither boundary breaks.
         let text = "不同的模型支持不同的词元限制，其中一个词元。";
         let font = uniform_font(text);
-        // Twenty ems end on the 词 of `一个词`, and the following 元 does not
-        // fit. `词元` overlaps that `一个词`, so the break moves before both.
+        // Twenty ems end inside `一个词元`. The overflow is a kinsoku
+        // boundary, so the line keeps the characters that fit instead of
+        // backing up through the whole compound (`预测的下`).
         let lines = wrap_text(text, 10.0, 200.0, 200.0, &font).expect("wrap");
         let flat: String = lines.concat();
         assert_eq!(flat, text);
-        for pair in lines.windows(2) {
-            assert!(
-                !(pair[0].ends_with('词') && pair[1].starts_with('元')),
-                "词|元: {lines:?}"
-            );
-            assert!(
-                !(pair[0].ends_with('个') && pair[1].starts_with('词')),
-                "一个|词: {lines:?}"
-            );
-        }
+        let joined = lines.join("|");
+        assert!(
+            !joined.contains("中|一个"),
+            "backed up through 一个词元: {lines:?}"
+        );
     }
 
     #[test]

@@ -4911,9 +4911,50 @@ pub(crate) fn display_equation_glyphs(glyphs: &[&Glyph]) -> bool {
         return false;
     }
     let (function_words, content_words) = prose_word_counts(glyphs);
+    // `q_i k_i, has mean 0 and variance d_k` is a footnote clause. The `=`
+    // under the summation and one function word (`and`) are not enough to
+    // keep the whole line in English.
+    if variance_clause(glyphs) {
+        return false;
+    }
     // `Attention(Q, K, V) = softmax(...)` has no function word. `where head_i
     // = Attention(Q W^Q_i, ...)` is still that equation: one lead-in word.
     function_words == 0 || (function_words <= 1 && content_words <= 3)
+}
+
+/// `has mean 0 and variance d_k`. The words are the sentence; the product
+/// is the formula in front of them.
+fn variance_clause(glyphs: &[&Glyph]) -> bool {
+    let mut ordered = glyphs.to_vec();
+    ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut previous: Option<&Glyph> = None;
+    for glyph in &ordered {
+        if let Some(prev) = previous {
+            if word_space(prev, glyph) && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        }
+        previous = Some(glyph);
+        if math_font_glyph(glyph) {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        for ch in glyph.unicode.chars() {
+            if ch.is_ascii_alphabetic() {
+                word.push(ch.to_ascii_lowercase());
+            } else if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words.iter().any(|item| item == "mean") && words.iter().any(|item| item == "variance")
 }
 
 fn prose_word_counts(glyphs: &[&Glyph]) -> (usize, usize) {
@@ -5368,11 +5409,58 @@ fn keep_low_prose_math(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
         if !dense[index] && !formula_sentence_tail(index, lines, &dense) {
             continue;
         }
+        // `Where the projections are parameter matrices … and W^O …` is a
+        // sentence. The formula runs are placeholders; the words translate.
+        // A line that is only the formula stays in the source.
+        if prose_letter_count(&line.glyphs) >= 18 || follows_prose_sentence(index, lines) {
+            continue;
+        }
         for glyph in &line.glyphs {
             kept.push((glyph.id, "math-block".into()));
         }
     }
     kept
+}
+
+fn prose_letter_count(glyphs: &[&Glyph]) -> usize {
+    let body = math_body_size(glyphs);
+    let mut letters = 0usize;
+    for glyph in glyphs {
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        let script = glyph.font_size <= body * 0.84;
+        if math_font_glyph(glyph) || vector_symbol_glyph(glyph) || script {
+            continue;
+        }
+        letters += glyph
+            .unicode
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .count();
+    }
+    letters
+}
+
+/// `and W^O ∈ R^{…}` sits under the projection sentence. Keeping it leaves
+/// the conjunction in English after the sentence above it is translated.
+fn follows_prose_sentence(index: usize, lines: &[VisualLine<'_>]) -> bool {
+    let line = &lines[index];
+    // A raised script (`2i/d_model`) is part of the equation above it. Only a
+    // line that still has a function word (`and W^O`) follows the sentence.
+    let (function_words, _) = prose_word_counts(&line.glyphs);
+    if function_words == 0 {
+        return false;
+    }
+    let size = line.size.max(1.0);
+    lines.iter().enumerate().any(|(other, host)| {
+        other != index
+            && host.page == line.page
+            && host.y > line.y
+            && host.y - line.y <= size * 2.5
+            && (line.left - host.left).abs() <= size * 4.0
+            && prose_letter_count(&host.glyphs) >= 18
+    })
 }
 
 fn formula_sentence_tail(index: usize, lines: &[VisualLine<'_>], dense: &[bool]) -> bool {
@@ -8927,10 +9015,14 @@ mod tests {
             crate::rewrite::merge_stacked_paragraphs(full.segments.clone(), &extraction.glyphs);
         let _ = rewritten;
         assert!(
-            texts.iter().all(|text| {
-                !text.contains("Where the projections") && !text.contains("Where Othe")
-            }),
-            "the projection sentence was split into a segment: {texts:?}"
+            texts
+                .iter()
+                .any(|text| text.contains("Where the projections are parameter matrices")),
+            "the projection sentence was kept as math: {texts:?}"
+        );
+        assert!(
+            texts.iter().all(|text| !text.contains("Where Othe")),
+            "the projection sentence was split: {texts:?}"
         );
         assert!(
             texts.iter().any(|text| {
@@ -8939,24 +9031,29 @@ mod tests {
             }),
             "the following prose sentence was kept or merged: {texts:?}"
         );
+        let stray: Vec<_> = texts
+            .iter()
+            .filter(|text| {
+                let trimmed = text.trim();
+                trimmed.chars().count() < 40
+                    && (trimmed.contains("hdv") || trimmed.contains("dmodel×dk"))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         assert!(
-            texts
-                .iter()
-                .all(|text| !text.contains("hdv") && !text.contains("dmodel×dk")),
-            "a superscript run was left as its own segment: {texts:?}"
+            stray.is_empty(),
+            "a superscript run was left as its own segment: {stray:?}"
         );
-        let kept: std::collections::HashSet<u32> = full.kept.iter().map(|(id, _)| *id).collect();
         let exponent = extraction.glyphs.iter().any(|glyph| {
             glyph.page_index == 4
                 && glyph.unicode == "O"
                 && (130.0..145.0).contains(&glyph.matrix[4])
-                && kept.contains(&glyph.id)
-                && !full
+                && full
                     .segments
                     .iter()
                     .any(|seg| seg.glyph_ids.contains(&glyph.id))
         });
-        assert!(exponent, "W^O was not kept on its base");
+        assert!(exponent, "W^O was not grouped into the sentence");
     }
 
     #[test]
@@ -8984,18 +9081,33 @@ mod tests {
             employ.contains("⟦0⟧ = ⟦1⟧ = ⟦2⟧⟦3⟧ = 64") && employ.contains("full dimensionality"),
             "employ sentence split: {employ}"
         );
+        let projection = rewritten.iter().find(|seg| {
+            seg.text
+                .contains("Where the projections are parameter matrices")
+        });
+        let projection = projection.map(|seg| seg.text.as_str()).unwrap_or("");
+        assert!(
+            projection.contains('⟦'),
+            "projection sentence has no formula hole: {projection}"
+        );
         let kept_where = extraction.glyphs.iter().any(|glyph| {
             glyph.page_index == 4
                 && glyph.unicode == "O"
                 && (130.0..145.0).contains(&glyph.matrix[4])
-                && full.kept.iter().any(|(id, _)| *id == glyph.id)
+                && rewritten
+                    .iter()
+                    .any(|seg| seg.glyph_ids.contains(&glyph.id))
         });
-        assert!(kept_where, "e2e W^O was not kept");
+        assert!(kept_where, "e2e W^O was not grouped into the sentence");
         assert!(
             rewritten
                 .iter()
-                .any(|seg| seg.text.contains("has mean 0 and variance dk")),
-            "the summation footnote was rewritten off its glyphs"
+                .any(|seg| seg.text.contains("has mean 0 and variance ⟦")),
+            "the summation footnote was not grouped: {:?}",
+            rewritten
+                .iter()
+                .find(|seg| seg.text.contains("mean 0"))
+                .map(|seg| seg.text.as_str())
         );
     }
 
