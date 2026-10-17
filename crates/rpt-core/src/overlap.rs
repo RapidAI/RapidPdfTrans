@@ -75,6 +75,16 @@ pub fn block_alignment(
     let right_min = lines.iter().map(|line| line.right).fold(f32::MAX, f32::min);
     let right_max = lines.iter().map(|line| line.right).fold(f32::MIN, f32::max);
     let flush_both = lines.len() >= 2 && left_max - left_min <= 2.5 && right_max - right_min <= 2.5;
+    let flush_left = lines
+        .iter()
+        .filter(|line| (line.left - left_min).abs() <= 2.5)
+        .count();
+    // A justified body column shares the left margin. Four full lines of
+    // that column also share the page center, and centering them slides the
+    // short last line into the middle of the measure. A notice sits further
+    // in than a tenth of the page (`124` vs a body at `108`).
+    let body_flush = flush_left * 2 >= lines.len()
+        && left_min - page_left < (page_width * 0.19).max(size * 8.0);
     // Two full lines of a centered header share both edges, the same way a
     // justified column does. The margin keeps that column out: a body line
     // sits closer to the page edge than a title.
@@ -84,7 +94,7 @@ pub fn block_alignment(
                 && line.left - page_left >= margin_floor
                 && page_right - line.right >= margin_floor
         });
-    if page_centered {
+    if page_centered && !body_flush {
         return BlockAlign::Center {
             axis: median(&mids),
         };
@@ -104,6 +114,7 @@ pub fn block_alignment(
         && lefts_wander
         && rights_wander
         && !flush_both
+        && !body_flush
         && ((axis - page_mid).abs() <= tol || on_column)
     {
         return BlockAlign::Center { axis };
@@ -117,7 +128,7 @@ pub fn block_alignment(
                     && line.left >= col_left + size * 0.8
                     && line.right <= col_right - size * 0.8
             });
-        if in_column && !flush_both {
+        if in_column && !flush_both && !body_flush {
             return BlockAlign::Center {
                 axis: median(&mids),
             };
@@ -700,6 +711,37 @@ mod tests {
             BlockAlign::Center { axis } => assert!((axis - 306.0).abs() < 2.0, "{axis}"),
             other => panic!("equal centered lines were {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_justified_body_paragraph_is_not_centered() {
+        let media = [0.0, 0.0, 612.0, 792.0];
+        let body = [
+            AlignLine {
+                left: 108.0,
+                right: 504.0,
+                size: 10.0,
+            },
+            AlignLine {
+                left: 108.0,
+                right: 504.0,
+                size: 10.0,
+            },
+            AlignLine {
+                left: 108.0,
+                right: 504.0,
+                size: 10.0,
+            },
+            AlignLine {
+                left: 108.0,
+                right: 459.0,
+                size: 10.0,
+            },
+        ];
+        assert!(
+            matches!(block_alignment(&body, media, None), BlockAlign::Start),
+            "a body column that shares the left margin is not a centered notice"
+        );
     }
 
     #[test]

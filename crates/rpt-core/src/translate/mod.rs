@@ -3619,11 +3619,13 @@ fn formula_shard(
 ) -> bool {
     let mut math = 0usize;
     let mut letters = 0usize;
+    let mut owned = Vec::new();
     for id in &seg.glyph_ids {
         let Some(&index) = by_id.get(id) else {
             continue;
         };
         let glyph = &glyphs[index];
+        owned.push(glyph);
         if formula_glyph(glyph) {
             math += 1;
         } else {
@@ -3634,7 +3636,25 @@ fn formula_shard(
                 .count();
         }
     }
-    math >= 3 && letters < 8 && math > letters
+    // `T`, `QK`, and `√` sit on the equation and are not words.
+    (math >= 1 && letters == 0)
+        || (math >= 3 && letters < 8 && math > letters)
+        || equation_number_only(&seg.text)
+        || crate::segment::display_equation_glyphs(&owned)
+}
+
+/// `(1)` beside a display equation. It is not a sentence.
+fn equation_number_only(text: &str) -> bool {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if !(3..=5).contains(&bytes.len()) {
+        return false;
+    }
+    let (open, close) = (bytes[0], bytes[bytes.len() - 1]);
+    matches!((open, close), (b'(', b')') | (b'[', b']'))
+        && bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|byte| byte.is_ascii_digit())
 }
 
 fn formula_glyph(glyph: &crate::glyph::Glyph) -> bool {
@@ -5403,6 +5423,55 @@ mod tests {
         let sent = translate_extraction(&mut prose, &opts, &PrefixTranslator).unwrap();
         assert!(sent.calls >= 1);
         assert!(sent.segments[0].translated.contains('译'));
+
+        // Attention(Q, K, V) = softmax(√)V is a display equation. The function
+        // names are roman. It still must not be sent to the model.
+        let mut glyphs = Vec::new();
+        let mut x = 80.0f32;
+        let paint = |glyphs: &mut Vec<Glyph>, id: &mut u32, x: &mut f32, text: &str, font: &str| {
+            for ch in text.chars() {
+                let mut item = glyph(*id, *x, 400.0, &ch.to_string());
+                item.font_name = font.into();
+                item.bbox = [*x, 398.0, *x + 6.0, 410.0];
+                glyphs.push(item);
+                *id += 1;
+                *x += 6.2;
+            }
+        };
+        let mut id = 0u32;
+        paint(&mut glyphs, &mut id, &mut x, "Attention", "CMR10");
+        paint(&mut glyphs, &mut id, &mut x, "(Q,K,V)", "CMMI10");
+        x += 4.0;
+        paint(&mut glyphs, &mut id, &mut x, "=", "CMR10");
+        x += 4.0;
+        paint(&mut glyphs, &mut id, &mut x, "softmax", "CMR10");
+        paint(&mut glyphs, &mut id, &mut x, "(", "CMR10");
+        let mut radical = glyph(id, x, 406.0, "√");
+        radical.font_name = "CMSY10".into();
+        glyphs.push(radical);
+        id += 1;
+        x += 8.0;
+        paint(&mut glyphs, &mut id, &mut x, "dk", "CMMI10");
+        paint(&mut glyphs, &mut id, &mut x, ")V", "CMMI10");
+        let mut equation = Extraction {
+            coordinate_space: COORDINATE_SPACE,
+            pages: vec![PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let kept = translate_extraction(&mut equation, &opts, &Boom).unwrap();
+        assert_eq!(kept.calls, 0, "{:?}", kept.segments);
+        assert!(kept.segments.iter().all(|segment| {
+            segment.translated == segment.source && !segment.translated.chars().any(|ch| {
+                ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+            })
+        }));
     }
 
     #[test]

@@ -1720,6 +1720,7 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     groups.extend(script_atoms(glyphs, body, &used));
     used.extend(groups.iter().flatten().copied());
     groups.extend(formula_runs(glyphs, body, &used));
+    absorb_radicals(glyphs, body, &mut groups);
     absorb_attached_scripts(glyphs, body, &mut groups);
     absorb_formula_parens(glyphs, body, &mut groups);
     absorb_math_accents(glyphs, body, &mut groups);
@@ -1780,6 +1781,53 @@ fn absorb_formula_parens(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) 
             used.insert(glyph.id);
         }
     }
+}
+
+/// A radical sits just left of its radicand (`√d_k`). The radicand is already
+/// a script atom. The radical joins that hole so the prose keeps one glyph run.
+fn absorb_radicals(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) {
+    let mut used: HashSet<u32> = groups.iter().flatten().copied().collect();
+    let by_id = glyph_index_refs(glyphs);
+    for glyph in glyphs {
+        if used.contains(&glyph.id) || !is_radical_char(&glyph.unicode) {
+            continue;
+        }
+        let mut best: Option<(usize, f32)> = None;
+        for (index, ids) in groups.iter().enumerate() {
+            let members: Vec<&Glyph> = ids
+                .iter()
+                .filter_map(|id| by_id.get(id).map(|at| glyphs[*at]))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let left = members
+                .iter()
+                .map(|item| item.matrix[4].min(item.bbox[0]))
+                .fold(f32::MAX, f32::min);
+            let top = members
+                .iter()
+                .map(|item| item.matrix[5])
+                .fold(f32::MIN, f32::max);
+            let dx = left - glyph.bbox[2].max(glyph.matrix[4]);
+            let dy = glyph.matrix[5] - top;
+            if dx < -body * 0.35 || dx > body * 0.85 || dy < -body * 0.15 || dy > body * 1.15 {
+                continue;
+            }
+            let dist = dx.abs() + dy.abs();
+            if best.is_none_or(|(_, previous)| dist < previous) {
+                best = Some((index, dist));
+            }
+        }
+        if let Some((index, _)) = best {
+            groups[index].push(glyph.id);
+            used.insert(glyph.id);
+        }
+    }
+}
+
+fn is_radical_char(text: &str) -> bool {
+    matches!(text.trim(), "√" | "\u{23B7}")
 }
 
 /// Latin Modern draws `\widehat` as U+F8F8 in the extension font, almost at
@@ -2220,13 +2268,19 @@ fn rewrite_inline_math(
     // Pages 1–4 that already read as a sentence keep their wording. From the
     // algebraic section on, a paragraph full of formula glyphs is still
     // English (math-block), and it needs the same holes.
+    if crate::segment::display_equation_glyphs(&owned) {
+        return segment;
+    }
     let formula = owned
         .iter()
         .filter(|glyph| inherent_keep(glyph) == Some("formula"))
         .count();
     let prose = prose_carries_inline_math(&owned);
     let formula_page = segment.page_index >= 4;
-    if prose && (!formula_page || formula < 3) {
+    let atomic = groups.iter().any(|group| group.len() >= 2);
+    // A sentence on an early page still gives its subscripts and radicals a
+    // hole. Without one, `d_k` is redrawn on the baseline.
+    if prose && !atomic && (!formula_page || formula < 3) {
         return segment;
     }
     if groups.is_empty() || outside_letters(&owned, &groups) < 12 {
@@ -2287,7 +2341,12 @@ pub(crate) fn merge_stacked_paragraphs(
         }
     }
     if queue.is_empty() {
-        return segments;
+        // A subscript or a radical is still inline math when the page has no
+        // binomial. The prose is translated; the atom is a hole.
+        return segments
+            .into_iter()
+            .map(|segment| rewrite_inline_math(segment, glyphs, &by_id))
+            .collect();
     }
     while let Some(index) = queue.pop() {
         let Some(origin) = spans[index] else {
@@ -8819,7 +8878,7 @@ fn layout_column_flow(
     }
     let lead = (source_size * scale).max(1.0) * metrics.leading_ratio;
     let available = lead * (slots - 1) as f32;
-    let (mut lines, size, _, _) = fit_cjk_block_with(
+    let (lines, size, _, _) = fit_cjk_block_with(
         text,
         source_size,
         scale,
@@ -8831,8 +8890,11 @@ fn layout_column_flow(
         None,
         holes,
     )?;
+    // More lines than the source columns can hold. Dropping the tail leaves
+    // a paragraph that ends mid-phrase. The single-column fitter shrinks
+    // instead.
     if lines.len() > slots {
-        lines.truncate(slots);
+        return None;
     }
     let color = ink
         .first()
@@ -23437,6 +23499,100 @@ ET";
             .join("\n");
         assert!(text.contains("Perelman"), "{text}");
         assert!(!text.contains("Perelma⟦"), "{text}");
+    }
+
+    #[test]
+    fn attention_display_math_stays_whole_and_inline_math_is_a_hole() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/neurips-2017-attention.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let merged = merge_stacked_paragraphs(
+            crate::segment::segment_glyphs(&extraction.glyphs),
+            &extraction.glyphs,
+        );
+        let sentence = merged.iter().find(|segment| {
+            segment.text.contains("divide each by") && segment.text.contains("softmax function")
+        });
+        let Some(sentence) = sentence else {
+            let hits: Vec<_> = merged
+                .iter()
+                .filter(|segment| segment.text.contains("divide each"))
+                .map(|segment| segment.text.as_str())
+                .collect();
+            panic!("inline radical split the sentence: {hits:?}");
+        };
+        assert!(
+            sentence.text.contains('⟦'),
+            "√d_k was not kept as one hole: {}",
+            sentence.text
+        );
+        assert!(
+            !sentence.text.contains("a√nd"),
+            "the radical joined the line above: {}",
+            sentence.text
+        );
+        let equation = merged.iter().find(|segment| {
+            segment.text.contains("Attention")
+                && segment.text.contains("softmax(")
+                && !segment.text.contains("function")
+        });
+        let Some(equation) = equation else {
+            let hits: Vec<_> = merged
+                .iter()
+                .filter(|segment| segment.text.contains("softmax"))
+                .map(|segment| segment.text.as_str())
+                .collect();
+            panic!("display equation was not its own segment: {hits:?}");
+        };
+        assert!(
+            !equation.text.contains("outputs as"),
+            "the equation joined the prose: {}",
+            equation.text
+        );
+        assert!(
+            !equation
+                .text
+                .split(|ch: char| !ch.is_ascii_alphabetic())
+                .any(|word| {
+                    matches!(
+                        word,
+                        "the" | "of" | "and" | "we" | "with" | "for" | "to" | "by"
+                    )
+                }),
+            "a display equation was sent as prose: {}",
+            equation.text
+        );
+        let by_id = glyph_index(&extraction.glyphs);
+        let owned: Vec<&Glyph> = equation
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extraction.glyphs.get(by_id[id]))
+            .collect();
+        assert!(
+            crate::segment::display_equation_glyphs(&owned),
+            "Attention(Q, K, V) was not a display equation: {}",
+            equation.text
+        );
+        let multi = merged.iter().find(|segment| {
+            segment.text.contains("dimensional keys") || segment.text.contains("dmodel")
+        });
+        let Some(multi) = multi else {
+            panic!("multi-head paragraph was dropped");
+        };
+        assert!(
+            multi.text.contains('⟦'),
+            "d_model lost its subscript hole: {}",
+            multi.text
+        );
+        assert!(
+            !multi.text.contains("dmodel"),
+            "d_model was flattened: {}",
+            multi.text
+        );
     }
 
     #[test]

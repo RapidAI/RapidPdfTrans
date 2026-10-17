@@ -388,7 +388,12 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // gap standing above the next word space, is still two columns.
         // Character glyphs, not a handful of pre-grouped blocks. A subscript
         // in the middle of one prose line is three boxes and must stay one line.
-        let tight_column = line.len() >= 40
+        // `divide each by √d_k, and apply` leaves about one em where the
+        // radical sits. That gap is the largest on a justified line, and it
+        // is not the other column: the sentence continues in the text face.
+        let inline_math_gap = continues_through_inline_math(&line, index, size);
+        let tight_column = !inline_math_gap
+            && line.len() >= 40
             && span >= size * 38.0
             && both_wide
             && gap + 0.05 >= largest
@@ -4793,8 +4798,142 @@ fn line_has_formula(line: &VisualLine<'_>) -> bool {
         }
     }
     // One math letter inside a sentence is still that sentence. A display
-    // equation has more math glyphs than prose letters.
-    math > 0 && (letters < 16 || math >= letters)
+    // equation has more math glyphs than prose letters. `Attention(Q,K,V) =
+    // softmax(...)` is that equation even though the function names are roman.
+    (math > 0 && (letters < 16 || math >= letters)) || display_equation_glyphs(&line.glyphs)
+}
+
+/// The right-hand piece opens with a math glyph and the sentence continues
+/// (`√d_k, and apply`). A column gutter does not.
+fn continues_through_inline_math(line: &[&Glyph], index: usize, size: f32) -> bool {
+    let open = line[index];
+    if !math_font_glyph(open) {
+        return false;
+    }
+    let origin = glyph_left(open);
+    line[index + 1..].iter().any(|glyph| {
+        glyph_left(glyph) - origin <= size * 8.0
+            && !math_font_glyph(glyph)
+            && glyph
+                .unicode
+                .chars()
+                .any(|ch| ch.is_ascii_lowercase())
+    })
+}
+
+/// A display equation: math-font glyphs, an operator, and no prose words.
+/// Roman function names (`Attention`, `softmax`) stay in the equation.
+/// `divide each by √d_k, and apply` is a sentence, so it is not.
+pub(crate) fn display_equation_glyphs(glyphs: &[&Glyph]) -> bool {
+    if glyphs.len() < 4 {
+        return false;
+    }
+    let mut math = 0usize;
+    let mut letters = 0usize;
+    let mut operators = 0usize;
+    for glyph in glyphs {
+        if math_font_glyph(glyph) {
+            math += 1;
+        } else {
+            letters += glyph
+                .unicode
+                .chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .count();
+        }
+        if is_display_operator(&glyph.unicode) {
+            operators += 1;
+        }
+    }
+    math >= 3 && operators >= 1 && letters < 48 && !glyphs_have_function_word(glyphs)
+}
+
+fn is_display_operator(text: &str) -> bool {
+    matches!(
+        text.trim(),
+        "=" | "+"
+            | "-"
+            | "−"
+            | "×"
+            | "·"
+            | "/"
+            | "√"
+            | "∑"
+            | "∏"
+            | "∫"
+            | "<"
+            | ">"
+            | "≤"
+            | "≥"
+            | "≈"
+            | "≠"
+    )
+}
+
+fn glyphs_have_function_word(glyphs: &[&Glyph]) -> bool {
+    let mut ordered = glyphs.to_vec();
+    ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut word = String::new();
+    let mut found = false;
+    let mut previous: Option<&Glyph> = None;
+    let flush = |word: &mut String, found: &mut bool| {
+        if is_prose_function_word(word) {
+            *found = true;
+        }
+        word.clear();
+    };
+    for glyph in ordered {
+        if let Some(prev) = previous {
+            if word_space(prev, glyph) {
+                flush(&mut word, &mut found);
+            }
+        }
+        previous = Some(glyph);
+        if math_font_glyph(glyph) {
+            flush(&mut word, &mut found);
+            continue;
+        }
+        for ch in glyph.unicode.chars() {
+            if ch.is_ascii_alphabetic() {
+                word.push(ch.to_ascii_lowercase());
+            } else {
+                flush(&mut word, &mut found);
+            }
+        }
+    }
+    flush(&mut word, &mut found);
+    found
+}
+
+fn is_prose_function_word(word: &str) -> bool {
+    matches!(
+        word,
+        "the" | "of"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "to"
+            | "by"
+            | "on"
+            | "in"
+            | "a"
+            | "an"
+            | "or"
+            | "as"
+            | "at"
+            | "this"
+            | "is"
+            | "we"
+            | "are"
+            | "be"
+            | "that"
+            | "where"
+            | "which"
+            | "each"
+            | "into"
+            | "than"
+    )
 }
 
 fn math_font_glyph(glyph: &Glyph) -> bool {
@@ -4855,22 +4994,42 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
             .chars()
             .filter(|ch| ch.is_ascii_alphabetic())
             .count();
-        if letters < 16 {
+        if letters < 16 && !display_equation_glyphs(&other.glyphs) {
             continue;
         }
         let dy = (line.y - other.y).abs();
         let size = other.size.max(1.0);
-        if dy < size * 0.08 || dy > size * 0.7 {
+        // A radical sits about one em above its radicand. The line above can
+        // be closer in y (`a√nd`) while the math letter it belongs to is below.
+        if dy < size * 0.08 || dy > size * 1.05 {
             continue;
         }
         if line.left < other.left - size || line.right > other.right + size {
             continue;
         }
-        if best.is_none_or(|(_, best_dy)| dy < best_dy) {
-            best = Some((other_index, dy));
+        let mut score = dy;
+        if line.y > other.y && radical_meets_base(line, other) {
+            score -= size;
+        }
+        if best.is_none_or(|(_, best_score)| score < best_score) {
+            best = Some((other_index, score));
         }
     }
     best.map(|(host, _)| host)
+}
+
+/// The radical's right edge meets a math glyph on the line below it.
+fn radical_meets_base(script: &VisualLine<'_>, host: &VisualLine<'_>) -> bool {
+    let size = host.size.max(1.0);
+    script.glyphs.iter().any(|mark| {
+        is_display_operator(&mark.unicode) || mark.font_name.to_ascii_uppercase().contains("CMSY")
+    }) && host.glyphs.iter().any(|glyph| {
+        math_font_glyph(glyph)
+            && {
+                let dx = glyph_left(glyph) - script.right;
+                dx >= -size * 0.45 && dx <= size * 0.65
+            }
+    })
 }
 
 fn is_math_script(line: &VisualLine<'_>) -> bool {
