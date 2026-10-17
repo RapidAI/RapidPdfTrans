@@ -3,16 +3,14 @@
 //! Glyf faces become a CIDFontType2 payload with Identity glyph ids. The
 //! subset is a standalone TrueType file: `maxp` maxima cover every outline
 //! (a short `maxContours` makes Windows/OTS drop multi-contour glyphs such as
-//! a, e, o, 0, and most Han), and `OS/2` is present. fontTools writes that
-//! file when Python is available; the in-process subsetter is the fallback.
-//! CFF faces (Noto CJK) are subset with fontTools. The saved bytes are an
-//! OpenType file whose `CFF ` table is what a CIDFontType0 FontFile3 must
-//! embed. Glyph ids in `glyphs` are identity charset CIDs (glyph index, not
-//! the source `cidNNNNN`). A viewer that paints CID as GID, and one that
-//! caches fonts by BaseFont, both then see the same outlines. Shaping is one
-//! glyph per character. OpenType GSUB is not applied.
+//! a, e, o, 0, and most Han), and `OS/2` is present. CFF faces (Noto CJK)
+//! become an OpenType file whose `CFF ` table is what a CIDFontType0
+//! FontFile3 must embed. Glyph ids in `glyphs` are identity charset CIDs
+//! (glyph index, not the source `cidNNNNN`). Outlines, composite closure,
+//! `loca`, and `hmtx` come from the `subsetter` crate. Shaping is one glyph
+//! per character. OpenType GSUB is not applied.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
 use super::ttf::{build_cmap_subtable, checksum32, FontCmap};
 
@@ -399,436 +397,151 @@ fn subset_user_font(
     codepoints: &[u32],
 ) -> Option<SubsetFont> {
     let bytes = cached_font_bytes(path)?;
-    if is_cff_font(&bytes) {
-        let path = path.to_str()?;
-        if let Some(face) = face {
-            return subset_cff(path, face, codepoints);
-        }
-        let mut best: Option<SubsetFont> = None;
-        let mut best_count = 0usize;
-        for face in 0..6 {
-            let Some(font) = subset_cff(path, face, codepoints) else {
-                continue;
-            };
-            let count = font.glyphs.len();
-            if count > best_count {
-                best_count = count;
-                best = Some(font);
-            }
-        }
-        best
-    } else {
-        subset_ttf_face(&bytes, face, codepoints)
-    }
-}
-
-fn is_cff_font(bytes: &[u8]) -> bool {
-    if bytes.starts_with(b"OTTO") {
-        return true;
-    }
-    if bytes.starts_with(b"ttcf") && bytes.len() >= 16 {
-        let count = u32::from_be_bytes(bytes[8..12].try_into().ok().unwrap_or([0; 4]));
-        if count == 0 {
-            return false;
-        }
-        let offset = u32::from_be_bytes(bytes[12..16].try_into().ok().unwrap_or([0; 4])) as usize;
-        return bytes.get(offset..offset + 4) == Some(b"OTTO");
-    }
-    false
+    subset_opentype(&bytes, face, codepoints)
 }
 
 fn subset_cff(path: &str, face_index: u32, codepoints: &[u32]) -> Option<SubsetFont> {
-    let mut codes: Vec<u32> = codepoints
-        .iter()
-        .copied()
-        .filter(|code| *code > 0 && *code <= 0xFFFF)
-        .collect();
-    codes.push(0x20);
-    codes.sort_unstable();
-    codes.dedup();
-    if codes.is_empty() {
-        return None;
-    }
-    let list = codes
-        .iter()
-        .map(|code| format!("{code:X}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let dir = std::env::temp_dir();
-    // cargo test runs cases on many threads. A clock stamp collides, and the
-    // later call deletes the file the earlier call is still reading.
-    let stamp = {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    };
-    let font_out = dir.join(format!("rpt-cff-{}-{stamp}.otf", std::process::id()));
-    let json_out = dir.join(format!("rpt-cff-{}-{stamp}.json", std::process::id()));
-    let script = r#"
-import json, sys, types
-from io import BytesIO
-from fontTools.ttLib import TTFont
-from fontTools.subset import Subsetter, Options
-src, face, unicodes, out_font, out_json = sys.argv[1:]
-codes = [int(item, 16) for item in unicodes.split(",") if item]
-opt = Options()
-opt.layout_features = ["*"]
-opt.notdef_outline = True
-opt.recommended_glyphs = True
-font = TTFont(src, fontNumber=int(face))
-subsetter = Subsetter(options=opt)
-subsetter.populate(unicodes=codes)
-subsetter.subset(font)
-# Source Han keeps Adobe-Identity CIDs in the glyph name (`cid00066` is "a",
-# `cid00017` is "0"). Those values are also Standard Encoding slots, and the
-# subset packs the outlines at glyph index 0..N. Identity-H must address the
-# glyph index. Rewriting cmap/hmtx to match breaks fontTools; splice a CFF
-# whose charset CID equals the glyph index into the subset instead.
-buf = BytesIO()
-font.save(buf)
-top = font["CFF "].cff.topDictIndex[0]
-if "ROS" in getattr(top, "rawDict", {}):
-    mut = TTFont(BytesIO(buf.getvalue()))
-    top = mut["CFF "].cff.topDictIndex[0]
-    old = list(top.charset)
-    new = [".notdef" if i == 0 else f"cid{i:05d}" for i in range(len(old))]
-    cs = top.CharStrings
-    rebuilt = {new[i]: cs.charStrings[name] for i, name in enumerate(old) if name in cs.charStrings}
-    cs.charStrings.clear()
-    cs.charStrings.update(rebuilt)
-    top.charset = list(new)
-    top.rawDict["CIDCount"] = len(new)
-    raw = bytes(mut["CFF "].compile(mut))
-    out = TTFont(BytesIO(buf.getvalue()))
-    def compile_raw(self, ttFont, payload=raw):
-        return payload
-    out["CFF "].compile = types.MethodType(compile_raw, out["CFF "])
-    out.save(out_font)
-else:
-    font.save(out_font)
-font = TTFont(out_font)
-cmap = {}
-for table in font["cmap"].tables:
-    if table.platformID == 3 and table.platEncID in (1, 10):
-        for cp, name in table.cmap.items():
-            cmap[cp] = name
-order = font.getGlyphOrder()
-upem = int(font["head"].unitsPerEm)
-glyphs = []
-for cp, name in cmap.items():
-    if isinstance(name, str) and name.startswith("cid") and name[3:].isdigit():
-        cid = int(name[3:])
-    elif name in order:
-        cid = order.index(name)
-    else:
-        continue
-    if cid > 65535:
-        continue
-    advance = int(font["hmtx"].metrics.get(name, (upem, 0))[0])
-    glyphs.append({"cp": int(cp), "cid": cid, "adv": advance})
-json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
-"#;
-    let mut command = python_command()?;
-    let status = command
-        .arg("-c")
-        .arg(script)
-        .arg(path)
-        .arg(face_index.to_string())
-        .arg(&list)
-        .arg(&font_out)
-        .arg(&json_out)
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    let bytes = std::fs::read(&font_out).ok()?;
-    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(&json_out).ok()?).ok()?;
-    let _ = std::fs::remove_file(&font_out);
-    let _ = std::fs::remove_file(&json_out);
-    let upem = meta.get("upem")?.as_u64()? as u16;
-    let mut glyphs = HashMap::new();
-    for item in meta.get("glyphs")?.as_array()? {
-        let cp = item.get("cp")?.as_u64()? as u32;
-        let cid = item.get("cid")?.as_u64()? as u16;
-        let adv = item.get("adv")?.as_u64()? as u16;
-        glyphs.insert(cp, (cid, adv));
-    }
-    if glyphs.is_empty() {
-        return None;
-    }
-    Some(SubsetFont {
-        bytes,
-        units_per_em: upem.max(1),
-        glyphs,
-        fallback: None,
-        notice: None,
-    })
+    let bytes = cached_font_bytes(std::path::Path::new(path))?;
+    subset_opentype(&bytes, Some(face_index), codepoints)
 }
 
-fn python_command() -> Option<std::process::Command> {
-    for name in ["python3", "python"] {
-        let Ok(output) = std::process::Command::new(name).arg("--version").output() else {
+/// Subset one face of a TrueType, CFF, or collection font.
+///
+/// `face` is a collection index. `None` keeps the face that covers the most
+/// requested characters. The `subsetter` crate closes composite components,
+/// rewrites `glyf`/`loca`/`hmtx` or `CFF `, and remaps glyph ids so the new
+/// id is the CID. `cmap` and `OS/2` are written here because that crate omits
+/// them; a CID font still addresses glyphs by the remapped id.
+fn subset_opentype(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> Option<SubsetFont> {
+    let face_count = face_directories(data).len() as u32;
+    if face_count == 0 {
+        return None;
+    }
+    let selected: Vec<u32> = if let Some(index) = face {
+        if index >= face_count {
+            return None;
+        }
+        vec![index]
+    } else {
+        (0..face_count).collect()
+    };
+    let mut best: Option<SubsetFont> = None;
+    let mut best_count = 0usize;
+    for index in selected {
+        let Some(subset) = subset_one_face(data, index, codepoints) else {
             continue;
         };
-        if output.status.success() {
-            return Some(std::process::Command::new(name));
+        let count = subset.glyphs.len();
+        if count > best_count {
+            best_count = count;
+            best = Some(subset);
         }
     }
-    None
+    best
 }
 
-fn next_stamp() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-thread_local! {
-    static SKIP_FONTTOOLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Runs `body` with the in-process glyf assembler. Python fontTools is not called.
-#[cfg(test)]
-pub struct RustGlyfOnly {
-    previous: bool,
-}
-
-#[cfg(test)]
-impl RustGlyfOnly {
-    pub fn enter() -> Self {
-        let previous = SKIP_FONTTOOLS.with(|flag| flag.replace(true));
-        Self { previous }
-    }
-}
-
-#[cfg(test)]
-impl Drop for RustGlyfOnly {
-    fn drop(&mut self) {
-        SKIP_FONTTOOLS.with(|flag| flag.set(self.previous));
-    }
-}
-
-enum GlyfAttempt {
-    Ready(SubsetFont),
-    /// Python or a glyf `OS/2` face is not available. The Rust assembler runs.
-    Absent,
-    /// fontTools started and failed. Do not hide that behind the assembler.
-    Failed,
-}
-
-/// Subset a glyf face with fontTools. The result is one TrueType file, not a
-/// collection. Glyph ids are the subset's glyph indexes, so CIDToGIDMap
-/// Identity addresses the outline that was packed.
-fn subset_glyf_fonttools(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> GlyfAttempt {
-    if SKIP_FONTTOOLS.with(std::cell::Cell::get)
-        || is_cff_font(data)
-        || !font_has_table(data, face, b"OS/2")
-    {
-        return GlyfAttempt::Absent;
-    }
-    let mut codes: Vec<u32> = codepoints
+fn subset_one_face(data: &[u8], index: u32, codepoints: &[u32]) -> Option<SubsetFont> {
+    let directory = *face_directories(data).get(index as usize)?;
+    let tables = read_tables(data, directory)?;
+    let cmap = FontCmap::from_table(tables.get(b"cmap".as_slice())?);
+    let head = tables.get(b"head".as_slice())?;
+    let hhea = tables.get(b"hhea".as_slice())?;
+    let hmtx = tables.get(b"hmtx".as_slice())?;
+    let maxp = tables.get(b"maxp".as_slice())?;
+    let upem = u16be(head, 18).unwrap_or(1000).max(1);
+    let ascender = i16be(hhea, 4).unwrap_or(800);
+    let descender = i16be(hhea, 6).unwrap_or(-200);
+    let num_glyphs = u16be(maxp, 4).unwrap_or(0) as usize;
+    let n_metrics = u16be(hhea, 34).unwrap_or(num_glyphs as u16) as usize;
+    let mut wanted: Vec<u32> = codepoints
         .iter()
         .copied()
         .filter(|code| *code > 0 && *code <= 0xFFFF)
         .collect();
-    codes.push(0x20);
-    codes.sort_unstable();
-    codes.dedup();
-    if codes.is_empty() {
-        return GlyfAttempt::Absent;
-    }
-    let list = codes
-        .iter()
-        .map(|code| format!("{code:X}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let stamp = next_stamp();
-    let dir = std::env::temp_dir();
-    let src = dir.join(format!("rpt-glyf-src-{}-{stamp}.bin", std::process::id()));
-    let font_out = dir.join(format!("rpt-glyf-{}-{stamp}.ttf", std::process::id()));
-    let json_out = dir.join(format!("rpt-glyf-{}-{stamp}.json", std::process::id()));
-    if std::fs::write(&src, data).is_err() {
-        return GlyfAttempt::Absent;
-    }
-    let face_arg = face
-        .map(|face| face.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let script = r#"
-import json, struct, sys
-from fontTools.ttLib import TTFont
-from fontTools.ttLib.tables._g_l_y_f import Glyph as RawGlyph
-from fontTools.subset import Subsetter, Options
-src, face, unicodes, out_font, out_json = sys.argv[1:]
-codes = [int(item, 16) for item in unicodes.split(",") if item]
-raw = open(src, "rb").read(12)
-if raw[:4] == b"ttcf":
-    count = struct.unpack(">I", open(src, "rb").read(12)[8:12])[0]
-else:
-    count = 1
-wanted = [int(face)] if face != "-" else list(range(min(count, 32)))
-
-def cover(font):
-    cmap = font.getBestCmap() or {}
-    return sum(1 for code in codes if code in cmap)
-
-best_face = None
-best_count = -1
-for index in wanted:
-    try:
-        font = TTFont(src, fontNumber=index)
-    except Exception:
-        continue
-    if "glyf" not in font:
-        continue
-    covered = cover(font)
-    if covered > best_count:
-        best_count = covered
-        best_face = index
-if best_face is None or best_count <= 0:
-    raise SystemExit(2)
-opt = Options()
-# "*" pulls every GSUB alternate. Some of those outlines make this
-# fontTools build crash in glyf.trim, and the page does not need them.
-# Component glyphs are still closed over.
-opt.layout_features = []
-opt.notdef_outline = True
-opt.recommended_glyphs = True
-opt.hinting = True
-font = TTFont(src, fontNumber=best_face)
-subsetter = Subsetter(options=opt)
-subsetter.populate(unicodes=codes)
-subsetter.subset(font)
-font.save(out_font)
-font = TTFont(out_font)
-if font.sfntVersion != "\x00\x01\x00\x00":
-    raise SystemExit("subset is not a standalone TrueType file")
-for table in ("cmap", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "name", "post"):
-    if table not in font:
-        raise SystemExit(f"missing {table}")
-maxp = font["maxp"]
-glyf = font["glyf"]
-order = font.getGlyphOrder()
-for name in order:
-    raw_glyph = glyf.glyphs[name]
-    raw = bytes(getattr(raw_glyph, "data", b"") or b"")
-    try:
-        RawGlyph(raw).trim(remove_hinting=False)
-    except Exception as exc:
-        raise SystemExit(f"{name} glyf record is not trimmable: {exc}")
-for name in order:
-    glyph = glyf[name]
-    contours = int(glyph.numberOfContours)
-    if contours > int(getattr(maxp, "maxContours", 0) or 0) and contours >= 0:
-        raise SystemExit(f"{name} has {contours} contours, maxp allows {maxp.maxContours}")
-    if glyph.isComposite():
-        elements = len(glyph.components)
-        if elements > int(getattr(maxp, "maxComponentElements", 0) or 0):
-            raise SystemExit(f"{name} components exceed maxp")
-        for component in glyph.components:
-            if component.glyphName not in glyf:
-                raise SystemExit(f"{name} missing component {component.glyphName}")
-cmap = font.getBestCmap() or {}
-upem = int(font["head"].unitsPerEm)
-glyphs = []
-for cp, name in cmap.items():
-    if name not in order:
-        continue
-    gid = order.index(name)
-    if gid > 65535:
-        continue
-    advance = int(font["hmtx"].metrics.get(name, (upem, 0))[0])
-    glyphs.append({"cp": int(cp), "cid": gid, "adv": min(advance, 65535)})
-if not glyphs:
-    raise SystemExit("empty cmap")
-json.dump({"upem": upem, "glyphs": glyphs}, open(out_json, "w"))
-"#;
-    let Some(mut command) = python_command() else {
-        let _ = std::fs::remove_file(&src);
-        return GlyfAttempt::Absent;
-    };
-    let output = command
-        .arg("-c")
-        .arg(script)
-        .arg(&src)
-        .arg(face_arg)
-        .arg(&list)
-        .arg(&font_out)
-        .arg(&json_out)
-        .output();
-    let cleanup = || {
-        let _ = std::fs::remove_file(&src);
-        let _ = std::fs::remove_file(&font_out);
-        let _ = std::fs::remove_file(&json_out);
-    };
-    let Ok(output) = output else {
-        cleanup();
-        return GlyfAttempt::Absent;
-    };
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let uncovered = output.status.code() == Some(2) && !err.contains("Traceback");
-        cleanup();
-        if uncovered {
-            return GlyfAttempt::Absent;
-        }
-        let message = err.trim();
-        if !message.is_empty() {
-            eprintln!("fontTools glyf subset failed:\n{message}");
-        }
-        return GlyfAttempt::Failed;
-    }
-    let bytes = match std::fs::read(&font_out) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            cleanup();
-            return GlyfAttempt::Failed;
-        }
-    };
-    let meta: serde_json::Value = match std::fs::read(&json_out)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-    {
-        Some(meta) => meta,
-        None => {
-            cleanup();
-            return GlyfAttempt::Failed;
-        }
-    };
-    cleanup();
-    let Some(upem) = meta.get("upem").and_then(|value| value.as_u64()) else {
-        return GlyfAttempt::Failed;
-    };
-    let upem = upem as u16;
-    let Some(items) = meta.get("glyphs").and_then(|value| value.as_array()) else {
-        return GlyfAttempt::Failed;
-    };
+    wanted.push(0x20);
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut remapper = subsetter::GlyphRemapper::new();
     let mut glyphs = HashMap::new();
-    for item in items {
-        let Some(cp) = item.get("cp").and_then(|value| value.as_u64()) else {
-            return GlyfAttempt::Failed;
+    for code in wanted {
+        let Some(gid) = cmap.unicode_to_gid.get(&code).copied() else {
+            continue;
         };
-        let Some(cid) = item.get("cid").and_then(|value| value.as_u64()) else {
-            return GlyfAttempt::Failed;
-        };
-        let Some(adv) = item.get("adv").and_then(|value| value.as_u64()) else {
-            return GlyfAttempt::Failed;
-        };
-        if cid > u64::from(u16::MAX) {
-            return GlyfAttempt::Failed;
+        if gid > u32::from(u16::MAX) {
+            continue;
         }
-        glyphs.insert(cp as u32, (cid as u16, adv.min(u64::from(u16::MAX)) as u16));
+        let advance = hmtx_advance(hmtx, gid as usize, n_metrics);
+        let new_gid = remapper.remap(gid as u16);
+        glyphs.insert(code, (new_gid, advance));
     }
     if glyphs.is_empty() {
-        return GlyfAttempt::Failed;
+        return None;
     }
-    GlyfAttempt::Ready(SubsetFont {
+    let raw = subsetter::subset(data, index, &remapper).ok()?;
+    let bytes = with_required_tables(&raw, &glyphs, upem, ascender, descender);
+    Some(SubsetFont {
         bytes,
-        units_per_em: upem.max(1),
+        units_per_em: upem,
         glyphs,
         fallback: None,
         notice: None,
     })
+}
+
+fn with_required_tables(
+    font: &[u8],
+    glyphs: &HashMap<u32, (u16, u16)>,
+    upem: u16,
+    ascender: i16,
+    descender: i16,
+) -> Vec<u8> {
+    let Some(tables) = read_tables(font, 0) else {
+        return font.to_vec();
+    };
+    let flavor = if font.starts_with(b"OTTO") {
+        *b"OTTO"
+    } else {
+        [0, 1, 0, 0]
+    };
+    let mut owned: Vec<([u8; 4], Vec<u8>)> = tables
+        .iter()
+        .filter_map(|(tag, data)| {
+            let bytes = tag.as_slice();
+            if bytes.len() != 4 {
+                return None;
+            }
+            let mut key = [0u8; 4];
+            key.copy_from_slice(bytes);
+            Some((key, data.to_vec()))
+        })
+        .collect();
+    let has = |owned: &[([u8; 4], Vec<u8>)], tag: &[u8; 4]| owned.iter().any(|(key, _)| key == tag);
+    if !has(&owned, b"cmap") {
+        let mappings: Vec<(u32, u32)> = glyphs
+            .iter()
+            .map(|(code, (gid, _))| (*code, u32::from(*gid)))
+            .collect();
+        owned.push((*b"cmap", unicode_cmap(&mappings)));
+    }
+    if !has(&owned, b"OS/2") {
+        owned.push((*b"OS/2", os2_table(upem, ascender, descender)));
+    }
+    owned.sort_by_key(|table| table.0);
+    let mut packed = pack_sfnt_with_flavor(&flavor, &owned);
+    apply_head_checksum(&mut packed);
+    packed
+}
+
+fn unicode_cmap(mappings: &[(u32, u32)]) -> Vec<u8> {
+    let sub = build_cmap_subtable(mappings);
+    let mut cmap = Vec::new();
+    cmap.extend_from_slice(&0u16.to_be_bytes());
+    cmap.extend_from_slice(&1u16.to_be_bytes());
+    cmap.extend_from_slice(&3u16.to_be_bytes());
+    cmap.extend_from_slice(&1u16.to_be_bytes());
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&sub);
+    cmap
 }
 
 struct CachedFace {
@@ -1122,148 +835,7 @@ pub fn subset_ttf(data: &[u8], codepoints: &[u32]) -> Option<SubsetFont> {
 }
 
 fn subset_ttf_face(data: &[u8], face: Option<u32>, codepoints: &[u32]) -> Option<SubsetFont> {
-    match subset_glyf_fonttools(data, face, codepoints) {
-        GlyfAttempt::Ready(font) => return Some(font),
-        // A crash used to fall through to the assembler, so the IndexError
-        // was only a log line and the test still passed.
-        GlyfAttempt::Failed => return None,
-        GlyfAttempt::Absent => {}
-    }
-    let directories = face_directories(data);
-    let selected: Vec<usize> = if let Some(index) = face {
-        directories
-            .get(index as usize)
-            .copied()
-            .into_iter()
-            .collect()
-    } else {
-        directories
-    };
-    let mut best: Option<SubsetFont> = None;
-    let mut best_count = 0usize;
-    for directory in selected {
-        let Some(subset) = subset_face(data, directory, codepoints) else {
-            continue;
-        };
-        let count = subset.glyphs.len();
-        if count > best_count {
-            best_count = count;
-            best = Some(subset);
-        }
-    }
-    best
-}
-
-fn subset_face(file: &[u8], directory: usize, codepoints: &[u32]) -> Option<SubsetFont> {
-    if directory + 12 > file.len() || &file[directory..directory + 4] == b"OTTO" {
-        return None;
-    }
-    let tables = read_tables(file, directory)?;
-    let head = tables.get(b"head".as_slice())?;
-    let maxp = tables.get(b"maxp".as_slice())?;
-    let hhea = tables.get(b"hhea".as_slice())?;
-    let hmtx = tables.get(b"hmtx".as_slice())?;
-    let loca = tables.get(b"loca".as_slice())?;
-    let glyf = tables.get(b"glyf".as_slice())?;
-    if head.len() < 54 || maxp.len() < 6 || hhea.len() < 36 {
-        return None;
-    }
-    let upem = u16be(head, 18).unwrap_or(1000).max(1);
-    let long_loca = i16be(head, 50).unwrap_or(0) != 0;
-    let num_glyphs = u16be(maxp, 4)? as usize;
-    let n_metrics = u16be(hhea, 34).unwrap_or(num_glyphs as u16) as usize;
-    let offsets = loca_offsets(loca, num_glyphs, long_loca)?;
-    let cmap = FontCmap::from_table(tables.get(b"cmap".as_slice())?);
-    let mut wanted: HashSet<u16> = HashSet::new();
-    wanted.insert(0);
-    let mut requested = Vec::new();
-    for code in codepoints {
-        if *code == 0 || *code > 0xFFFF {
-            continue;
-        }
-        let Some(gid) = cmap.unicode_to_gid.get(code).copied() else {
-            continue;
-        };
-        if gid > u16::MAX as u32 {
-            continue;
-        }
-        wanted.insert(gid as u16);
-        requested.push((*code, gid as u16));
-    }
-    let mut queue: VecDeque<u16> = wanted.iter().copied().collect();
-    while let Some(gid) = queue.pop_front() {
-        let slice = glyph_slice(glyf, &offsets, gid as usize)?;
-        for component in composite_gids(slice) {
-            if wanted.insert(component) {
-                queue.push_back(component);
-            }
-        }
-    }
-    let mut order: Vec<u16> = wanted.into_iter().collect();
-    order.sort_unstable();
-    if order.first().copied() != Some(0) {
-        order.insert(0, 0);
-    }
-    let new_of: HashMap<u16, u16> = order
-        .iter()
-        .enumerate()
-        .map(|(index, gid)| (*gid, index as u16))
-        .collect();
-    let mut glyphs = Vec::new();
-    let mut metrics = Vec::new();
-    for gid in &order {
-        let mut bytes = outline_bytes(glyph_slice(glyf, &offsets, *gid as usize)?);
-        rewrite_composites(&mut bytes, &new_of);
-        glyphs.push(bytes);
-        let adv = hmtx_advance(hmtx, *gid as usize, n_metrics);
-        push_hmtx(&mut metrics, adv, 0);
-    }
-    let mut mappings: Vec<(u32, u16)> = requested
-        .into_iter()
-        .map(|(code, old)| (code, new_of[&old]))
-        .collect();
-    let ascender = i16be(hhea, 4).unwrap_or(800);
-    let descender = i16be(hhea, 6).unwrap_or(-200);
-    if codepoints.contains(&0x20) && !mappings.iter().any(|(code, _)| *code == 0x20) {
-        let gid = glyphs.len() as u16;
-        // A 10-byte zero header plus loca padding makes fontTools trim() read
-        // yMax as an end point and then walk off the flag array. A zero-length
-        // glyph is the empty outline.
-        glyphs.push(Vec::new());
-        push_hmtx(&mut metrics, upem / 4, 0);
-        mappings.push((0x20, gid));
-    }
-    let bytes = assemble_font(upem, &glyphs, &metrics, &mappings, ascender, descender);
-    let mut glyph_map = HashMap::new();
-    for (code, gid) in &mappings {
-        let adv = hmtx_advance(&metrics, *gid as usize, glyphs.len());
-        glyph_map.insert(*code, (*gid, adv));
-    }
-    Some(SubsetFont {
-        bytes,
-        units_per_em: upem,
-        glyphs: glyph_map,
-        fallback: None,
-        notice: None,
-    })
-}
-
-fn font_has_table(data: &[u8], face: Option<u32>, tag: &[u8; 4]) -> bool {
-    let directories = face_directories(data);
-    let selected: Vec<usize> = if let Some(index) = face {
-        directories
-            .get(index as usize)
-            .copied()
-            .into_iter()
-            .collect()
-    } else {
-        directories
-    };
-    selected.iter().any(|directory| {
-        read_tables(data, *directory)
-            .and_then(|tables| tables.get(tag.as_slice()).copied())
-            .is_some()
-    })
+    subset_opentype(data, face, codepoints)
 }
 
 fn face_directories(data: &[u8]) -> Vec<usize> {
@@ -1305,6 +877,7 @@ fn read_tables(file: &[u8], directory: usize) -> Option<HashMap<Vec<u8>, &[u8]>>
     Some(tables)
 }
 
+#[cfg(test)]
 fn loca_offsets(loca: &[u8], num_glyphs: usize, long: bool) -> Option<Vec<u32>> {
     let count = num_glyphs + 1;
     if long {
@@ -1328,20 +901,7 @@ fn loca_offsets(loca: &[u8], num_glyphs: usize, long: bool) -> Option<Vec<u32>> 
     }
 }
 
-/// Bytes copied into the subset. A zero-contour header is not a legal simple
-/// glyph: `Glyph.trim` reads `yMax` as an end point and then indexes the flag
-/// array. The empty outline is a zero-length glyf record.
-fn outline_bytes(glyph: &[u8]) -> Vec<u8> {
-    if glyph.len() < 10 {
-        return Vec::new();
-    }
-    let contours = i16::from_be_bytes([glyph[0], glyph[1]]);
-    if contours == 0 {
-        return Vec::new();
-    }
-    glyph.to_vec()
-}
-
+#[cfg(test)]
 fn glyph_slice<'a>(glyf: &'a [u8], offsets: &[u32], gid: usize) -> Option<&'a [u8]> {
     let start = *offsets.get(gid)? as usize;
     let end = *offsets.get(gid + 1)? as usize;
@@ -1351,6 +911,7 @@ fn glyph_slice<'a>(glyf: &'a [u8], offsets: &[u32], gid: usize) -> Option<&'a [u
     Some(&glyf[start..end])
 }
 
+#[cfg(test)]
 fn composite_gids(glyph: &[u8]) -> Vec<u16> {
     if glyph.len() < 10 {
         return Vec::new();
@@ -1385,39 +946,6 @@ fn composite_gids(glyph: &[u8]) -> Vec<u16> {
     gids
 }
 
-fn rewrite_composites(glyph: &mut [u8], new_of: &HashMap<u16, u16>) {
-    if glyph.len() < 10 {
-        return;
-    }
-    let contours = i16::from_be_bytes([glyph[0], glyph[1]]);
-    if contours >= 0 {
-        return;
-    }
-    let mut i = 10usize;
-    loop {
-        if i + 4 > glyph.len() {
-            break;
-        }
-        let flags = u16::from_be_bytes([glyph[i], glyph[i + 1]]);
-        let gid = u16::from_be_bytes([glyph[i + 2], glyph[i + 3]]);
-        let mapped = new_of.get(&gid).copied().unwrap_or(0);
-        glyph[i + 2..i + 4].copy_from_slice(&mapped.to_be_bytes());
-        i += 4;
-        let arg_bytes = if flags & 0x0001 != 0 { 4 } else { 2 };
-        i += arg_bytes;
-        if flags & 0x0008 != 0 {
-            i += 2;
-        } else if flags & 0x0040 != 0 {
-            i += 4;
-        } else if flags & 0x0080 != 0 {
-            i += 8;
-        }
-        if flags & 0x0020 == 0 {
-            break;
-        }
-    }
-}
-
 fn hmtx_advance(hmtx: &[u8], gid: usize, n_metrics: usize) -> u16 {
     if n_metrics == 0 || hmtx.len() < 2 {
         return 600;
@@ -1430,6 +958,7 @@ fn hmtx_advance(hmtx: &[u8], gid: usize, n_metrics: usize) -> u16 {
     u16be(hmtx, at).unwrap_or(600)
 }
 
+#[cfg(test)]
 fn assemble_font(
     upem: u16,
     glyphs: &[Vec<u8>],
@@ -1486,7 +1015,12 @@ fn assemble_font(
     font
 }
 
+#[cfg(test)]
 fn pack_sfnt(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    pack_sfnt_with_flavor(&[0, 1, 0, 0], tables)
+}
+
+fn pack_sfnt_with_flavor(flavor: &[u8; 4], tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
     let n = tables.len() as u16;
     let mut search_range = 1u16;
     let mut entry_selector = 0u16;
@@ -1510,7 +1044,7 @@ fn pack_sfnt(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
         offset += data.len() + pad;
     }
     let mut out = Vec::new();
-    out.extend_from_slice(&0x00010000u32.to_be_bytes());
+    out.extend_from_slice(flavor);
     out.extend_from_slice(&n.to_be_bytes());
     out.extend_from_slice(&search_range.to_be_bytes());
     out.extend_from_slice(&entry_selector.to_be_bytes());
@@ -1550,6 +1084,7 @@ fn table_offset(font: &[u8], tag: &[u8; 4]) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 fn head_table(upem: u16, ascender: i16, descender: i16) -> Vec<u8> {
     let mut t = vec![0u8; 54];
     t[0..4].copy_from_slice(&0x00010000u32.to_be_bytes());
@@ -1567,6 +1102,7 @@ fn head_table(upem: u16, ascender: i16, descender: i16) -> Vec<u8> {
     t
 }
 
+#[cfg(test)]
 fn hhea_table(ascender: i16, descender: i16, n_metrics: u16) -> Vec<u8> {
     let mut t = vec![0u8; 36];
     t[0..4].copy_from_slice(&0x00010000u32.to_be_bytes());
@@ -1582,6 +1118,7 @@ fn hhea_table(ascender: i16, descender: i16, n_metrics: u16) -> Vec<u8> {
 /// A hard-coded `maxContours` of 1 is what made Windows and OTS drop every
 /// glyph with a counter (a, e, o, 0, B, R, and almost every Han character)
 /// while single-contour letters such as T, r, and E still painted.
+#[cfg(test)]
 fn maxp_from_glyphs(glyphs: &[Vec<u8>]) -> Vec<u8> {
     let mut max_points = 0u16;
     let mut max_contours = 0u16;
@@ -1653,6 +1190,7 @@ fn maxp_from_glyphs(glyphs: &[Vec<u8>]) -> Vec<u8> {
     t
 }
 
+#[cfg(test)]
 struct GlyphHeader {
     composite: bool,
     points: u16,
@@ -1661,6 +1199,7 @@ struct GlyphHeader {
     components: Vec<u16>,
 }
 
+#[cfg(test)]
 fn parse_glyph_header(glyph: &[u8]) -> Option<GlyphHeader> {
     if glyph.len() < 10 {
         return Some(GlyphHeader {
@@ -1711,6 +1250,7 @@ fn parse_glyph_header(glyph: &[u8]) -> Option<GlyphHeader> {
     })
 }
 
+#[cfg(test)]
 fn expanded_composite(
     index: usize,
     components: &[Vec<u16>],
@@ -1783,12 +1323,14 @@ fn os2_table(upem: u16, ascender: i16, descender: i16) -> Vec<u8> {
     t
 }
 
+#[cfg(test)]
 fn post_table() -> Vec<u8> {
     let mut t = vec![0u8; 32];
     t[0..4].copy_from_slice(&0x00030000u32.to_be_bytes());
     t
 }
 
+#[cfg(test)]
 fn name_table() -> Vec<u8> {
     let records = [
         (1u16, "RPT CJK"),
@@ -1848,6 +1390,7 @@ fn box_glyph() -> Vec<u8> {
     g
 }
 
+#[cfg(test)]
 fn push_hmtx(out: &mut Vec<u8>, advance: u16, lsb: i16) {
     out.extend_from_slice(&advance.to_be_bytes());
     out.extend_from_slice(&lsb.to_be_bytes());
@@ -1984,40 +1527,23 @@ mod tests {
         assert_ne!(font.glyphs[&0x65].0, 70, "e");
         assert_ne!(font.glyphs[&0x6f].0, 80, "o");
         assert_ne!(font.glyphs[&0x30].0, 17, "0");
-        let otf = std::env::temp_dir().join(format!("rpt-ident-{}.otf", std::process::id()));
-        std::fs::write(&otf, &font.bytes).unwrap();
-        let check = std::process::Command::new("python3")
-            .arg("-c")
-            .arg(
-                r#"
-import sys
-from fontTools.ttLib import TTFont
-font = TTFont(sys.argv[1])
-order = font.getGlyphOrder()
-bad = []
-for index, name in enumerate(order):
-    expect = ".notdef" if index == 0 else f"cid{index:05d}"
-    if name != expect:
-        bad.append(f"{index}:{name}")
-if bad:
-    raise SystemExit("charset is not identity: " + ", ".join(bad[:8]))
-cmap = {}
-for table in font["cmap"].tables:
-    if table.platformID == 3 and table.platEncID in (1, 10):
-        cmap.update(table.cmap)
-for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
-    name = cmap.get(code)
-    if name is None or not name.startswith("cid"):
-        raise SystemExit(f"missing cmap for U+{code:04X}")
-    if int(name[3:]) != order.index(name):
-        raise SystemExit(f"U+{code:04X} cid {name} is not its glyph index")
-"#,
-            )
-            .arg(&otf)
-            .status()
-            .expect("python3");
-        let _ = std::fs::remove_file(&otf);
-        assert!(check.success(), "CFF charset CIDs are not glyph indexes");
+        assert!(
+            font.bytes.starts_with(b"OTTO"),
+            "CFF subset is a standalone OpenType font"
+        );
+        assert!(table_present(&font.bytes, b"CFF "), "missing CFF table");
+        let tables = read_tables(&font.bytes, 0).expect("tables");
+        let num = u16be(tables[b"maxp".as_slice()], 4).unwrap();
+        let cmap = FontCmap::parse(&font.bytes);
+        for code in [0x61u32, 0x65, 0x6F, 0x30, 0x4E2D] {
+            let cid = font.glyphs[&code].0;
+            assert!(cid < num, "U+{code:04X} cid {cid} is past maxp {num}");
+            assert_eq!(
+                cmap.unicode_to_gid.get(&code).copied(),
+                Some(u32::from(cid)),
+                "U+{code:04X} cmap gid is not its CID"
+            );
+        }
     }
 
     fn face_name_contains(bytes: &[u8], needle: &str) -> bool {
@@ -2243,7 +1769,7 @@ for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
         }
         let bytes = std::fs::read(path).unwrap();
         let codes = [0x61u32, 0x65, 0x6f, 0x30, 0x42, 0x52, 0x54, 0x45];
-        let font = subset_face(&bytes, 0, &codes).expect("rust subset");
+        let font = subset_ttf(&bytes, &codes).expect("glyf subset");
         assert!(font.bytes.starts_with(&[0, 1, 0, 0]), "standalone TTF");
         assert!(font.glyphs.contains_key(&0x61));
         assert_maxp_covers_glyf(&font.bytes);
@@ -2375,105 +1901,198 @@ for code in (0x61, 0x65, 0x6F, 0x30, 0x4E2D):
     }
 
     fn assert_maxp_covers_glyf(font: &[u8]) {
-        let path = std::env::temp_dir().join(format!(
-            "rpt-maxp-{}-{}.ttf",
-            std::process::id(),
-            next_stamp()
-        ));
-        std::fs::write(&path, font).unwrap();
-        let mut command = python_command().expect("python");
-        let output = command
-            .arg("-c")
-            .arg(
-                r#"
-import sys
-from fontTools.ttLib import TTFont
-from fontTools.ttLib.tables._g_l_y_f import Glyph as RawGlyph
-font = TTFont(sys.argv[1])
-if font.sfntVersion not in ("\x00\x01\x00\x00",):
-    raise SystemExit(f"not a TTF: {font.sfntVersion!r}")
-required = ["cmap", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "name", "OS/2", "post"]
-missing = [name for name in required if name not in font]
-if missing:
-    raise SystemExit("missing " + ",".join(missing))
-maxp = font["maxp"]
-glyf = font["glyf"]
-for name in font.getGlyphOrder():
-    # glyf[name] expands the outline and trim() then skips the raw bytes.
-    # prune_post_subset trims the compact record, which is where the
-    # IndexError was raised.
-    raw = bytes(getattr(glyf.glyphs[name], "data", b"") or b"")
-    try:
-        RawGlyph(raw).trim(remove_hinting=False)
-    except Exception as exc:
-        raise SystemExit(f"{name} glyf record is not trimmable: {exc}")
-    glyph = glyf[name]
-    contours = glyph.numberOfContours
-    if contours >= 0 and contours > int(maxp.maxContours or 0):
-        raise SystemExit(f"{name} contours {contours} > maxp {maxp.maxContours}")
-    if contours > 0:
-        data = bytes(getattr(glyph, "data", b"") or b"")
-        if len(data) >= 10 + contours * 2:
-            last = int.from_bytes(data[8 + contours * 2 : 10 + contours * 2], "big")
-            if last + 1 > int(maxp.maxPoints or 0):
-                raise SystemExit(f"{name} points {last + 1} > maxp {maxp.maxPoints}")
-    if glyph.isComposite():
-        if len(glyph.components) > int(maxp.maxComponentElements or 0):
-            raise SystemExit(f"{name} components {len(glyph.components)} > maxp")
-        for component in glyph.components:
-            if component.glyphName not in glyf:
-                raise SystemExit(f"{name} dropped {component.glyphName}")
-"#,
-            )
-            .arg(&path)
-            .output()
-            .expect("python");
-        let _ = std::fs::remove_file(&path);
-        let detail = String::from_utf8_lossy(&output.stderr);
         assert!(
-            output.status.success(),
-            "maxp does not cover the glyf outlines: {detail}"
+            font.starts_with(&[0, 1, 0, 0]),
+            "glyf subset must be a standalone TrueType file"
         );
+        for tag in [
+            b"cmap", b"glyf", b"head", b"hhea", b"hmtx", b"loca", b"maxp", b"name", b"OS/2",
+            b"post",
+        ] {
+            assert!(
+                table_present(font, tag),
+                "missing {}",
+                String::from_utf8_lossy(tag)
+            );
+        }
+        let tables = read_tables(font, 0).expect("sfnt tables");
+        let maxp = tables[b"maxp".as_slice()];
+        let head = tables[b"head".as_slice()];
+        let glyf = tables[b"glyf".as_slice()];
+        let loca = tables[b"loca".as_slice()];
+        let num = u16be(maxp, 4).unwrap() as usize;
+        let max_points = u16be(maxp, 6).unwrap_or(0);
+        let max_contours = u16be(maxp, 8).unwrap_or(0);
+        let max_elements = u16be(maxp, 28).unwrap_or(0);
+        let long = i16be(head, 50).unwrap_or(0) != 0;
+        let offsets = loca_offsets(loca, num, long).expect("loca");
+        for gid in 0..num {
+            let slice = glyph_slice(glyf, &offsets, gid).unwrap_or_else(|| {
+                panic!("gid {gid} is outside the loca table");
+            });
+            assert!(
+                glyph_record_fits(slice),
+                "gid {gid} glyf record is not a legal outline"
+            );
+            let Some(parsed) = parse_glyph_header(slice) else {
+                panic!("gid {gid} glyph header does not parse");
+            };
+            if parsed.composite {
+                assert!(
+                    parsed.components.len() as u16 <= max_elements,
+                    "gid {gid} has {} components, maxp allows {max_elements}",
+                    parsed.components.len()
+                );
+                for component in parsed.components {
+                    assert!(
+                        (component as usize) < num,
+                        "gid {gid} dropped component {component}"
+                    );
+                }
+            } else if parsed.contours > 0 {
+                assert!(
+                    parsed.contours <= max_contours,
+                    "gid {gid} has {} contours, maxp allows {max_contours}",
+                    parsed.contours
+                );
+                assert!(
+                    parsed.points <= max_points,
+                    "gid {gid} has {} points, maxp allows {max_points}",
+                    parsed.points
+                );
+            }
+        }
+    }
+
+    /// True when a compact glyf record can be walked without reading past its
+    /// loca span. Trailing alignment bytes are allowed. A zero-contour header
+    /// is empty; a short non-empty record is not.
+    fn glyph_record_fits(glyph: &[u8]) -> bool {
+        if glyph.is_empty() {
+            return true;
+        }
+        if glyph.len() < 10 {
+            return false;
+        }
+        let contours = i16::from_be_bytes([glyph[0], glyph[1]]);
+        if contours == 0 {
+            return true;
+        }
+        if contours < 0 {
+            return composite_record_fits(glyph);
+        }
+        let count = contours as usize;
+        let mut i = 10 + 2 * count;
+        if i + 2 > glyph.len() {
+            return false;
+        }
+        let n_coordinates = usize::from(u16::from_be_bytes([glyph[i - 2], glyph[i - 1]])) + 1;
+        let instruction_len = usize::from(u16::from_be_bytes([glyph[i], glyph[i + 1]]));
+        i += 2;
+        if i + instruction_len > glyph.len() {
+            return false;
+        }
+        i += instruction_len;
+        let mut seen = 0usize;
+        let mut coord_bytes = 0usize;
+        while seen < n_coordinates {
+            if i >= glyph.len() {
+                return false;
+            }
+            let flag = glyph[i];
+            i += 1;
+            let mut repeat = 1usize;
+            if flag & 0x08 != 0 {
+                if i >= glyph.len() {
+                    return false;
+                }
+                repeat = usize::from(glyph[i]) + 1;
+                i += 1;
+            }
+            let x_bytes = if flag & 0x02 != 0 {
+                1
+            } else if flag & 0x10 == 0 {
+                2
+            } else {
+                0
+            };
+            let y_bytes = if flag & 0x04 != 0 {
+                1
+            } else if flag & 0x20 == 0 {
+                2
+            } else {
+                0
+            };
+            coord_bytes += (x_bytes + y_bytes) * repeat;
+            seen += repeat;
+            if seen > n_coordinates {
+                return false;
+            }
+        }
+        seen == n_coordinates && i + coord_bytes <= glyph.len()
+    }
+
+    fn composite_record_fits(glyph: &[u8]) -> bool {
+        let mut i = 10usize;
+        loop {
+            if i + 4 > glyph.len() {
+                return false;
+            }
+            let flags = u16::from_be_bytes([glyph[i], glyph[i + 1]]);
+            i += 4;
+            i += if flags & 0x0001 != 0 { 4 } else { 2 };
+            if flags & 0x0008 != 0 {
+                i += 2;
+            } else if flags & 0x0040 != 0 {
+                i += 4;
+            } else if flags & 0x0080 != 0 {
+                i += 8;
+            }
+            if i > glyph.len() {
+                return false;
+            }
+            if flags & 0x0020 == 0 {
+                if flags & 0x0100 != 0 {
+                    if i + 2 > glyph.len() {
+                        return false;
+                    }
+                    let instructions = usize::from(u16::from_be_bytes([glyph[i], glyph[i + 1]]));
+                    return i + 2 + instructions <= glyph.len();
+                }
+                return true;
+            }
+        }
     }
 
     #[test]
-    fn fonttools_glyf_subset_keeps_the_source_name() {
+    fn glyf_subset_keeps_the_source_name() {
         let path = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
-        if !std::path::Path::new(path).is_file() || python_command().is_none() {
+        if !std::path::Path::new(path).is_file() {
             return;
         }
         let bytes = std::fs::read(path).unwrap();
-        let font = subset_ttf(&bytes, &[0x61, 0x65, 0x6F, 0x30, 0x42])
-            .expect("fontTools glyf subset failed; a crash must not fall back to the assembler");
+        let font = subset_ttf(&bytes, &[0x61, 0x65, 0x6F, 0x30, 0x42]).expect("glyf subset");
         assert!(
             face_name_contains(&font.bytes, "Liberation"),
-            "glyf subset lost the source name, so the Rust assembler ran"
+            "glyf subset dropped the source name"
         );
         assert_maxp_covers_glyf(&font.bytes);
     }
 
     #[test]
-    fn rust_glyf_subset_of_a_collection_has_legal_flags() {
+    fn collection_glyf_subset_has_legal_flags() {
         let path = "/usr/share/fonts/truetype/arphic/uming.ttc";
         if !std::path::Path::new(path).is_file() {
             return;
         }
         let bytes = std::fs::read(path).unwrap();
-        let _guard = RustGlyfOnly::enter();
         let font = subset_ttf_face(&bytes, Some(0), &[0x4E2D, 0x6587, 0x61, 0x65, 0x6F, 0x30])
-            .expect("rust glyf subset");
-        drop(_guard);
+            .expect("collection subset");
         assert!(
-            face_name_contains(&font.bytes, "RPT CJK"),
-            "Rust assembler did not replace the name"
-        );
-        assert!(
-            !face_name_contains(&font.bytes, "UMing"),
-            "collection subset still carries the source name"
+            face_name_contains(&font.bytes, "UMing"),
+            "collection subset dropped the source name"
         );
         assert!(font.glyphs.contains_key(&0x4E2D), "missing 中");
-        if python_command().is_some() {
-            assert_maxp_covers_glyf(&font.bytes);
-        }
+        assert_maxp_covers_glyf(&font.bytes);
     }
 }

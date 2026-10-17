@@ -20319,8 +20319,7 @@ mod tests {
 
     #[test]
     fn a_sentence_with_one_math_glyph_is_still_translated() {
-        // A synthetic glyf font, not the host CJK file. GitHub runners ship
-        // Noto CJK as CFF, and subset_ttf does not subset CFF faces.
+        // A synthetic glyf font, so the test does not depend on the host CJK face.
         let translated = "该方法与我们的做法相似。";
         let codes: Vec<u32> = "The method is similar to our approach.xy"
             .chars()
@@ -22005,97 +22004,22 @@ ET",
                 == Some(b"TrueType")
         });
         assert!(embedded, "Times-Roman stamp was left non-embedded");
-        assert_viewer_text(&saved, "arXiv:1810.04805v2[cs.CL]24May2019");
-    }
-
-    #[test]
-    fn rust_assembler_paints_a_times_stamp_in_pdfium() {
-        let path = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
-        if !std::path::Path::new(path).is_file() {
-            return;
-        }
-        let bytes = contents_pdf_named(
-            b"BT /F1 20 Tf 72 700 Td (arXiv:1810.04805v2  [cs.CL]  24 May 2019) Tj ET",
-            "Times-Roman",
-        );
-        let mut doc = Document::load_mem(&bytes).unwrap();
-        let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
-        for id in ids {
-            let Some(dict) = doc
-                .get_object_mut(id)
-                .ok()
-                .and_then(|object| object.as_dict_mut().ok())
-            else {
-                continue;
-            };
-            if dict.get(b"BaseFont").and_then(|obj| obj.as_name()).ok()
-                == Some(b"Times-Roman".as_slice())
-            {
-                dict.remove(b"Widths");
-                dict.remove(b"FirstChar");
-                dict.remove(b"LastChar");
-                dict.remove(b"Encoding");
-            }
-        }
-        let _guard = crate::font::RustGlyfOnly::enter();
-        embed_base14_fonts(&mut doc);
-        drop(_guard);
-        let mut saved = Vec::new();
-        doc.save_to(&mut saved).unwrap();
-        let loaded = Document::load_mem(&saved).unwrap();
-        let mut saw_rpt = false;
-        let mut saw_liberation = false;
-        for object in loaded.objects.values() {
-            let Ok(stream) = object.as_stream() else {
-                continue;
-            };
-            let font_bytes = stream
+        let program = loaded.objects.values().find_map(|object| {
+            let stream = object.as_stream().ok()?;
+            let bytes = stream
                 .decompressed_content()
                 .unwrap_or_else(|_| stream.content.clone());
-            if font_bytes.len() < 12 || font_bytes[0..4] != [0, 1, 0, 0] {
-                continue;
-            }
-            if utf16_be_contains(&font_bytes, "RPT CJK") {
-                saw_rpt = true;
-            }
-            if utf16_be_contains(&font_bytes, "Liberation")
-                || font_bytes.windows(10).any(|window| window == b"Liberation")
-            {
-                saw_liberation = true;
-            }
-        }
-        assert!(saw_rpt, "Rust assembler did not embed its name table");
-        assert!(
-            !saw_liberation,
-            "Times stamp still carries the Liberation name, so fontTools ran"
-        );
-        let needle = "arXiv:1810.04805v2[cs.CL]24May2019";
-        if std::env::var_os("CI").is_some() {
-            assert!(pdfium_ready(), "CI has no pdfium renderer");
-            assert!(!tool_missing("tesseract"), "CI has no tesseract");
-        }
-        if pdfium_ready() && !tool_missing("tesseract") {
-            let slot = viewer_slot();
-            let pdf = std::env::temp_dir()
-                .join(format!("rpt-rust-glyf-{}-{slot}.pdf", std::process::id()));
-            std::fs::write(&pdf, &saved).unwrap();
-            let text = ocr_pngs(&render_pdfium(&pdf, slot), needle);
+            (bytes.len() >= 12 && bytes[0..4] == [0, 1, 0, 0]).then_some(bytes)
+        });
+        let program = program.expect("embedded TrueType program");
+        for tag in [b"glyf", b"loca", b"hmtx", b"maxp", b"head", b"OS/2"] {
             assert!(
-                ocr_has(&text, needle),
-                "pdfium dropped glyphs from the Rust glyf subset: {text}"
+                sfnt_table(&program, tag).is_some(),
+                "Times subset is missing {}",
+                String::from_utf8_lossy(tag)
             );
-            let _ = std::fs::remove_file(&pdf);
         }
-    }
-
-    fn utf16_be_contains(bytes: &[u8], text: &str) -> bool {
-        let wide: Vec<u8> = text
-            .encode_utf16()
-            .flat_map(|unit| unit.to_be_bytes())
-            .collect();
-        bytes
-            .windows(wide.len())
-            .any(|window| window == wide.as_slice())
+        assert_viewer_text(&saved, "arXiv:1810.04805v2[cs.CL]24May2019");
     }
 
     fn assert_viewer_text(pdf: &[u8], needle: &str) {
