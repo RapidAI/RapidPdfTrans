@@ -749,6 +749,11 @@ pub fn rewrite_translation(
     // stream, so it stays on the English baseline unless those y values move
     // by the same amount.
     shift_listing_arrows(doc, extraction, &by_id, &drawn, &listing_shifts);
+    // A radical bar is a stroked path, not a glyph. The formula text moved
+    // with the line and the bar stayed on the next line (`相似`) or beside
+    // the heading. Blanking does not touch the path; shift it by the same
+    // amount, keeping each number the same width so later offsets still match.
+    shift_formula_rules(doc, extraction, &stack_shifts)?;
 
     let draw_ids: HashSet<u32> = succeeded
         .iter()
@@ -13007,14 +13012,7 @@ fn content_tokens(bytes: &[u8]) -> Vec<ContentTok> {
                 index += 1;
             }
             if array == 0 && dict == 0 {
-                let name = match &bytes[start..index] {
-                    b"q" => Some("q"),
-                    b"Q" => Some("Q"),
-                    b"re" => Some("re"),
-                    b"cm" => Some("cm"),
-                    b"Tm" => Some("Tm"),
-                    _ => None,
-                };
+                let name = path_operator(&bytes[start..index]);
                 if let Some(op) = name {
                     tokens.push(ContentTok {
                         kind: ContentTokKind::Operator(op),
@@ -13628,6 +13626,449 @@ fn reposition_listings(
 
 /// One glyph at a time. A binomial is not a single baseline, so grouping
 /// the char codes into one `Tj` would flatten the `2` onto `k+1`.
+/// A fraction bar or radical vinculum drawn as a hairline next to formula
+/// glyphs. `x0,y0,x1,y1` is the glyph ink padded so the stroke is inside it.
+/// `dx,dy` is the same shift applied to those glyphs.
+type FormulaBox = (f32, f32, f32, f32, f32, f32);
+
+fn shift_formula_rules(
+    doc: &mut Document,
+    extraction: &Extraction,
+    shifts: &[ListingShift],
+) -> Result<()> {
+    if shifts.is_empty() {
+        return Ok(());
+    }
+    let by_id = glyph_index(&extraction.glyphs);
+    let mut pending: HashMap<ObjectId, Vec<FormulaBox>> = HashMap::new();
+    for shift in shifts {
+        if shift.dx.abs() < 0.3 && shift.dy.abs() < 0.3 {
+            continue;
+        }
+        let mut x0 = f32::MAX;
+        let mut y0 = f32::MAX;
+        let mut x1 = f32::MIN;
+        let mut y1 = f32::MIN;
+        let mut streams = HashSet::new();
+        let mut count = 0u32;
+        for id in &shift.ids {
+            let Some(glyph) = by_id
+                .get(id)
+                .and_then(|index| extraction.glyphs.get(*index))
+            else {
+                continue;
+            };
+            if glyph.font_resource.is_empty() || glyph.char_code.is_empty() {
+                continue;
+            }
+            count += 1;
+            x0 = x0.min(glyph.bbox[0].min(glyph.bbox[2]));
+            y0 = y0.min(glyph.bbox[1].min(glyph.bbox[3]));
+            x1 = x1.max(glyph.bbox[0].max(glyph.bbox[2]));
+            y1 = y1.max(glyph.bbox[1].max(glyph.bbox[3]));
+            if let Some(span) = span_of(&glyph.source) {
+                streams.insert(span.object_id);
+            }
+        }
+        if count == 0 || !x0.is_finite() {
+            continue;
+        }
+        // The bar starts a point before the radical and ends a point past
+        // the subscript. A footnote rule is far wider than this pad.
+        let pad = 3.0;
+        let ink = (x0 - pad, y0 - pad, x1 + pad, y1 + pad, shift.dx, shift.dy);
+        for id in streams {
+            pending.entry(id).or_default().push(ink);
+        }
+    }
+    for (id, boxes) in pending {
+        let Ok(object) = doc.get_object(id) else {
+            continue;
+        };
+        let Ok(stream) = object.as_stream() else {
+            continue;
+        };
+        let Ok(mut bytes) = stream.decompressed_content() else {
+            continue;
+        };
+        if !shift_hairlines(&mut bytes, &boxes) {
+            continue;
+        }
+        let Ok(object) = doc.get_object_mut(id) else {
+            continue;
+        };
+        let Ok(stream) = object.as_stream_mut() else {
+            continue;
+        };
+        stream.set_plain_content(bytes);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct FormMtx {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+}
+
+fn form_ident() -> FormMtx {
+    FormMtx {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    }
+}
+
+fn form_is_ident(m: FormMtx) -> bool {
+    (m.a - 1.0).abs() < 0.02
+        && m.b.abs() < 0.02
+        && m.c.abs() < 0.02
+        && (m.d - 1.0).abs() < 0.02
+        && m.e.abs() < 0.02
+        && m.f.abs() < 0.02
+}
+
+/// `m` is applied to the point first, then `ctm`.
+fn form_concat(ctm: FormMtx, m: FormMtx) -> FormMtx {
+    FormMtx {
+        a: ctm.a * m.a + ctm.c * m.b,
+        b: ctm.b * m.a + ctm.d * m.b,
+        c: ctm.a * m.c + ctm.c * m.d,
+        d: ctm.b * m.c + ctm.d * m.d,
+        e: ctm.a * m.e + ctm.c * m.f + ctm.e,
+        f: ctm.b * m.e + ctm.d * m.f + ctm.f,
+    }
+}
+
+fn form_map(m: FormMtx, x: f32, y: f32) -> (f32, f32) {
+    (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f)
+}
+
+#[derive(Clone)]
+struct CmHandle {
+    x_at: (usize, usize),
+    y_at: (usize, usize),
+    tx: f32,
+    ty: f32,
+}
+
+struct HairEdit {
+    x_at: (usize, usize),
+    y_at: (usize, usize),
+    x: f32,
+    y: f32,
+}
+
+struct HairPt {
+    x: f32,
+    y: f32,
+    x_at: (usize, usize),
+    y_at: (usize, usize),
+    lx: f32,
+    ly: f32,
+}
+
+struct HairSub {
+    pts: Vec<HairPt>,
+    curved: bool,
+}
+
+/// Move hairline rules that sit on a shifted formula. Numbers keep their
+/// original width so a blanked text operator later in the stream stays at
+/// the offset recorded during extraction.
+fn shift_hairlines(bytes: &mut Vec<u8>, boxes: &[FormulaBox]) -> bool {
+    if boxes.is_empty() {
+        return false;
+    }
+    let tokens = content_tokens(bytes);
+    let mut ctm = form_ident();
+    let mut stack: Vec<(FormMtx, Option<CmHandle>)> = Vec::new();
+    let mut cm: Option<CmHandle> = None;
+    let mut nums: Vec<(usize, usize, f32)> = Vec::new();
+    let mut subs: Vec<HairSub> = Vec::new();
+    let mut edits: HashMap<usize, HairEdit> = HashMap::new();
+
+    for token in &tokens {
+        match &token.kind {
+            ContentTokKind::Number(value) => nums.push((token.start, token.end, *value)),
+            ContentTokKind::Operator(op) => {
+                match *op {
+                    "q" => {
+                        stack.push((ctm, cm.clone()));
+                        subs.clear();
+                    }
+                    "Q" => {
+                        if let Some((prev, prev_cm)) = stack.pop() {
+                            ctm = prev;
+                            cm = prev_cm;
+                        }
+                        subs.clear();
+                    }
+                    "cm" if nums.len() >= 6 => {
+                        let m = &nums[nums.len() - 6..];
+                        let applied = FormMtx {
+                            a: m[0].2,
+                            b: m[1].2,
+                            c: m[2].2,
+                            d: m[3].2,
+                            e: m[4].2,
+                            f: m[5].2,
+                        };
+                        let usable = form_is_ident(ctm)
+                            && applied.b.abs() < 0.02
+                            && applied.c.abs() < 0.02
+                            && applied.a > 0.05
+                            && applied.d > 0.05;
+                        cm = usable.then(|| CmHandle {
+                            x_at: (m[4].0, m[4].1),
+                            y_at: (m[5].0, m[5].1),
+                            tx: applied.e,
+                            ty: applied.f,
+                        });
+                        ctm = form_concat(ctm, applied);
+                    }
+                    "m" if nums.len() >= 2 => {
+                        let x = &nums[nums.len() - 2];
+                        let y = &nums[nums.len() - 1];
+                        let (px, py) = form_map(ctm, x.2, y.2);
+                        subs.push(HairSub {
+                            pts: vec![HairPt {
+                                x: px,
+                                y: py,
+                                x_at: (x.0, x.1),
+                                y_at: (y.0, y.1),
+                                lx: x.2,
+                                ly: y.2,
+                            }],
+                            curved: false,
+                        });
+                    }
+                    "l" if nums.len() >= 2 => {
+                        let x = &nums[nums.len() - 2];
+                        let y = &nums[nums.len() - 1];
+                        let (px, py) = form_map(ctm, x.2, y.2);
+                        if let Some(sub) = subs.last_mut() {
+                            sub.pts.push(HairPt {
+                                x: px,
+                                y: py,
+                                x_at: (x.0, x.1),
+                                y_at: (y.0, y.1),
+                                lx: x.2,
+                                ly: y.2,
+                            });
+                        }
+                    }
+                    "c" | "v" | "y" => {
+                        if let Some(sub) = subs.last_mut() {
+                            sub.curved = true;
+                        }
+                    }
+                    "re" if nums.len() >= 4 => {
+                        let n = &nums[nums.len() - 4..];
+                        let (x, y, w, h) = (n[0].2, n[1].2, n[2].2, n[3].2);
+                        let corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)];
+                        let mapped: Vec<(f32, f32)> = corners
+                            .iter()
+                            .map(|(cx, cy)| form_map(ctm, *cx, *cy))
+                            .collect();
+                        let left = mapped.iter().map(|p| p.0).fold(f32::MAX, f32::min);
+                        let right = mapped.iter().map(|p| p.0).fold(f32::MIN, f32::max);
+                        let bottom = mapped.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+                        let top = mapped.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+                        let width = right - left;
+                        let height = top - bottom;
+                        if height <= 1.2 && (2.0..=40.0).contains(&width) {
+                            let mid_y = (bottom + top) * 0.5;
+                            if let Some(hit) = boxes.iter().find(|ink| {
+                                left >= ink.0 - 0.4
+                                    && right <= ink.2 + 0.4
+                                    && mid_y >= ink.1
+                                    && mid_y <= ink.3
+                            }) {
+                                if let Some(handle) = cm.as_ref() {
+                                    edits.entry(handle.x_at.0).or_insert(HairEdit {
+                                        x_at: handle.x_at,
+                                        y_at: handle.y_at,
+                                        x: handle.tx + hit.4,
+                                        y: handle.ty + hit.5,
+                                    });
+                                } else if form_is_ident(ctm) {
+                                    edits.entry(n[0].0).or_insert(HairEdit {
+                                        x_at: (n[0].0, n[0].1),
+                                        y_at: (n[1].0, n[1].1),
+                                        x: x + hit.4,
+                                        y: y + hit.5,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                        for sub in &subs {
+                            if sub.curved || sub.pts.len() < 2 {
+                                continue;
+                            }
+                            for pair in sub.pts.windows(2) {
+                                note_hairline(
+                                    pair[0].x,
+                                    pair[0].y,
+                                    pair[1].x,
+                                    pair[1].y,
+                                    cm.as_ref(),
+                                    ctm,
+                                    pair,
+                                    boxes,
+                                    &mut edits,
+                                );
+                            }
+                        }
+                        subs.clear();
+                    }
+                    "n" => subs.clear(),
+                    _ => {}
+                }
+                nums.clear();
+            }
+            ContentTokKind::Break => nums.clear(),
+        }
+    }
+
+    if edits.is_empty() {
+        return false;
+    }
+    let mut ordered: Vec<HairEdit> = edits.into_values().collect();
+    ordered.sort_by_key(|edit| std::cmp::Reverse(edit.x_at.0.max(edit.y_at.0)));
+    let mut changed = false;
+    for edit in ordered {
+        let first_y = edit.y_at.0 > edit.x_at.0;
+        let (first, second) = if first_y {
+            ((edit.y_at, edit.y), (edit.x_at, edit.x))
+        } else {
+            ((edit.x_at, edit.x), (edit.y_at, edit.y))
+        };
+        changed |= splice_fitted_number(bytes, first.0, first.1);
+        changed |= splice_fitted_number(bytes, second.0, second.1);
+    }
+    changed
+}
+
+fn splice_fitted_number(bytes: &mut Vec<u8>, span: (usize, usize), value: f32) -> bool {
+    let width = span.1.saturating_sub(span.0);
+    let Some(text) = pdf_num_fitted(value, width) else {
+        return false;
+    };
+    if span.1 > bytes.len() || span.0 >= span.1 {
+        return false;
+    }
+    bytes.splice(span.0..span.1, text.into_bytes());
+    true
+}
+
+/// `pdf_num` at the operand's original width. A longer value loses decimals
+/// or, when still short, gains leading zeros. Both stay a legal PDF number,
+/// so blanked operator offsets do not move.
+fn path_operator(name: &[u8]) -> Option<&'static str> {
+    Some(match name {
+        b"q" => "q",
+        b"Q" => "Q",
+        b"re" => "re",
+        b"cm" => "cm",
+        b"Tm" => "Tm",
+        b"m" => "m",
+        b"l" => "l",
+        b"c" => "c",
+        b"v" => "v",
+        b"y" => "y",
+        b"h" => "h",
+        b"S" => "S",
+        b"s" => "s",
+        b"f" => "f",
+        b"F" => "F",
+        b"f*" => "f*",
+        b"n" => "n",
+        b"B" => "B",
+        b"B*" => "B*",
+        b"b" => "b",
+        b"b*" => "b*",
+        _ => return None,
+    })
+}
+
+fn note_hairline(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    handle: Option<&CmHandle>,
+    ctm: FormMtx,
+    pts: &[HairPt],
+    boxes: &[FormulaBox],
+    edits: &mut HashMap<usize, HairEdit>,
+) {
+    if (y0 - y1).abs() > 1.2 {
+        return;
+    }
+    let width = (x0 - x1).abs();
+    // A footnote rule is ~140pt. A fraction bar is under 40pt.
+    if !(2.0..=40.0).contains(&width) {
+        return;
+    }
+    let left = x0.min(x1);
+    let right = x0.max(x1);
+    let y = (y0 + y1) * 0.5;
+    let Some(hit) = boxes
+        .iter()
+        .find(|ink| left >= ink.0 - 0.4 && right <= ink.2 + 0.4 && y >= ink.1 && y <= ink.3)
+    else {
+        return;
+    };
+    let dx = hit.4;
+    let dy = hit.5;
+    if let Some(handle) = handle {
+        edits.entry(handle.x_at.0).or_insert(HairEdit {
+            x_at: handle.x_at,
+            y_at: handle.y_at,
+            x: handle.tx + dx,
+            y: handle.ty + dy,
+        });
+        return;
+    }
+    if !form_is_ident(ctm) {
+        return;
+    }
+    for pt in pts {
+        edits.entry(pt.x_at.0).or_insert(HairEdit {
+            x_at: pt.x_at,
+            y_at: pt.y_at,
+            x: pt.lx + dx,
+            y: pt.ly + dy,
+        });
+    }
+}
+
+fn pdf_num_fitted(value: f32, width: usize) -> Option<String> {
+    if width == 0 || !value.is_finite() {
+        return None;
+    }
+    for places in (0..=6).rev() {
+        let text = format!("{value:.places$}");
+        if text.len() == width {
+            return Some(text);
+        }
+        if text.len() < width && !text.starts_with('-') {
+            return Some(format!("{text:0>width$}"));
+        }
+    }
+    None
+}
+
 fn reposition_stacks(
     doc: &mut Document,
     extraction: &Extraction,
@@ -29975,5 +30416,29 @@ ET"
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();
         bytes
+    }
+
+    #[test]
+    fn a_fraction_rule_follows_the_formula_and_a_footnote_rule_stays() {
+        let src = b"q\n1 0 0 1 120.056 265.599 cm\n[]0 d 0 J 0.398 w 0 0 m 15.047 0 l S\nQ\n\
+q\n1 0 0 1 126.601 264.493 cm\n[]0 d 0 J 0.339 w 0 0 m 8.503 0 l S\nQ\n\
+q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n\
+100 200 12 0.4 re S\n"
+            .to_vec();
+        let mut bytes = src.clone();
+        let moved = shift_hairlines(
+            &mut bytes,
+            &[
+                (116.0, 253.0, 140.0, 276.0, 49.7, 10.9),
+                (96.0, 198.0, 116.0, 204.0, 5.0, -3.0),
+            ],
+        );
+        assert!(moved);
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("169.756 276.499 cm"), "{text}");
+        assert!(text.contains("176.301 275.393 cm"), "{text}");
+        assert!(text.contains("108 94.002 cm"), "{text}");
+        assert!(text.contains("105 197 12 0.4 re"), "{text}");
+        assert_eq!(bytes.len(), src.len());
     }
 }

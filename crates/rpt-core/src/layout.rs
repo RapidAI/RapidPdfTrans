@@ -1020,8 +1020,8 @@ fn formula_hole_at(chars: &[char], index: usize) -> Option<(usize, usize)> {
 }
 
 /// A centered name list breaks after `、` so an item stays on one line.
-/// Body prose does not: a comma at 60% of the fitted span left `例如，` and
-/// `表明，` with a third of the column empty.
+/// Body prose does not walk back to a comma in the middle of the measure:
+/// that left `不同的、` short of the column while `学习` still fitted.
 fn prefer_list_delimiter(chars: &[char], sticky: &[bool], start: usize, end: usize) -> usize {
     if end <= start + 1 || end > chars.len() {
         return end;
@@ -1033,28 +1033,21 @@ fn prefer_list_delimiter(chars: &[char], sticky: &[bool], start: usize, end: usi
         return end;
     }
     // Two or more `、` is a name list (`无线电、量子计算、铁路`). One `、`
-    // after a citation, or a prose `，`, stays on the line unless the line
-    // is already full. The 60% backup is what ragged the k-server column.
+    // or a prose `，` uses the same short window: only the character that
+    // overflowed. A 60% retreat is what left the 3.2.2 line short.
     let list = ideographic >= 2;
     let mut alt = end;
     while alt > start + 1 {
         alt -= 1;
+        if end - alt > 1 {
+            break;
+        }
         let mark = if list {
             chars[alt - 1] == '、'
         } else {
             chars[alt - 1] == '、' || chars[alt - 1] == '，'
         };
-        if !mark || !can_break_at(chars, sticky, alt) {
-            continue;
-        }
-        let span = end - start;
-        let kept = alt - start;
-        let full = if list {
-            kept * 5 >= span * 3
-        } else {
-            kept * 10 >= span * 9
-        };
-        if full {
+        if mark && can_break_at(chars, sticky, alt) {
             return alt;
         }
     }
@@ -2346,6 +2339,26 @@ mod tests {
         assert!(
             lines.iter().any(|line| line.contains('、')),
             "the list did not break on a delimiter: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_prose_line_keeps_characters_that_fit_after_an_ideographic_comma() {
+        // Two `、` used to mark the line as a name list and retreat to the
+        // last one. `学习` still fits; the overflow break is in front of `得`.
+        let text = "不如用h次不同的、学习得到的线性投影";
+        let font = uniform_font(text);
+        let through = "不如用h次不同的、学习";
+        let width = through.chars().count() as f32 * 10.0;
+        let lines = wrap_text(text, 10.0, width, width, &font).expect("wrap");
+        assert!(
+            lines[0].ends_with("学习"),
+            "backed up to the comma: {lines:?}"
+        );
+        assert_eq!(
+            lines[0].chars().count(),
+            through.chars().count(),
+            "{lines:?}"
         );
     }
 
