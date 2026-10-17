@@ -3984,14 +3984,14 @@ fn closes_the_page(
 
 /// A bottom credit (`* Work partially done…`, `˚Work partially…`).
 fn marked_footnote(para: &[VisualLine<'_>]) -> bool {
-    let Some(line) = para.first() else {
-        return false;
-    };
-    let text = line.text.trim_start();
-    let Some(first) = text.chars().next() else {
-        return false;
-    };
-    matches!(first, '*' | '∗' | '⋆' | '†' | '‡' | '§' | '˚' | '\u{2042}')
+    para.first().is_some_and(|line| footnote_line(&line.text))
+}
+
+fn footnote_line(text: &str) -> bool {
+    matches!(
+        text.trim_start().chars().next(),
+        Some('*' | '∗' | '⋆' | '†' | '‡' | '§' | '¶' | '˚' | '\u{2042}')
+    )
 }
 
 /// The other column is an abstract or a heading, not the rest of this sentence.
@@ -4367,6 +4367,12 @@ fn caption_line_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
 
 fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: f32) -> bool {
     if upper.page != lower.page {
+        return false;
+    }
+    // `†…Brain.` and `‡…Research.` are two notes. Joining them wraps 工作
+    // across the two short source lines. A starred note's next line starts
+    // with a word, so that paragraph still joins.
+    if footnote_line(&lower.text) {
         return false;
     }
     // `Figure 2 | … segmentation` / `and reading order prediction.` The wrap
@@ -6166,6 +6172,76 @@ mod tests {
         assert!(
             texts[0].contains("including ensembles") && texts[0].contains("41.8"),
             "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn each_footnote_marker_starts_its_own_line() {
+        let star = [
+            wide(
+                0,
+                108.0,
+                180.0,
+                "∗Equal contribution. Listing order is random. Jakob proposed replacing RNNs.",
+                380.0,
+                9.0,
+            ),
+            wide(
+                1,
+                108.0,
+                169.0,
+                "the effort to evaluate this idea across several weeks of work.",
+                396.0,
+                9.0,
+            ),
+        ];
+        let joined: Vec<_> = segment_glyphs(&star)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert_eq!(joined.len(), 1, "{joined:?}");
+        assert!(joined[0].contains("the effort"), "{joined:?}");
+
+        // A page that is only these two notes looks like OCR. The body line
+        // above them is far enough that it does not join either note.
+        let notes = [
+            wide(
+                0,
+                108.0,
+                220.0,
+                "The model was trained on the full parallel corpus for three days.",
+                396.0,
+                9.0,
+            ),
+            wide(
+                1,
+                124.0,
+                95.0,
+                "†Work performed while at Google Brain.",
+                143.0,
+                9.0,
+            ),
+            wide(
+                2,
+                124.0,
+                84.0,
+                "‡Work performed while at Google Research.",
+                156.0,
+                9.0,
+            ),
+        ];
+        let split: Vec<_> = segment_glyphs(&notes)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+        assert_eq!(split.len(), 3, "{split:?}");
+        assert!(split.iter().any(|text| text.starts_with('†')), "{split:?}");
+        assert!(split.iter().any(|text| text.starts_with('‡')), "{split:?}");
+        assert!(
+            split
+                .iter()
+                .all(|text| !text.contains('†') || !text.contains('‡')),
+            "the two notes were joined: {split:?}"
         );
     }
 

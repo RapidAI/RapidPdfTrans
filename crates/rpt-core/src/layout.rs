@@ -1347,6 +1347,8 @@ fn enumerated_item_at(chars: &[char], index: usize) -> bool {
 }
 
 /// `使用 LangChain、LangGraph 和 MCP` breaks after `、`, not before `和`.
+/// `注意力、……。代码库和` is a different sentence: the earlier `、` stays put,
+/// and the line that already reached `代码库` is not emptied.
 fn prefer_enumeration_break(chars: &[char], sticky: &[bool], start: usize, end: usize) -> usize {
     let mut look = end;
     while look < chars.len() && chars[look].is_whitespace() {
@@ -1358,6 +1360,12 @@ fn prefer_enumeration_break(chars: &[char], sticky: &[bool], start: usize, end: 
     let mut alt = end;
     while alt > start + 1 {
         alt -= 1;
+        if matches!(
+            chars[alt],
+            '。' | '！' | '？' | '；' | '，' | '.' | '!' | '?' | ';'
+        ) {
+            return end;
+        }
         if chars[alt - 1] == '、' && can_break_at(chars, sticky, alt) && alt - start >= 4 {
             return alt;
         }
@@ -2682,6 +2690,31 @@ mod tests {
             "Publications 知悉了商标声明，并且 Manning"
         );
         assert_eq!(space_cjk_latin_mask("第4章与15%", &[]).0, "第4章与15%");
+    }
+
+    #[test]
+    fn a_sentence_comma_does_not_empty_the_line_before_he() {
+        // The footnote overflowed on 和. Walking back to an earlier `、`
+        // left `放点积注意力、` on its own and continued the paragraph under it.
+        let text = "提出了缩放点积注意力、多头注意力。代码库和模型后续内容继续填满这一行。";
+        let font = uniform_font(text);
+        let lines = wrap_text(text, 10.0, 200.0, 200.0, &font).expect("wrap");
+        assert!(
+            lines.iter().any(|line| line.contains("注意力。代码库")),
+            "the line was cut back to the earlier comma: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.ends_with("放点积注意力、")),
+            "{lines:?}"
+        );
+        let last = lines.len() - 1;
+        for (index, line) in lines.iter().enumerate() {
+            if index == last {
+                continue;
+            }
+            let width = measure(line, 10.0, &font);
+            assert!(width >= 200.0 * 0.6, "short mid line {width:.1}pt: {line}");
+        }
     }
 
     #[test]

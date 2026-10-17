@@ -7716,6 +7716,32 @@ fn layout_label_value_list(
     ])
 }
 
+fn footnote_line(text: &str) -> bool {
+    matches!(
+        text.trim_start().chars().next(),
+        Some('*' | '∗' | '⋆' | '†' | '‡' | '§' | '¶')
+    )
+}
+
+/// The body column beside a one-line footnote. The starred note above a
+/// dagger reaches the column's right edge; the dagger's own ink does not.
+fn footnote_column_right(extraction: &Extraction, line: &InkLine<'_>) -> Option<f32> {
+    let page = line.glyphs.first()?.page_index;
+    let size = crate::segment::representative_size(&line.glyphs).max(1.0);
+    let right = page_text_pieces(extraction, page)
+        .iter()
+        .filter(|piece| {
+            let width = piece.right - piece.left;
+            width >= size * 16.0
+                && (piece.left - line.left).abs() <= size * 4.0
+                && (piece.y - line.y).abs() <= size * 14.0
+                && (piece.size - size).abs() <= size * 0.35
+        })
+        .map(|piece| piece.right)
+        .fold(line.right, f32::max);
+    (right > line.right + size).then_some(right)
+}
+
 /// The widest row in a left-aligned stack. A short address line uses that
 /// width so its translation stays on one baseline at the shared left edge.
 fn shared_left_stack_right(extraction: &Extraction, line: &InkLine<'_>) -> Option<f32> {
@@ -9130,6 +9156,14 @@ fn layout_segment(
     // Fitting each row to its own ink shrinks or wraps the longest translation.
     if !bilingual && ink.len() == 1 {
         if let Some(right) = shared_left_stack_right(extraction, &ink[0]) {
+            block_right = block_right.max(right).min(media[2] - 1.0);
+        }
+    }
+    // `†…Brain.` is only 140pt of English. Fitting the Chinese to that ink
+    // wraps 工作. The note uses the footnote column, the same right edge as
+    // the starred note above it, and stays one line.
+    if !bilingual && ink.len() == 1 && footnote_line(text) {
+        if let Some(right) = footnote_column_right(extraction, &ink[0]) {
             block_right = block_right.max(right).min(media[2] - 1.0);
         }
     }
@@ -16121,8 +16155,12 @@ fn superscript_mask(text: &str) -> Vec<bool> {
             || enumeration_digit(&chars, index)
             || follows_operator(&chars, start)
             || version_token(&chars, start);
+        // `tensor2tensor` keeps the digit on the baseline. `Zhang1` does not
+        // continue the word, so the mark still rises.
+        let word_continues = chars.get(index).is_some_and(|ch| ch.is_ascii_alphabetic());
         let after_name = !body_digit
             && run == 1
+            && !word_continues
             && !lone_math_base(&chars, start)
             && prev.is_some_and(|ch| {
                 ch.is_alphabetic() || (is_mark_star(ch) && start > 0 && mask[start - 1])
@@ -20166,6 +20204,11 @@ mod tests {
         assert!(superscript_mask("n ≥ 2").iter().all(|flag| !flag));
         assert!(superscript_mask("研究1) 初始化").iter().all(|flag| !flag));
         assert!(superscript_mask("LayoutLMv3").iter().all(|flag| !flag));
+        let tensor = "在 tensor2tensor 中设计";
+        let mask = superscript_mask(tensor);
+        let two = tensor.chars().position(|ch| ch == '2').unwrap();
+        assert!(!mask[two], "tensor2tensor raised the digit: {mask:?}");
+        assert!(superscript_mask("Zhang1")[5], "Zhang1 should still rise");
     }
 
     #[test]
