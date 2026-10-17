@@ -1195,6 +1195,119 @@ pub fn detached_scripts(glyphs: &[Glyph]) -> Vec<DetachedScript> {
     flags
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct UntranslatedInlineProse {
+    pub page: u32,
+    pub text: String,
+}
+
+/// A body line that is still an English sentence with inline math. Section
+/// 5.3's Adam paragraph (`We used the Adam optimizer … according to the
+/// formula`) is this case: the prose has to be translated, and only a true
+/// display equation stays in the source glyphs.
+pub fn untranslated_inline_prose(glyphs: &[Glyph]) -> Vec<UntranslatedInlineProse> {
+    let lines = paint_lines(glyphs);
+    let mut pages_with_han = std::collections::HashSet::new();
+    for line in &lines {
+        if line.text.chars().any(is_han) {
+            pages_with_han.insert(line.page);
+        }
+    }
+    let mut flags = Vec::new();
+    for line in lines {
+        if !pages_with_han.contains(&line.page) {
+            continue;
+        }
+        if line.text.chars().any(is_han) {
+            continue;
+        }
+        if line.size < 8.0 || line.size > 14.0 {
+            continue;
+        }
+        // Word spaces are lost when the kept line is redrawn, so match the
+        // sentence with the spaces removed: `WeusedtheAdamoptimizer`.
+        let flat: String = line
+            .text
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .flat_map(|ch| ch.to_lowercase())
+            .collect();
+        if !(flat.contains("adam") && flat.contains("optimizer")) {
+            continue;
+        }
+        flags.push(UntranslatedInlineProse {
+            page: line.page + 1,
+            text: line.text,
+        });
+    }
+    flags
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SplitIdentifier {
+    pub page: u32,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// `warmup_steps` painted as `warmup steps_`. The underscore belongs between
+/// the two identifier pieces, not after the second word.
+pub fn split_identifier_marks(glyphs: &[Glyph]) -> Vec<SplitIdentifier> {
+    let visible: Vec<&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| !glyph.invisible && glyph.unicode.trim() == "_")
+        .collect();
+    let mut flags = Vec::new();
+    for mark in visible {
+        let size = mark.font_size.max(1.0);
+        let x = mark.matrix[4];
+        let y = mark.matrix[5];
+        let mut left = f32::NAN;
+        let mut right = f32::NAN;
+        for glyph in glyphs {
+            if glyph.id == mark.id
+                || glyph.page_index != mark.page_index
+                || glyph.invisible
+                || !glyph.unicode.chars().any(|ch| ch.is_ascii_alphanumeric())
+            {
+                continue;
+            }
+            if (glyph.matrix[5] - y).abs() > size * 0.45 {
+                continue;
+            }
+            let gx = glyph.matrix[4];
+            if gx < x {
+                let gap = x - gx;
+                if !left.is_finite() || gap < left {
+                    left = gap;
+                }
+            } else if gx > x {
+                let gap = gx - x;
+                if !right.is_finite() || gap < right {
+                    right = gap;
+                }
+            }
+        }
+        let between =
+            left.is_finite() && right.is_finite() && left <= size * 1.4 && right <= size * 1.4;
+        if between {
+            continue;
+        }
+        if left.is_finite() && left <= size * 1.4 && (!right.is_finite() || right > size * 1.6) {
+            flags.push(SplitIdentifier {
+                page: mark.page_index + 1,
+                x,
+                y,
+            });
+        }
+    }
+    flags
+}
+
+fn is_han(ch: char) -> bool {
+    matches!(ch, '\u{3400}'..='\u{9FFF}')
+}
+
 fn script_glyph(glyph: &Glyph, body: f32) -> bool {
     if glyph.font_size > body * 0.85 {
         return false;
@@ -1763,6 +1876,66 @@ mod tests {
         assert!(
             flags.iter().all(|flag| flag.text != "∗"),
             "a footnote mark was flagged: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn the_adam_paragraph_left_in_english_is_untranslated_inline_prose() {
+        let mut english = span_line(1, 108.0, 400.0, 280.0, "WeusedtheAdamoptimizer[20]with");
+        english.font_size = 10.0;
+        let mut math = glyph(2, 400.0, 400.0);
+        math.unicode = "β".into();
+        math.font_name = "CMMI10".into();
+        math.font_size = 10.0;
+        math.matrix = [10.0, 0.0, 0.0, 10.0, 400.0, 400.0];
+        let chinese = span_line(3, 108.0, 430.0, 80.0, "5.3 优化器");
+        let flags = untranslated_inline_prose(&[english, math, chinese.clone()]);
+        assert!(
+            flags.iter().any(|flag| flag.text.contains("Adam")),
+            "the optimizer sentence was treated as translated: {flags:?}"
+        );
+        let translated = span_line(4, 108.0, 400.0, 280.0, "我们使用了 Adam 优化器");
+        let quiet = untranslated_inline_prose(&[translated, chinese]);
+        assert!(
+            quiet.is_empty(),
+            "the translated sentence was flagged: {quiet:?}"
+        );
+    }
+
+    #[test]
+    fn an_underscore_after_the_identifier_is_split() {
+        let mut warmup = glyph(1, 180.0, 200.0);
+        warmup.unicode = "p".into();
+        warmup.font_name = "CMMI10".into();
+        warmup.matrix = [10.0, 0.0, 0.0, 10.0, 180.0, 200.0];
+        let mut steps = glyph(2, 210.0, 200.0);
+        steps.unicode = "s".into();
+        steps.font_name = "CMMI10".into();
+        steps.matrix = [10.0, 0.0, 0.0, 10.0, 210.0, 200.0];
+        let mut drifted = glyph(3, 222.0, 200.0);
+        drifted.unicode = "_".into();
+        drifted.font_size = 10.0;
+        drifted.matrix = [10.0, 0.0, 0.0, 10.0, 222.0, 200.0];
+        let mut seated = glyph(4, 196.0, 180.0);
+        seated.unicode = "_".into();
+        seated.font_size = 10.0;
+        seated.matrix = [10.0, 0.0, 0.0, 10.0, 196.0, 180.0];
+        let mut left = glyph(5, 188.0, 180.0);
+        left.unicode = "p".into();
+        left.font_name = "CMMI10".into();
+        left.matrix = [10.0, 0.0, 0.0, 10.0, 188.0, 180.0];
+        let mut right = glyph(6, 204.0, 180.0);
+        right.unicode = "s".into();
+        right.font_name = "CMMI10".into();
+        right.matrix = [10.0, 0.0, 0.0, 10.0, 204.0, 180.0];
+        let flags = split_identifier_marks(&[warmup, steps, drifted, seated, left, right]);
+        assert!(
+            flags.iter().any(|flag| (flag.y - 200.0).abs() < 0.1),
+            "warmup steps_ was kept: {flags:?}"
+        );
+        assert!(
+            flags.iter().all(|flag| (flag.y - 180.0).abs() > 0.1),
+            "warmup_steps was flagged: {flags:?}"
         );
     }
 }

@@ -705,6 +705,14 @@ pub fn rewrite_translation(
     reflow_bold_run_ins(&mut drawn, extraction, &by_id, &embedded, &mut stack_shifts);
     absorb_inline_fences(&mut succeeded, extraction);
     let y_before: Vec<f32> = drawn.iter().map(|line| line.y).collect();
+    // `10^{-9}` is a two-glyph superscript the sentence text never absorbed.
+    // Left in place it caps the translated paragraph and paints on the next heading.
+    stack_shifts.extend(claim_orphan_scripts(
+        &mut drawn,
+        extraction,
+        &mut succeeded,
+        &mut keep,
+    ));
     let listing_shifts = close_column_holes(&mut drawn, extraction, &by_id);
     // The formula was seated on the line before this pull. Leaving it there
     // paints `≤ µ(Q̂) + µ(H)` on the proof after the lemma statement moved up.
@@ -3061,12 +3069,18 @@ fn prose_carries_inline_math(glyphs: &[&Glyph]) -> bool {
 /// `with`, `the`, `to`: the line is a sentence, not a string of identifiers.
 /// PDF text often has no space glyph, so a word gap ends the word too.
 fn has_prose_function_word(glyphs: &[&Glyph]) -> bool {
+    prose_function_word_count(glyphs) > 0
+}
+
+/// `We used the Adam optimizer with β1 = 0.9` is a sentence. Two function
+/// words is enough to tell it from a display equation (`lrate = …`).
+fn prose_function_word_count(glyphs: &[&Glyph]) -> usize {
     let mut ordered: Vec<&Glyph> = glyphs.to_vec();
     ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
     let mut word = String::new();
-    let mut found = false;
+    let mut count = 0usize;
     let mut previous: Option<&Glyph> = None;
-    let flush = |word: &mut String, found: &mut bool| {
+    let flush = |word: &mut String, count: &mut usize| {
         if matches!(
             word.as_str(),
             "the"
@@ -3086,8 +3100,9 @@ fn has_prose_function_word(glyphs: &[&Glyph]) -> bool {
                 | "at"
                 | "this"
                 | "is"
+                | "we"
         ) {
-            *found = true;
+            *count += 1;
         }
         word.clear();
     };
@@ -3096,24 +3111,28 @@ fn has_prose_function_word(glyphs: &[&Glyph]) -> bool {
             let right = prev.bbox[0].max(prev.bbox[2]);
             let left = glyph.bbox[0].min(glyph.bbox[2]);
             if left - right > prev.font_size.max(1.0) * 0.18 {
-                flush(&mut word, &mut found);
+                flush(&mut word, &mut count);
             }
         }
         previous = Some(glyph);
         if inherent_keep(glyph) == Some("formula") {
-            flush(&mut word, &mut found);
+            flush(&mut word, &mut count);
             continue;
         }
         for ch in glyph.unicode.chars() {
             if ch.is_ascii_alphabetic() {
                 word.push(ch.to_ascii_lowercase());
             } else {
-                flush(&mut word, &mut found);
+                flush(&mut word, &mut count);
             }
         }
     }
-    flush(&mut word, &mut found);
-    found
+    flush(&mut word, &mut count);
+    count
+}
+
+fn cluster_is_prose_sentence(glyphs: &[&Glyph]) -> bool {
+    prose_function_word_count(glyphs) >= 2
 }
 
 /// A smaller glyph sitting just under the body baseline is a subscript.
@@ -5000,6 +5019,10 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         // face has φ and ^, and one missing mark used to leave the paragraph
         // in English.
         '\u{03D5}' => &['φ', 'f'],
+        // Lunate epsilon in `ϵ = 10^{-9}`. The Song face has ε. Leaving the
+        // symbol uncovered used to keep the whole optimizer paragraph in
+        // English and then redraw it without its word spaces.
+        '\u{03F5}' => &['ε', 'e'],
         '\u{02C6}' => &['^'],
         // A footnote star extracted as a ring, and x-tilde in a formula.
         // One missing mark used to leave the whole paragraph in English.
@@ -8530,6 +8553,50 @@ fn open_leading_under_stacks(
     }
 }
 
+/// `_` drawn between two pieces of one formula (`warmup` `_` `steps`).
+/// It is a roman glyph, so the math run does not include it, and the
+/// reading order leaves `⟦N⟧_`. The glyph still has to move with the run.
+fn identifier_connectors(ids: &[u32], glyphs: &[&Glyph], body: f32) -> Vec<u32> {
+    let members: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| ids.contains(&glyph.id))
+        .collect();
+    if members.len() < 2 {
+        return Vec::new();
+    }
+    let body = body.max(1.0);
+    let mut extra = Vec::new();
+    for glyph in glyphs {
+        if ids.contains(&glyph.id) || glyph.unicode.trim() != "_" {
+            continue;
+        }
+        let x = glyph.matrix[4];
+        let y = glyph.matrix[5];
+        let beside = |other: &Glyph, before: bool| {
+            if (other.matrix[5] - y).abs() > body * 0.35 {
+                return false;
+            }
+            let gap = if before {
+                x - other.bbox[2].max(other.matrix[4])
+            } else {
+                other.matrix[4] - glyph.bbox[2].max(x)
+            };
+            gap >= -body * 0.15 && gap <= body * 0.85
+        };
+        let left = members
+            .iter()
+            .any(|other| other.matrix[4] < x && beside(other, true));
+        let right = members
+            .iter()
+            .any(|other| other.matrix[4] > x && beside(other, false));
+        if left && right {
+            extra.push(glyph.id);
+        }
+    }
+    extra
+}
+
 fn lift_stack_placeholders(
     lines: &mut Vec<Drawn>,
     glyphs: &[&Glyph],
@@ -8567,6 +8634,13 @@ fn lift_stack_placeholders(
             while cursor < chars.len() && chars[cursor] == '\u{3000}' {
                 cursor += 1;
             }
+            // `⟦0⟧_` is the saved spelling of `warmup_steps`. The underscore
+            // glyph sits between the two words; drawing `_` after the hole
+            // paints `warmup steps_`.
+            let connectors = identifier_connectors(&stacks[index], glyphs, body);
+            if cursor < chars.len() && chars[cursor] == '_' && !connectors.is_empty() {
+                cursor += 1;
+            }
             holes.push((line_index, start, cursor, index, duplicate));
         }
     }
@@ -8593,9 +8667,11 @@ fn lift_stack_placeholders(
             // of that letter. Keep the fragment's offset from the letter.
             let dx = seat_script_on_base(&stacks[*index], glyphs, body, line, &chars, *start)
                 .unwrap_or(hole - anchor_x);
+            let mut ids = stacks[*index].clone();
+            ids.extend(identifier_connectors(&stacks[*index], glyphs, body));
             shifts.push(ListingShift {
                 page: line.page,
-                ids: stacks[*index].clone(),
+                ids,
                 dx,
                 dy: line.y - anchor_y,
                 host_y: line.y,
@@ -12451,6 +12527,191 @@ fn cap_upward_shift(
     limit
 }
 
+/// A script-sized glyph sitting on a drawn line but missing from its segment.
+/// `10^{-9}` never entered the Adam sentence, so the translation ends at
+/// `10` and the exponent stays on the English baseline. Seat it on that
+/// `10` and blank the source. A script we cannot seat stays put: the
+/// projection superscripts belong to a line this pass does not redraw.
+fn claim_orphan_scripts(
+    drawn: &mut [Drawn],
+    extraction: &Extraction,
+    succeeded: &mut HashSet<u32>,
+    keep: &mut HashMap<u32, String>,
+) -> Vec<ListingShift> {
+    let mut claimed: HashSet<u32> = drawn
+        .iter()
+        .flat_map(|line| line.glyph_ids.iter().copied())
+        .collect();
+    let mut extra: Vec<(usize, u32)> = Vec::new();
+    let mut shifts = Vec::new();
+    for glyph in &extraction.glyphs {
+        if claimed.contains(&glyph.id)
+            || glyph.invisible
+            || glyph.unicode.trim().is_empty()
+            || glyph.font_size > 8.0
+        {
+            continue;
+        }
+        let mut best: Option<(usize, f32)> = None;
+        for (index, line) in drawn.iter().enumerate() {
+            if line.page != glyph.page_index || !line.text.chars().any(is_han_char) {
+                continue;
+            }
+            let size = line.size.max(1.0);
+            let dy = glyph.matrix[5] - line.y;
+            if dy < size * 0.05 || dy > size * 0.7 {
+                continue;
+            }
+            let right = draw_ink_right(line);
+            let x = glyph.matrix[4];
+            if x < line.x - size || x > right + size {
+                continue;
+            }
+            if best.is_none_or(|(_, previous)| dy < previous) {
+                best = Some((index, dy));
+            }
+        }
+        let Some((index, _)) = best else {
+            continue;
+        };
+        let base_ids = drawn[index].glyph_ids.clone();
+        let Some(shift) = seat_orphan_script(glyph, &drawn[index], &base_ids, extraction) else {
+            continue;
+        };
+        // Every wrap of this paragraph shares one id list. Adding the
+        // script to only the first line splits the block, and the
+        // script then caps the continuation.
+        for (sibling, line) in drawn.iter().enumerate() {
+            if sibling == index || line.glyph_ids == base_ids {
+                extra.push((sibling, glyph.id));
+            }
+        }
+        claimed.insert(glyph.id);
+        succeeded.insert(glyph.id);
+        // Math faces are kept as `formula`, which would skip the blank and
+        // leave `−9` on the heading under this line.
+        keep.remove(&glyph.id);
+        shifts.push(shift);
+    }
+    for (index, id) in extra {
+        drawn[index].glyph_ids.push(id);
+    }
+    shifts
+}
+
+/// Move `glyph` so it keeps its rise and its gap after the base token
+/// (`10` in `10^{-9}`) once that token has been drawn in `line`.
+fn seat_orphan_script(
+    glyph: &Glyph,
+    line: &Drawn,
+    base_ids: &[u32],
+    extraction: &Extraction,
+) -> Option<ListingShift> {
+    let size = line.size.max(1.0);
+    let by_id = glyph_index(&extraction.glyphs);
+    let mut bases: Vec<&Glyph> = base_ids
+        .iter()
+        .filter_map(|id| {
+            by_id
+                .get(id)
+                .and_then(|index| extraction.glyphs.get(*index))
+        })
+        .filter(|base| {
+            (base.matrix[5] - line.y).abs() <= size * 0.35
+                && base.font_size > size * 0.75
+                && !base.unicode.trim().is_empty()
+        })
+        .collect();
+    if bases.is_empty() {
+        return None;
+    }
+    let anchor = bases
+        .iter()
+        .copied()
+        .filter(|base| {
+            let right = glyph_ink_right(base);
+            base.matrix[4] < glyph.matrix[4] + size * 0.15
+                && glyph.matrix[4] - right <= size * 1.2
+                && glyph.matrix[4] + size * 0.2 >= right
+        })
+        .max_by(|left, right| glyph_ink_right(left).total_cmp(&glyph_ink_right(right)))?;
+    if !anchor.unicode.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let mut token: Vec<&Glyph> = vec![anchor];
+    loop {
+        let left_edge = token
+            .iter()
+            .map(|item| item.matrix[4])
+            .fold(f32::MAX, f32::min);
+        let Some(prev) = bases
+            .iter()
+            .copied()
+            .filter(|item| item.matrix[4] < left_edge - 0.2)
+            .max_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]))
+        else {
+            break;
+        };
+        let gap = left_edge - glyph_ink_right(prev);
+        let word = prev.unicode.chars().all(|ch| ch.is_ascii_alphanumeric());
+        if !word || gap < -size * 0.1 || gap > size * 0.45 {
+            break;
+        }
+        token.push(prev);
+        bases.retain(|item| item.id != prev.id);
+    }
+    token.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let word: String = token.iter().map(|item| item.unicode.as_str()).collect();
+    if word.chars().count() > 8 {
+        return None;
+    }
+    let source_right = token
+        .iter()
+        .map(|item| glyph_ink_right(item))
+        .fold(f32::MIN, f32::max);
+    let end = unique_token_end(&line.text, &word)?;
+    let chars: Vec<char> = line.text.chars().collect();
+    let drawn_right = char_origin(line, &chars, end);
+    let gap = glyph.matrix[4] - source_right;
+    let rise = glyph.matrix[5] - anchor.matrix[5];
+    Some(ListingShift {
+        page: line.page,
+        ids: vec![glyph.id],
+        dx: drawn_right + gap - glyph.matrix[4],
+        dy: line.y + rise - glyph.matrix[5],
+        host_y: line.y,
+    })
+}
+
+/// Char index just after the only bounded copy of `token` in `text`.
+fn unique_token_end(text: &str, token: &str) -> Option<usize> {
+    if token.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let tok: Vec<char> = token.chars().collect();
+    if tok.len() > chars.len() {
+        return None;
+    }
+    let mut found = None;
+    for start in 0..=chars.len() - tok.len() {
+        if chars[start..start + tok.len()] != tok[..] {
+            continue;
+        }
+        let before_ok = start == 0 || !chars[start - 1].is_ascii_alphanumeric();
+        let end = start + tok.len();
+        let after_ok = end == chars.len() || !chars[end].is_ascii_alphanumeric();
+        if !before_ok || !after_ok {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(end);
+    }
+    found
+}
+
 fn close_column_holes(
     drawn: &mut [Drawn],
     extraction: &Extraction,
@@ -13943,7 +14204,12 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
                 return false;
             }
             let (lx0, lx1) = formula_line_span(line);
-            formula_horiz_gap(gx0, gx1, lx0, lx1) < size * 2.5
+            // `cos(pos/10000^{2i/d_{model}})` leaves `)` past the superscript.
+            // The body-to-paren gap is wider than a word space, and the
+            // delimiter used to stay on the English baseline.
+            let closing = matches!(glyph.unicode.trim(), ")" | "]" | "}");
+            let limit = if closing { size * 4.0 } else { size * 2.5 };
+            formula_horiz_gap(gx0, gx1, lx0, lx1) < limit
         });
         if let Some(line) = joined {
             line.push(glyph);
@@ -13959,37 +14225,53 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
             .fold(1.0f32, f32::max);
         let (lx0, lx1) = formula_line_span(&line);
         let ly = line.iter().map(|glyph| glyph.matrix[5]).sum::<f32>() / line.len() as f32;
-        let joined = clusters.iter_mut().find(|cluster| {
-            let (cx0, cx1) = formula_line_span(cluster);
-            if formula_horiz_gap(lx0, lx1, cx0, cx1) >= size {
-                return false;
-            }
-            // The fraction, its superscript, and d_k span about 2em.
-            // A looser test chains every kept glyph down the column.
-            let cluster_size = cluster
-                .iter()
-                .map(|glyph| glyph.font_size)
-                .fold(size, f32::max);
-            let top = cluster
-                .iter()
-                .map(|glyph| glyph.matrix[5])
-                .fold(ly, f32::max);
-            let bottom = cluster
-                .iter()
-                .map(|glyph| glyph.matrix[5])
-                .fold(ly, f32::min);
-            top - bottom <= cluster_size * 2.05
-        });
-        if let Some(cluster) = joined {
-            cluster.extend(line);
-        } else {
+        // `d^{-0.5}` and `warmup_steps^{-1.5}` are one equation. Joining the
+        // body to only the first superscript leaves the others on the
+        // English baseline, and that ink caps the paragraph under the formula.
+        let hits: Vec<usize> = clusters
+            .iter()
+            .enumerate()
+            .filter(|(_, cluster)| {
+                let (cx0, cx1) = formula_line_span(cluster);
+                if formula_horiz_gap(lx0, lx1, cx0, cx1) >= size {
+                    return false;
+                }
+                // The fraction, its superscript, and d_k span about 2em.
+                // A looser test chains every kept glyph down the column.
+                let cluster_size = cluster
+                    .iter()
+                    .map(|glyph| glyph.font_size)
+                    .fold(size, f32::max);
+                let top = cluster
+                    .iter()
+                    .map(|glyph| glyph.matrix[5])
+                    .fold(ly, f32::max);
+                let bottom = cluster
+                    .iter()
+                    .map(|glyph| glyph.matrix[5])
+                    .fold(ly, f32::min);
+                top - bottom <= cluster_size * 2.05
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if hits.is_empty() {
             clusters.push(line);
+            continue;
+        }
+        let first = hits[0];
+        clusters[first].extend(line);
+        for index in hits.into_iter().skip(1).rev() {
+            let extra = clusters.remove(index);
+            clusters[first].extend(extra);
         }
     }
     // `(1)` sits on the equation baseline, a column-width away from the
     // formula. Leaving it behind caps the next paragraph and paints the
     // tag in the hole the formula just left.
     attach_equation_tags(&mut clusters);
+    // `We used the Adam optimizer…` is a sentence with inline math. It is
+    // translated. Only the display equation moves as original glyphs.
+    clusters.retain(|cluster| !cluster_is_prose_sentence(cluster));
     clusters
         .into_iter()
         .filter_map(|cluster| {
@@ -14178,6 +14460,13 @@ fn reposition_listings(
                     let prev = glyphs[end - 1];
                     let expected = prev.matrix[4] + prev.advance[0];
                     if (glyphs[end].matrix[4] - expected).abs() > 1.5 {
+                        break;
+                    }
+                    // A word space is often the advance, not a glyph. Joining
+                    // those char codes paints `WeusedtheAdamoptimizer`.
+                    let ink_right = prev.bbox[0].max(prev.bbox[2]).max(prev.matrix[4]);
+                    let ink_gap = glyphs[end].matrix[4] - ink_right;
+                    if ink_gap > prev.font_size.max(1.0) * 0.2 {
                         break;
                     }
                     end += 1;
@@ -19164,6 +19453,7 @@ mod tests {
     fn a_similar_to_tilde_has_an_ascii_stand_in() {
         assert_eq!(coverage_fallbacks('\u{223C}'), &['~']);
         assert_eq!(coverage_fallbacks('\u{03D5}'), &['φ', 'f']);
+        assert_eq!(coverage_fallbacks('\u{03F5}'), &['ε', 'e']);
         assert_eq!(coverage_fallbacks('\u{02C6}'), &['^']);
     }
 
@@ -22495,6 +22785,61 @@ mod tests {
                 resource_name: Some("F1".into()),
             },
         }
+    }
+
+    #[test]
+    fn an_orphan_superscript_seats_on_the_translated_base() {
+        let one = math_glyph(1, 200.0, 200.0, "1", false);
+        let zero = math_glyph(2, 208.0, 200.0, "0", false);
+        let mut nine = math_glyph(3, 220.0, 204.0, "9", false);
+        nine.font_size = 7.0;
+        nine.font_name = "CMR7".into();
+        let glyphs = vec![one, zero, nine];
+        let text = "率 = 10。";
+        let chars = text.chars().count();
+        let line = Drawn {
+            page: 0,
+            x: 180.0,
+            y: 200.0,
+            size: 10.0,
+            color: Color::black(),
+            cids: vec![1; chars],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: text.into(),
+            glyph_ids: vec![1, 2],
+            widths: vec![20.0; chars],
+            gaps: vec![0.0; chars.saturating_sub(1)],
+            supers: vec![false; chars],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let extraction = Extraction {
+            coordinate_space: crate::COORDINATE_SPACE,
+            pages: Vec::new(),
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut drawn = vec![line];
+        let mut succeeded = HashSet::new();
+        let mut keep = HashMap::from([(3, "formula".into())]);
+        let shifts = claim_orphan_scripts(&mut drawn, &extraction, &mut succeeded, &mut keep);
+        assert!(
+            succeeded.contains(&3),
+            "the exponent is blanked with the line"
+        );
+        assert!(
+            !keep.contains_key(&3),
+            "formula keep would leave the source exponent"
+        );
+        assert!(drawn[0].glyph_ids.contains(&3));
+        assert_eq!(shifts.len(), 1);
+        // "10" ends at char 6. Origin 180 + 20*6 = 300. Source "0" right is 214,
+        // so the gap is 6 and the seated "9" is at 306. dx = 306 - 220.
+        assert!((shifts[0].dx - 86.0).abs() < 0.2, "dx {}", shifts[0].dx);
+        assert!(shifts[0].dy.abs() < 0.2, "dy {}", shifts[0].dy);
+        assert!((shifts[0].host_y - 200.0).abs() < 0.1);
     }
 
     #[test]
@@ -32081,6 +32426,115 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
             "superscript left the operator: {ids:?}"
         );
         assert!(ids.contains(&tag), "equation tag left behind: {ids:?}");
+    }
+
+    #[test]
+    fn distant_superscripts_stay_on_one_display_equation() {
+        let mut glyphs = Vec::new();
+        let mut id = 1u32;
+        let mut push = |x, y, text: &str, font: &str| {
+            let mut glyph = ink_glyph(id, x, y, if y > 400.0 { 7.0 } else { 10.0 }, text);
+            glyph.font_name = font.into();
+            id += 1;
+            glyphs.push(glyph);
+        };
+        for index in 0..28 {
+            let x = 160.0 + index as f32 * 12.0;
+            let (text, font) = if index == 4 {
+                ("=", "CMR10")
+            } else {
+                ("d", "CMMI10")
+            };
+            push(x, 360.0, text, font);
+        }
+        push(230.0, 366.0, "-", "CMSY7");
+        push(360.0, 366.0, "-", "CMSY7");
+        push(470.0, 366.0, "-", "CMSY7");
+        let body = glyphs[0].id;
+        let scripts: Vec<u32> = glyphs
+            .iter()
+            .filter(|glyph| glyph.matrix[5] > 363.0)
+            .map(|glyph| glyph.id)
+            .collect();
+        assert_eq!(scripts.len(), 3);
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let above = test_draw(108.0, 400.0, 10.0, "根据以下公式", vec![]);
+        let below = test_draw(108.0, 320.0, 10.0, "这对应于", vec![]);
+        let blocks = display_formula_blocks(&[above, below], &extraction, 0);
+        assert_eq!(blocks.len(), 1, "equation split into {}", blocks.len());
+        let ids = &blocks[0].kept_ids;
+        assert!(ids.contains(&body), "equation body left behind: {ids:?}");
+        for script in scripts {
+            assert!(
+                ids.contains(&script),
+                "superscript {script} left the equation: {ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prose_sentence_with_inline_math_is_not_a_display_equation() {
+        let mut glyphs = Vec::new();
+        let mut id = 1u32;
+        let mut push = |x, y, text: &str, font: &str| {
+            let mut glyph = ink_glyph(id, x, y, 10.0, text);
+            glyph.font_name = font.into();
+            glyph.bbox = [x, y - 2.0, x + 8.0, y + 8.0];
+            glyph.advance = [8.0, 0.0];
+            id += 1;
+            glyphs.push(glyph);
+        };
+        let sentence = "We used the Adam optimizer with";
+        for (index, ch) in sentence.chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            push(108.0 + index as f32 * 6.0, 400.0, &ch.to_string(), "CMR10");
+        }
+        let math_x = 108.0 + sentence.len() as f32 * 6.0;
+        push(math_x, 400.0, "β", "CMMI10");
+        push(math_x + 14.0, 400.0, "ϵ", "CMMI10");
+        push(math_x + 28.0, 400.0, "β", "CMMI10");
+        push(math_x + 42.0, 400.0, "=", "CMR10");
+        push(200.0, 340.0, "Q", "CMMI10");
+        push(214.0, 340.0, "=", "CMR10");
+        push(228.0, 340.0, "K", "CMMI10");
+        push(242.0, 340.0, "V", "CMMI10");
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let above = test_draw(108.0, 460.0, 10.0, "优化器", vec![]);
+        let blocks = display_formula_blocks(&[above], &extraction, 0);
+        assert!(
+            blocks.iter().all(|block| !block.kept_ids.iter().any(|id| {
+                extraction
+                    .glyphs
+                    .iter()
+                    .any(|glyph| glyph.id == *id && glyph.unicode == "W")
+            })),
+            "the Adam sentence was kept as a display equation"
+        );
+        assert!(
+            blocks.iter().any(|block| {
+                block.kept_ids.iter().any(|id| {
+                    extraction
+                        .glyphs
+                        .iter()
+                        .any(|glyph| glyph.id == *id && glyph.unicode == "Q")
+                })
+            }),
+            "the display equation was dropped with the sentence"
+        );
     }
 
     #[test]
