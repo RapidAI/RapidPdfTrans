@@ -8449,6 +8449,60 @@ fn external_script_base<'a>(
 /// A repeated index is drawn again as text, because the glyphs can sit in
 /// only one hole. `None` means a hole is missing, so the paragraph stays
 /// in the source order.
+fn open_leading_under_stacks(
+    lines: &mut [Drawn],
+    holes: &[(usize, usize, usize, usize, bool)],
+    stacks: &[Vec<u32>],
+    glyphs: &[&Glyph],
+) {
+    if lines.len() < 2 || holes.is_empty() {
+        return;
+    }
+    let body = prose_body_size(glyphs);
+    let mut order: Vec<usize> = (0..lines.len()).collect();
+    order.sort_by(|&left, &right| lines[right].y.total_cmp(&lines[left].y));
+    for rank in 0..order.len().saturating_sub(1) {
+        let line_index = order[rank];
+        let next = order[rank + 1];
+        let mut below = 0.0f32;
+        for &(hole_line, _, _, index, duplicate) in holes {
+            if duplicate || hole_line != line_index || index >= stacks.len() {
+                continue;
+            }
+            let (_, anchor_y) = stack_anchor(&stacks[index], glyphs, body);
+            if !anchor_y.is_finite() {
+                continue;
+            }
+            let bottom = glyphs
+                .iter()
+                .filter(|glyph| stacks[index].contains(&glyph.id))
+                .map(|glyph| glyph.bbox[1])
+                .fold(f32::MAX, f32::min);
+            if bottom.is_finite() {
+                below = below.max(anchor_y - bottom);
+            }
+        }
+        let size = lines[line_index].size.max(1.0);
+        // A normal subscript sits inside the leading. Only a stack that
+        // hangs further than that asks for more room.
+        if below <= size * 0.22 {
+            continue;
+        }
+        let gap = lines[line_index].y - lines[next].y;
+        let need = below + lines[next].size * 0.88 + 0.8;
+        let push = (need - gap).clamp(0.0, size * 1.4);
+        if push < 0.4 {
+            continue;
+        }
+        let floor = lines[next].y;
+        for line in lines.iter_mut() {
+            if line.y <= floor + 0.2 {
+                line.y -= push;
+            }
+        }
+    }
+}
+
 fn lift_stack_placeholders(
     lines: &mut Vec<Drawn>,
     glyphs: &[&Glyph],
@@ -8492,6 +8546,10 @@ fn lift_stack_placeholders(
     if seen.iter().any(|flag| !*flag) {
         return None;
     }
+    // A radical and its subscript hang below the body. The next Chinese
+    // line used to run through `√(1/d_k)`. Drop every later baseline until
+    // the formula's ink clears that line.
+    open_leading_under_stacks(lines, &holes, &stacks, glyphs);
     let mut shifts = Vec::with_capacity(holes.len());
     let mut per_line: HashMap<usize, Vec<(usize, usize, usize, bool)>> = HashMap::new();
     for (line_index, start, end, index, duplicate) in &holes {
@@ -23550,6 +23608,61 @@ ET";
             .join("\n");
         assert!(text.contains("Perelman"), "{text}");
         assert!(!text.contains("Perelma⟦"), "{text}");
+    }
+
+    #[test]
+    fn a_hanging_formula_pushes_the_next_line_clear() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut x = 72.0f32;
+        for ch in "abcdefgh".chars() {
+            let mut glyph = ink_glyph(id, x, 400.0, 10.0, &ch.to_string());
+            glyph.bbox = [x, 398.0, x + 5.0, 408.0];
+            glyphs.push(glyph);
+            id += 1;
+            x += 6.0;
+        }
+        let mut base = ink_glyph(id, 160.0, 400.0, 10.0, "d");
+        base.font_name = "CMMI10".into();
+        base.bbox = [160.0, 398.0, 166.0, 408.0];
+        glyphs.push(base);
+        let base_id = id;
+        id += 1;
+        let mut sub = ink_glyph(id, 166.0, 394.0, 6.0, "k");
+        sub.font_name = "CMMI7".into();
+        // The subscript hangs 14pt under the body baseline.
+        sub.bbox = [166.0, 386.0, 170.0, 398.0];
+        glyphs.push(sub);
+        let sub_id = id;
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let stacks = vec![vec![base_id, sub_id]];
+        let holes = vec![(0usize, 0usize, 3usize, 0usize, false)];
+        let drawn_at = |y: f32| Drawn {
+            page: 0,
+            x: 108.0,
+            y,
+            size: 10.0,
+            color: Color::black(),
+            cids: Vec::new(),
+            resource: "R".into(),
+            skew: 0.0,
+            text: "行".into(),
+            glyph_ids: Vec::new(),
+            widths: vec![10.0],
+            gaps: Vec::new(),
+            supers: vec![false],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let mut lines = vec![drawn_at(400.0), drawn_at(388.0)];
+        open_leading_under_stacks(&mut lines, &holes, &stacks, &refs);
+        let gap = lines[0].y - lines[1].y;
+        assert!(
+            (lines[0].y - 400.0).abs() < 0.1 && gap >= 22.0,
+            "the subscript still meets the next line: {gap:.1} ys {} {}",
+            lines[0].y,
+            lines[1].y
+        );
     }
 
     #[test]
