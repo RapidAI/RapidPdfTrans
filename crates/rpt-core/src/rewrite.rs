@@ -32072,7 +32072,7 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
         };
         let above = test_draw(108.0, 364.0, 10.0, "计算如下", vec![]);
         let below = test_draw(108.0, 285.0, 10.0, "最常用", vec![]);
-        let blocks = display_formula_blocks(&vec![above, below], &extraction, 0);
+        let blocks = display_formula_blocks(&[above, below], &extraction, 0);
         assert_eq!(blocks.len(), 1, "equation split into {}", blocks.len());
         let ids = &blocks[0].kept_ids;
         assert!(ids.contains(&attention), "operator left behind: {ids:?}");
