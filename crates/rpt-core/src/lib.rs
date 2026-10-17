@@ -51,7 +51,7 @@ pub use color::Color;
 pub use coverage::{report as coverage_report, CoverageReport};
 pub use error::{Error, Result};
 pub use extract::{ExtractOptions, Extraction, OpenOptions, PdfDocument, COORDINATE_SPACE};
-pub use font::{minimal_ttf, parse_font_spec};
+pub use font::{minimal_ttf, parse_font_spec, CjkStyle};
 pub use geom::{Matrix, Rect};
 pub use glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKind};
 pub use layout::{fit_paragraph, CjkMeasure, FittedParagraph};

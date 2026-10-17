@@ -72,9 +72,10 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
 /// `options_json` selects the output: `{"output_mode":"replace"}` (pure
 /// translation) or `{"output_mode":"bilingual","bilingual_layout":"side-by-side"}`.
 /// Layouts are `side-by-side`, `alternating`, and `overlay`.
-/// `cjk_font` and `cjk_bold_font` are `.ttf`, `.otf`, or `.ttc` paths;
-/// `#N` selects a collection face. A missing glyph uses Noto Serif CJK
-/// and Python emits a warning.
+/// `cjk_style` is `sans` (default, Noto Sans CJK SC) or `serif`.
+/// `cjk_font` and `cjk_bold_font` are `.ttf`, `.otf`, or `.ttc` paths and
+/// win over `cjk_style`; `#N` selects a collection face. A missing glyph
+/// uses the selected family and Python emits a warning.
 #[pyfunction]
 #[pyo3(signature = (path, output, options_json=None))]
 fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
@@ -88,15 +89,7 @@ fn save(path: &str, output: &str, options_json: Option<&str>) -> PyResult<()> {
     doc.rewrite(
         &mut extraction,
         &report,
-        &RewriteOptions {
-            mode: opts.output_mode,
-            cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
-            cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
-            cjk_bold: opts.cjk_bold_font.as_ref().map(std::path::PathBuf::from),
-            cjk_size_scale: opts.cjk_size_scale,
-            cjk_leading: opts.cjk_leading,
-            ..RewriteOptions::default()
-        },
+        &RewriteOptions::from_translate(&opts, opts.output_mode),
     )
     .map_err(py_err)?;
     doc.save_file(output).map_err(py_err)?;

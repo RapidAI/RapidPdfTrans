@@ -89,14 +89,19 @@ pub struct TranslateOptions {
     pub skip_figures: bool,
     /// Leave table cells and headers original. Only the caption is translated.
     pub skip_tables: bool,
-    /// Song/serif CJK font file. Empty uses `RPT_CJK_FONT`, then Noto Serif CJK.
-    /// A trailing `#N` selects face N of a collection (`simsun.ttc#0`).
+    /// Regular CJK font file. Empty uses `RPT_CJK_FONT`, then the family
+    /// selected by `cjk_style`. A trailing `#N` selects face N of a
+    /// collection (`msyh.ttc#0`). This path wins over `cjk_style`.
     pub cjk_font: Option<String>,
-    /// Sans CJK font file for regular sans text. Empty uses Song Bold.
+    /// Sans CJK font file for regular sans source text. Wins over `cjk_font`
+    /// for that source style only.
     pub cjk_sans: Option<String>,
-    /// Song Bold for titles, section names, and sans source faces.
-    /// Empty uses `RPT_CJK_BOLD_FONT`, then Noto Serif CJK Bold.
+    /// Bold CJK font for titles and bold source faces.
+    /// Empty uses `RPT_CJK_BOLD_FONT`, then Bold of the selected family.
+    /// This path wins over `cjk_style`.
     pub cjk_bold_font: Option<String>,
+    /// `sans` (Heiti, default) or `serif` (Songti). Empty uses `RPT_CJK_STYLE`.
+    pub cjk_style: Option<String>,
     /// Chinese body size as a fraction of the source size. `0` uses 0.90,
     /// or `RPT_CJK_SIZE_SCALE` when that is set.
     pub cjk_size_scale: f32,
@@ -190,6 +195,7 @@ impl Default for TranslateOptions {
             cjk_font: None,
             cjk_sans: None,
             cjk_bold_font: None,
+            cjk_style: None,
             cjk_size_scale: 0.0,
             cjk_leading: 0.0,
             output_mode: OutputMode::Replace,
@@ -327,6 +333,10 @@ impl TranslateOptions {
         if let Some(v) = string_field(&value, &["cjk_bold_font", "cjk_bold"]) {
             opts.cjk_bold_font = Some(v);
         }
+        if let Some(v) = string_field(&value, &["cjk_style", "cjkStyle"]) {
+            let style = crate::font::CjkStyle::parse(&v).map_err(Error::Options)?;
+            opts.cjk_style = Some(style.as_str().to_string());
+        }
         if let Some(v) = float_field(&value, &["cjk_size_scale", "cjkSizeScale"]) {
             opts.cjk_size_scale = v;
         }
@@ -442,6 +452,7 @@ pub fn translate_extraction(
     opts: &TranslateOptions,
     translator: &dyn Translator,
 ) -> Result<TranslateReport> {
+    crate::font::CjkStyle::resolve(opts.cjk_style.as_deref()).map_err(Error::Options)?;
     let jobs = opts.resolved_jobs()?;
     let (segments, reference_ids) = prepare_segments(extraction, opts)?;
     let shielded: Vec<protect::Shielded> = segments
@@ -5208,6 +5219,24 @@ mod tests {
         assert!((sized.cjk_leading - 1.5).abs() < 0.001);
         assert_eq!(TranslateOptions::default().cjk_size_scale, 0.0);
         assert_eq!(TranslateOptions::default().cjk_leading, 0.0);
+        assert!(TranslateOptions::default().cjk_style.is_none());
+        assert_eq!(
+            TranslateOptions::from_json(r#"{"cjk_style":"serif"}"#)
+                .unwrap()
+                .0
+                .cjk_style
+                .as_deref(),
+            Some("serif")
+        );
+        assert_eq!(
+            TranslateOptions::from_json(r#"{"cjkStyle":"SANS"}"#)
+                .unwrap()
+                .0
+                .cjk_style
+                .as_deref(),
+            Some("sans")
+        );
+        assert!(TranslateOptions::from_json(r#"{"cjk_style":"song"}"#).is_err());
         assert_eq!(
             TranslateOptions::from_json(r#"{"layout":"side-by-side"}"#)
                 .unwrap()

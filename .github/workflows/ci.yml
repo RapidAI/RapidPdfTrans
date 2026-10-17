@@ -27,7 +27,9 @@ jobs:
       - name: Test
         env:
           RPT_VIEWERS_DIR: /tmp/rpt-viewers
-        run: cargo test --workspace
+        run: |
+          unset RPT_CJK_FONT RPT_CJK_BOLD_FONT RPT_CJK_SANS RPT_CJK_STYLE || true
+          cargo test --workspace
       - name: Release artifacts
         run: |
           # cdylib is not in the package crate-type: rpt-python owns that filename
@@ -87,18 +89,23 @@ jobs:
           RPT_FONT_SMOKE: "1"
         run: |
           set -euo pipefail
-          unset RPT_CJK_FONT RPT_CJK_BOLD_FONT RPT_CJK_SANS || true
+          unset RPT_CJK_FONT RPT_CJK_BOLD_FONT RPT_CJK_SANS RPT_CJK_STYLE || true
           python - << 'PY'
           import os, sys
           system = [
+              "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+              "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+              "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+              "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
               "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
               "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
+              "/Library/Fonts/NotoSansCJKsc-Regular.otf",
               "/Library/Fonts/NotoSerifCJKsc-Regular.otf",
               "/usr/local/share/fonts/NotoSerifCJKsc-Regular.otf",
           ]
           present = [path for path in system if os.path.isfile(path)]
           if present:
-              sys.exit("clean runner already has a Song face: " + ",".join(present))
+              sys.exit("clean runner already has a CJK face: " + ",".join(present))
           PY
           cargo test -p rpt-core --lib font::subset::tests::cached_noto_serves_a_clean_machine -- --exact
       - name: Replay translation
@@ -107,7 +114,7 @@ jobs:
           RPT_FONT_SMOKE: "1"
         run: |
           set -euo pipefail
-          unset RPT_CJK_FONT RPT_CJK_BOLD_FONT RPT_CJK_SANS RPT_LLM_API_KEY RPT_TRANSLATOR || true
+          unset RPT_CJK_FONT RPT_CJK_BOLD_FONT RPT_CJK_SANS RPT_CJK_STYLE RPT_LLM_API_KEY RPT_TRANSLATOR || true
           cargo build -p rpt-cli --release
           bin="target/release/rpt"
           if [ -f target/release/rpt.exe ]; then bin="target/release/rpt.exe"; fi
@@ -144,16 +151,17 @@ jobs:
           ]), encoding="utf-8")
           PY
           "$bin" translate smoke-in.pdf --output smoke-out.pdf --replay smoke-replay.json --json > smoke-out.json
+          "$bin" translate smoke-in.pdf --output smoke-serif.pdf --replay smoke-replay.json --cjk-style serif --json > smoke-serif.json
           python - << 'PY'
           import json, pathlib
-          from fontTools.ttLib import TTFont
-          from io import BytesIO
           report = json.loads(pathlib.Path("smoke-out.json").read_text(encoding="utf-8"))
           texts = " ".join(item.get("translated", "") for item in report.get("translations", []))
           assert "Transformer" in texts and "aeo0" in texts, texts
-          data = pathlib.Path("smoke-out.pdf").read_bytes()
-          assert b"RPTCJK" in data, "no embedded CJK face"
-          # The smoke only proves the translate path embedded a face. Glyph
-          # limits are covered by the library tests on the Linux CI job.
-          print("smoke ok", len(data))
+          sans = pathlib.Path("smoke-out.pdf").read_bytes()
+          serif = pathlib.Path("smoke-serif.pdf").read_bytes()
+          assert b"RPTCJK" in sans, "no embedded CJK face"
+          assert b"NotoSansCJK" in sans, "default face is not Heiti"
+          assert b"NotoSerifCJK" in serif, "serif style did not embed Songti"
+          # Glyph limits are covered by the library tests on the Linux CI job.
+          print("smoke ok", len(sans), len(serif))
           PY

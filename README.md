@@ -65,9 +65,10 @@ Set the key in the environment. An `api_key` field in options JSON is ignored.
 | `RPT_GOOGLE_API_KEY` | Cloud Translation v2 | unset |
 | `RPT_GOOGLE_CREDENTIALS` | `google-v3` service account | unset |
 | `RPT_GOOGLE_ACCESS_TOKEN` | `google-v3` bearer token | unset |
-| `RPT_CJK_FONT` | optional Song file for body text | Noto Serif CJK, then the fallback list below |
-| `RPT_CJK_BOLD_FONT` | optional Song Bold file | Noto Serif CJK Bold |
-| `RPT_CJK_SANS` | optional file for regular sans text | Song Bold, the same face as titles |
+| `RPT_CJK_STYLE` | `sans` (Heiti) or `serif` (Songti) | `sans` |
+| `RPT_CJK_FONT` | optional regular face; wins over the style | Regular of the selected family |
+| `RPT_CJK_BOLD_FONT` | optional bold face; wins over the style | Bold of the selected family |
+| `RPT_CJK_SANS` | optional file for regular sans source text | the regular face |
 | `RPT_TRANSLATE_JOBS` | optional parallel requests | `4` (cap `8`) |
 | `RPT_CJK_SIZE_SCALE` | optional | `0.90` |
 | `RPT_CJK_LEADING` | optional | `1.60` |
@@ -76,19 +77,21 @@ Set the key in the environment. An `api_key` field in options JSON is ignored.
 
 ### Fonts
 
-Titles, section names, “摘要”, and any other bold or sans source face are drawn in Song Bold. Body text stays Song Regular. The whole page is one serif family.
+The default Chinese face is Heiti: Noto Sans CJK SC (Source Han Sans). Body text is Regular. Titles, section names, “摘要”, and other bold source faces are Bold. Songti (Noto Serif CJK SC) is optional.
 
-`--cjk-font` is the body face. `--cjk-bold-font` is Song Bold, used for those bold and sans faces. `--cjk-sans` still replaces regular sans text when it is set. Each flag takes a `.ttf`, `.otf`, or `.ttc`. Append `#N` to pick face N of a collection (`simsun.ttc#0` is Song, `simsun.ttc#1` is NSimSun on a typical SimSun collection). The same strings are `RPT_CJK_FONT`, `RPT_CJK_BOLD_FONT`, and `RPT_CJK_SANS`. Python `save` / `translate` and C `rpt_save` / `rpt_translate` take them as `cjk_font`, `cjk_bold_font`, and `cjk_sans` in options JSON (`cjk_bold` is the same field as `cjk_bold_font`).
+`--cjk-style sans` is the default. `--cjk-style serif` selects Songti. The same value is the environment variable `RPT_CJK_STYLE`, and the `cjk_style` field in Python and C options JSON. The only accepted values are `sans` and `serif`.
 
-Only the glyphs the page uses are embedded. A character the user face does not cover is taken from the built-in Song face and reported:
+`--cjk-font` replaces the regular face and `--cjk-bold-font` replaces the bold face. Either path wins over `--cjk-style`. `--cjk-sans` still replaces regular sans source text only, and wins over `--cjk-font` for that source style. Each path is a `.ttf`, `.otf`, or `.ttc`. Append `#N` to pick face N of a collection (`msyh.ttc#0` is a typical Microsoft YaHei face). The same strings are `RPT_CJK_FONT`, `RPT_CJK_BOLD_FONT`, and `RPT_CJK_SANS`. Python `save` / `translate` and C `rpt_save` / `rpt_translate` take `cjk_font`, `cjk_bold_font`, `cjk_sans`, and `cjk_style` (`cjk_bold` is the same field as `cjk_bold_font`).
+
+Only the glyphs the page uses are embedded. A character the user face does not cover is taken from the selected built-in family at the same weight and reported:
 
 ```text
-rpt: warning: CJK font /path/to/face.ttf has no glyph for U+4E2D; those characters use Noto Serif CJK
+rpt: warning: CJK font /path/to/face.ttf has no glyph for U+4E2D; those characters use Noto Sans CJK
 ```
 
-Noto Serif CJK and Noto Sans CJK are SIL Open Font License 1.1. The font bytes are not copied into the wheel or the SDK. When a Song face is installed (`fonts-noto-cjk`, or the paths below), that file is used. When it is not, the first translation downloads Noto Serif CJK SC Regular and Bold (Serif 2.003, about 24 MB and 25 MB) into the font cache and writes `OFL.txt` beside them. The cache is `RPT_FONT_CACHE`, or `%LOCALAPPDATA%\rapidpdftrans` on Windows, `~/Library/Caches/rapidpdftrans` on macOS, and `$XDG_CACHE_HOME/rapidpdftrans` or `~/.cache/rapidpdftrans` otherwise. Subsetting still needs `fontTools` (`pip install fonttools`). The Debian package has no separate SemiBold file, so bold text uses Bold. Its Simplified Chinese face is collection index 2.
+Noto Sans CJK and Noto Serif CJK are SIL Open Font License 1.1. The font bytes are not copied into the wheel or the SDK. When the family is installed (`fonts-noto-cjk`, or the paths below), that file is used. When it is not, the first use downloads the Simplified Chinese Regular and Bold OTFs of the family that was requested: Noto Sans CJK SC (Sans 2.004, about 16 MB and 17 MB) and, when the style is `serif`, Noto Serif CJK SC (Serif 2.003, about 24 MB and 25 MB). The cache is `RPT_FONT_CACHE`, or `%LOCALAPPDATA%\rapidpdftrans` on Windows, `~/Library/Caches/rapidpdftrans` on macOS, and `$XDG_CACHE_HOME/rapidpdftrans` or `~/.cache/rapidpdftrans` otherwise. `OFL.txt` is written beside the files. Subsetting still needs `fontTools` (`pip install fonttools`). Bold text uses Bold. The Debian collection's Simplified Chinese face is index 2.
 
-When the body path is unset, body text uses Noto Serif CJK SC Light if it is installed (`~/.local/share/fonts/NotoSerifCJKsc-Light.otf`, `/usr/local/share/fonts/NotoSerifCJKsc-Light.otf`, or `/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf`), otherwise `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc` (face 2), otherwise the cached SC Regular face. Bold and sans text use `/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc` (face 2), otherwise the cached SC Bold face. If those faces cannot be subset, the fallback is `RPT_CJK_FONT` when it is set, then `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`, `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`, and `NotoSansCJK-Regular.ttc` under `/usr/share/fonts/opentype/noto` or `/usr/share/fonts/truetype/noto`.
+When `--cjk-font` is unset, Heiti body text uses `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` (face 2), or the same file under `/usr/share/fonts/truetype/noto`, otherwise the cached Noto Sans CJK SC Regular file. Bold text uses `NotoSansCJK-Bold.ttc` (face 2), otherwise the cached Bold file. `--cjk-style serif` uses Noto Serif CJK SC Light when that file is installed (`~/.local/share/fonts/NotoSerifCJKsc-Light.otf`, `/usr/local/share/fonts/NotoSerifCJKsc-Light.otf`, or `/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf`), otherwise `NotoSerifCJK-Regular.ttc` (face 2), otherwise the cached SC Regular file. Bold Songti uses `NotoSerifCJK-Bold.ttc` (face 2), otherwise the cached SC Bold file. If those faces cannot be subset, the fallback is `RPT_CJK_FONT` when it is set, then `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`, `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`, and `NotoSansCJK-Regular.ttc` under `/usr/share/fonts/opentype/noto` or `/usr/share/fonts/truetype/noto`.
 
 ### Translate
 
@@ -113,7 +116,8 @@ Flags that exist on `rpt translate`:
 | `--translate-references` | Translate the bibliography. Default is to keep it. |
 | `--translate-figures` | Translate text inside figures. Default is the caption only. |
 | `--translate-tables` | Translate cells and headers. Default is the caption only. |
-| `--cjk-font`, `--cjk-bold-font`, `--cjk-sans` | TTF, OTF, or TTC. `#N` selects a collection face. |
+| `--cjk-style` | `sans` (default, Heiti) or `serif` (Songti). Also `RPT_CJK_STYLE` and JSON `cjk_style`. |
+| `--cjk-font`, `--cjk-bold-font`, `--cjk-sans` | TTF, OTF, or TTC. These paths win over `--cjk-style`. `#N` selects a collection face. |
 | `--cjk-size-scale`, `--cjk-leading` | Default `0.90` and `1.60`. |
 | `--batch-size` | Segments per model call. Default `8`. |
 | `--jobs` | Parallel model requests. Default `4`, or `RPT_TRANSLATE_JOBS`, capped at `8`. Layout stays single-threaded. |
@@ -143,12 +147,18 @@ An explicit `RPT_TRANSLATOR=maclaw` with no key still reports that `RPT_LLM_API_
 
 **Missing translator.** With nothing configured, RapidPdfTrans probes Google Translate. Export `RPT_LLM_API_KEY` before `rpt translate`, Python `save` / `translate`, C++ `save`, or `rpt_save` to use the LLM gateway instead. A key placed in options JSON is ignored.
 
-**A user face is missing a character.** That character is drawn from Noto Serif CJK and the run prints `CJK font … has no glyph for U+….`. A path that is not a file fails before any request: `rpt: CJK font not found: ...`.
+**A user face is missing a character.** That character is drawn from the selected family (Noto Sans CJK by default, Noto Serif CJK when the style is `serif`) and the run prints `CJK font … has no glyph for U+….`. A path that is not a file fails before any request: `rpt: CJK font not found: ...`. An unknown `cjk_style` fails the same way: `unknown cjk_style …; use sans or serif`.
 
 ```bash
 ./target/release/rpt translate paper.pdf --from en --to zh \
-  --cjk-font /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc#2 \
-  --cjk-bold-font /usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc#2 \
+  --cjk-style serif \
+  --output paper.zh.pdf
+```
+
+```bash
+./target/release/rpt translate paper.pdf --from en --to zh \
+  --cjk-font /path/to/msyh.ttc#0 \
+  --cjk-bold-font /path/to/msyhbd.ttc#0 \
   --output paper.zh.pdf
 ```
 
@@ -240,7 +250,7 @@ export RPT_LLM_API_KEY=...
 
 With `RPT_LLM_API_KEY` set, that command posts to `RPT_LLM_BASE_URL` (`https://hub.mypapers.top/api/llm/v1` when unset) with model `RPT_LLM_MODEL` (`auto` when unset). The key is only `RPT_LLM_API_KEY`. With no LLM settings and no `RPT_TRANSLATOR`, the same command uses Google Translate when the probe succeeds. `--glossary transformer=Transformer` is optional and is applied locally before the call. Parallel requests default to 4.
 
-CJK glyphs are embedded from a face on the machine. Body text is Song (`RPT_CJK_FONT`, then Noto Serif CJK SC Light or Regular, face 2, then the cached SC Regular file). Titles, section names, and sans source faces are Song Bold (`RPT_CJK_BOLD_FONT`, then `/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc`, face 2, then the cached SC Bold file). `RPT_CJK_SANS` replaces regular sans text only when it is set. A path may end in `#N` to select a collection face. The embedded file is a subset of the glyphs that page uses (Identity-H, ToUnicode). A TrueType subset is a standalone TTF whose `maxp` covers every outline. A missing user-font glyph is taken from Noto Serif CJK and named in a warning. Noto CJK is SIL OFL 1.1 and is not shipped inside the wheel or the SDK. A machine without the system font downloads the SC Regular and Bold OTFs into `RPT_FONT_CACHE` (or the platform cache directory) on first use and stores `OFL.txt` next to them. When those faces cannot be subset, the fallback is `RPT_CJK_FONT` if it is set, then `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`, `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`, and `NotoSansCJK-Regular.ttc` under `/usr/share/fonts/opentype/noto` or `/usr/share/fonts/truetype/noto`. Horizontal advances come from `hmtx`; OpenType GSUB is not applied.
+CJK glyphs are embedded from a face on the machine. The default family is Heiti, Noto Sans CJK SC: body text is Regular and titles are Bold (`RPT_CJK_STYLE=sans`, or `--cjk-style sans`). `--cjk-style serif` selects Songti, Noto Serif CJK SC, including an installed SC Light file for body text. `RPT_CJK_FONT` and `RPT_CJK_BOLD_FONT` replace the regular and bold faces and win over the style. `RPT_CJK_SANS` replaces regular sans source text only when it is set. A path may end in `#N` to select a collection face, including a TrueType collection such as `msyh.ttc#0`. The embedded file is a subset of the glyphs that page uses (Identity-H, ToUnicode). A TrueType subset is a standalone TTF whose `maxp` covers every outline. A missing user-font glyph is taken from the selected family and named in a warning. Noto CJK is SIL OFL 1.1 and is not shipped inside the wheel or the SDK. A machine without the system font downloads the SC Regular and Bold OTFs of the requested family into `RPT_FONT_CACHE` (or the platform cache directory) on first use and stores `OFL.txt` next to them. When those faces cannot be subset, the fallback is `RPT_CJK_FONT` if it is set, then `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`, `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`, and `NotoSansCJK-Regular.ttc` under `/usr/share/fonts/opentype/noto` or `/usr/share/fonts/truetype/noto`. Horizontal advances come from `hmtx`; OpenType GSUB is not applied.
 
 The default output is pure target-language text: the translation replaces the original in place. Bilingual output is opt-in. `--mode side-by-side` puts the original page on the left and the translation on the right. `--mode alternating` writes the original page, then the translated page. `--mode overlay` keeps the original operators and draws the translation on the same page. `--bilingual` selects side-by-side unless `--layout alternating` or `--layout overlay` is set. `--layout` alone does not change the default. The same choice is `output_mode` (default `replace`) and, only when bilingual is requested, `bilingual_layout` in options JSON for `rpt_save`, the C++ `save`, and Python `save`. A layout field by itself leaves the PDF as pure translation. `--max-pages N` limits extraction to the first N pages. A segment that does not fit, or that shares an operator with a formula or another kept glyph, stays original.
 

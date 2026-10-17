@@ -22,7 +22,9 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use crate::color::Color;
 use crate::error::{Error, Result};
 use crate::extract::Extraction;
-use crate::font::{face_style, subset_for_style, subset_ttf, FaceStyle, FontSources, SubsetFont};
+use crate::font::{
+    face_style, subset_for_style, subset_ttf, CjkStyle, FaceStyle, FontSources, SubsetFont,
+};
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
     apply_formula_hole_widths, char_widths, cids_of, cjk_indent_ems, fit_cjk_block_with,
@@ -31,7 +33,9 @@ use crate::layout::{
     scale_for_heading, spread_to_lines, wrap_text, CjkMeasure, HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
-use crate::translate::{comma_list_incomplete, BilingualLayout, OutputMode, TranslateReport};
+use crate::translate::{
+    comma_list_incomplete, BilingualLayout, OutputMode, TranslateOptions, TranslateReport,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct RewriteOptions {
@@ -39,18 +43,37 @@ pub struct RewriteOptions {
     pub mode: OutputMode,
     /// Font bytes to subset. `None` searches `RPT_CJK_FONT` and common CJK fonts.
     pub font_bytes: Option<Vec<u8>>,
-    /// Song/serif CJK file used for regular body text.
+    /// Regular CJK file. Wins over [`Self::cjk_style`].
     pub cjk_serif: Option<std::path::PathBuf>,
-    /// Sans CJK file used for regular sans text. Unset uses Song Bold.
+    /// Regular sans source text only. Wins over `cjk_serif` for that source style.
     pub cjk_sans: Option<std::path::PathBuf>,
-    /// Song Bold for titles, section names, and sans source faces.
+    /// Bold CJK file for titles and bold source faces. Wins over [`Self::cjk_style`].
     pub cjk_bold: Option<std::path::PathBuf>,
+    /// `sans` (default, Heiti) or `serif` (Songti). Empty uses `RPT_CJK_STYLE`.
+    pub cjk_style: Option<String>,
     /// Chinese body size as a fraction of the source size. `0` uses 0.90,
     /// or `RPT_CJK_SIZE_SCALE` when that is set. Titles stay a little larger.
     pub cjk_size_scale: f32,
     /// Baseline distance in ems of the Chinese size. `0` uses 1.60,
     /// or `RPT_CJK_LEADING` when that is set. This is wider than English leading.
     pub cjk_leading: f32,
+}
+
+impl RewriteOptions {
+    /// Font paths and `cjk_style` from a translate request. `mode` can differ
+    /// when a second bilingual file is written from the same options.
+    pub fn from_translate(opts: &TranslateOptions, mode: OutputMode) -> Self {
+        Self {
+            mode,
+            font_bytes: None,
+            cjk_serif: opts.cjk_font.as_ref().map(std::path::PathBuf::from),
+            cjk_sans: opts.cjk_sans.as_ref().map(std::path::PathBuf::from),
+            cjk_bold: opts.cjk_bold_font.as_ref().map(std::path::PathBuf::from),
+            cjk_style: opts.cjk_style.clone(),
+            cjk_size_scale: opts.cjk_size_scale,
+            cjk_leading: opts.cjk_leading,
+        }
+    }
 }
 
 struct Span {
@@ -93,6 +116,7 @@ pub fn rewrite_translation(
     report: &TranslateReport,
     opts: &RewriteOptions,
 ) -> Result<()> {
+    let cjk_family = CjkStyle::resolve(opts.cjk_style.as_deref()).map_err(Error::Options)?;
     let compose = match opts.mode {
         OutputMode::Bilingual(
             layout @ (BilingualLayout::SideBySide | BilingualLayout::Alternating),
@@ -500,6 +524,7 @@ pub fn rewrite_translation(
                     serif: opts.cjk_serif.clone(),
                     sans: opts.cjk_sans.clone(),
                     bold: opts.cjk_bold.clone(),
+                    style: Some(cjk_family),
                 },
             ) else {
                 for (index, _) in &group {
@@ -23296,7 +23321,7 @@ ET";
 
     #[test]
     fn a_bold_italic_chapter_title_keeps_a_bold_face() {
-        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc").is_file() {
+        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc").is_file() {
             return;
         }
         let bytes = contents_pdf_named(
@@ -23342,15 +23367,17 @@ ET",
                 calls: 0,
                 cache_hits: 0,
             },
-            &RewriteOptions::default(),
+            &RewriteOptions {
+                cjk_style: Some("sans".into()),
+                ..RewriteOptions::default()
+            },
         )
         .unwrap();
         let saved = doc.save_bytes().unwrap();
         let saved_text = String::from_utf8_lossy(&saved);
         assert!(
-            saved_text.contains("NotoSerifCJKjp-Bold")
-                || saved_text.contains("NotoSerifCJKsc-Bold"),
-            "chapter title was not painted with Song Bold"
+            saved_text.contains("NotoSansCJKjp-Bold") || saved_text.contains("NotoSansCJKsc-Bold"),
+            "chapter title was not painted with Heiti Bold"
         );
         let painted = PdfDocument::open_bytes(&saved).unwrap().extract();
         let title: Vec<_> = painted

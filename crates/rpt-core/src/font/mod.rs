@@ -35,7 +35,8 @@ pub use subset::box_ttf;
 #[allow(unused_imports)]
 pub use subset::load_cjk_font;
 pub use subset::{
-    face_style, parse_font_spec, subset_for_style, subset_ttf, FaceStyle, FontSources, SubsetFont,
+    face_style, parse_font_spec, subset_for_style, subset_ttf, CjkStyle, FaceStyle, FontSources,
+    SubsetFont,
 };
 pub use ttf::{minimal_ttf, FontCmap};
 
