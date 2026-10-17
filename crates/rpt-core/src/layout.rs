@@ -1610,6 +1610,14 @@ fn can_break(prev: char, next: char) -> bool {
     if (prev == '-' || prev == '\'') && is_latin_word_char(next) {
         return false;
     }
+    // `41.8` and `1,000`. The break before the dot is already forbidden, so
+    // the old split was `41.` / `8`. A sentence period is followed by a space.
+    if matches!(prev, '.' | ',') && next.is_ascii_digit() {
+        return false;
+    }
+    if prev.is_ascii_digit() && matches!(next, '%' | '％') {
+        return false;
+    }
     break_after(prev) && break_before(next)
 }
 
@@ -1698,6 +1706,8 @@ fn pull_latin_prefix(
 }
 
 fn break_before(ch: char) -> bool {
+    // Closing punctuation stays with the previous character (kinsoku). A line
+    // must not open on `。`, `”`, or `%`.
     !matches!(
         ch,
         '，' | '。'
@@ -1711,6 +1721,19 @@ fn break_before(ch: char) -> bool {
             | '」'
             | '』'
             | '】'
+            | '〉'
+            | '］'
+            | '｝'
+            | '〕'
+            | '〗'
+            | '〙'
+            | '〛'
+            | '｣'
+            | '”'
+            | '’'
+            | '…'
+            | '%'
+            | '％'
             | ','
             | '.'
             | ';'
@@ -2353,6 +2376,52 @@ mod tests {
                     width / column * 100.0
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_decimal_stays_whole_and_a_body_line_does_not_end_short() {
+        // Width 330 fits `分数41.` and not the following `8` when every
+        // character is one em. The break used to be `41.` / `8`.
+        let text = "我们的模型在八块处理器上训练数天后建立了新的单模型最先进分数41.8，超过了现有最佳结果，包括集成模型。在英法翻译任务上，单模型分数达到41.8%。";
+        let font = uniform_font(text);
+        let size = 10.0f32;
+        let column = 330.0f32;
+        let lines = wrap_text(text, size, column, column, &font).expect("wrap");
+        assert!(lines.len() >= 3, "{lines:?}");
+        let joined = lines.join("");
+        assert!(joined.contains("41.8"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.ends_with("41.") && !line.starts_with('8')),
+            "number split: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("41.8")),
+            "41.8 was not kept on one line: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("41.8%")),
+            "percent left the number: {lines:?}"
+        );
+        let closers = [
+            '。', '，', '、', '；', '：', '！', '？', '）', '」', '”', '’', '%', '％',
+        ];
+        assert!(
+            lines
+                .iter()
+                .skip(1)
+                .all(|line| line.chars().next().is_none_or(|ch| !closers.contains(&ch))),
+            "line opened on closing punctuation: {lines:?}"
+        );
+        for line in &lines[..lines.len() - 1] {
+            let width = measure(line, size, &font);
+            assert!(
+                width >= column * 0.90,
+                "body line filled {:.0}% of the column: {line}",
+                width / column * 100.0
+            );
         }
     }
 

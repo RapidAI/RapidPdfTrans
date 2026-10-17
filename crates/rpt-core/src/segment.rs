@@ -5114,14 +5114,31 @@ fn hyphen_pull(prev: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
 
 /// `83 Generating` on one baseline is the next contents entry, not a sentence.
 /// A bare page number only: `1:` and `(3)` stay with the prose around them.
+/// A quantity in a sentence is not a page number: `2 BLEU`, `8 NVIDIA`, and
+/// `8 P100` used to match, and the line was translated as its own paragraph.
 fn inline_contents_entry(text: &str) -> bool {
     let tokens: Vec<&str> = text.split_whitespace().collect();
     tokens.windows(2).any(|pair| {
         (1..=3).contains(&pair[0].len())
             && pair[0].bytes().all(|byte| byte.is_ascii_digit())
-            && pair[1].chars().count() >= 3
-            && pair[1].starts_with(|ch: char| ch.is_ascii_uppercase())
+            && contents_title_word(pair[1])
     })
+}
+
+/// `Generating` and `The`, not an acronym or a model name (`BLEU`, `NVIDIA`,
+/// `P100`, `GPUs`). The word after a contents page number is title case.
+fn contents_title_word(token: &str) -> bool {
+    let token =
+        token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' | ')' | '(' | '“' | '”'));
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() || token.chars().count() < 3 {
+        return false;
+    }
+    let rest: Vec<char> = chars.collect();
+    rest.len() >= 2 && rest.iter().all(|ch| ch.is_ascii_lowercase())
 }
 
 fn toc_entry_boundary(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
@@ -6113,6 +6130,42 @@ mod tests {
             seg.kept.iter().any(|(_, reason)| reason == "toc"),
             "{:?}",
             seg.kept
+        );
+    }
+
+    #[test]
+    fn a_sentence_quantity_stays_in_the_paragraph() {
+        // `2 BLEU` matched the contents crumb `83 Generating`, so the abstract
+        // line was its own block: a short line ending at 包括, then a centered
+        // fragment, then a new indent.
+        let lines = [
+            "to-German translation task, improving over the existing best results, including",
+            "ensembles, by over 2 BLEU. On the WMT 2014 English-to-French translation task,",
+            "our model establishes a new single-model state-of-the-art BLEU score of 41.8 after",
+            "training for 3.5 days on eight GPUs, a small fraction of the training costs of the",
+        ];
+        let glyphs: Vec<Glyph> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                wide(
+                    index as u32,
+                    143.9,
+                    283.8 - index as f32 * 10.9,
+                    text,
+                    324.0,
+                    10.0,
+                )
+            })
+            .collect();
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains("including ensembles") && texts[0].contains("41.8"),
+            "{texts:?}"
         );
     }
 
