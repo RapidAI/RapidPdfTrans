@@ -306,6 +306,7 @@ pub fn rewrite_translation(
             && !translated.chars().any(is_han_char)
             && comma_list_english(&segment.source)
             && !crate::translate::is_name_byline(&segment.source)
+            && !crate::translate::is_institution_line(&segment.source)
         {
             for id in &segment.glyph_ids {
                 keep.insert(*id, "english-body".into());
@@ -21305,6 +21306,9 @@ mod tests {
             "english-body"
         );
         assert_eq!(kept_source_reason("Hello.", true), "unchanged");
+        let affiliation = "3Center for Human-Compatible AI, UC Berkeley, Berkeley, USA";
+        assert!(crate::translate::is_institution_line(affiliation));
+        assert_eq!(kept_source_reason(affiliation, true), "name");
     }
 
     #[test]
