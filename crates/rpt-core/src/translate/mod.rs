@@ -1668,6 +1668,18 @@ fn topic_comma_list(source: &str) -> bool {
     if items.len() < 6 {
         return false;
     }
+    // `(Bordes et al., 2017; Goyal et al., 2017)` is a citation sentence.
+    // Those commas are not a topic list, and a顿号 is not a dropped name.
+    let citations = items
+        .iter()
+        .filter(|item| {
+            item.to_ascii_lowercase().contains("et al")
+                || item.chars().filter(|ch| ch.is_ascii_digit()).count() >= 4
+        })
+        .count();
+    if citations * 2 >= items.len() {
+        return false;
+    }
     let short = items
         .iter()
         .filter(|item| item.split_whitespace().count() <= 4)
@@ -4425,6 +4437,13 @@ mod tests {
                 "k-服务器问题与分页相关。它属于任务系统 [BLS92, BCLL21, CL22, BCR23, BMC26]。论文涉及遍历 [FFK+98, BCR25]。"
             ),
             "citation commas were treated as a devroom list"
+        );
+        assert!(
+            !comma_list_incomplete(
+                "Score-based generative models, and related techniques (Bordes et al., 2017; Goyal et al., 2017; Du & Mordatch, 2019), have proven effective at generation of images (Song & Ermon, 2019; 2020; Ho et al., 2020), audio (Chen et al., 2020; Kong et al., 2020), graphs (Niu et al., 2020), and shapes (Cai",
+                "基于分数的生成模型及相关技术(Bordes et al., 2017; Goyal et al., 2017; Du & Mordatch, 2019)已被证明能有效生成图像（Song & Ermon, 2019；2020；Ho et al., 2020）、音频(Chen et al., 2020; Kong et al., 2020)、图(Niu et al., 2020)和形状（Cai"
+            ),
+            "an author-year sentence was treated as a dropped topic list"
         );
         assert!(
             !comma_list_incomplete(

@@ -2413,6 +2413,16 @@ fn merge_span(glyphs: &[&Glyph], stacks: &[Vec<u32>]) -> Option<MergeSpan> {
         return None;
     }
     let page = glyphs[0].page_index;
+    // A sentence that finishes on the next page still carries this page's
+    // equation number. The next page's baselines are a different coordinate
+    // space; folding them in makes the box as tall as the column and the
+    // chain swallows every formula above it.
+    let local: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| glyph.page_index == page)
+        .collect();
+    let glyphs = if local.is_empty() { glyphs } else { &local };
     let mut top = f32::MIN;
     let mut bottom = f32::MAX;
     let mut left = f32::MAX;
@@ -2486,6 +2496,9 @@ fn absorb_orphan_glyphs(
     let mut left = f32::MAX;
     let mut right = f32::MIN;
     for glyph in &owned {
+        if glyph.page_index != page {
+            continue;
+        }
         top = top.max(glyph.matrix[5]);
         bottom = bottom.min(glyph.matrix[5]);
         left = left.min(glyph.matrix[4]);
@@ -2531,6 +2544,9 @@ fn absorb_interior_shards(
     let mut left = f32::MAX;
     let mut right = f32::MIN;
     for glyph in &owned {
+        if glyph.page_index != page {
+            continue;
+        }
         top = top.max(glyph.matrix[5]);
         bottom = bottom.min(glyph.matrix[5]);
         left = left.min(glyph.matrix[4]);
@@ -2681,8 +2697,7 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
     // One marker per binomial, on the body line it belongs to. The numerator,
     // the denominator, and the fences are not separate reading-order events:
     // a fence above `N =` was pulling ⟦N⟧ in front of those words.
-    let baselines = body_baselines(glyphs, body);
-    let mut anchors: Vec<(f32, f32, f32)> = Vec::with_capacity(stacks.len());
+    let mut anchors: Vec<(f32, f32, f32, u32)> = Vec::with_capacity(stacks.len());
     for ids in stacks {
         let content: Vec<&Glyph> = ids
             .iter()
@@ -2699,8 +2714,15 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
         let mut ys: Vec<f32> = source.iter().map(|glyph| glyph.matrix[5]).collect();
         ys.sort_by(|left, right| left.total_cmp(right));
         let mid = ys.get(ys.len() / 2).copied().unwrap_or(0.0);
-        let y =
-            nearest_baseline(mid, &baselines, body * 0.85).map_or(mid, |index| baselines[index]);
+        let page = source.first().map(|glyph| glyph.page_index).unwrap_or(0);
+        let page_glyphs: Vec<&Glyph> = glyphs
+            .iter()
+            .copied()
+            .filter(|glyph| glyph.page_index == page)
+            .collect();
+        let page_baselines = body_baselines(&page_glyphs, body);
+        let y = nearest_baseline(mid, &page_baselines, body * 0.85)
+            .map_or(mid, |index| page_baselines[index]);
         let x = source
             .iter()
             .map(|glyph| glyph.matrix[4])
@@ -2709,12 +2731,13 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
             .iter()
             .map(|glyph| glyph.bbox[2].max(glyph.matrix[4]))
             .fold(x, f32::max);
-        anchors.push((x, y, right));
+        anchors.push((x, y, right, page));
     }
     struct Token<'a> {
         glyph: Option<&'a Glyph>,
         x: f32,
         y: f32,
+        page: u32,
         stack: Option<usize>,
     }
     let mut tokens: Vec<Token<'_>> = Vec::new();
@@ -2725,11 +2748,12 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
         }
         if let Some(index) = cluster_of.get(&glyph.id).copied() {
             if seen.insert(index) {
-                let (x, y, _) = anchors[index];
+                let (x, y, _, page) = anchors[index];
                 tokens.push(Token {
                     glyph: None,
                     x,
                     y,
+                    page,
                     stack: Some(index),
                 });
             }
@@ -2742,15 +2766,23 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
             glyph: Some(glyph),
             x: glyph.matrix[4],
             y: glyph.matrix[5],
+            page: glyph.page_index,
             stack: None,
         });
     }
-    tokens.sort_by(|left, right| right.y.total_cmp(&left.y));
+    // Page 3's `where w` sits at the same height as page 2's noise-scale
+    // line. Sorting by y alone weaves those two sentences into one line.
+    tokens.sort_by(|left, right| {
+        left.page
+            .cmp(&right.page)
+            .then(right.y.total_cmp(&left.y))
+            .then(left.x.total_cmp(&right.x))
+    });
     let band = body * 0.65;
     let mut lines: Vec<Vec<Token<'_>>> = Vec::new();
     for token in tokens {
         if let Some(line) = lines.last_mut() {
-            if (line[0].y - token.y).abs() <= band {
+            if line[0].page == token.page && (line[0].y - token.y).abs() <= band {
                 line.push(token);
                 continue;
             }
@@ -2766,7 +2798,7 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
     let mut prev_text = String::new();
     for token in lines.into_iter().flatten() {
         if let Some(index) = token.stack {
-            let (mark_left, mark_y, mark_right) = anchors[index];
+            let (mark_left, mark_y, mark_right, _) = anchors[index];
             push_gap(
                 &mut out, &prev_text, prev_right, prev_y, "⟦", mark_left, mark_y, body, band,
             );
@@ -4875,6 +4907,10 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         // in English.
         '\u{03D5}' => &['φ', 'f'],
         '\u{02C6}' => &['^'],
+        // A footnote star extracted as a ring, and x-tilde in a formula.
+        // One missing mark used to leave the whole paragraph in English.
+        '\u{02DA}' => &['*', '\u{00B0}'],
+        '\u{02DC}' => &['~'],
         '\u{2018}' | '\u{2019}' | '\u{201A}' => &['\''],
         '\u{201C}' | '\u{201D}' | '\u{201E}' => &['"'],
         '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2009}' => &[' '],
@@ -5073,6 +5109,8 @@ fn latin_base(ch: char) -> Option<char> {
         'ł' => 'l',
         'Đ' => 'D',
         'đ' => 'd',
+        'Ď' => 'D',
+        'ď' => 'd',
         'Ø' => 'O',
         'ø' => 'o',
         _ => return None,
@@ -19874,6 +19912,27 @@ mod tests {
         };
         assert_eq!(substitute_covered("✅已杀死👽", &icons), "✓已杀死•");
         assert_eq!(substitute_covered("ﬁle", &icons), "file");
+    }
+
+    #[test]
+    fn a_ring_tilde_or_caron_uses_a_covered_stand_in() {
+        let mut glyphs = HashMap::new();
+        for (index, ch) in "部分工作*~dx".chars().enumerate() {
+            glyphs.insert(ch as u32, (index as u16, 500));
+        }
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+            fallback: None,
+            notice: None,
+        };
+        assert_eq!(substitute_covered("˚部分工作", &font), "*部分工作");
+        assert_eq!(substitute_covered("x˜", &font), "x~");
+        assert_eq!(substitute_covered("ď", &font), "d");
+        assert!(stand_ins('˚').contains(&'*'));
+        assert!(stand_ins('˜').contains(&'~'));
+        assert!(stand_ins('ď').contains(&'d'));
     }
 
     #[test]

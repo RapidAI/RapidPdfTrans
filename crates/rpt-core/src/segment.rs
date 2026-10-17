@@ -363,7 +363,21 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // the median trigger. The tail is short and the head already fills
         // the column. A short left token (`Note`) still splits from the line
         // that follows it.
-        let trailing_word = gap <= hard && right_w < size * 8.0 && left_w >= size * 12.0;
+        // `racy.` is the next column's hyphen tail, 1.4pt off this baseline.
+        // A justified last word shares the baseline. The offset is the gutter.
+        let line_y = {
+            let mut ys: Vec<f32> = current.iter().map(|item| item.matrix[5]).collect();
+            ys.sort_by(|left, right| left.total_cmp(right));
+            ys[ys.len() / 2]
+        };
+        let off_baseline = (glyph.matrix[5] - line_y).abs() > size * 0.1;
+        let trailing_word =
+            gap <= hard && right_w < size * 8.0 && left_w >= size * 12.0 && !off_baseline;
+        let stray_column_fragment = off_baseline
+            && left_w >= size * 12.0
+            && right_w >= size * 0.8
+            && gap >= size
+            && gap + 0.05 >= largest;
         // "Table 1." then a one-em space is the caption sentence, not the
         // other column. The hard gap still splits a label from a real column.
         let caption_label = gap_inside_caption(&current, gap, size);
@@ -437,7 +451,8 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             || column_stub
             || two_column_tail
             || lone_mark
-            || gutter_digit)
+            || gutter_digit
+            || stray_column_fragment)
             && !current.is_empty()
             && !crumb
         {
@@ -3052,6 +3067,8 @@ fn is_running_header(text: &str) -> bool {
     let lower = text.trim().to_ascii_lowercase();
     if lower == "preprint"
         || lower == "published"
+        || lower.starts_with("published as ")
+        || lower.starts_with("published in ")
         || lower.starts_with("under review")
         || lower.starts_with("proceedings of")
     {
@@ -3599,6 +3616,7 @@ fn page_body_floor(paragraphs: &[Vec<VisualLine<'_>>]) -> std::collections::Hash
         if para.is_empty()
             || is_page_bridge(para)
             || is_margin_strip(para)
+            || marked_footnote(para)
             || !substantial_paragraph(para)
         {
             continue;
@@ -3676,7 +3694,10 @@ fn closes_the_column(
         if lower.y >= upper.y - 0.5 {
             continue;
         }
-        if substantial_paragraph(para) {
+        // `˚Work partially done…` sits under the column. It is not the
+        // next sentence, and it must not keep the paragraph from continuing
+        // on the next page.
+        if substantial_paragraph(para) && !marked_footnote(para) {
             return false;
         }
     }
@@ -3703,6 +3724,30 @@ fn find_page_continuation(
     if next_page.is_empty() {
         return None;
     }
+    // A gutter index (`3.1.1`) sits left of the body. It is not the column
+    // the right-hand sentence continues into.
+    let body_edge = next_page
+        .iter()
+        .filter(|(index, _, _)| {
+            let para = &paragraphs[*index];
+            votes_as_column(para) && !is_page_bridge(para) && !is_margin_strip(para)
+        })
+        .map(|(_, left, _)| *left)
+        .fold(f32::MAX, f32::min);
+    let left_edge = if body_edge.is_finite() {
+        body_edge
+    } else {
+        next_page
+            .iter()
+            .map(|(_, left, _)| *left)
+            .fold(f32::MAX, f32::min)
+    };
+    // The right column's next line is the next page's left column.
+    // The next page's right column is a new column, even when it starts
+    // in lowercase (`school Chinese students` under a table).
+    if upper.left > left_edge + 36.0 {
+        return leftmost_page_continuation(current, paragraphs, &next_page);
+    }
     // A hyphenated right column finishes at the top of the next page's left
     // column (`de-` / `tecting`). That column can sit far from this margin.
     if soft_hyphen_stem(&upper.text).is_some() {
@@ -3719,23 +3764,7 @@ fn find_page_continuation(
         .map(|(index, _, y)| (index, y))
         .collect();
     band.sort_by(|left, right| right.1.total_cmp(&left.1));
-    if let Some(index) = first_body_continuation(current, paragraphs, &band) {
-        return Some(index);
-    }
-    // The right column ends mid-sentence (`presented`) and the next page's
-    // right column is a table. The continuation is the left column
-    // (`mixed results`). A line already on that left margin stays put.
-    if sentence_end(upper.text.trim_end()) {
-        return None;
-    }
-    let left_edge = next_page
-        .iter()
-        .map(|(_, left, _)| *left)
-        .fold(f32::MAX, f32::min);
-    if upper.left <= left_edge + 36.0 {
-        return None;
-    }
-    leftmost_page_continuation(current, paragraphs, &next_page)
+    first_body_continuation(current, paragraphs, &band)
 }
 
 fn leftmost_page_continuation(
@@ -3864,7 +3893,11 @@ fn closes_the_page(
             // A display equation sits in the middle of a single column. It is
             // not the other column, and it must not keep the paragraph under
             // it from continuing on the next page.
-            if column_blocks_page(para) {
+            // The first page's abstract sits in that column while the
+            // introduction continues on the next page (`shapes (Cai` /
+            // `et al., 2020)`). A column that does not continue this
+            // sentence must not block that join.
+            if column_blocks_page(para) && !unrelated_sidebar(current, para) {
                 return false;
             }
             continue;
@@ -3876,11 +3909,37 @@ fn closes_the_page(
         if (lower.left - upper.left).abs() > size * 12.0 || lower.y >= upper.y - 0.5 {
             continue;
         }
-        if substantial_paragraph(para) {
+        if substantial_paragraph(para) && !marked_footnote(para) {
             return false;
         }
     }
     true
+}
+
+/// A bottom credit (`* Work partially done…`, `˚Work partially…`).
+fn marked_footnote(para: &[VisualLine<'_>]) -> bool {
+    let Some(line) = para.first() else {
+        return false;
+    };
+    let text = line.text.trim_start();
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    matches!(first, '*' | '∗' | '⋆' | '†' | '‡' | '§' | '˚' | '\u{2042}')
+}
+
+/// The other column is an abstract or a heading, not the rest of this sentence.
+fn unrelated_sidebar(current: &[VisualLine<'_>], para: &[VisualLine<'_>]) -> bool {
+    let Some(upper) = current.last() else {
+        return false;
+    };
+    if sentence_end(upper.text.trim_end()) {
+        return false;
+    }
+    let Some(lower) = para.first() else {
+        return false;
+    };
+    !prose_continues(upper, lower)
 }
 
 /// A real column, not a table cell such as `t [s]` or `Method`.
@@ -3963,13 +4022,19 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
             .trim_start()
             .starts_with(|ch: char| ch.is_ascii_lowercase());
     // `presented` at the right margin continues as `mixed results` on the
-    // next page's left margin. A finished sentence does not.
+    // next page's left margin. A citation list continues as `HellaSwag`.
+    // A finished sentence does not.
     let later_column = upper.left > lower.left + 36.0
         && !sentence_end(upper.text.trim_end())
-        && lower
+        && (lower
             .text
             .trim_start()
-            .starts_with(|ch: char| ch.is_ascii_lowercase());
+            .starts_with(|ch: char| ch.is_ascii_lowercase())
+            || (ends_with_list_mark(upper.text.trim_end())
+                && lower
+                    .text
+                    .trim_start()
+                    .starts_with(|ch: char| ch.is_ascii_uppercase())));
     if (upper.left - lower.left).abs() > 36.0 && !finishes_hyphen && !later_column {
         return false;
     }
@@ -4048,7 +4113,21 @@ fn prose_continues(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     if hyphen {
         return start.starts_with(|ch: char| ch.is_ascii_alphanumeric());
     }
-    start.starts_with(|ch: char| ch.is_ascii_lowercase())
+    if start.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+        return true;
+    }
+    // `SIQA (Sap et al., 2019),` / `HellaSwag`. The next name is capitalized.
+    // A short heading is not that name.
+    ends_with_list_mark(tail)
+        && start.starts_with(|ch: char| ch.is_ascii_uppercase())
+        && lower.text.chars().filter(|ch| ch.is_alphabetic()).count() >= 12
+}
+
+fn ends_with_list_mark(text: &str) -> bool {
+    let trimmed = text.trim_end().trim_end_matches(|ch: char| {
+        matches!(ch, ')' | '）' | ']' | '"' | '\'' | '\u{2019}' | '\u{201D}')
+    });
+    trimmed.ends_with([',', ';', ':'])
 }
 
 /// `construct LangChain` / `Expression Language` across a page. A new
@@ -5316,6 +5395,129 @@ mod tests {
         cjk[1].bbox = [14.0, 700.0, 26.0, 710.0];
         let segs = segment_glyphs(&cjk);
         assert_eq!(segs[0].text, "中文");
+    }
+
+    #[test]
+    fn a_hyphen_tail_off_the_baseline_is_not_a_justified_word() {
+        // `accu-` wraps as `racy.` one point below the other column. The gap
+        // is a gutter, not the last word of `WinoGrande.`
+        let mut glyphs = Vec::new();
+        for index in 0..36 {
+            let x = 70.0 + index as f32 * 6.0;
+            let mut item = glyph(index, x, 597.0, "a", false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 597.0];
+            item.bbox = [x, 597.0, x + 5.5, 607.0];
+            glyphs.push(item);
+        }
+        let left_right = 70.0 + 35.0 * 6.0 + 5.5;
+        for (index, ch) in "racy.".chars().enumerate() {
+            let x = left_right + 15.0 + index as f32 * 5.0;
+            let mut item = glyph(100 + index as u32, x, 595.6, &ch.to_string(), false);
+            item.font_size = 10.0;
+            item.matrix = [10.0, 0.0, 0.0, 10.0, x, 595.6];
+            item.bbox = [x, 595.6, x + 4.5, 605.6];
+            glyphs.push(item);
+        }
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains('a') && !text.contains("racy")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|text| text.contains("racy")), "{texts:?}");
+    }
+
+    #[test]
+    fn a_right_column_list_continues_on_the_next_left_column() {
+        // LLaMA's right column ends `SIQA (Sap et al., 2019),`. The next page's
+        // left column is `HellaSwag`, and `school Chinese students` is the
+        // right column under the table. Reading order takes the left column.
+        let mut upper = glyph(
+            0,
+            306.0,
+            71.0,
+            "PIQA (Bisk et al., 2020), SIQA (Sap et al., 2019),",
+            false,
+        );
+        upper.font_size = 10.0;
+        let mut left = glyph(
+            1,
+            70.0,
+            760.0,
+            "HellaSwag (Zellers et al., 2019), WinoGrande and OpenBookQA.",
+            false,
+        );
+        left.page_index = 1;
+        left.font_size = 10.0;
+        let mut right = glyph(
+            2,
+            306.0,
+            560.0,
+            "school Chinese students. We follow the evaluation setup.",
+            false,
+        );
+        right.page_index = 1;
+        right.font_size = 10.0;
+        let texts: Vec<_> = segment_glyphs(&[upper, left, right])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("SIQA") && text.contains("HellaSwag")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("SIQA") && text.contains("school Chinese")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_abstract_beside_an_unfinished_introduction_does_not_block_the_next_page() {
+        let mut intro = glyph(0, 108.0, 81.0, "and shapes (Cai", false);
+        intro.font_size = 10.0;
+        let mut abstract_body = glyph(
+            1,
+            320.0,
+            507.0,
+            "Creating noise from data is easy and this abstract stands on its own.",
+            false,
+        );
+        abstract_body.font_size = 10.0;
+        let mut next = glyph(
+            2,
+            108.0,
+            563.0,
+            "et al., 2020). To enable new sampling methods and further models.",
+            false,
+        );
+        next.page_index = 1;
+        next.font_size = 10.0;
+        let texts: Vec<_> = segment_glyphs(&[intro, abstract_body, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Cai") && text.contains("et al.")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("Cai") && text.contains("Creating noise")),
+            "{texts:?}"
+        );
     }
 
     #[test]
@@ -7507,6 +7709,144 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("presented") && text.contains("System Dev")),
             "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_conference_header_and_footnote_do_not_block_the_next_page() {
+        // ICLR puts the abstract in the right column and a starred footnote
+        // under the introduction. The sentence continues under the next
+        // page's running header and figure caption.
+        let mut intro = glyph(0, 108.0, 90.0, "and shapes (Cai", false);
+        intro.font_size = 10.0;
+        let mut note = glyph(
+            1,
+            108.0,
+            62.0,
+            "˚Work partially done during an internship at Google Brain.",
+            false,
+        );
+        note.font_size = 8.0;
+        let mut abstract_body = glyph(
+            2,
+            320.0,
+            500.0,
+            "Creating noise from data is easy and this abstract stands on its own.",
+            false,
+        );
+        abstract_body.font_size = 10.0;
+        let mut header = glyph(
+            3,
+            108.0,
+            760.0,
+            "Published as a conference paper at ICLR 2021",
+            false,
+        );
+        header.page_index = 1;
+        header.font_size = 9.0;
+        let mut caption = glyph(
+            4,
+            108.0,
+            700.0,
+            "Figure 1: Solving a reverse-time SDE yields a score-based model.",
+            false,
+        );
+        caption.page_index = 1;
+        caption.font_size = 9.0;
+        let mut next = block(
+            5,
+            108.0,
+            500.0,
+            220.0,
+            10.0,
+            "et al., 2020). To enable new sampling methods and further models.",
+        );
+        next.page_index = 1;
+        let texts: Vec<_> = segment_glyphs(&[intro, note, abstract_body, header, caption, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Cai") && text.contains("To enable new sampling")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("Cai") && text.contains("Creating noise")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Work partially done")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn sde_intro_continues_when_the_pdf_is_present() {
+        let path = std::path::Path::new("/tmp/rpt-e2e/diverse/sde-12.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(path).unwrap();
+        let extraction = doc.extract();
+        let placed = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let merged_hold =
+            crate::rewrite::merge_stacked_paragraphs(placed.segments.clone(), &extraction.glyphs);
+        let sohl = merged_hold
+            .iter()
+            .find(|item| item.text.contains("positive noise scales"))
+            .expect("noise-scale paragraph");
+        assert!(
+            !sohl.text.contains("Our goal is to construct"),
+            "DDPM column swallowed the next section: {}",
+            sohl.text.chars().take(80).collect::<String>()
+        );
+        let wiener = merged_hold
+            .iter()
+            .find(|item| item.text.contains("standard Wiener process (a.k.a."))
+            .expect("wiener paragraph");
+        assert!(
+            wiener
+                .text
+                .contains("where w is the standard Wiener process"),
+            "wiener prose was woven into another line: {}",
+            wiener.text.chars().take(160).collect::<String>()
+        );
+        assert!(
+            !wiener.text.contains("Sohl-Dickstein"),
+            "wiener paragraph absorbed the previous section"
+        );
+        assert!(
+            !merged_hold
+                .iter()
+                .any(|item| item.text.contains("anNcestral")),
+            "ancestral was interleaved with a formula mark"
+        );
+        let merged = merged_hold;
+        let hit = merged
+            .iter()
+            .find(|item| item.text.contains("and shapes (Cai"))
+            .expect("intro fragment");
+        assert!(
+            hit.text.contains("To enable new sampling"),
+            "page 1 citation stayed split ({} chars): {}",
+            hit.text.len(),
+            hit.text.chars().rev().take(80).collect::<String>()
+        );
+        assert!(
+            !hit.text.contains("Creating noise"),
+            "intro joined the abstract: {}",
+            hit.text.chars().take(120).collect::<String>()
         );
     }
 
