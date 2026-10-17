@@ -11334,14 +11334,16 @@ fn hang_kept_author_marks(
         let Some((_, font)) = embedded.iter().find(|(name, _)| name == &line.resource) else {
             continue;
         };
-        if marks.iter().any(|mark| {
-            mark.unicode
-                .chars()
-                .any(|ch| !ch.is_whitespace() && !font.has(ch as u32))
-        }) {
+        // CMSY draws U+2217. The CJK face has `*`, the same stand-in the
+        // body uses, so the mark is not left on the source x.
+        let raw_marks: String = marks.iter().map(|mark| mark.unicode.as_str()).collect();
+        let mark_text = substitute_covered(&raw_marks, font);
+        if mark_text
+            .chars()
+            .any(|ch| !ch.is_whitespace() && !font.has(ch as u32))
+        {
             continue;
         }
-        let mark_text: String = marks.iter().map(|mark| mark.unicode.as_str()).collect();
         let mark_cids = cids_of(&mark_text, font);
         if mark_cids.len() != mark_text.chars().count() {
             continue;
@@ -23732,7 +23734,8 @@ mod tests {
             regions: Vec::new(),
             diagnostics: Vec::new(),
         };
-        let font = uniform_font("Aidan N. Gomez∗†Work performed while at Google Brain.");
+        // The CJK face has `*` and not U+2217. The mark still has to hang.
+        let font = uniform_font("Aidan N. Gomez*†Work performed while at Google Brain.");
         let name_text = "Aidan N. Gomez";
         let widths = char_widths(name_text, 10.0, &font);
         let mut drawn = vec![Drawn {
@@ -23769,9 +23772,9 @@ mod tests {
         );
         assert!(!keep.contains_key(&2) && !keep.contains_key(&3));
         let line = &drawn[0];
-        assert_eq!(line.text, "Aidan N. Gomez∗†");
+        assert_eq!(line.text, "Aidan N. Gomez*†");
         let chars: Vec<char> = line.text.chars().collect();
-        let star_at = chars.iter().position(|ch| *ch == '∗').expect("star");
+        let star_at = chars.iter().position(|ch| *ch == '*').expect("star");
         let dagger_at = chars.iter().position(|ch| *ch == '†').expect("dagger");
         assert!(line.supers[star_at] && line.supers[dagger_at]);
         assert!(line.supers[..star_at].iter().all(|flag| !flag));
