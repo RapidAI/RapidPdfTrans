@@ -4000,6 +4000,12 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
     if lower.page != upper.page + 1 {
         return false;
     }
+    // `(5)` is the equation's tag. The next page's `where w` defines that
+    // equation, but gluing the tag on makes one segment in two coordinate
+    // spaces and the definition stays in English.
+    if equation_tag(&upper.text) {
+        return false;
+    }
     // A centered devroom list fills its own slide. The next slide's list is
     // not the rest of this sentence, even when a line starts with `and`.
     // A schedule bullet (`● 1052 events`) is not the start of that list either.
@@ -4121,6 +4127,22 @@ fn prose_continues(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     ends_with_list_mark(tail)
         && start.starts_with(|ch: char| ch.is_ascii_uppercase())
         && lower.text.chars().filter(|ch| ch.is_alphabetic()).count() >= 12
+}
+
+/// `(5)` or `[12]`. A display equation's number, not a sentence.
+fn equation_tag(text: &str) -> bool {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if bytes.len() < 3 || bytes.len() > 6 {
+        return false;
+    }
+    let (open, close) = (bytes[0], bytes[bytes.len() - 1]);
+    if !matches!((open, close), (b'(', b')') | (b'[', b']')) {
+        return false;
+    }
+    bytes[1..bytes.len() - 1]
+        .iter()
+        .all(|byte| byte.is_ascii_digit())
 }
 
 fn ends_with_list_mark(text: &str) -> bool {
@@ -7821,6 +7843,11 @@ mod tests {
                 .contains("where w is the standard Wiener process"),
             "wiener prose was woven into another line: {}",
             wiener.text.chars().take(160).collect::<String>()
+        );
+        assert!(
+            !wiener.text.starts_with("(5)"),
+            "the equation number was glued onto the definition: {}",
+            wiener.text.chars().take(40).collect::<String>()
         );
         assert!(
             !wiener.text.contains("Sohl-Dickstein"),
