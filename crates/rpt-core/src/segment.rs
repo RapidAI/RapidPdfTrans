@@ -4845,7 +4845,55 @@ pub(crate) fn display_equation_glyphs(glyphs: &[&Glyph]) -> bool {
             operators += 1;
         }
     }
-    math >= 3 && operators >= 1 && letters < 48 && !glyphs_have_function_word(glyphs)
+    if math < 3 || operators < 1 || letters >= 48 {
+        return false;
+    }
+    let (function_words, content_words) = prose_word_counts(glyphs);
+    // `Attention(Q, K, V) = softmax(...)` has no function word. `where head_i
+    // = Attention(Q W^Q_i, ...)` is still that equation: one lead-in word.
+    function_words == 0 || (function_words <= 1 && content_words <= 3)
+}
+
+fn prose_word_counts(glyphs: &[&Glyph]) -> (usize, usize) {
+    let mut ordered = glyphs.to_vec();
+    ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut word = String::new();
+    let mut function_words = 0usize;
+    let mut content_words = 0usize;
+    let mut previous: Option<&Glyph> = None;
+    let flush = |word: &mut String, function_words: &mut usize, content_words: &mut usize| {
+        if word.len() >= 3 {
+            if is_prose_function_word(word) {
+                *function_words += 1;
+            } else {
+                *content_words += 1;
+            }
+        } else if is_prose_function_word(word) {
+            *function_words += 1;
+        }
+        word.clear();
+    };
+    for glyph in ordered {
+        if let Some(prev) = previous {
+            if word_space(prev, glyph) {
+                flush(&mut word, &mut function_words, &mut content_words);
+            }
+        }
+        previous = Some(glyph);
+        if math_font_glyph(glyph) {
+            flush(&mut word, &mut function_words, &mut content_words);
+            continue;
+        }
+        for ch in glyph.unicode.chars() {
+            if ch.is_ascii_alphabetic() {
+                word.push(ch.to_ascii_lowercase());
+            } else {
+                flush(&mut word, &mut function_words, &mut content_words);
+            }
+        }
+    }
+    flush(&mut word, &mut function_words, &mut content_words);
+    (function_words, content_words)
 }
 
 fn is_display_operator(text: &str) -> bool {
@@ -4868,41 +4916,6 @@ fn is_display_operator(text: &str) -> bool {
             | "≈"
             | "≠"
     )
-}
-
-fn glyphs_have_function_word(glyphs: &[&Glyph]) -> bool {
-    let mut ordered = glyphs.to_vec();
-    ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
-    let mut word = String::new();
-    let mut found = false;
-    let mut previous: Option<&Glyph> = None;
-    let flush = |word: &mut String, found: &mut bool| {
-        if is_prose_function_word(word) {
-            *found = true;
-        }
-        word.clear();
-    };
-    for glyph in ordered {
-        if let Some(prev) = previous {
-            if word_space(prev, glyph) {
-                flush(&mut word, &mut found);
-            }
-        }
-        previous = Some(glyph);
-        if math_font_glyph(glyph) {
-            flush(&mut word, &mut found);
-            continue;
-        }
-        for ch in glyph.unicode.chars() {
-            if ch.is_ascii_alphabetic() {
-                word.push(ch.to_ascii_lowercase());
-            } else {
-                flush(&mut word, &mut found);
-            }
-        }
-    }
-    flush(&mut word, &mut found);
-    found
 }
 
 fn is_prose_function_word(word: &str) -> bool {

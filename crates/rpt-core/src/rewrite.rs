@@ -2143,9 +2143,11 @@ fn script_bases<'a>(
         picked.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
         return picked;
     }
+    // The subscript's own width is not a license to swallow the previous
+    // word. `d_model` is wider than one em; `with` still belongs to the sentence.
     for glyph in candidates.iter().copied().filter(|glyph| {
         let x = glyph.matrix[4];
-        x >= left - body * 0.95 && x <= right + body * 0.08
+        x >= left - body * 0.35 && x < right
     }) {
         take(&mut picked, glyph);
     }
@@ -2160,7 +2162,7 @@ fn script_bases<'a>(
         };
         let Some(prev) = candidates.iter().copied().rev().find(|glyph| {
             glyph.matrix[4] < first.matrix[4] - 0.5
-                && first.matrix[4] - glyph.bbox[2].max(glyph.matrix[4]) <= body * 0.28
+                && first.matrix[4] - glyph.bbox[2].max(glyph.matrix[4]) <= body * 0.18
         }) else {
             break;
         };
@@ -10932,10 +10934,16 @@ fn adopt_unchanged_body_lines(
         // or a Td gap. Joining the unicode paints `AttentionIsAllYouNeed`.
         let text = spaced_glyph_run(&glyphs);
         let trimmed = text.trim();
+        // A display equation is unchanged on purpose. Redrawing `Attention =
+        // softmax` in the body face drops the fraction onto one baseline.
         if trimmed.chars().count() < 12
             || is_section_index_text(trimmed)
             || bare_page_label(trimmed)
             || english_body_source(trimmed)
+            || glyphs
+                .iter()
+                .any(|glyph| is_math_font(&glyph.font_name))
+            || crate::segment::display_equation_glyphs(&glyphs)
         {
             continue;
         }
@@ -23592,6 +23600,27 @@ ET";
             !multi.text.contains("dmodel"),
             "d_model was flattened: {}",
             multi.text
+        );
+        assert!(
+            multi.text.contains("function with"),
+            "the subscript hole swallowed the previous word: {}",
+            multi.text
+        );
+        let where_line = merged.iter().find(|segment| {
+            segment.text.contains("where") && segment.text.contains("Attention")
+        });
+        let Some(where_line) = where_line else {
+            panic!("where head_i = Attention was not segmented");
+        };
+        let where_glyphs: Vec<&Glyph> = where_line
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extraction.glyphs.get(by_id[id]))
+            .collect();
+        assert!(
+            crate::segment::display_equation_glyphs(&where_glyphs),
+            "where head_i = Attention was treated as prose: {}",
+            where_line.text
         );
     }
 
