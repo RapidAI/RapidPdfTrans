@@ -694,7 +694,16 @@ fn absorb_one_char_tail(lines: &mut [String]) {
         .chars()
         .filter(|ch| is_cjk_body(*ch))
         .count();
-    if last_cjk == 0 || last_cjk >= 2 {
+    // A formula hole disables hanging punctuation, so `实现。` can wrap as
+    // `实现` / `。`. A mark by itself is the same orphan as `组` / `件`.
+    let closing_only = {
+        let marks: Vec<char> = lines[last_index]
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        !marks.is_empty() && marks.iter().all(|ch| hanging_punct(*ch))
+    };
+    if last_cjk >= 2 || (last_cjk == 0 && !closing_only) {
         return;
     }
     let prev: Vec<char> = lines[last_index - 1].chars().collect();
@@ -3378,6 +3387,54 @@ mod tests {
             .count();
         assert!(tail >= 2, "orphan tail: {lines:?}");
         let flat: String = lines.iter().flat_map(|line| line.chars()).collect();
+        assert_eq!(flat, text);
+    }
+
+    #[test]
+    fn a_period_after_a_formula_hole_is_not_its_own_line() {
+        // Holes disable hanging punctuation, so the closing `。` wraps alone
+        // when the line is already full. It has to come down with the last
+        // ideograph. `实现` / `。` is the paragraph under equation (1).
+        let text = "00\u{3000}矩阵乘法代码实现。";
+        let mut glyphs = HashMap::new();
+        for (id, ch) in (1u16..).zip(text.chars()) {
+            glyphs.insert(ch as u32, (id, 1000));
+        }
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+            fallback: None,
+            notice: None,
+        };
+        let mut holes = HashMap::new();
+        holes.insert(0, 20.0);
+        let fitted = fit_cjk_block_with(
+            text,
+            10.0,
+            1.0,
+            100.0,
+            0.0,
+            40.0,
+            &font,
+            CjkMeasure::resolve(1.0, 1.2),
+            None,
+            &holes,
+        )
+        .expect("fit");
+        let lines = &fitted.0;
+        assert!(
+            lines.iter().all(|line| {
+                let marks: Vec<char> = line.chars().filter(|ch| !ch.is_whitespace()).collect();
+                !(marks.len() == 1 && hanging_punct(marks[0]))
+            }),
+            "lone closing mark: {lines:?}"
+        );
+        assert!(
+            lines.last().unwrap().contains('现') && lines.last().unwrap().ends_with('。'),
+            "the period left its ideograph: {lines:?}"
+        );
+        let flat: String = lines.concat();
         assert_eq!(flat, text);
     }
 
