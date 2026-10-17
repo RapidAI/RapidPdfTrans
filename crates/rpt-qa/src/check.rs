@@ -1049,6 +1049,59 @@ pub fn title_axis_drift(extraction: &Extraction) -> Vec<TitleAxisDrift> {
     flags
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct OrphanRule {
+    pub page: u32,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+}
+
+/// A short horizontal path with no glyph beside it. A radical vinculum or
+/// fraction bar left at the English position after the formula moved is
+/// this. A bar that still crosses its radicand is not.
+pub fn orphan_rules(extraction: &Extraction) -> Vec<OrphanRule> {
+    let mut flags = Vec::new();
+    for region in &extraction.regions {
+        if region.kind != "path" {
+            continue;
+        }
+        let x0 = region.bbox[0].min(region.bbox[2]);
+        let x1 = region.bbox[0].max(region.bbox[2]);
+        let y0 = region.bbox[1].min(region.bbox[3]);
+        let y1 = region.bbox[1].max(region.bbox[3]);
+        let width = x1 - x0;
+        let height = y1 - y0;
+        if height > 1.6 || !(2.0..=40.0).contains(&width) {
+            continue;
+        }
+        let y = (y0 + y1) * 0.5;
+        let beside = extraction.glyphs.iter().any(|glyph| {
+            if glyph.page_index != region.page_index
+                || glyph.invisible
+                || glyph.unicode.trim().is_empty()
+            {
+                return false;
+            }
+            let gx0 = glyph.bbox[0].min(glyph.bbox[2]) - 16.0;
+            let gx1 = glyph.bbox[0].max(glyph.bbox[2]) + 16.0;
+            let gy0 = glyph.bbox[1].min(glyph.bbox[3]) - 6.0;
+            let gy1 = glyph.bbox[1].max(glyph.bbox[3]) + 6.0;
+            y >= gy0 && y <= gy1 && x1 >= gx0 && x0 <= gx1
+        });
+        if beside {
+            continue;
+        }
+        flags.push(OrphanRule {
+            page: region.page_index + 1,
+            x: x0,
+            y,
+            width,
+        });
+    }
+    flags
+}
+
 /// Shared midpoint of the horizontal rules above and below `y`.
 fn bracketing_rules(extraction: &Extraction, page: u32, y: f32, size: f32) -> Option<f32> {
     let mut rules = Vec::new();
@@ -1506,6 +1559,44 @@ mod tests {
         assert!(
             !centered.iter().any(|flag| flag.text.contains("Attention")),
             "{centered:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_rule_with_no_glyph_is_an_orphan() {
+        let mut radicand = glyph(1, 126.0, 259.0);
+        radicand.unicode = "d".into();
+        radicand.bbox = [126.0, 257.0, 132.0, 266.0];
+        let mut page = page_with(vec![radicand]);
+        page.regions = vec![
+            rpt_core::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [120.0, 265.4, 135.0, 265.8],
+                kind: "path".into(),
+            },
+            rpt_core::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [260.0, 220.0, 275.0, 220.4],
+                kind: "path".into(),
+            },
+            rpt_core::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [108.0, 94.0, 251.0, 94.4],
+                kind: "path".into(),
+            },
+        ];
+        let flags = orphan_rules(&page);
+        assert!(
+            flags.iter().any(|flag| (flag.x - 260.0).abs() < 0.1),
+            "the bar with no glyph was kept: {flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| (flag.x - 120.0).abs() < 0.1),
+            "the vinculum on d was flagged: {flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| flag.width > 40.0),
+            "a footnote rule was flagged: {flags:?}"
         );
     }
 }

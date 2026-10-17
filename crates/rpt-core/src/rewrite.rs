@@ -764,7 +764,10 @@ pub fn rewrite_translation(
     // with the line and the bar stayed on the next line (`相似`) or beside
     // the heading. Blanking does not touch the path; shift it by the same
     // amount, keeping each number the same width so later offsets still match.
-    shift_formula_rules(doc, extraction, &stack_shifts)?;
+    // A display equation closed up with the paragraph uses the same shift.
+    let mut rule_shifts = stack_shifts.clone();
+    rule_shifts.extend(listing_shifts.iter().cloned());
+    shift_formula_rules(doc, extraction, &rule_shifts)?;
 
     let draw_ids: HashSet<u32> = succeeded
         .iter()
@@ -774,7 +777,10 @@ pub fn rewrite_translation(
     // A bar whose glyphs were erased and not redrawn as a formula still
     // strikes the Chinese (`噪声尺度`). A bar we just moved sits in the
     // destination box and stays with the radical.
-    blank_rules_on_erased_text(doc, extraction, &draw_ids, &stack_shifts)?;
+    blank_rules_on_erased_text(doc, extraction, &draw_ids, &rule_shifts)?;
+    // A vinculum whose formula moved and whose path did not is no longer
+    // next to any glyph. Remove it instead of leaving `——` in the column.
+    blank_orphan_hairlines(doc, extraction, &drawn, &draw_ids, &rule_shifts)?;
     if !draw_ids.is_empty() && !embedded.is_empty() {
         embed_and_draw(doc, extraction, &drawn, &embedded)?;
         retarget_link_annotations(doc, extraction, &drawn, &draw_ids);
@@ -10294,6 +10300,7 @@ struct ColumnBlock {
     listing: bool,
 }
 
+#[derive(Clone)]
 struct ListingShift {
     page: u32,
     ids: Vec<u32>,
@@ -12450,7 +12457,7 @@ fn close_column_holes(
     by_id: &HashMap<u32, usize>,
 ) -> Vec<ListingShift> {
     let original_y: Vec<f32> = drawn.iter().map(|line| line.y).collect();
-    let mut shifts = Vec::new();
+    let mut shifts: Vec<ListingShift> = Vec::new();
     let mut pages: Vec<u32> = drawn.iter().map(|line| line.page).collect();
     pages.sort_unstable();
     pages.dedup();
@@ -12486,6 +12493,10 @@ fn close_column_holes(
         // index is short, so closing the hole above it used to lift `1.3`
         // onto the previous line and leave the title behind.
         merge_section_heading_blocks(&mut blocks, drawn);
+        // A display equation is not a drawn line. Without it in the chain,
+        // a shorter paragraph above resets the pull and leaves a hole
+        // between `计算如下：` and equation (1).
+        blocks.extend(display_formula_blocks(drawn, extraction, page));
         let slots = listing_slots(&blocks, extraction);
         blocks.sort_by(|left, right| right.top.total_cmp(&left.top));
         let mut used_ids = HashSet::new();
@@ -12633,7 +12644,16 @@ fn close_column_holes(
             {
                 0.0
             } else if shift > 0.4 {
-                cap_upward_shift(&block, shift, page, extraction, &used_ids)
+                // A display equation in this chain is about to move by the
+                // same pull. Its old baseline is not a ceiling, or the
+                // paragraph under equation (1) stays in the hole.
+                let mut ceiling = used_ids.clone();
+                for item in &shifts {
+                    if item.page == page && item.dy > 0.4 {
+                        ceiling.extend(item.ids.iter().copied());
+                    }
+                }
+                cap_upward_shift(&block, shift, page, extraction, &ceiling)
             } else {
                 shift
             };
@@ -13762,9 +13782,264 @@ fn column_block(
     })
 }
 
+fn formula_glyph_span(glyph: &Glyph) -> (f32, f32) {
+    let x0 = glyph.bbox[0].min(glyph.matrix[4]);
+    let x1 = glyph.bbox[2].max(glyph.matrix[4] + glyph.advance[0].max(0.0));
+    (x0.min(x1), x0.max(x1))
+}
+
+fn formula_line_span(line: &[&Glyph]) -> (f32, f32) {
+    let left = line
+        .iter()
+        .map(|glyph| formula_glyph_span(glyph).0)
+        .fold(f32::MAX, f32::min);
+    let right = line
+        .iter()
+        .map(|glyph| formula_glyph_span(glyph).1)
+        .fold(f32::MIN, f32::max);
+    (left, right)
+}
+
+fn formula_horiz_gap(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
+    if a1 < b0 {
+        b0 - a1
+    } else if b1 < a0 {
+        a0 - b1
+    } else {
+        0.0
+    }
+}
+
+/// `(1)` / `(12)` on a display baseline. The tag is roman, so it is not
+/// part of the math-font cluster, and it can sit far to the right.
+fn equation_tag(text: &str) -> bool {
+    let text = text.trim();
+    let inner = text.strip_prefix('(').unwrap_or(text);
+    let inner = inner.strip_suffix(')').unwrap_or(inner);
+    !inner.is_empty()
+        && inner.len() <= 7
+        && inner.chars().any(|ch| ch.is_ascii_digit())
+        && inner.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+fn attach_equation_tags(clusters: &mut Vec<Vec<&Glyph>>) {
+    let mut tags = Vec::new();
+    let mut hosts = Vec::new();
+    for cluster in std::mem::take(clusters) {
+        let text: String = {
+            let mut ordered = cluster.clone();
+            ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+            ordered.iter().map(|glyph| glyph.unicode.trim()).collect()
+        };
+        let math = cluster
+            .iter()
+            .filter(|glyph| is_math_font(&glyph.font_name))
+            .count();
+        if equation_tag(&text) && math == 0 && cluster.len() <= 6 {
+            tags.push(cluster);
+        } else {
+            hosts.push(cluster);
+        }
+    }
+    for tag in tags {
+        let size = tag
+            .iter()
+            .map(|glyph| glyph.font_size)
+            .fold(1.0f32, f32::max);
+        let tag_y = tag
+            .iter()
+            .map(|glyph| glyph.matrix[5])
+            .fold(0.0f32, |sum, y| sum + y)
+            / tag.len() as f32;
+        let tag_x = tag
+            .iter()
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        let host = hosts.iter_mut().find(|cluster| {
+            let math = cluster
+                .iter()
+                .filter(|glyph| is_math_font(&glyph.font_name))
+                .count();
+            if math < 3 {
+                return false;
+            }
+            let mut bands: HashMap<i32, usize> = HashMap::new();
+            for glyph in cluster.iter() {
+                let band = (glyph.matrix[5] * 2.0).round() as i32;
+                *bands.entry(band).or_default() += 1;
+            }
+            let base = bands
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(band, _)| band as f32 * 0.5)
+                .unwrap_or(tag_y);
+            if (tag_y - base).abs() > size * 0.55 {
+                return false;
+            }
+            let right = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[4] + glyph.advance[0].max(0.0))
+                .fold(f32::MIN, f32::max);
+            tag_x + size > right && tag_x - right < size * 16.0
+        });
+        if let Some(host) = host {
+            host.extend(tag);
+        } else {
+            hosts.push(tag);
+        }
+    }
+    *clusters = hosts;
+}
+
 /// Monospace lines that were not redrawn. Each line is its own block so a
 /// shorter paragraph above the listing pulls the code, and the paragraph
 /// under the code, up by the same hole.
+/// A kept display equation between two paragraphs. Inline math sits on a
+/// drawn baseline and is seated with its line; this is the formula that
+/// does not, such as equation (1).
+fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<ColumnBlock> {
+    let mut used = HashSet::new();
+    let mut baselines = Vec::new();
+    for line in drawn {
+        if line.page != page {
+            continue;
+        }
+        used.extend(line.glyph_ids.iter().copied());
+        baselines.push((line.y, line.size.max(1.0)));
+    }
+    let away_from_text = |glyph: &Glyph| {
+        let y = glyph.matrix[5];
+        baselines
+            .iter()
+            .all(|(line_y, size)| (y - *line_y).abs() > size * 0.9)
+    };
+    let mut pool: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == page
+                && !used.contains(&glyph.id)
+                && !glyph.invisible
+                && !glyph.unicode.trim().is_empty()
+                && away_from_text(glyph)
+        })
+        .collect();
+    pool.sort_by(|left, right| {
+        right.matrix[5]
+            .total_cmp(&left.matrix[5])
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    // A superscript is a few points above the operator it belongs to.
+    // Joining whichever cluster is merely nearby pulls `tmax` into the
+    // fraction and leaves `Attention(Q, K, V) = sof` on the old baseline.
+    // Lines form first. A line then stacks onto a formula it overlaps.
+    let mut lines: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in pool {
+        let size = glyph.font_size.max(1.0);
+        let (gx0, gx1) = formula_glyph_span(glyph);
+        let joined = lines.iter_mut().find(|line| {
+            let base = line[0].matrix[5];
+            if (glyph.matrix[5] - base).abs() > size * 0.35 {
+                return false;
+            }
+            let (lx0, lx1) = formula_line_span(line);
+            formula_horiz_gap(gx0, gx1, lx0, lx1) < size * 2.5
+        });
+        if let Some(line) = joined {
+            line.push(glyph);
+        } else {
+            lines.push(vec![glyph]);
+        }
+    }
+    let mut clusters: Vec<Vec<&Glyph>> = Vec::new();
+    for line in lines {
+        let size = line
+            .iter()
+            .map(|glyph| glyph.font_size)
+            .fold(1.0f32, f32::max);
+        let (lx0, lx1) = formula_line_span(&line);
+        let ly = line.iter().map(|glyph| glyph.matrix[5]).sum::<f32>() / line.len() as f32;
+        let joined = clusters.iter_mut().find(|cluster| {
+            let (cx0, cx1) = formula_line_span(cluster);
+            if formula_horiz_gap(lx0, lx1, cx0, cx1) >= size {
+                return false;
+            }
+            // The fraction, its superscript, and d_k span about 2em.
+            // A looser test chains every kept glyph down the column.
+            let cluster_size = cluster
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(size, f32::max);
+            let top = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[5])
+                .fold(ly, f32::max);
+            let bottom = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[5])
+                .fold(ly, f32::min);
+            top - bottom <= cluster_size * 2.05
+        });
+        if let Some(cluster) = joined {
+            cluster.extend(line);
+        } else {
+            clusters.push(line);
+        }
+    }
+    // `(1)` sits on the equation baseline, a column-width away from the
+    // formula. Leaving it behind caps the next paragraph and paints the
+    // tag in the hole the formula just left.
+    attach_equation_tags(&mut clusters);
+    clusters
+        .into_iter()
+        .filter_map(|cluster| {
+            let math = cluster
+                .iter()
+                .filter(|glyph| is_math_font(&glyph.font_name))
+                .count();
+            if math < 3 || cluster.len() < 4 {
+                return None;
+            }
+            let left = cluster
+                .iter()
+                .map(|glyph| formula_glyph_span(glyph).0)
+                .fold(f32::MAX, f32::min);
+            let right = cluster
+                .iter()
+                .map(|glyph| formula_glyph_span(glyph).1)
+                .fold(f32::MIN, f32::max);
+            if !left.is_finite() || right - left < 28.0 {
+                return None;
+            }
+            let top = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[5])
+                .fold(f32::MIN, f32::max);
+            let bottom = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[5])
+                .fold(f32::MAX, f32::min);
+            let size = cluster
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max);
+            let kept_ids = cluster.iter().map(|glyph| glyph.id).collect();
+            Some(ColumnBlock {
+                indices: Vec::new(),
+                kept_ids,
+                top,
+                bottom,
+                left,
+                right,
+                source_top: top,
+                source_bottom: bottom,
+                size,
+                listing: true,
+            })
+        })
+        .collect()
+}
+
 fn listing_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<ColumnBlock> {
     let mut used = HashSet::new();
     for line in drawn {
@@ -13897,6 +14172,14 @@ fn reposition_listings(
                     && glyphs[end].font_resource == glyphs[start].font_resource
                     && (glyphs[end].matrix[5] - glyphs[start].matrix[5]).abs() < 0.8
                 {
+                    // `softmax( QKᵀ/√d_k )` puts the closing paren past the
+                    // fraction. One `Tj` would set that paren by the font
+                    // advance and close the parentheses on the fraction.
+                    let prev = glyphs[end - 1];
+                    let expected = prev.matrix[4] + prev.advance[0];
+                    if (glyphs[end].matrix[4] - expected).abs() > 1.5 {
+                        break;
+                    }
                     end += 1;
                 }
                 let run = &glyphs[start..end];
@@ -14658,6 +14941,272 @@ fn blank_covered_hairlines(
                             }
                             for pair in sub.pts.windows(2) {
                                 if covered(pair[0].x, pair[0].y, pair[1].x, pair[1].y) {
+                                    group_doomed = true;
+                                }
+                            }
+                        }
+                        subs.clear();
+                    }
+                    "n" => subs.clear(),
+                    _ => {}
+                }
+                nums.clear();
+            }
+            ContentTokKind::Break => nums.clear(),
+        }
+    }
+    if doomed.is_empty() {
+        return false;
+    }
+    doomed.sort_by_key(|span| std::cmp::Reverse(span.0));
+    doomed.dedup();
+    for (start, end) in doomed {
+        if end <= bytes.len() && start < end {
+            for byte in &mut bytes[start..end] {
+                *byte = b' ';
+            }
+        }
+    }
+    true
+}
+
+/// Drop a short rule that no longer sits on a glyph. A fraction bar that
+/// moved with `1/√d_k` stays. One left at the English x after the formula
+/// moved is the stray `——` under the paragraph and beside the heading.
+fn blank_orphan_hairlines(
+    doc: &mut Document,
+    extraction: &Extraction,
+    drawn: &[Drawn],
+    erased: &HashSet<u32>,
+    shifts: &[ListingShift],
+) -> Result<()> {
+    let by_id = glyph_index(&extraction.glyphs);
+    let mut moved: HashMap<u32, (f32, f32)> = HashMap::new();
+    for shift in shifts {
+        if shift.dx.abs() < 0.3 && shift.dy.abs() < 0.3 {
+            continue;
+        }
+        for id in &shift.ids {
+            moved.insert(*id, (shift.dx, shift.dy));
+        }
+    }
+    let mut ink: Vec<(f32, f32, f32, f32)> = Vec::new();
+    for line in drawn {
+        if line.text.trim().is_empty() {
+            continue;
+        }
+        let width = line.widths.iter().sum::<f32>() + line.gaps.iter().sum::<f32>();
+        if width < 0.5 {
+            continue;
+        }
+        let size = line.size.max(1.0);
+        ink.push((
+            line.x - 2.0,
+            line.y - size * 0.45,
+            line.x + width + 2.0,
+            line.y + size * 1.05,
+        ));
+    }
+    for glyph in &extraction.glyphs {
+        if glyph.invisible || glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        let (dx, dy) = if let Some(delta) = moved.get(&glyph.id) {
+            *delta
+        } else if erased.contains(&glyph.id) {
+            continue;
+        } else {
+            (0.0, 0.0)
+        };
+        let x0 = glyph.bbox[0].min(glyph.bbox[2]) + dx;
+        let x1 = glyph.bbox[0].max(glyph.bbox[2]) + dx;
+        let y0 = glyph.bbox[1].min(glyph.bbox[3]) + dy;
+        let y1 = glyph.bbox[1].max(glyph.bbox[3]) + dy;
+        ink.push((x0 - 3.0, y0 - 6.0, x1 + 3.0, y1 + 6.0));
+    }
+    if ink.is_empty() {
+        return Ok(());
+    }
+    let mut streams = HashSet::new();
+    for id in erased {
+        if let Some(glyph) = by_id
+            .get(id)
+            .and_then(|index| extraction.glyphs.get(*index))
+        {
+            if let Some(span) = span_of(&glyph.source) {
+                streams.insert(span.object_id);
+            }
+        }
+    }
+    for shift in shifts {
+        for id in &shift.ids {
+            if let Some(glyph) = by_id
+                .get(id)
+                .and_then(|index| extraction.glyphs.get(*index))
+            {
+                if let Some(span) = span_of(&glyph.source) {
+                    streams.insert(span.object_id);
+                }
+            }
+        }
+    }
+    for id in streams {
+        let Ok(object) = doc.get_object(id) else {
+            continue;
+        };
+        let Ok(stream) = object.as_stream() else {
+            continue;
+        };
+        let Ok(mut bytes) = stream.decompressed_content() else {
+            continue;
+        };
+        if !blank_distant_hairlines(&mut bytes, &ink) {
+            continue;
+        }
+        let Ok(object) = doc.get_object_mut(id) else {
+            continue;
+        };
+        let Ok(stream) = object.as_stream_mut() else {
+            continue;
+        };
+        stream.set_plain_content(bytes);
+    }
+    Ok(())
+}
+
+/// A short horizontal stroke counts as placed when its span meets a glyph
+/// or a drawn line. Anything else in the 2–40pt band is a leftover vinculum.
+fn blank_distant_hairlines(bytes: &mut [u8], ink: &[(f32, f32, f32, f32)]) -> bool {
+    if ink.is_empty() {
+        return false;
+    }
+    let near = |x0: f32, y0: f32, x1: f32, y1: f32| -> bool {
+        let width = (x0 - x1).abs();
+        let height = (y0 - y1).abs();
+        if height > 1.2 || !(2.0..=40.0).contains(&width) {
+            return true;
+        }
+        let left = x0.min(x1);
+        let right = x0.max(x1);
+        let y = (y0 + y1) * 0.5;
+        ink.iter().any(|ink_box| {
+            // An arrow shaft sits a few points to the side of its label.
+            // A vinculum left on the old line is a full baseline away.
+            if y < ink_box.1 || y > ink_box.3 {
+                return false;
+            }
+            let gap = if right < ink_box.0 {
+                ink_box.0 - right
+            } else if left > ink_box.2 {
+                left - ink_box.2
+            } else {
+                0.0
+            };
+            gap <= 16.0
+        })
+    };
+    let tokens = content_tokens(bytes);
+    let mut ctm = form_ident();
+    let mut stack: Vec<(FormMtx, Option<usize>, bool)> = Vec::new();
+    let mut q_start: Option<usize> = None;
+    let mut nums: Vec<(usize, usize, f32)> = Vec::new();
+    let mut subs: Vec<HairSub> = Vec::new();
+    let mut doomed: Vec<(usize, usize)> = Vec::new();
+    let mut group_doomed = false;
+    let mut loose_re: Option<usize> = None;
+    for token in &tokens {
+        match &token.kind {
+            ContentTokKind::Number(value) => nums.push((token.start, token.end, *value)),
+            ContentTokKind::Operator(op) => {
+                match *op {
+                    "q" => {
+                        stack.push((ctm, q_start, group_doomed));
+                        q_start = Some(token.start);
+                        group_doomed = false;
+                        subs.clear();
+                    }
+                    "Q" => {
+                        if group_doomed {
+                            if let Some(start) = q_start {
+                                if token.end.saturating_sub(start) <= 400 {
+                                    doomed.push((start, token.end));
+                                }
+                            }
+                        }
+                        if let Some((prev, prev_q, prev_doomed)) = stack.pop() {
+                            ctm = prev;
+                            q_start = prev_q;
+                            group_doomed = prev_doomed;
+                        } else {
+                            q_start = None;
+                            group_doomed = false;
+                        }
+                        subs.clear();
+                    }
+                    "cm" if nums.len() >= 6 => {
+                        let m = &nums[nums.len() - 6..];
+                        let applied = FormMtx {
+                            a: m[0].2,
+                            b: m[1].2,
+                            c: m[2].2,
+                            d: m[3].2,
+                            e: m[4].2,
+                            f: m[5].2,
+                        };
+                        ctm = form_concat(ctm, applied);
+                    }
+                    "m" if nums.len() >= 2 => {
+                        let x = &nums[nums.len() - 2];
+                        let y = &nums[nums.len() - 1];
+                        let (px, py) = form_map(ctm, x.2, y.2);
+                        subs.push(HairSub {
+                            pts: vec![HairPt {
+                                x: px,
+                                y: py,
+                                x_at: (x.0, x.1),
+                                y_at: (y.0, y.1),
+                                lx: x.2,
+                                ly: y.2,
+                            }],
+                            curved: false,
+                        });
+                    }
+                    "l" if nums.len() >= 2 => {
+                        let x = &nums[nums.len() - 2];
+                        let y = &nums[nums.len() - 1];
+                        let (px, py) = form_map(ctm, x.2, y.2);
+                        if let Some(sub) = subs.last_mut() {
+                            sub.pts.push(HairPt {
+                                x: px,
+                                y: py,
+                                x_at: (x.0, x.1),
+                                y_at: (y.0, y.1),
+                                lx: x.2,
+                                ly: y.2,
+                            });
+                        }
+                    }
+                    "re" if nums.len() >= 4 => {
+                        let n = &nums[nums.len() - 4..];
+                        let (x, y, w, h) = (n[0].2, n[1].2, n[2].2, n[3].2);
+                        let (x0, y0) = form_map(ctm, x, y);
+                        let (x1, y1) = form_map(ctm, x + w, y + h);
+                        if !near(x0, y0, x1, y1) && q_start.is_some() {
+                            group_doomed = true;
+                        } else if !near(x0, y0, x1, y1) {
+                            loose_re = Some(n[0].0);
+                        }
+                    }
+                    "S" | "s" | "f" | "F" | "f*" => {
+                        if let Some(start) = loose_re.take() {
+                            doomed.push((start, token.end));
+                        }
+                        for sub in &subs {
+                            if sub.curved || sub.pts.len() < 2 {
+                                continue;
+                            }
+                            for pair in sub.pts.windows(2) {
+                                if !near(pair[0].x, pair[0].y, pair[1].x, pair[1].y) {
                                     group_doomed = true;
                                 }
                             }
@@ -31407,5 +31956,152 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
             &[],
         ));
         assert!(!String::from_utf8(pieces).unwrap().contains("26.108"));
+    }
+
+    #[test]
+    fn a_short_paragraph_pulls_the_display_equation_up() {
+        let mut math: Vec<Glyph> = (0..6)
+            .map(|index| {
+                let mut glyph =
+                    ink_glyph(30 + index, 108.0 + index as f32 * 12.0, 360.0, 10.0, "Q");
+                glyph.font_name = "CMMI10".into();
+                glyph
+            })
+            .collect();
+        math.push({
+            let mut label = ink_glyph(40, 200.0, 360.0, 10.0, "(1)");
+            label.font_name = "CMR10".into();
+            label
+        });
+        let mut glyphs = vec![
+            ink_glyph(1, 108.0, 400.0, 10.0, "I"),
+            ink_glyph(2, 108.0, 386.0, 10.0, "a"),
+            ink_glyph(3, 108.0, 342.0, 10.0, "T"),
+            ink_glyph(4, 108.0, 330.0, 10.0, "h"),
+        ];
+        glyphs.append(&mut math);
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut intro = test_draw(108.0, 400.0, 10.0, "输出矩阵的计算如下：", vec![1, 2]);
+        intro.widths = vec![22.0; intro.text.chars().count()];
+        // 18pt under the equation, the same gap d_k leaves above the next
+        // sentence. The equation's old ink must not cap this line.
+        let mut following = test_draw(108.0, 342.0, 10.0, "最常用的两种注意力函数", vec![3]);
+        following.widths = vec![22.0; following.text.chars().count()];
+        let mut after = test_draw(108.0, 330.0, 10.0, "点积注意力与我们的算法相同", vec![4]);
+        after.widths = vec![22.0; after.text.chars().count()];
+        let mut drawn = vec![intro, following, after];
+        let shifts = close_column_holes(&mut drawn, &extraction, &by_id);
+        let equation = shifts
+            .iter()
+            .find(|shift| shift.ids.contains(&30))
+            .expect("display equation was left under the hole");
+        assert!(
+            equation.dy > 8.0,
+            "equation dy {} did not close the gap",
+            equation.dy
+        );
+        assert!(
+            equation.ids.contains(&40),
+            "equation tag stayed on the old baseline: {:?}",
+            equation.ids
+        );
+        let next = drawn
+            .iter()
+            .find(|line| line.text.starts_with('最'))
+            .unwrap();
+        assert!(
+            (next.y - (342.0 + equation.dy)).abs() < 1.5,
+            "paragraph under the equation rose to {} while the equation rose {}",
+            next.y - 342.0,
+            equation.dy
+        );
+        let third = drawn
+            .iter()
+            .find(|line| line.text.starts_with('点'))
+            .unwrap();
+        assert!(
+            (next.y - third.y - 12.0).abs() < 1.5,
+            "lines under the equation closed up: {} then {}",
+            next.y,
+            third.y
+        );
+    }
+
+    #[test]
+    fn a_superscript_stays_on_the_same_display_equation() {
+        let mut glyphs = Vec::new();
+        let mut id = 1u32;
+        let mut push = |x, y, text: &str, font: &str| {
+            let mut glyph = ink_glyph(id, x, y, 10.0, text);
+            glyph.font_name = font.into();
+            id += 1;
+            glyphs.push(glyph);
+        };
+        for (index, _) in "Attention".chars().enumerate() {
+            push(220.0 + index as f32 * 6.0, 311.0, "A", "CMR10");
+        }
+        push(270.0, 311.0, "Q", "CMMI10");
+        push(290.0, 311.0, "=", "CMR10");
+        for (index, ch) in "softmax".chars().enumerate() {
+            push(305.0 + index as f32 * 6.0, 311.0, &ch.to_string(), "CMR10");
+        }
+        push(340.0, 318.0, "Q", "CMMI10");
+        push(350.0, 322.0, "T", "CMMI7");
+        push(344.0, 304.0, "d", "CMMI10");
+        push(493.0, 311.0, "(1)", "CMR10");
+        let attention = glyphs[0].id;
+        let superscript = glyphs
+            .iter()
+            .find(|glyph| glyph.matrix[5] == 318.0)
+            .unwrap()
+            .id;
+        let tag = glyphs.last().unwrap().id;
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let above = test_draw(108.0, 364.0, 10.0, "计算如下", vec![]);
+        let below = test_draw(108.0, 285.0, 10.0, "最常用", vec![]);
+        let blocks = display_formula_blocks(&vec![above, below], &extraction, 0);
+        assert_eq!(blocks.len(), 1, "equation split into {}", blocks.len());
+        let ids = &blocks[0].kept_ids;
+        assert!(ids.contains(&attention), "operator left behind: {ids:?}");
+        assert!(
+            ids.contains(&superscript),
+            "superscript left the operator: {ids:?}"
+        );
+        assert!(ids.contains(&tag), "equation tag left behind: {ids:?}");
+    }
+
+    #[test]
+    fn an_orphan_vinculum_is_blanked_and_a_bar_on_ink_stays() {
+        let src = b"q\n1 0 0 1 120.056 265.599 cm\n[]0 d 0 J 0.398 w 0 0 m 15.047 0 l S\nQ\n\
+q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
+            .to_vec();
+        let mut orphan = src.clone();
+        assert!(blank_distant_hairlines(
+            &mut orphan,
+            &[(300.0, 250.0, 360.0, 280.0)],
+        ));
+        let text = String::from_utf8(orphan).unwrap();
+        assert!(!text.contains("120.056 265.599"), "{text}");
+        assert!(text.contains("108 94.002 cm"), "{text}");
+
+        let mut seated = src.clone();
+        assert!(!blank_distant_hairlines(
+            &mut seated,
+            &[(116.0, 258.0, 140.0, 272.0)],
+        ));
+        assert_eq!(seated, src);
     }
 }
