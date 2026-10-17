@@ -1102,6 +1102,122 @@ pub fn orphan_rules(extraction: &Extraction) -> Vec<OrphanRule> {
     flags
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct DetachedScript {
+    pub page: u32,
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// A superscript or subscript that no longer sits on its base. Reflow moved
+/// the base and left the script at the English x, or split `O` off `W^O`.
+/// A footnote mark on a name is not a script.
+pub fn detached_scripts(glyphs: &[Glyph]) -> Vec<DetachedScript> {
+    let visible: Vec<&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .collect();
+    let mut body_sizes: Vec<f32> = visible
+        .iter()
+        .filter(|glyph| {
+            glyph.font_size >= 8.0 && glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+        })
+        .map(|glyph| glyph.font_size)
+        .collect();
+    body_sizes.sort_by(|left, right| left.total_cmp(right));
+    let body = body_sizes
+        .get(body_sizes.len() / 2)
+        .copied()
+        .unwrap_or(10.0)
+        .max(1.0);
+    let scripts: Vec<&Glyph> = visible
+        .iter()
+        .copied()
+        .filter(|glyph| script_glyph(glyph, body))
+        .collect();
+    if scripts.is_empty() {
+        return Vec::new();
+    }
+    let mut parent: Vec<usize> = (0..scripts.len()).collect();
+    for left in 0..scripts.len() {
+        for right in left + 1..scripts.len() {
+            let a = scripts[left];
+            let b = scripts[right];
+            if a.page_index != b.page_index {
+                continue;
+            }
+            let dx = (a.matrix[4] - b.matrix[4]).abs();
+            let dy = (a.matrix[5] - b.matrix[5]).abs();
+            if dx <= body * 0.95 && dy <= body * 0.40 {
+                let root_left = script_root(&mut parent, left);
+                let root_right = script_root(&mut parent, right);
+                parent[root_right] = root_left;
+            }
+        }
+    }
+    let mut clusters: HashMap<usize, Vec<&Glyph>> = HashMap::new();
+    for (index, glyph) in scripts.iter().enumerate() {
+        clusters
+            .entry(script_root(&mut parent, index))
+            .or_default()
+            .push(*glyph);
+    }
+    let mut flags = Vec::new();
+    for cluster in clusters.into_values() {
+        let anchored = cluster.iter().any(|mark| {
+            visible.iter().any(|base| {
+                base.page_index == mark.page_index
+                    && base.id != mark.id
+                    && base.font_size >= body * 0.85
+                    && {
+                        let rise = (mark.matrix[5] - base.matrix[5]).abs();
+                        let dx = mark.matrix[4] - base.matrix[4];
+                        rise >= body * 0.05
+                            && rise <= body * 0.85
+                            && dx >= -body * 0.50
+                            && dx <= body * 1.45
+                    }
+            })
+        });
+        if anchored {
+            continue;
+        }
+        for mark in cluster {
+            flags.push(DetachedScript {
+                page: mark.page_index + 1,
+                text: mark.unicode.trim().to_string(),
+                x: mark.matrix[4],
+                y: mark.matrix[5],
+            });
+        }
+    }
+    flags
+}
+
+fn script_glyph(glyph: &Glyph, body: f32) -> bool {
+    if glyph.font_size > body * 0.85 {
+        return false;
+    }
+    let text = glyph.unicode.trim();
+    if text.is_empty() || footnote_mark(text) {
+        return false;
+    }
+    text.chars().any(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn footnote_mark(text: &str) -> bool {
+    matches!(text, "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#")
+}
+
+fn script_root(parent: &mut [usize], mut index: usize) -> usize {
+    while parent[index] != index {
+        parent[index] = parent[parent[index]];
+        index = parent[index];
+    }
+    index
+}
+
 /// Shared midpoint of the horizontal rules above and below `y`.
 fn bracketing_rules(extraction: &Extraction, page: u32, y: f32, size: f32) -> Option<f32> {
     let mut rules = Vec::new();
@@ -1597,6 +1713,56 @@ mod tests {
         assert!(
             !flags.iter().any(|flag| flag.width > 40.0),
             "a footnote rule was flagged: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn a_superscript_far_from_its_base_is_detached() {
+        let mut base = glyph(1, 180.0, 200.0);
+        base.unicode = "R".into();
+        base.font_name = "MSBM10".into();
+        base.font_size = 10.0;
+        base.matrix = [10.0, 0.0, 0.0, 10.0, 180.0, 200.0];
+        base.bbox = [180.0, 198.0, 188.0, 208.0];
+        let mut seated = glyph(2, 190.0, 203.6);
+        seated.unicode = "d".into();
+        seated.font_name = "CMMI7".into();
+        seated.font_size = 7.0;
+        seated.matrix = [7.0, 0.0, 0.0, 7.0, 190.0, 203.6];
+        seated.bbox = [190.0, 202.0, 195.0, 210.0];
+        let mut floating = glyph(3, 420.0, 203.6);
+        floating.unicode = "d".into();
+        floating.font_name = "CMMI7".into();
+        floating.font_size = 7.0;
+        floating.matrix = [7.0, 0.0, 0.0, 7.0, 420.0, 203.6];
+        floating.bbox = [420.0, 202.0, 425.0, 210.0];
+        let mut model = glyph(4, 426.0, 202.4);
+        model.unicode = "m".into();
+        model.font_name = "NimbusRomNo9L-Regu".into();
+        model.font_size = 5.0;
+        model.matrix = [5.0, 0.0, 0.0, 5.0, 426.0, 202.4];
+        model.bbox = [426.0, 201.0, 430.0, 207.0];
+        let mut star = glyph(5, 250.0, 203.6);
+        star.unicode = "∗".into();
+        star.font_name = "CMSY7".into();
+        star.font_size = 7.0;
+        star.matrix = [7.0, 0.0, 0.0, 7.0, 250.0, 203.6];
+        let mut name = glyph(6, 220.0, 200.0);
+        name.unicode = "z".into();
+        name.font_size = 10.0;
+        name.matrix = [10.0, 0.0, 0.0, 10.0, 220.0, 200.0];
+        let flags = detached_scripts(&[base, seated, floating, model, star, name]);
+        assert!(
+            flags.iter().any(|flag| (flag.x - 420.0).abs() < 0.1),
+            "the floating exponent was kept: {flags:?}"
+        );
+        assert!(
+            flags.iter().all(|flag| (flag.x - 190.0).abs() > 0.1),
+            "the exponent on R was flagged: {flags:?}"
+        );
+        assert!(
+            flags.iter().all(|flag| flag.text != "∗"),
+            "a footnote mark was flagged: {flags:?}"
         );
     }
 }

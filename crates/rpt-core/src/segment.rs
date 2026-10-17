@@ -1033,6 +1033,14 @@ fn centered_comma_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -
     if (upper.left - lower.left).abs() <= size * 1.2 {
         return false;
     }
+    // A full body line shares the page midpoint with a short centered
+    // equation (`where head_i = Attention(...)`). The edges differ, so the
+    // comma test used to claim the sentence under that equation.
+    let upper_w = upper.right - upper.left;
+    let lower_w = lower.right - lower.left;
+    if lower_w > upper_w * 1.45 && lower.left + size * 2.0 < upper.left {
+        return false;
+    }
     if upper_text.ends_with('.') || upper_text.ends_with('?') || upper_text.ends_with('!') {
         return false;
     }
@@ -1218,7 +1226,13 @@ fn detach_low_quality_ocr(
         let low: Vec<usize> = page_lines
             .iter()
             .copied()
-            .filter(|&index| ocr_line_low_quality(&lines[index].text))
+            .filter(|&index| {
+                let body = page_body_size(lines, lines[index].page);
+                // `d_model×d_k` is a superscript of the sentence under it.
+                // The multiply sign makes the line look like scan garbage.
+                ocr_line_low_quality(&lines[index].text)
+                    && !is_extended_formula_script(&lines[index], body)
+            })
             .collect();
         if low.is_empty() {
             continue;
@@ -1472,9 +1486,10 @@ fn junk_ocr_token(token: &str) -> bool {
 /// The operator itself (`−`, `≤`) is not a junk symbol.
 fn formula_line(text: &str) -> bool {
     let math = text.chars().any(math_formula_char);
+    // A space is not scan garbage. `and W ∈ R` is still that formula.
     let junk = text
         .chars()
-        .any(|ch| junk_ocr_symbol(ch) && !math_formula_char(ch));
+        .any(|ch| !ch.is_whitespace() && junk_ocr_symbol(ch) && !math_formula_char(ch));
     math && !junk
 }
 
@@ -1669,7 +1684,13 @@ fn assemble(
     kept.extend(detach_junk_ocr_pages(&mut lines));
     kept.extend(detach_low_quality_ocr(&mut lines, regions, pages));
     attach_markers(&mut lines);
+    // The body line is split where a superscript (`d_model×d_k`) leaves a
+    // hole. Join the shards while those scripts are still their own lines.
+    // Attaching first parks the scripts on the left shard, the hole no
+    // longer has a line over it, and equation (1) loses its closing `)V`.
+    bridge_formula_holes(&mut lines);
     attach_math_scripts(&mut lines);
+    attach_formula_scripts(&mut lines);
     kept.extend(detach_toc_marks(&mut lines));
     kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
@@ -1687,6 +1708,7 @@ fn assemble(
     // sentence, so those words stay in the paragraph. The listing itself is
     // not translated.
     kept.extend(listing_glyphs(&lines));
+    kept.extend(keep_low_prose_math(&lines));
     let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     if !kept_ids.is_empty() {
         lines.retain(|line| {
@@ -4848,6 +4870,20 @@ pub(crate) fn display_equation_glyphs(glyphs: &[&Glyph]) -> bool {
     if glyphs.len() < 4 {
         return false;
     }
+    let body = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    let mut anchor_ys: Vec<f32> = glyphs
+        .iter()
+        .filter(|glyph| glyph.font_size > body * 0.84)
+        .map(|glyph| glyph.matrix[5])
+        .collect();
+    if anchor_ys.is_empty() {
+        anchor_ys = glyphs.iter().map(|glyph| glyph.matrix[5]).collect();
+    }
+    anchor_ys.sort_by(|left, right| left.total_cmp(right));
+    let anchor_y = anchor_ys[anchor_ys.len() / 2];
     let mut math = 0usize;
     let mut letters = 0usize;
     let mut operators = 0usize;
@@ -4861,8 +4897,14 @@ pub(crate) fn display_equation_glyphs(glyphs: &[&Glyph]) -> bool {
                 .filter(|ch| ch.is_ascii_alphabetic())
                 .count();
         }
+        // A superscript `×` in `d_k` sits above the line. The `=` under a
+        // summation is smaller than the sentence and is still that formula's
+        // operator.
         if is_display_operator(&glyph.unicode) {
-            operators += 1;
+            let raised = glyph.matrix[5] > anchor_y + glyph.font_size * 0.25;
+            if glyph.font_size > body * 0.84 || !raised {
+                operators += 1;
+            }
         }
     }
     if math < 3 || operators < 1 || letters >= 48 {
@@ -5028,11 +5070,14 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
             .chars()
             .filter(|ch| ch.is_ascii_alphabetic())
             .count();
-        if letters < 16 && !display_equation_glyphs(&other.glyphs) {
-            continue;
-        }
         let dy = (line.y - other.y).abs();
         let size = other.size.max(1.0);
+        // `W^O` is a one-glyph superscript. The prose line above also covers
+        // that x, but the base is the math letter on the short line below.
+        let on_math = script_sits_on_math(line, other, size);
+        if letters < 16 && !display_equation_glyphs(&other.glyphs) && !on_math {
+            continue;
+        }
         // A radical sits about one em above its radicand. The line above can
         // be closer in y (`a√nd`) while the math letter it belongs to is below.
         if dy < size * 0.08 || dy > size * 1.05 {
@@ -5042,6 +5087,9 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
             continue;
         }
         let mut score = dy;
+        if on_math {
+            score -= size;
+        }
         if line.y > other.y && radical_meets_base(line, other) {
             score -= size;
         }
@@ -5075,6 +5123,336 @@ fn is_math_script(line: &VisualLine<'_>) -> bool {
             .glyphs
             .iter()
             .all(|glyph| symbol(glyph) || !glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
+}
+
+/// `W_i^Q ∈ R` then a wide hole then `, W_i^K`. The hole is the superscript
+/// `d_model×d_k`, which is on the baseline above. It is not a second column.
+fn bridge_formula_holes(lines: &mut Vec<VisualLine<'_>>) {
+    let mut index = 0usize;
+    while index < lines.len() {
+        let Some(next) = next_formula_shard(lines, index) else {
+            index += 1;
+            continue;
+        };
+        let taken = std::mem::take(&mut lines[next].glyphs);
+        lines[index].glyphs.extend(taken);
+        lines[index]
+            .glyphs
+            .sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+        lines[index].text = line_text(&lines[index].glyphs);
+        if let Some((left, right, y, size)) = line_bounds(&lines[index].glyphs) {
+            lines[index].left = left;
+            lines[index].right = right;
+            lines[index].y = y;
+            lines[index].size = size;
+        }
+        lines.remove(next);
+    }
+}
+
+fn next_formula_shard(lines: &[VisualLine<'_>], index: usize) -> Option<usize> {
+    let left = &lines[index];
+    if left.glyphs.is_empty() {
+        return None;
+    }
+    let size = left.size.max(1.0);
+    let body = page_body_size(lines, left.page);
+    let body_glyph = |glyph: &Glyph| glyph.font_size > body * 0.84;
+    if !left.glyphs.iter().any(|glyph| body_glyph(glyph)) {
+        return None;
+    }
+    let next = (index + 1..lines.len().min(index + 8)).find(|&other| {
+        let right = &lines[other];
+        right.page == left.page
+            && !right.glyphs.is_empty()
+            && right.glyphs.iter().any(|glyph| body_glyph(glyph))
+            && (right.y - left.y).abs() <= size * 0.45
+            && right.left >= left.right - 1.0
+    })?;
+    let right = &lines[next];
+    // Equation (1) is already a display equation. Bridging its fraction
+    // hole pulls `)V` and the transpose into the segment, and the formula
+    // is then redrawn off its baseline.
+    if display_equation_glyphs(&left.glyphs) || display_equation_glyphs(&right.glyphs) {
+        return None;
+    }
+    let gap = right.left - left.right;
+    if gap < size * 0.35 || gap > size * 8.0 {
+        return None;
+    }
+    let right_letters = right
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.font_size > body * 0.84
+                && !math_font_glyph(glyph)
+                && glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+        })
+        .count();
+    if right_letters > 12 {
+        return None;
+    }
+    let bridged = lines.iter().any(|script| {
+        script.page == left.page
+            && (is_extended_formula_script(script, body) || is_math_script(script))
+            && script.left < left.right + size
+            && script.right > right.left - size
+            && {
+                let dy = (script.y - left.y).abs();
+                dy >= size * 0.05 && dy <= size * 0.95
+            }
+    });
+    bridged.then_some(next)
+}
+
+/// A raised or lowered formula run of any width, including the roman
+/// second-level word in `d_{model}`. Body-size prose is not this run.
+/// Joined onto its base only when the sentence is math-dense, so a prose
+/// line that already has a saved translation keeps its wording.
+fn attach_formula_scripts(lines: &mut Vec<VisualLine<'_>>) {
+    let hosts: Vec<Option<usize>> = (0..lines.len())
+        .map(|index| {
+            let body = page_body_size(lines, lines[index].page);
+            formula_script_host(index, lines, body)
+        })
+        .collect();
+    let mut incoming: Vec<Vec<usize>> = vec![Vec::new(); lines.len()];
+    for (index, host) in hosts.into_iter().enumerate() {
+        let Some(host) = host else {
+            continue;
+        };
+        incoming[host].push(index);
+    }
+    let mut drop = vec![false; lines.len()];
+    for (host, scripts) in incoming.iter().enumerate() {
+        if scripts.is_empty() || drop[host] {
+            continue;
+        }
+        let mut combined = lines[host].glyphs.clone();
+        for script in scripts {
+            combined.extend(lines[*script].glyphs.iter().copied());
+        }
+        if !low_prose_math_sentence(&combined) {
+            continue;
+        }
+        for script in scripts {
+            let taken = std::mem::take(&mut lines[*script].glyphs);
+            lines[host].glyphs.extend(taken);
+            drop[*script] = true;
+        }
+        lines[host]
+            .glyphs
+            .sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+        lines[host].text = line_text(&lines[host].glyphs);
+        if let Some((left, right, y, size)) = line_bounds(&lines[host].glyphs) {
+            lines[host].left = left;
+            lines[host].right = right;
+            lines[host].y = y;
+            lines[host].size = size;
+        }
+    }
+    let mut index = 0;
+    lines.retain(|_| {
+        let keep = !drop[index];
+        index += 1;
+        keep
+    });
+}
+
+fn formula_script_host(index: usize, lines: &[VisualLine<'_>], body: f32) -> Option<usize> {
+    let line = &lines[index];
+    if !is_extended_formula_script(line, body) {
+        return None;
+    }
+    let mut best: Option<(usize, f32)> = None;
+    for (other_index, other) in lines.iter().enumerate() {
+        if other_index == index || other.page != line.page {
+            continue;
+        }
+        let other_body = page_body_size(lines, other.page);
+        if is_math_script(other) || is_extended_formula_script(other, other_body) {
+            continue;
+        }
+        if display_equation_glyphs(&other.glyphs) {
+            continue;
+        }
+        let size = other.size.max(body).max(1.0);
+        let dy = (line.y - other.y).abs();
+        if dy < size * 0.08 || dy > size * 1.05 {
+            continue;
+        }
+        if !script_sits_on_math(line, other, size) {
+            continue;
+        }
+        if best.is_none_or(|(_, score)| dy < score) {
+            best = Some((other_index, dy));
+        }
+    }
+    best.map(|(host, _)| host)
+}
+
+fn is_extended_formula_script(line: &VisualLine<'_>, body: f32) -> bool {
+    if line.glyphs.len() < 2 || is_math_script(line) {
+        return false;
+    }
+    let ceiling = body.max(1.0) * 0.84;
+    let mut math = false;
+    for glyph in &line.glyphs {
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        if glyph.font_size > ceiling {
+            return false;
+        }
+        if math_font_glyph(glyph) || vector_symbol_glyph(glyph) {
+            math = true;
+        }
+    }
+    // A footnote in a slightly smaller face (`has mean 0 and variance`)
+    // is prose. `d_model` has no function word.
+    let (function_words, _) = prose_word_counts(&line.glyphs);
+    math && function_words == 0
+}
+
+fn page_body_size(lines: &[VisualLine<'_>], page: u32) -> f32 {
+    let mut sizes = Vec::new();
+    for line in lines.iter().filter(|line| line.page == page) {
+        let roman = line
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.font_size >= 8.0
+                    && !math_font_glyph(glyph)
+                    && glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+            })
+            .count();
+        if roman >= 8 {
+            sizes.push(representative_size(&line.glyphs));
+        }
+    }
+    if sizes.is_empty() {
+        return lines
+            .iter()
+            .filter(|line| line.page == page)
+            .map(|line| line.size)
+            .fold(1.0f32, f32::max);
+    }
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    sizes[sizes.len() / 2].max(1.0)
+}
+
+/// One glyph of the script sits on a math letter of the host (`d` on `R`,
+/// `O` on `W`). A prose word at the same x is not that base.
+fn script_sits_on_math(script: &VisualLine<'_>, host: &VisualLine<'_>, size: f32) -> bool {
+    let size = size.max(1.0);
+    script.glyphs.iter().any(|mark| {
+        host.glyphs.iter().any(|base| {
+            math_font_glyph(base) && {
+                let dx = mark.matrix[4] - base.matrix[4];
+                dx >= -size * 0.45 && dx <= size * 1.45
+            }
+        })
+    })
+}
+
+/// `Where the projections are parameter matrices W_i^Q ∈ R^{d_model×d_k} …`.
+/// The formula is most of the line. Translating the words and reflowing the
+/// bases leaves the superscripts at the English x.
+fn keep_low_prose_math(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
+    let dense: Vec<bool> = lines
+        .iter()
+        .map(|line| low_prose_math_sentence(&line.glyphs))
+        .collect();
+    let mut kept = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !dense[index] && !formula_sentence_tail(index, lines, &dense) {
+            continue;
+        }
+        for glyph in &line.glyphs {
+            kept.push((glyph.id, "math-block".into()));
+        }
+    }
+    kept
+}
+
+fn formula_sentence_tail(index: usize, lines: &[VisualLine<'_>], dense: &[bool]) -> bool {
+    let line = &lines[index];
+    if dense[index] || display_equation_glyphs(&line.glyphs) {
+        return false;
+    }
+    let letters = line
+        .text
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count();
+    if !(1..=8).contains(&letters) || !line.glyphs.iter().any(|glyph| math_font_glyph(glyph)) {
+        return false;
+    }
+    let size = line.size.max(1.0);
+    lines.iter().enumerate().any(|(other, host)| {
+        dense[other]
+            && host.page == line.page
+            && host.y > line.y
+            && host.y - line.y <= size * 2.5
+            && (line.left - host.left).abs() <= size * 4.0
+    })
+}
+
+/// Prose share is the width of body words over body words plus the formula.
+/// High means the line is still a sentence (`In this work we employ h = 8`).
+/// A display equation is not this decision; it already stays original.
+fn low_prose_math_sentence(glyphs: &[&Glyph]) -> bool {
+    if glyphs.len() < 4 || display_equation_glyphs(glyphs) {
+        return false;
+    }
+    let body = math_body_size(glyphs);
+    let mut prose = 0.0f32;
+    let mut formula = 0.0f32;
+    let mut prose_letters = 0usize;
+    for glyph in glyphs {
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        let width = glyph_ink_width(glyph).max(body * 0.15);
+        let letters = glyph
+            .unicode
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .count();
+        let script = glyph.font_size <= body * 0.84;
+        if math_font_glyph(glyph) || vector_symbol_glyph(glyph) || script {
+            formula += width;
+        } else if letters > 0 {
+            prose += width;
+            prose_letters += letters;
+        }
+    }
+    if prose_letters < 3 || formula < body * 4.0 {
+        return false;
+    }
+    prose / (prose + formula) < 0.60
+}
+
+fn math_body_size(glyphs: &[&Glyph]) -> f32 {
+    let max_size = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    let mut sizes: Vec<f32> = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .filter(|size| *size >= max_size * 0.8)
+        .collect();
+    if sizes.is_empty() {
+        return max_size.max(1.0);
+    }
+    sizes.sort_by(|left, right| left.total_cmp(right));
+    sizes[sizes.len() / 2].max(1.0)
+}
+
+fn glyph_ink_width(glyph: &Glyph) -> f32 {
+    let box_w = (glyph.bbox[2] - glyph.bbox[0]).abs();
+    box_w.max(glyph.advance[0].abs())
 }
 
 /// A TeX vector arrow (`#»`) drawn a little under the word it marks.
@@ -6488,6 +6866,90 @@ mod tests {
         assert!(segs[0].text.contains('∗'), "{}", segs[0].text);
         assert!(segs[0].glyph_ids.contains(&1));
         assert!(segs[0].glyph_ids.contains(&2));
+    }
+
+    #[test]
+    fn a_wide_superscript_stays_on_its_base_and_the_math_line_is_kept() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut put = |text: &str, x: f32, y: f32, size: f32, font: &str, width: f32| -> f32 {
+            let mut at = x;
+            for ch in text.chars() {
+                let mut item = glyph(id, at, y, &ch.to_string(), false);
+                id += 1;
+                item.font_name = font.into();
+                item.font_size = size;
+                item.matrix = [size, 0.0, 0.0, size, at, y];
+                item.advance = [width, 0.0];
+                item.bbox = [at, y - size * 0.2, at + width, y + size * 0.8];
+                at += width;
+                glyphs.push(item);
+            }
+            at
+        };
+        let mut x = put(
+            "Where the matrices ",
+            108.0,
+            200.0,
+            10.0,
+            "NimbusRomNo9L-Regu",
+            4.2,
+        );
+        let w = x;
+        x = put("W", x, 200.0, 10.0, "CMMI10", 8.0);
+        x = put("R", x, 200.0, 10.0, "MSBM10", 7.0);
+        // Hole under the superscript, then the next base. The hole is not a column.
+        x += 28.0;
+        x = put("W", x, 200.0, 10.0, "CMMI10", 8.0);
+        put("R", x, 200.0, 10.0, "MSBM10", 7.0);
+        put("d", w + 6.0, 204.8, 7.0, "CMMI7", 4.2);
+        put("model", w + 11.0, 203.6, 5.0, "NimbusRomNo9L-Regu", 3.4);
+        put("d", w + 30.0, 204.8, 7.0, "CMMI7", 4.2);
+        put("k", w + 35.0, 203.6, 5.0, "CMMI5", 3.2);
+        let mut base = put("and ", 108.0, 186.0, 10.0, "NimbusRomNo9L-Regu", 5.0);
+        let w2 = base;
+        base = put("W", base, 186.0, 10.0, "CMMI10", 8.0);
+        put("R.", base, 186.0, 10.0, "MSBM10", 7.0);
+        put("O", w2 + 6.0, 190.6, 7.0, "CMMI7", 6.0);
+        put("h", w2 + 16.0, 190.6, 7.0, "CMMI7", 4.0);
+        put("d", w2 + 21.0, 190.6, 7.0, "CMMI7", 4.0);
+        put("model", w2 + 26.0, 189.4, 5.0, "NimbusRomNo9L-Regu", 3.2);
+        put(
+            "In this work we employ parallel attention layers for the model.",
+            108.0,
+            164.0,
+            10.0,
+            "NimbusRomNo9L-Regu",
+            4.6,
+        );
+        let o = glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "O")
+            .map(|glyph| glyph.id)
+            .expect("O");
+        let full = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = full.segments.iter().map(|item| item.text.clone()).collect();
+        assert!(
+            texts.iter().all(|text| !text.contains("Where")),
+            "the math-dense line was translated: {texts:?}"
+        );
+        assert!(
+            texts.iter().all(|text| !text.contains('O')),
+            "the superscript O was split onto a prose line: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("employ")),
+            "a prose sentence was kept: {texts:?}"
+        );
+        let kept: std::collections::HashSet<u32> =
+            full.kept.iter().map(|(glyph_id, _)| *glyph_id).collect();
+        assert!(kept.contains(&o), "O was not kept with its base");
+        assert!(
+            full.segments
+                .iter()
+                .all(|item| !item.glyph_ids.contains(&o)),
+            "O was redrawn in a segment"
+        );
     }
 
     #[test]
@@ -8442,6 +8904,98 @@ mod tests {
         assert!(
             headers >= 11,
             "running headers were kept inside figures or tables: {headers}"
+        );
+    }
+
+    #[test]
+    fn attention_projection_line_stays_original() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/neurips-2017-attention.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let full = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let texts: Vec<_> = full.segments.iter().map(|seg| seg.text.clone()).collect();
+        let rewritten =
+            crate::rewrite::merge_stacked_paragraphs(full.segments.clone(), &extraction.glyphs);
+        let _ = rewritten;
+        assert!(
+            texts.iter().all(|text| {
+                !text.contains("Where the projections") && !text.contains("Where Othe")
+            }),
+            "the projection sentence was split into a segment: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| {
+                text.starts_with("In this work we employ h = 8")
+                    && text.contains("full dimensionality")
+            }),
+            "the following prose sentence was kept or merged: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains("hdv") && !text.contains("dmodel×dk")),
+            "a superscript run was left as its own segment: {texts:?}"
+        );
+        let kept: std::collections::HashSet<u32> = full.kept.iter().map(|(id, _)| *id).collect();
+        let exponent = extraction.glyphs.iter().any(|glyph| {
+            glyph.page_index == 4
+                && glyph.unicode == "O"
+                && (130.0..145.0).contains(&glyph.matrix[4])
+                && kept.contains(&glyph.id)
+                && !full
+                    .segments
+                    .iter()
+                    .any(|seg| seg.glyph_ids.contains(&glyph.id))
+        });
+        assert!(exponent, "W^O was not kept on its base");
+    }
+
+    #[test]
+    fn e2e_attention_segments_for_replay() {
+        let path = std::path::PathBuf::from("/tmp/rpt-e2e/pdfs/attention.pdf");
+        if !path.exists() {
+            return;
+        }
+        let doc = crate::extract::PdfDocument::open(&path).unwrap();
+        let extraction = doc.extract();
+        let full = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let rewritten =
+            crate::rewrite::merge_stacked_paragraphs(full.segments.clone(), &extraction.glyphs);
+        let employ = rewritten.iter().find(|seg| {
+            seg.text
+                .starts_with("In this work we employ h = 8 parallel attention")
+        });
+        let employ = employ.map(|seg| seg.text.as_str()).unwrap_or("");
+        assert!(
+            employ.contains("⟦0⟧ = ⟦1⟧ = ⟦2⟧⟦3⟧ = 64") && employ.contains("full dimensionality"),
+            "employ sentence split: {employ}"
+        );
+        let kept_where = extraction.glyphs.iter().any(|glyph| {
+            glyph.page_index == 4
+                && glyph.unicode == "O"
+                && (130.0..145.0).contains(&glyph.matrix[4])
+                && full.kept.iter().any(|(id, _)| *id == glyph.id)
+        });
+        assert!(kept_where, "e2e W^O was not kept");
+        assert!(
+            rewritten
+                .iter()
+                .any(|seg| seg.text.contains("has mean 0 and variance dk")),
+            "the summation footnote was rewritten off its glyphs"
         );
     }
 
