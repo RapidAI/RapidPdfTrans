@@ -9169,11 +9169,11 @@ fn layout_segment(
     }
     let covered = substitute_covered(text, font);
     let raw_mask = superscript_mask(&covered);
-    let (normalized, body_mask) = fullwidth_han_digits(&covered, &raw_mask, font);
-    let (normalized, body_mask) = if font.has(0x20) {
-        crate::layout::space_cjk_latin_mask(&normalized, &body_mask)
+    let (normalized, _) = fullwidth_han_digits(&covered, &raw_mask, font);
+    let normalized = if font.has(0x20) {
+        crate::layout::space_cjk_latin_mask(&normalized, &raw_mask).0
     } else {
-        (normalized, body_mask)
+        normalized
     };
     let text = normalized.as_str();
     let page = glyphs[0].page_index;
@@ -9564,8 +9564,11 @@ fn layout_segment(
     let width = (block_right - block_left).max(source_size);
     let first_width = (width - indent).max(size * 0.5);
     let sup = superscript_metrics(glyphs);
+    // The mask belongs to the text that is painted, after placeholder
+    // expansion. A mask built on the shielded sentence shifts onto the
+    // expanded digits and raises an equation (`N = 6`) off its baseline.
     let mask = if sup.is_some() {
-        body_mask
+        superscript_mask(text)
     } else {
         vec![false; text.chars().count()]
     };
@@ -16922,22 +16925,30 @@ fn superscript_metrics(glyphs: &[&Glyph]) -> Option<SupMetrics> {
         return None;
     }
     body_sizes.sort_by(|left, right| left.total_cmp(right));
-    body_ys.sort_by(|left, right| left.total_cmp(right));
     let body = body_sizes[body_sizes.len() / 2].max(1.0);
-    let base = body_ys[body_ys.len() / 2];
     let mut scales = Vec::new();
     let mut rises = Vec::new();
     for glyph in glyphs {
         if !affil_marker(&glyph.unicode) {
             continue;
         }
+        // Compare with the line this digit sits on. The paragraph median is
+        // a later baseline, so an equation `6` on the first line looked
+        // raised by a whole leading and was clamped to 0.6em.
+        let Some(line_y) = body_ys.iter().copied().min_by(|left, right| {
+            (left - glyph.matrix[5])
+                .abs()
+                .total_cmp(&(right - glyph.matrix[5]).abs())
+        }) else {
+            continue;
+        };
         let smaller = glyph.font_size <= body * 0.85;
-        let raised = glyph.matrix[5] >= base + body * 0.12;
+        let raised = glyph.matrix[5] >= line_y + body * 0.12;
         if !smaller && !raised {
             continue;
         }
         scales.push((glyph.font_size / body).clamp(0.45, 1.0));
-        let rise = ((glyph.matrix[5] - base) / body).max(0.0);
+        let rise = ((glyph.matrix[5] - line_y) / body).max(0.0);
         rises.push(rise.clamp(0.0, 0.6));
     }
     if scales.is_empty() {
@@ -17056,7 +17067,10 @@ fn superscript_mask(text: &str) -> Vec<bool> {
             && prev.is_some_and(|ch| {
                 ch.is_alphabetic() || (is_mark_star(ch) && start > 0 && mask[start - 1])
             });
-        let before_name = run == 1
+        // `1新加坡` leads an institution. `N = 6个` is a count: a digit
+        // after `=` stays on the baseline even when Han follows it.
+        let before_name = !body_digit
+            && run == 1
             && word >= 2
             && prev.is_none_or(|ch| {
                 ch.is_whitespace() || matches!(ch, ',' | '，' | ';' | '；' | '*' | '∗')
@@ -21137,6 +21151,57 @@ mod tests {
         let two = tensor.chars().position(|ch| ch == '2').unwrap();
         assert!(!mask[two], "tensor2tensor raised the digit: {mask:?}");
         assert!(superscript_mask("Zhang1")[5], "Zhang1 should still rise");
+        let equation = "解码器：其同样由N = 6个相同的层堆叠而成";
+        let mask = superscript_mask(equation);
+        let six = equation.chars().position(|ch| ch == '6').unwrap();
+        assert!(!mask[six], "a digit after = was raised: {mask:?}");
+        let glued = "解码器：其同样由 N = 6个相同的层";
+        let mask = superscript_mask(glued);
+        let six = glued.chars().position(|ch| ch == '6').unwrap();
+        assert!(!mask[six], "a digit after = was raised: {mask:?}");
+        assert!(
+            superscript_mask("1新加坡")[0],
+            "an affiliation should still rise"
+        );
+    }
+
+    #[test]
+    fn an_equation_digit_on_the_first_line_is_not_an_affiliation_mark() {
+        let mut glyphs = Vec::new();
+        let mut id = 1u32;
+        for (index, ch) in "由N=".chars().enumerate() {
+            glyphs.push(ink_glyph(
+                id,
+                100.0 + index as f32 * 8.0,
+                300.0,
+                10.0,
+                &ch.to_string(),
+            ));
+            id += 1;
+        }
+        glyphs.push(ink_glyph(id, 132.0, 300.0, 10.0, "6"));
+        id += 1;
+        for line in 1..5 {
+            glyphs.push(ink_glyph(id, 80.0, 300.0 - line as f32 * 14.0, 10.0, "文"));
+            id += 1;
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        assert!(
+            superscript_metrics(&refs).is_none(),
+            "N = 6 on the first baseline looked like a superscript"
+        );
+        let author = [
+            ink_glyph(1, 72.0, 400.0, 10.0, "张"),
+            ink_glyph(2, 82.0, 403.5, 6.0, "1"),
+            ink_glyph(3, 72.0, 386.0, 10.0, "文"),
+        ];
+        let refs: Vec<&Glyph> = author.iter().collect();
+        let metrics = superscript_metrics(&refs).expect("author mark");
+        assert!(
+            metrics.rise > 0.2 && metrics.rise < 0.5,
+            "rise {}",
+            metrics.rise
+        );
     }
 
     #[test]

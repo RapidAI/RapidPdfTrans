@@ -826,8 +826,10 @@ pub struct ShortBodyLine {
     pub width_ratio: f32,
 }
 
-/// A non-final line of a body paragraph whose ink is under 30% of the
-/// paragraph width. The last line of a paragraph may be short.
+/// A non-final line of a body paragraph whose ink is under 85% of the
+/// paragraph width. The last line of a paragraph may be short. Backing up
+/// to `、` or `，` leaves a line in this range while the next characters
+/// still fitted.
 pub fn short_paragraph_lines(glyphs: &[Glyph]) -> Vec<ShortBodyLine> {
     let lines = paint_lines(glyphs);
     let mut flags = Vec::new();
@@ -847,7 +849,7 @@ pub fn short_paragraph_lines(glyphs: &[Glyph]) -> Vec<ShortBodyLine> {
                 let width = line.max_x - line.min_x;
                 let ratio = width / measure;
                 let letters = line.chars_of_text();
-                if ratio < 0.30 && letters >= 2 && width > 1.0 {
+                if ratio < 0.85 && letters >= 2 && width > 1.0 {
                     flags.push(ShortBodyLine {
                         page: line.page + 1,
                         text: line.text.clone(),
@@ -884,6 +886,115 @@ fn paragraph_continues(upper: &PaintLine, lower: &PaintLine) -> bool {
     }
     let shift = (upper.min_x - lower.min_x).abs();
     shift <= size * 2.4
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BaselineDrift {
+    pub page: u32,
+    pub text: String,
+    pub rise: f32,
+}
+
+/// A digit after `=` belongs on that baseline. Inline math (`N = 6`) and a
+/// body-size formula digit must not be painted above the line.
+pub fn inline_math_baseline_drift(glyphs: &[Glyph]) -> Vec<BaselineDrift> {
+    let visible: Vec<&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .collect();
+    let mut flags = Vec::new();
+    for glyph in &visible {
+        let text = glyph.unicode.trim();
+        if text.chars().count() != 1 || !text.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let Some(equals) = visible
+            .iter()
+            .filter(|equals| {
+                if equals.page_index != glyph.page_index || equals.unicode.trim() != "=" {
+                    return false;
+                }
+                let size = equals.font_size.max(1.0);
+                let dx = glyph.matrix[4] - equals.matrix[4];
+                if dx <= 0.2 || dx > size * 3.0 {
+                    return false;
+                }
+                !visible.iter().any(|between| {
+                    if between.id == equals.id || between.id == glyph.id {
+                        return false;
+                    }
+                    if between.page_index != glyph.page_index {
+                        return false;
+                    }
+                    let text = between.unicode.trim();
+                    if text.is_empty() || text.chars().all(|ch| ch.is_whitespace()) {
+                        return false;
+                    }
+                    let x = between.matrix[4];
+                    x > equals.matrix[4] + 0.2 && x < glyph.matrix[4] - 0.2
+                })
+            })
+            .min_by(|left, right| {
+                (left.matrix[5] - glyph.matrix[5])
+                    .abs()
+                    .total_cmp(&(right.matrix[5] - glyph.matrix[5]).abs())
+            })
+        else {
+            continue;
+        };
+        let rise = glyph.matrix[5] - equals.matrix[5];
+        if rise > equals.font_size.max(1.0) * 0.15 {
+            flags.push(BaselineDrift {
+                page: glyph.page_index + 1,
+                text: format!("={text}"),
+                rise,
+            });
+        }
+    }
+    for glyph in &visible {
+        let text = glyph.unicode.trim();
+        if text.chars().count() != 1 || !text.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        if !math_face(&glyph.font_name) {
+            continue;
+        }
+        let size = glyph.font_size.max(1.0);
+        let Some(host) = visible
+            .iter()
+            .filter(|host| {
+                host.page_index == glyph.page_index
+                    && host.id != glyph.id
+                    && !math_face(&host.font_name)
+                    && host.font_size > size * 0.85
+                    && (host.matrix[4] - glyph.matrix[4]).abs() < size * 6.0
+            })
+            .min_by(|left, right| {
+                (left.matrix[5] - glyph.matrix[5])
+                    .abs()
+                    .total_cmp(&(right.matrix[5] - glyph.matrix[5]).abs())
+            })
+        else {
+            continue;
+        };
+        if glyph.font_size <= host.font_size * 0.85 {
+            continue;
+        }
+        let rise = glyph.matrix[5] - host.matrix[5];
+        if rise > host.font_size * 0.20 {
+            flags.push(BaselineDrift {
+                page: glyph.page_index + 1,
+                text: text.to_string(),
+                rise,
+            });
+        }
+    }
+    flags
+}
+
+fn math_face(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("cmm") || name.contains("cmr") || name.contains("cmsy") || name.contains("math")
 }
 
 fn ends_sentence(text: &str) -> bool {
@@ -1201,5 +1312,66 @@ mod tests {
             span_line(8, 93.0, 240.0, 180.0, "10.1 内容数据库查询生成"),
         ]);
         assert!(heading.is_empty(), "{heading:?}");
+        let ragged = short_paragraph_lines(&[
+            span_line(9, 66.0, 400.0, 400.0, "完整的一行排到栏宽"),
+            span_line(10, 66.0, 386.0, 320.0, "这一行大约只有八成"),
+            span_line(11, 66.0, 372.0, 370.0, "这一行超过八成五所以留下"),
+            span_line(12, 66.0, 358.0, 80.0, "结束。"),
+        ]);
+        assert!(
+            ragged.iter().any(|flag| flag.text.contains("八成")),
+            "{ragged:?}"
+        );
+        assert!(
+            ragged.iter().all(|flag| !flag.text.contains("八成五")),
+            "{ragged:?}"
+        );
+    }
+
+    #[test]
+    fn an_equation_digit_raised_off_the_equals_baseline_is_flagged() {
+        let mut equals = glyph(1, 180.0, 220.0);
+        equals.unicode = "=".into();
+        equals.font_size = 9.0;
+        equals.matrix = [9.0, 0.0, 0.0, 9.0, 180.0, 220.0];
+        equals.advance = [6.0, 0.0];
+        equals.bbox = [180.0, 218.0, 186.0, 228.0];
+        let mut raised = glyph(2, 196.0, 225.5);
+        raised.unicode = "6".into();
+        raised.font_size = 9.0;
+        raised.matrix = [9.0, 0.0, 0.0, 9.0, 196.0, 225.5];
+        raised.advance = [5.0, 0.0];
+        raised.bbox = [196.0, 223.0, 201.0, 233.0];
+        let mut seated = glyph(3, 196.0, 180.0);
+        seated.unicode = "6".into();
+        seated.font_size = 9.0;
+        seated.matrix = [9.0, 0.0, 0.0, 9.0, 196.0, 180.0];
+        seated.advance = [5.0, 0.0];
+        seated.bbox = [196.0, 178.0, 201.0, 188.0];
+        let mut equals_low = equals.clone();
+        equals_low.id = 4;
+        equals_low.matrix[4] = 180.0;
+        equals_low.matrix[5] = 180.0;
+        equals_low.bbox = [180.0, 178.0, 186.0, 188.0];
+        let flags = inline_math_baseline_drift(&[equals, raised, seated, equals_low]);
+        assert!(
+            flags
+                .iter()
+                .any(|flag| flag.text.contains('6') && flag.rise > 4.0),
+            "{flags:?}"
+        );
+        assert_eq!(flags.len(), 1, "{flags:?}");
+        let mut math = glyph(5, 210.0, 230.0);
+        math.unicode = "6".into();
+        math.font_name = "CMR10".into();
+        math.font_size = 10.0;
+        math.matrix = [10.0, 0.0, 0.0, 10.0, 210.0, 230.0];
+        let mut host = glyph(6, 200.0, 220.0);
+        host.unicode = "层".into();
+        host.font_name = "RPTCJK".into();
+        host.font_size = 10.0;
+        host.matrix = [10.0, 0.0, 0.0, 10.0, 200.0, 220.0];
+        let lifted = inline_math_baseline_drift(&[math, host]);
+        assert!(lifted.iter().any(|flag| flag.text == "6"), "{lifted:?}");
     }
 }

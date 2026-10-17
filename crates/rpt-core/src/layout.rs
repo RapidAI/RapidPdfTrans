@@ -915,7 +915,12 @@ pub(crate) fn wrap_text_holes(
             let advance = advances[end];
             if end > start && width + advance > limit {
                 // A closing comma or period may hang past the measure once.
-                if allow_hang && hanging_punct(chars[end]) && width <= limit + 0.01 {
+                // `[11]，` is unsplittable, so the comma used to push the
+                // whole citation onto the next line (`残差连接` / `[11]，`).
+                // Hang that comma even when a formula hole elsewhere in the
+                // paragraph has disabled ordinary hanging.
+                let hang = hanging_punct(chars[end]) && width <= limit + 0.01;
+                if hang && (allow_hang || bracket_citation_before(&chars, end)) {
                     end += 1;
                 }
                 break;
@@ -950,7 +955,9 @@ pub(crate) fn wrap_text_holes(
             // this line. A URL stays sticky and is not cut.
             end = pull_latin_prefix(&chars, &advances, &sticky, start, end, fitted, limit, size);
             end = prefer_enumeration_break(&chars, &sticky, start, end);
-            end = prefer_list_delimiter(&chars, &sticky, start, end);
+            // Do not walk back to `、` or `，`. A compound stays together
+            // through `sticky`. Backing up to the delimiter dropped `值` and
+            // `然` after they had already fitted.
             end = retreat_formula_hole(&chars, start, end);
         }
         let mut line_end = end;
@@ -1019,39 +1026,35 @@ fn formula_hole_at(chars: &[char], index: usize) -> Option<(usize, usize)> {
     None
 }
 
-/// A centered name list breaks after `、` so an item stays on one line.
-/// Body prose does not walk back to a comma in the middle of the measure:
-/// that left `不同的、` short of the column while `学习` still fitted.
-fn prefer_list_delimiter(chars: &[char], sticky: &[bool], start: usize, end: usize) -> usize {
-    if end <= start + 1 || end > chars.len() {
-        return end;
+/// `[11]` or `［1］` sits immediately before this closing mark.
+fn bracket_citation_before(chars: &[char], punct_at: usize) -> bool {
+    let mut index = punct_at;
+    if index == 0 {
+        return false;
     }
-    let window = &chars[start..end];
-    let ideographic = window.iter().filter(|ch| **ch == '、').count();
-    let commas = window.iter().filter(|ch| **ch == '，').count();
-    if ideographic == 0 && commas == 0 {
-        return end;
-    }
-    // Two or more `、` is a name list (`无线电、量子计算、铁路`). One `、`
-    // or a prose `，` uses the same short window: only the character that
-    // overflowed. A 60% retreat is what left the 3.2.2 line short.
-    let list = ideographic >= 2;
-    let mut alt = end;
-    while alt > start + 1 {
-        alt -= 1;
-        if end - alt > 1 {
-            break;
+    index -= 1;
+    if chars[index].is_whitespace() && chars[index] != '\u{3000}' {
+        if index == 0 {
+            return false;
         }
-        let mark = if list {
-            chars[alt - 1] == '、'
-        } else {
-            chars[alt - 1] == '、' || chars[alt - 1] == '，'
-        };
-        if mark && can_break_at(chars, sticky, alt) {
-            return alt;
-        }
+        index -= 1;
     }
-    end
+    if chars[index] != ']' && chars[index] != '］' {
+        return false;
+    }
+    if index == 0 {
+        return false;
+    }
+    index -= 1;
+    let mut digits = 0usize;
+    while chars[index].is_ascii_digit() {
+        digits += 1;
+        if digits > 6 || index == 0 {
+            return false;
+        }
+        index -= 1;
+    }
+    digits >= 1 && (chars[index] == '[' || chars[index] == '［')
 }
 
 /// `量子|计算` moves onto one line. The dictionary hit is the same one a
@@ -1372,7 +1375,13 @@ fn prefer_enumeration_break(chars: &[char], sticky: &[bool], start: usize, end: 
             return end;
         }
         if chars[alt - 1] == '、' && can_break_at(chars, sticky, alt) && alt - start >= 4 {
-            return alt;
+            // `LangChain、LangGraph 和` keeps the Latin name with `和`.
+            // `键、值和` is prose: `值` already fitted, so the line stays.
+            let names = chars[alt..look].iter().any(|ch| ch.is_ascii_alphabetic());
+            if names {
+                return alt;
+            }
+            return end;
         }
     }
     end
@@ -2359,6 +2368,60 @@ mod tests {
             lines[0].chars().count(),
             through.chars().count(),
             "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn prose_keeps_the_character_that_fits_after_a_comma() {
+        let text = "我们采用残差连接，然后进行层归一化";
+        let through = "我们采用残差连接，然";
+        let font = uniform_font(text);
+        let width = through.chars().count() as f32 * 10.0;
+        let lines = wrap_text(text, 10.0, width, width, &font).expect("wrap");
+        assert!(
+            lines[0].ends_with('然'),
+            "backed up to the comma: {lines:?}"
+        );
+        let query = "其中查询、键、值和输出都是向量";
+        let fitted = "其中查询、键、值";
+        let font = uniform_font(query);
+        let width = fitted.chars().count() as f32 * 10.0;
+        let lines = wrap_text(query, 10.0, width, width, &font).expect("wrap");
+        assert!(
+            lines[0].ends_with('值'),
+            "backed up to the enumeration comma: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_citation_comma_hangs_when_a_formula_hole_disables_hanging() {
+        let text = "采用残差连接[11]，随后进行";
+        let mut glyphs = std::collections::HashMap::new();
+        for (id, ch) in (1u16..).zip(text.chars()) {
+            let advance = if matches!(ch, '[' | ']' | '1') {
+                400
+            } else {
+                1000
+            };
+            glyphs.insert(ch as u32, (id, advance));
+        }
+        let font = SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs,
+            fallback: None,
+            notice: None,
+        };
+        let mut holes = HashMap::new();
+        holes.insert(0, 20.0);
+        let lines = wrap_text_holes(text, 10.0, 80.0, 80.0, &font, &holes).expect("wrap");
+        assert!(
+            lines[0].ends_with('，') && lines[0].contains("[11]"),
+            "citation moved to the next line: {lines:?}"
+        );
+        assert!(
+            lines[1].starts_with('随'),
+            "the next line should continue after the citation: {lines:?}"
         );
     }
 
