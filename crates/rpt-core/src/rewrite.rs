@@ -14085,7 +14085,7 @@ fn blank_rules_on_erased_text(
             .then(right.matrix[5].total_cmp(&left.matrix[5]))
             .then(left.matrix[4].total_cmp(&right.matrix[4]))
     });
-    let mut keep: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
+    let mut keep: Vec<(u32, f32, f32, f32, f32, f32, f32)> = Vec::new();
     for shift in shifts {
         if shift.dx.abs() < 0.3 && shift.dy.abs() < 0.3 {
             continue;
@@ -14107,12 +14107,17 @@ fn blank_rules_on_erased_text(
             y1 = y1.max(glyph.bbox[1].max(glyph.bbox[3]));
         }
         if x0.is_finite() {
+            // Pre-shift ink plus the move. A bar we shifted maps back into
+            // this box. A bar that merely lies under the destination line
+            // does not, so it can still be blanked.
             keep.push((
                 shift.page,
-                x0 + shift.dx - 4.0,
-                y0 + shift.dy - 4.0,
-                x1 + shift.dx + 4.0,
-                y1 + shift.dy + 4.0,
+                x0 - 1.5,
+                y0 - 1.5,
+                x1 + 1.5,
+                y1 + 1.5,
+                shift.dx,
+                shift.dy,
             ));
         }
     }
@@ -14133,10 +14138,10 @@ fn blank_rules_on_erased_text(
         ));
     }
     for (id, cover) in by_stream {
-        let kept: Vec<(f32, f32, f32, f32)> = keep
+        let kept: Vec<(f32, f32, f32, f32, f32, f32)> = keep
             .iter()
             .filter(|item| item.0 == cover.page)
-            .map(|item| (item.1, item.2, item.3, item.4))
+            .map(|item| (item.1, item.2, item.3, item.4, item.5, item.6))
             .collect();
         let Ok(object) = doc.get_object(id) else {
             continue;
@@ -14173,7 +14178,7 @@ struct PageCover {
 fn blank_covered_hairlines(
     bytes: &mut [u8],
     cover: &[(f32, f32, f32, f32)],
-    keep: &[(f32, f32, f32, f32)],
+    keep: &[(f32, f32, f32, f32, f32, f32)],
 ) -> bool {
     if cover.is_empty() {
         return false;
@@ -14198,15 +14203,35 @@ fn blank_covered_hairlines(
         let left = x0.min(x1);
         let right = x0.max(x1);
         let y = (y0 + y1) * 0.5;
-        if keep
-            .iter()
-            .any(|ink| left >= ink.0 && right <= ink.2 && y >= ink.1 && y <= ink.3)
-        {
+        // `keep` is the formula's ink before the shift, then dx, dy. A bar
+        // that moved with those glyphs maps back into the box. A bar that
+        // the line merely landed on does not.
+        let kept_bar = keep.iter().any(|ink| {
+            let old_left = left - ink.4;
+            let old_right = right - ink.4;
+            let old_y = y - ink.5;
+            old_left >= ink.0 - 0.8
+                && old_right <= ink.2 + 0.8
+                && old_y >= ink.1 - 0.8
+                && old_y <= ink.3 + 0.8
+        });
+        if kept_bar {
             return false;
         }
-        cover
+        // One erased glyph is a few points wide. A fraction bar crosses
+        // several of them, so the whole bar never sits inside a single box.
+        let overlap: f32 = cover
             .iter()
-            .any(|ink| left >= ink.0 - 0.6 && right <= ink.2 + 0.6 && y >= ink.1 && y <= ink.3)
+            .map(|ink| {
+                if y < ink.1 || y > ink.3 {
+                    return 0.0;
+                }
+                let ix0 = left.max(ink.0 - 0.6);
+                let ix1 = right.min(ink.2 + 0.6);
+                (ix1 - ix0).max(0.0)
+            })
+            .sum();
+        overlap >= 6.0 && overlap >= width * 0.55
     };
 
     for token in &tokens {
@@ -30752,8 +30777,43 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
         assert!(!blank_covered_hairlines(
             &mut kept,
             &[(116.0, 253.0, 140.0, 276.0)],
-            &[(116.0, 253.0, 140.0, 276.0)],
+            &[(
+                116.0 - 49.7,
+                253.0 - 10.9,
+                140.0 - 49.7,
+                276.0 - 10.9,
+                49.7,
+                10.9
+            )],
         ));
         assert_eq!(kept, src);
+
+        // The SDE radical: `[]0 d` sits between `cm` and the stroke. A line
+        // that moved onto this bar must not protect it.
+        let radical =
+            b"q\n1 0 0 1 378.142 483.647 cm\n[]0 d 0 J 0.299 w 0 0 m 26.108 0 l S\nQ\n".to_vec();
+        let mut radical_bytes = radical.clone();
+        assert!(
+            blank_covered_hairlines(&mut radical_bytes, &[(370.0, 470.0, 420.0, 496.0)], &[],),
+            "{}",
+            String::from_utf8_lossy(&radical_bytes)
+        );
+        assert!(
+            !String::from_utf8(radical_bytes).unwrap().contains("26.108"),
+            "the bar on erased text stays"
+        );
+        // The bar is wider than any one erased glyph. Overlap across the
+        // run is what puts it on the Chinese.
+        let mut pieces = radical.clone();
+        assert!(blank_covered_hairlines(
+            &mut pieces,
+            &[
+                (376.0, 474.0, 386.0, 490.0),
+                (386.0, 474.0, 396.0, 490.0),
+                (396.0, 474.0, 406.0, 490.0),
+            ],
+            &[],
+        ));
+        assert!(!String::from_utf8(pieces).unwrap().contains("26.108"));
     }
 }

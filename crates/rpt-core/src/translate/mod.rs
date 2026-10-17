@@ -621,6 +621,15 @@ fn lookup_saved(source: &str, saved: &HashMap<String, String>) -> Option<String>
     if let Some(hit) = saved.get(source) {
         return Some(hit.clone());
     }
+    // Shield placeholders pick up a space when the run is built again.
+    // `⟦12⟧⟦11⟧ px` and `⟦12⟧⟦11⟧px` are the same sentence.
+    let needle: String = source.chars().filter(|ch| *ch != ' ').collect();
+    if let Some((_, value)) = saved
+        .iter()
+        .find(|(key, _)| key.chars().filter(|ch| *ch != ' ').eq(needle.chars()))
+    {
+        return Some(value.clone());
+    }
     let trimmed = source.trim();
     if is_digit_index(trimmed) {
         return Some(trimmed.to_string());
@@ -5904,6 +5913,14 @@ mod tests {
         let mut again = extraction_from_lines(&["Hello world.", "Second sentence stays."]);
         let err = replay_extraction(&mut again, &opts, &hole).unwrap_err();
         assert!(err.to_string().contains("no saved translation"), "{err}");
+    }
+
+    #[test]
+    fn replay_matches_a_sentence_that_only_gained_a_space() {
+        let mut saved = HashMap::new();
+        saved.insert("a ⟦12⟧⟦11⟧px b".to_string(), "译文".to_string());
+        let hit = lookup_saved("a ⟦12⟧⟦11⟧ px b", &saved).expect("space-only match");
+        assert_eq!(hit, "译文");
     }
 
     #[test]
