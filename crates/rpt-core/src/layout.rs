@@ -770,6 +770,53 @@ pub(crate) fn spread_to_lines(mut lines: Vec<String>, count: usize) -> Vec<Strin
     lines
 }
 
+/// Wrap `text` to `max_width`, then tighten the measure so the same number of
+/// lines share the width. A greedy wrap leaves a short tail (`仅用于新闻或` under
+/// a full line). A centered paragraph wants those lines even, each still
+/// inside the block.
+pub(crate) fn balance_lines(
+    text: &str,
+    size: f32,
+    max_width: f32,
+    font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
+) -> Option<Vec<String>> {
+    let greedy = wrap_text_holes(text, size, max_width, max_width, font, holes)?;
+    if greedy.len() < 2 {
+        return Some(greedy);
+    }
+    let total = fit_measure_holes(text, size, font, holes);
+    let count = greedy.len();
+    let mut low = (total / count as f32).max(size * 4.0);
+    let mut high = max_width;
+    if high <= low + 0.5 {
+        return Some(greedy);
+    }
+    let mut best = greedy;
+    for _ in 0..16 {
+        if high - low < size * 0.2 {
+            break;
+        }
+        let mid = (low + high) * 0.5;
+        let Some(mut lines) = wrap_text_holes(text, size, mid, mid, font, holes) else {
+            low = mid;
+            continue;
+        };
+        let fits = lines.len() <= count
+            && lines
+                .iter()
+                .all(|line| fit_measure_holes(line, size, font, holes) <= max_width + 1.0);
+        if fits {
+            absorb_one_char_tail(&mut lines);
+            best = lines;
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    Some(best)
+}
+
 /// Split near the middle. Never inside a citation, number, URL, email, or
 /// Latin word (`API`), and never so the next piece starts with `；`.
 fn safe_split(line: &str) -> Option<(String, String)> {
@@ -2174,6 +2221,37 @@ fn consumed_chars(src: &[char], lines: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_centered_paragraph_balances_a_short_tail() {
+        let text = "若提供适当的署名特此授予许可以复制本文中的表格和图形仅用于新闻或学术著作";
+        let font = uniform_font(text);
+        let greedy = wrap_text(text, 10.0, 70.0, 70.0, &font).unwrap();
+        assert!(
+            greedy.len() >= 2
+                && greedy.last().unwrap().chars().count() + 2 < greedy[0].chars().count(),
+            "fixture should be a short tail: {greedy:?}"
+        );
+        let balanced = balance_lines(text, 10.0, 70.0, &font, &HashMap::new()).unwrap();
+        assert_eq!(balanced.len(), greedy.len(), "{balanced:?}");
+        let longest = balanced
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap();
+        let shortest = balanced
+            .iter()
+            .map(|line| line.chars().count())
+            .min()
+            .unwrap();
+        assert!(
+            longest - shortest <= 1,
+            "unbalanced {balanced:?} from {greedy:?}"
+        );
+        assert!(balanced
+            .iter()
+            .all(|line| measure(line, 10.0, &font) <= 71.0));
+    }
 
     fn uniform_font(text: &str) -> SubsetFont {
         let mut glyphs = std::collections::HashMap::new();

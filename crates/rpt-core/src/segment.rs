@@ -1131,6 +1131,63 @@ fn centered_block_axis(lines: &[VisualLine<'_>]) -> f32 {
     mids[mids.len() / 2]
 }
 
+/// A short centered tail under a wide centered sentence (`scholarly works.`
+/// under `…journalistic or`). The left edges do not match, so the ordinary
+/// margin join starts a new paragraph and the translation keeps the source
+/// line break.
+fn centered_prose_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    if upper.page != lower.page {
+        return false;
+    }
+    let size = upper.size.max(lower.size).max(1.0);
+    if (upper.size - lower.size).abs() > size * 0.25 {
+        return false;
+    }
+    let dy = upper.y - lower.y;
+    if dy < size * 0.7 || dy > size * 1.6 {
+        return false;
+    }
+    let upper_mid = (upper.left + upper.right) * 0.5;
+    let lower_mid = (lower.left + lower.right) * 0.5;
+    if (upper_mid - lower_mid).abs() > size * 2.0 {
+        return false;
+    }
+    // A wrapped body line already shares the margin. This path is the tail
+    // whose edges wander because the line is centered.
+    if (upper.left - lower.left).abs() <= size * 1.5
+        && (upper.right - lower.right).abs() <= size * 1.5
+    {
+        return false;
+    }
+    let upper_text = upper.text.trim();
+    let lower_text = lower.text.trim();
+    if upper_text.ends_with(['.', '?', '!', '。', '？', '！']) {
+        return false;
+    }
+    if upper_text.contains('@') || lower_text.contains('@') {
+        return false;
+    }
+    if crate::translate::is_institution_line(upper_text)
+        || crate::translate::is_institution_line(lower_text)
+    {
+        return false;
+    }
+    let upper_width = upper.right - upper.left;
+    let lower_width = lower.right - lower.left;
+    if upper_width < size * 18.0 || lower_width > upper_width * 0.72 {
+        return false;
+    }
+    // `scholarly` continues the sentence. A title's second line is capitalized.
+    lower_text.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && lower_text.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn centered_prose_keeps(current: &[VisualLine<'_>], lower: &VisualLine<'_>) -> bool {
+    current
+        .last()
+        .is_some_and(|upper| centered_prose_continuation(upper, lower))
+}
+
 /// Per-block OCR score. A low-quality block is not translated and not
 /// painted. A title page whose scan is only partly read (a real title plus
 /// `3jOV£9rOIit`) keeps the photograph: every text block on that page goes.
@@ -3473,7 +3530,15 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
                 .last()
                 .is_some_and(|prev| centered_comma_continuation(prev, &line))
         });
-        let slot = hyphen_slot.or(list_slot).or_else(|| {
+        // `scholarly works.` is centered under the permission notice. Its left
+        // edge is far from the full lines, so the margin test starts a new
+        // paragraph and the translation keeps that short tail.
+        let prose_slot = columns.iter().position(|column| {
+            column
+                .last()
+                .is_some_and(|prev| centered_prose_continuation(prev, &line))
+        });
+        let slot = hyphen_slot.or(list_slot).or(prose_slot).or_else(|| {
             let mut best: Option<(usize, f32)> = None;
             for (index, column) in columns.iter().enumerate() {
                 let Some(anchor) = column_anchor(column, line.page) else {
@@ -3525,6 +3590,7 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
                 .last()
                 .is_some_and(|prev| continues_paragraph(prev, &line, measure))
                 || centered_list_keeps(&current, &line)
+                || centered_prose_keeps(&current, &line)
             {
                 current.push(line);
             } else {
@@ -10792,6 +10858,45 @@ mod tests {
             texts
                 .iter()
                 .any(|text| text.contains('+') && text.contains("FKL")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_centered_permission_notice_is_one_paragraph() {
+        // Attention page 1. The two full lines share a margin. `scholarly
+        // works.` is centered on the same axis, so its left edge used to
+        // start a new segment and the translation kept that short line.
+        let rows = [
+            (
+                124.0,
+                710.0,
+                364.0,
+                "Provided proper attribution is provided, Google hereby grants permission to",
+            ),
+            (
+                124.3,
+                696.0,
+                363.6,
+                "reproduce the tables and figures in this paper solely for use in journalistic or",
+            ),
+            (267.6, 682.0, 78.9, "scholarly works."),
+        ];
+        let mut glyphs = Vec::new();
+        for (id, (x, y, width, text)) in rows.iter().enumerate() {
+            let mut item = glyph(id as u32, *x, *y, text, false);
+            item.font_size = 12.0;
+            item.bbox = [*x, *y, x + width, y + 12.0];
+            item.advance = [*width, 0.0];
+            glyphs.push(item);
+        }
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains("journalistic or") && texts[0].contains("scholarly works."),
             "{texts:?}"
         );
     }

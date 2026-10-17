@@ -27,10 +27,11 @@ use crate::font::{
 };
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
-    apply_formula_hole_widths, char_widths, cids_of, cjk_indent_ems, fit_cjk_block_with,
-    heading_level, is_cjk_body, justify_gaps, justify_gaps_holes, justify_wrapped_line, measure,
-    pack_into_slots_holes, pack_narrow_tail_holes, prompt_line_is_full, prompt_line_is_full_holes,
-    scale_for_heading, spread_to_lines, wrap_text, CjkMeasure, HeadingLevel, LineSlots,
+    apply_formula_hole_widths, balance_lines, char_widths, cids_of, cjk_indent_ems,
+    fit_cjk_block_with, heading_level, is_cjk_body, justify_gaps, justify_gaps_holes,
+    justify_wrapped_line, measure, pack_into_slots_holes, pack_narrow_tail_holes,
+    prompt_line_is_full, prompt_line_is_full_holes, scale_for_heading, spread_to_lines, wrap_text,
+    CjkMeasure, HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{
@@ -668,6 +669,11 @@ pub fn rewrite_translation(
     // `1.4.1` is one glyph per draw. Hole-closing then lifts the title and
     // leaves the digits on the English baseline, on top of the next paragraph.
     coalesce_section_indexes(&mut drawn);
+    // Names are already Songti. Affiliations were kept in Times (`name`) and a
+    // shared typewriter operator kept the emails. Redraw that column in the
+    // CJK face and center each line before the unchanged-line pass, which
+    // would otherwise paint the same emails again at the source x.
+    seat_author_columns(&mut drawn, &mut succeeded, &mut keep, extraction, &embedded);
     adopt_unchanged_body_lines(
         &mut drawn,
         &mut succeeded,
@@ -7796,6 +7802,22 @@ fn small_caps_cap_size(sizes: &[f32]) -> Option<f32> {
     Some(large)
 }
 
+/// A centered permission notice or similar multi-line header. Body columns
+/// that share a left margin are not centered, so they keep the source breaks.
+fn centered_body_block(
+    ink: &[InkLine<'_>],
+    level: HeadingLevel,
+    media: [f32; 4],
+    extraction: &Extraction,
+) -> bool {
+    ink.len() >= 2
+        && matches!(level, HeadingLevel::Body)
+        && matches!(
+            source_block_align(ink, media, extraction),
+            crate::overlap::BlockAlign::Center { .. }
+        )
+}
+
 fn source_block_align(
     ink: &[InkLine<'_>],
     media: [f32; 4],
@@ -9256,6 +9278,19 @@ fn layout_segment(
             return Some(drawn);
         }
     }
+    // A centered notice is one paragraph. A first-line indent would shove the
+    // opening line off the axis the other lines are centered on.
+    let centered_prose = !bilingual
+        && numbered.is_none()
+        && bullet.is_none()
+        && hanging.is_none()
+        && run_in.is_none()
+        && callout.is_none()
+        && quotes.is_empty()
+        && centered_body_block(&ink, level, media, extraction);
+    if centered_prose {
+        indent_ems = 0.0;
+    }
     let callout_indent = callout
         .as_ref()
         .and_then(|lead| {
@@ -9369,7 +9404,7 @@ fn layout_segment(
     // A narrow contents tail (`engines` beside page number `4`) is packed
     // before a full-column reflow. Reflow would keep `引擎` on the wide line
     // and leave `4` as the first mark on the next baseline.
-    let lines = if bilingual || hanging.is_some() {
+    let mut lines = if bilingual || hanging.is_some() {
         // A dash item is one paragraph. Spreading it onto the source line
         // breaks leaves each continuation at a different indent.
         lines
@@ -9401,6 +9436,15 @@ fn layout_segment(
     } else {
         spread_to_lines(lines, ink.len())
     };
+    if centered_prose {
+        // The source line count is not the translation's. Balance the whole
+        // paragraph on the block measure and center each line. Spreading back
+        // onto the English breaks leaves `仅用于新闻或` on its own.
+        if let Some(balanced) = balance_lines(text, size, width, font, &holes) {
+            lines = balanced;
+        }
+        absorbed.extend(glyphs.iter().map(|glyph| glyph.id));
+    }
     if hanging.is_some() || reflow || numbered.is_some() {
         // Reflow replaces the source lines. A stray cover glyph at the source
         // size is the mixed-size glitch inside the paragraph.
@@ -10330,6 +10374,421 @@ fn coalesce_section_indexes(drawn: &mut Vec<Drawn>) {
 /// block, so the column closer stops and the quote sits a line below the
 /// title that moved up. Redraw that one body line. Section numbers, folios,
 /// and short code tokens stay where they are.
+struct CreditLine {
+    page: u32,
+    y: f32,
+    left: f32,
+    right: f32,
+    size: f32,
+    text: String,
+    ids: Vec<u32>,
+    color: Color,
+}
+
+/// Author columns: a name, an affiliation, and an email stacked on one axis.
+/// The affiliation used to stay in Times (`name`) and the emails in the
+/// source typewriter face. Draw every line in the CJK face, centered on the
+/// column.
+fn seat_author_columns(
+    drawn: &mut Vec<Drawn>,
+    succeeded: &mut HashSet<u32>,
+    keep: &mut HashMap<u32, String>,
+    extraction: &Extraction,
+    embedded: &[(String, SubsetFont)],
+) {
+    if embedded.is_empty() {
+        return;
+    }
+    let lines = credit_lines(extraction);
+    let columns = author_columns(&lines);
+    if columns.is_empty() {
+        return;
+    }
+    let prefer = drawn
+        .iter()
+        .find(|line| line.text.chars().any(is_han_char))
+        .map(|line| line.resource.clone());
+    let placed: Vec<(Vec<usize>, f32)> = columns
+        .iter()
+        .filter_map(|column| {
+            let axis = credit_axis(&lines, column);
+            axis.is_finite().then_some((column.clone(), axis))
+        })
+        .collect();
+    let mut pending: Vec<Drawn> = Vec::new();
+    let mut claim: Vec<u32> = Vec::new();
+    for (column, axis) in &placed {
+        let slot = credit_slot(&lines, &placed, column, *axis);
+        for index in column {
+            let line = &lines[*index];
+            let mut seated = false;
+            for item in drawn.iter_mut() {
+                if item.page != line.page {
+                    continue;
+                }
+                let overlap = item
+                    .glyph_ids
+                    .iter()
+                    .filter(|id| line.ids.contains(id))
+                    .count();
+                if overlap == 0 || overlap * 2 < item.glyph_ids.len() {
+                    continue;
+                }
+                if !credit_drawn_text(&item.text) {
+                    continue;
+                }
+                item.gaps.fill(0.0);
+                let mut advance = item.widths.iter().sum::<f32>();
+                if advance > slot && slot > 1.0 {
+                    let scale = slot / advance;
+                    item.size *= scale;
+                    for width in &mut item.widths {
+                        *width *= scale;
+                    }
+                    advance = slot;
+                }
+                if advance > 0.0 {
+                    item.x = *axis - advance * 0.5;
+                }
+                seated = true;
+            }
+            if seated {
+                continue;
+            }
+            let text = line.text.trim();
+            if !credit_kept_text(text) {
+                continue;
+            }
+            let Some((resource, font)) = credit_font(embedded, prefer.as_deref(), text) else {
+                continue;
+            };
+            let mut size = line.size;
+            let mut widths = char_widths(text, size, font);
+            let mut advance = widths.iter().sum::<f32>();
+            if advance > slot && slot > 1.0 {
+                size = (size * slot / advance).max(1.0);
+                widths = char_widths(text, size, font);
+                advance = widths.iter().sum::<f32>();
+            }
+            if advance <= 0.0 {
+                continue;
+            }
+            pending.push(Drawn {
+                page: line.page,
+                x: *axis - advance * 0.5,
+                y: line.y,
+                size,
+                color: line.color.clone(),
+                cids: cids_of(text, font),
+                resource: resource.to_string(),
+                skew: 0.0,
+                widths,
+                gaps: vec![0.0; text.chars().count().saturating_sub(1)],
+                text: text.to_string(),
+                supers: Vec::new(),
+                sup_scale: 1.0,
+                sup_rise: 0.0,
+                glyph_ids: line.ids.clone(),
+            });
+            claim.extend(line.ids.iter().copied());
+        }
+    }
+    // Four emails share one typewriter operator. Blank it only when every
+    // address on that operator is being redrawn.
+    let committed = committed_credit_ids(&claim, extraction, succeeded);
+    pending.retain(|item| item.glyph_ids.iter().all(|id| committed.contains(id)));
+    for id in committed {
+        keep.remove(&id);
+        succeeded.insert(id);
+    }
+    drawn.extend(pending);
+}
+
+fn credit_font<'a>(
+    embedded: &'a [(String, SubsetFont)],
+    prefer: Option<&str>,
+    text: &str,
+) -> Option<(&'a str, &'a SubsetFont)> {
+    let covers = |font: &SubsetFont| {
+        text.chars()
+            .all(|ch| ch.is_whitespace() || font.has(ch as u32))
+    };
+    if let Some(name) = prefer {
+        if let Some((resource, font)) = embedded
+            .iter()
+            .find(|(resource, font)| resource == name && covers(font))
+        {
+            return Some((resource.as_str(), font));
+        }
+    }
+    embedded
+        .iter()
+        .find(|(_, font)| covers(font))
+        .map(|(resource, font)| (resource.as_str(), font))
+}
+
+fn credit_drawn_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.chars().count() < 2 || trimmed.chars().count() > 48 {
+        return false;
+    }
+    trimmed.chars().any(|ch| ch.is_alphabetic())
+}
+
+fn credit_kept_text(text: &str) -> bool {
+    if text.contains('@') {
+        return text.chars().any(|ch| ch.is_ascii_alphabetic());
+    }
+    if crate::translate::is_institution_line(text) {
+        return true;
+    }
+    // `Aidan N. Gomez` is left in Latin, so it was still the original Times
+    // face beside Songti names. Draw it with the same CJK face.
+    let trimmed = text
+        .trim()
+        .trim_end_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
+    crate::translate::is_name_byline(trimmed)
+}
+
+/// Ids whose operator is fully covered by `claim` or by glyphs already drawn.
+/// A shared typewriter line is blanked only when every email on it is redrawn.
+fn committed_credit_ids(
+    claim: &[u32],
+    extraction: &Extraction,
+    succeeded: &HashSet<u32>,
+) -> HashSet<u32> {
+    let claimed: HashSet<u32> = claim.iter().copied().collect();
+    let by_id = glyph_index(&extraction.glyphs);
+    let mut blocked: HashSet<(u32, u16, usize, usize)> = HashSet::new();
+    for id in &claimed {
+        let Some(glyph) = by_id.get(id).map(|&index| &extraction.glyphs[index]) else {
+            continue;
+        };
+        let Some(span) = span_of(&glyph.source) else {
+            continue;
+        };
+        let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+        let open = extraction.glyphs.iter().any(|other| {
+            if other.unicode.trim().is_empty() {
+                return false;
+            }
+            let Some(other_span) = span_of(&other.source) else {
+                return false;
+            };
+            other_span.object_id == span.object_id
+                && other_span.start == span.start
+                && other_span.end == span.end
+                && !claimed.contains(&other.id)
+                && !succeeded.contains(&other.id)
+        });
+        if open {
+            blocked.insert(key);
+        }
+    }
+    claimed
+        .into_iter()
+        .filter(|id| {
+            let Some(glyph) = by_id.get(id).map(|&index| &extraction.glyphs[index]) else {
+                return false;
+            };
+            let Some(span) = span_of(&glyph.source) else {
+                return true;
+            };
+            !blocked.contains(&(span.object_id.0, span.object_id.1, span.start, span.end))
+        })
+        .collect()
+}
+
+fn credit_lines(extraction: &Extraction) -> Vec<CreditLine> {
+    let mut glyphs: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .collect();
+    glyphs.sort_by(|left, right| {
+        left.page_index
+            .cmp(&right.page_index)
+            .then(right.matrix[5].total_cmp(&left.matrix[5]))
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let mut baselines: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in glyphs {
+        let size = glyph.font_size.max(1.0);
+        if let Some(line) = baselines.iter_mut().find(|line| {
+            let host = line[0];
+            host.page_index == glyph.page_index
+                && (host.matrix[5] - glyph.matrix[5]).abs() < size * 0.35
+        }) {
+            line.push(glyph);
+        } else {
+            baselines.push(vec![glyph]);
+        }
+    }
+    let mut lines = Vec::new();
+    for mut baseline in baselines {
+        // A later glyph on this baseline can be a fraction of a point higher,
+        // so it was visited first. Sort before splitting columns or two emails
+        // are glued into one run (`lukaszkaiser…llion@…`).
+        baseline.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+        let size = baseline
+            .iter()
+            .map(|glyph| glyph.font_size)
+            .fold(1.0f32, f32::max)
+            .max(1.0);
+        let mut run: Vec<&Glyph> = Vec::new();
+        let flush = |run: &mut Vec<&Glyph>, lines: &mut Vec<CreditLine>| {
+            if run.is_empty() {
+                return;
+            }
+            let text = spaced_glyph_run(run).trim().to_string();
+            let left = run
+                .iter()
+                .map(|glyph| glyph.bbox[0].min(glyph.matrix[4]))
+                .fold(f32::MAX, f32::min);
+            let right = run
+                .iter()
+                .map(|glyph| glyph.bbox[2].max(glyph.matrix[4]))
+                .fold(f32::MIN, f32::max);
+            let width = right - left;
+            let size = run
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max)
+                .max(1.0);
+            // A permission notice and a body line are wider than a byline.
+            if !text.is_empty() && width >= size * 3.0 && width <= size * 22.0 {
+                lines.push(CreditLine {
+                    page: run[0].page_index,
+                    y: run[0].matrix[5],
+                    left,
+                    right,
+                    size,
+                    text,
+                    ids: run.iter().map(|glyph| glyph.id).collect(),
+                    color: run[0].fill_color.clone(),
+                });
+            }
+            run.clear();
+        };
+        for glyph in baseline {
+            if let Some(prev) = run.last() {
+                let prev_right = prev.bbox[2].max(prev.matrix[4]);
+                let next_left = glyph.bbox[0].min(glyph.matrix[4]);
+                if next_left - prev_right > size * 0.9 {
+                    flush(&mut run, &mut lines);
+                }
+            }
+            run.push(glyph);
+        }
+        flush(&mut run, &mut lines);
+    }
+    lines
+}
+
+fn author_columns(lines: &[CreditLine]) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..lines.len()).collect();
+    order.sort_by(|&left, &right| {
+        lines[left]
+            .page
+            .cmp(&lines[right].page)
+            .then(lines[right].y.total_cmp(&lines[left].y))
+    });
+    let mut columns: Vec<Vec<usize>> = Vec::new();
+    for index in order {
+        let line = &lines[index];
+        let mid = (line.left + line.right) * 0.5;
+        let host = columns.iter().position(|column| {
+            let axis = credit_axis(lines, column);
+            if (mid - axis).abs() > 24.0 {
+                return false;
+            }
+            column.iter().any(|&other| {
+                let item = &lines[other];
+                item.page == line.page && (item.y - line.y).abs() <= line.size.max(item.size) * 2.3
+            })
+        });
+        if let Some(host) = host {
+            columns[host].push(index);
+        } else {
+            columns.push(vec![index]);
+        }
+    }
+    columns.retain(|column| is_author_column(lines, column));
+    columns
+}
+
+fn is_author_column(lines: &[CreditLine], column: &[usize]) -> bool {
+    if column.len() < 2 {
+        return false;
+    }
+    let email = column.iter().any(|&index| lines[index].text.contains('@'));
+    let institution = column
+        .iter()
+        .any(|&index| crate::translate::is_institution_line(&lines[index].text));
+    let name = column.iter().any(|&index| {
+        let trimmed = lines[index]
+            .text
+            .trim()
+            .trim_end_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
+        crate::translate::is_name_byline(trimmed)
+    });
+    email || (institution && name)
+}
+
+/// Room for one centered line: the gap to the nearest column on the same
+/// row. A long email in the CJK face is wider than the typewriter original,
+/// and two columns must not run into each other.
+fn credit_slot(
+    lines: &[CreditLine],
+    placed: &[(Vec<usize>, f32)],
+    column: &[usize],
+    axis: f32,
+) -> f32 {
+    let y = credit_axis_y(lines, column);
+    let size = column
+        .iter()
+        .map(|&index| lines[index].size)
+        .fold(1.0f32, f32::max)
+        .max(1.0);
+    let mut limit = 420.0f32;
+    for (other, other_axis) in placed {
+        if other.as_slice() == column {
+            continue;
+        }
+        let other_y = credit_axis_y(lines, other);
+        if (other_y - y).abs() > size * 3.5 {
+            continue;
+        }
+        let gap = (other_axis - axis).abs();
+        if gap > 1.0 {
+            limit = limit.min(gap - 4.0);
+        }
+    }
+    limit.max(size * 4.0)
+}
+
+fn credit_axis_y(lines: &[CreditLine], column: &[usize]) -> f32 {
+    let mut ys: Vec<f32> = column.iter().map(|&index| lines[index].y).collect();
+    if ys.is_empty() {
+        return 0.0;
+    }
+    ys.sort_by(|left, right| left.total_cmp(right));
+    ys[ys.len() / 2]
+}
+
+fn credit_axis(lines: &[CreditLine], column: &[usize]) -> f32 {
+    let mut mids: Vec<f32> = column
+        .iter()
+        .map(|&index| (lines[index].left + lines[index].right) * 0.5)
+        .collect();
+    mids.retain(|value| value.is_finite());
+    if mids.is_empty() {
+        return f32::NAN;
+    }
+    mids.sort_by(|left, right| left.total_cmp(right));
+    mids[mids.len() / 2]
+}
+
 fn adopt_unchanged_body_lines(
     drawn: &mut Vec<Drawn>,
     succeeded: &mut HashSet<u32>,
@@ -21611,6 +22070,178 @@ mod tests {
                 line.text
             );
         }
+    }
+
+    #[test]
+    fn a_centered_notice_reflows_as_one_balanced_paragraph() {
+        let notice = "若提供适当的署名，Google特此授予许可，以复制本文中的表格和图形，仅用于新闻或学术著作。";
+        let mut points: Vec<u32> = notice.chars().map(|ch| ch as u32).collect();
+        points.sort_unstable();
+        points.dedup();
+        let Some(font) = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: false,
+                italic: false,
+            },
+            &points,
+            &FontSources::default(),
+        ) else {
+            return;
+        };
+        let page = |glyphs: Vec<Glyph>| Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let band = |id: u32, x: f32, right: f32, y: f32, text: &str| {
+            let mut glyph = ink_glyph(id, x, y, 12.0, text);
+            glyph.bbox = [x, y - 2.0, right, y + 10.0];
+            glyph
+        };
+        let glyphs = vec![
+            band(
+                0,
+                124.7,
+                487.3,
+                710.0,
+                "Provided proper attribution is provided, Google hereby grants permission to",
+            ),
+            band(
+                1,
+                124.3,
+                487.9,
+                696.0,
+                "reproduce the tables and figures in this paper solely for use in journalistic or",
+            ),
+            band(2, 267.6, 346.5, 682.0, "scholarly works."),
+        ];
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let extraction = page(glyphs.clone());
+        let drawn = layout_segment(
+            &refs,
+            notice,
+            &font,
+            &extraction,
+            false,
+            "RPT",
+            0.0,
+            CjkMeasure::resolve(0.90, 1.60),
+        )
+        .expect("notice fits");
+        let texts: Vec<_> = drawn.iter().map(|line| line.text.as_str()).collect();
+        assert!(
+            texts.len() >= 2,
+            "the notice should wrap across the block: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .all(|line| *line != "学术著作。" && *line != "仅用于新闻或"),
+            "source breaks survived: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|line| line.contains("学术著作")),
+            "{texts:?}"
+        );
+        let mut advances = Vec::new();
+        for line in &drawn {
+            let advance = line.widths.iter().sum::<f32>();
+            advances.push(advance);
+            let mid = line.x + advance * 0.5;
+            assert!(
+                (mid - 306.0).abs() < 8.0,
+                "notice mid {mid:.1} x {:.1}: {}",
+                line.x,
+                line.text
+            );
+        }
+        let longest = advances.iter().copied().fold(0.0f32, f32::max);
+        let shortest = advances.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            shortest >= longest * 0.62,
+            "unbalanced {advances:?} {texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_author_column_is_one_face_and_one_axis() {
+        let name = ink_glyph(1, 133.0, 549.0, 10.0, "Ashish Vaswani");
+        let mut name = name;
+        name.bbox = [133.0, 547.0, 200.0, 557.0];
+        let mut affiliation = ink_glyph(2, 139.0, 538.0, 10.0, "Google Brain");
+        affiliation.bbox = [139.0, 536.0, 193.0, 546.0];
+        affiliation.font_name = "Times-Roman".into();
+        let mut email = ink_glyph(3, 117.0, 527.0, 10.0, "avaswani@google.com");
+        email.bbox = [117.0, 525.0, 216.0, 535.0];
+        email.font_name = "Courier".into();
+        let glyphs = vec![name, affiliation, email];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let font = uniform_font("阿希什·瓦斯瓦尼Google Brainavaswani@google.com");
+        let mut drawn = vec![Drawn {
+            page: 0,
+            x: 133.0,
+            y: 549.0,
+            size: 10.0,
+            color: Color::black(),
+            cids: cids_of("阿希什·瓦斯瓦尼", &font),
+            resource: "RPT".into(),
+            skew: 0.0,
+            widths: char_widths("阿希什·瓦斯瓦尼", 10.0, &font),
+            gaps: vec![0.0; "阿希什·瓦斯瓦尼".chars().count() - 1],
+            text: "阿希什·瓦斯瓦尼".into(),
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids: vec![1],
+        }];
+        let mut succeeded = HashSet::from([1]);
+        let mut keep = HashMap::from([(2, "name".into()), (3, "unchanged".into())]);
+        super::seat_author_columns(
+            &mut drawn,
+            &mut succeeded,
+            &mut keep,
+            &extraction,
+            &[("RPT".into(), font)],
+        );
+        assert!(
+            succeeded.contains(&2) && succeeded.contains(&3),
+            "{succeeded:?}"
+        );
+        assert!(!keep.contains_key(&2) && !keep.contains_key(&3));
+        let texts: Vec<_> = drawn.iter().map(|line| line.text.as_str()).collect();
+        assert!(texts.contains(&"Google Brain"), "{texts:?}");
+        assert!(texts.contains(&"avaswani@google.com"), "{texts:?}");
+        let axis = drawn
+            .iter()
+            .map(|line| {
+                let advance = line.widths.iter().sum::<f32>();
+                line.x + advance * 0.5
+            })
+            .collect::<Vec<_>>();
+        let anchor = axis[0];
+        assert!(
+            axis.iter().all(|mid| (mid - anchor).abs() < 1.0),
+            "column drifted {axis:?} {texts:?}"
+        );
     }
 
     #[test]
