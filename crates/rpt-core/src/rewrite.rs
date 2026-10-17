@@ -684,6 +684,17 @@ pub fn rewrite_translation(
         &embedded,
         &owners,
     );
+    // `Aidan N. Gomez∗†` keeps the marks on their own CMSY operator. The
+    // wider name is already drawn, so those marks would stay on the source
+    // x and land on `z`. Hang them off the redrawn name and blank the source.
+    hang_kept_author_marks(
+        &mut drawn,
+        &mut succeeded,
+        &mut keep,
+        extraction,
+        &by_id,
+        &embedded,
+    );
     // `TEXT Julius… in the` / `demise of the Roman…` are two segments. Each
     // was fitted to its own English line, so the first Chinese line stopped
     // early. Join that wrap and fill the source measure before holes close.
@@ -11064,20 +11075,28 @@ fn adopt_unchanged_body_lines(
             0.0
         };
         let glyph_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+        let widths = char_widths(&text, size, font);
+        let advance = widths.iter().sum::<f32>();
+        // The source title is centered on the rules. Keeping the first
+        // glyph's x and painting a wider face shifts that center off the axis.
+        let x = display_title_axis(&glyphs, extraction)
+            .filter(|_| advance > 0.0)
+            .map(|axis| axis - advance * 0.5)
+            .unwrap_or(sample.matrix[4]);
         for id in &glyph_ids {
             keep.remove(id);
             succeeded.insert(*id);
         }
         drawn.push(Drawn {
             page,
-            x: sample.matrix[4],
+            x,
             y,
             size,
             color: sample.fill_color.clone(),
             cids: cids_of(&text, font),
             resource: resource.clone(),
             skew,
-            widths: char_widths(&text, size, font),
+            widths,
             gaps: vec![0.0; text.chars().count().saturating_sub(1)],
             text,
             supers: Vec::new(),
@@ -11085,6 +11104,301 @@ fn adopt_unchanged_body_lines(
             sup_rise: 0.0,
             glyph_ids,
         });
+    }
+}
+
+/// A short unchanged line whose ink sits on the page center, or between a
+/// pair of horizontal rules. The axis is the rules' shared midpoint when
+/// they bracket the line, otherwise the page center.
+fn display_title_axis(glyphs: &[&Glyph], extraction: &Extraction) -> Option<f32> {
+    if glyphs.is_empty() {
+        return None;
+    }
+    let size = glyphs
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(1.0f32, f32::max);
+    // Author names and emails are centered on a column, not the page.
+    if size < 14.0 {
+        return None;
+    }
+    let page = glyphs[0].page_index;
+    let media = extraction
+        .pages
+        .iter()
+        .find(|info| info.index == page)
+        .map(|info| info.media_box)
+        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let left = glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].min(glyph.matrix[4]))
+        .fold(f32::MAX, f32::min);
+    let right = glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[2].max(glyph.matrix[4] + glyph.advance[0].max(0.0)))
+        .fold(f32::MIN, f32::max);
+    if !left.is_finite() || !right.is_finite() || right - left < size * 2.0 {
+        return None;
+    }
+    let mid = (left + right) * 0.5;
+    let page_left = media[0];
+    let page_right = media[2];
+    let page_width = page_right - page_left;
+    let page_mid = (page_left + page_right) * 0.5;
+    let margin_floor = (page_width * 0.12).max(size * 3.0);
+    if left - page_left < margin_floor || page_right - right < margin_floor {
+        return None;
+    }
+    let y = glyphs.iter().map(|glyph| glyph.matrix[5]).sum::<f32>() / glyphs.len() as f32;
+    let rule_axis = bracketing_rule_axis(extraction, page, y, size);
+    let axis = rule_axis.unwrap_or(page_mid);
+    let tol = (size * 0.45).max(8.0);
+    ((mid - axis).abs() <= tol).then_some(axis)
+}
+
+/// Midpoint of the two horizontal rules that bracket `y`. A title rule is a
+/// thin path a few hundred points wide. A footnote rule is shorter and sits
+/// far below the title.
+fn bracketing_rule_axis(extraction: &Extraction, page: u32, y: f32, size: f32) -> Option<f32> {
+    let mut rules = Vec::new();
+    for region in &extraction.regions {
+        if region.page_index != page || region.kind != "path" {
+            continue;
+        }
+        let width = (region.bbox[2] - region.bbox[0]).abs();
+        let height = (region.bbox[3] - region.bbox[1]).abs();
+        if width < 120.0 || height > 6.0 {
+            continue;
+        }
+        let left = region.bbox[0].min(region.bbox[2]);
+        let right = region.bbox[0].max(region.bbox[2]);
+        let rule_y = (region.bbox[1] + region.bbox[3]) * 0.5;
+        rules.push((left, right, rule_y));
+    }
+    let above = rules
+        .iter()
+        .filter(|rule| rule.2 > y + size * 0.15 && rule.2 < y + size * 4.5)
+        .min_by(|left, right| left.2.total_cmp(&right.2))?;
+    let below = rules
+        .iter()
+        .filter(|rule| rule.2 < y - size * 0.05 && rule.2 > y - size * 4.5)
+        .max_by(|left, right| left.2.total_cmp(&right.2))?;
+    let overlap = above.1.min(below.1) - above.0.max(below.0);
+    let shorter = (above.1 - above.0).min(below.1 - below.0);
+    if overlap < shorter * 0.6 {
+        return None;
+    }
+    Some((above.0 + above.1 + below.0 + below.1) * 0.25)
+}
+
+/// Footnote marks that stayed on their own operator (`∗†` after Gomez, `∗‡`
+/// after Illia). The name was redrawn wider, so the source x now lies on
+/// the last letter. Draw the marks after that letter and blank the source.
+fn hang_kept_author_marks(
+    drawn: &mut [Drawn],
+    succeeded: &mut HashSet<u32>,
+    keep: &mut HashMap<u32, String>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+) {
+    let claimed: HashSet<u32> = drawn
+        .iter()
+        .flat_map(|line| line.glyph_ids.iter().copied())
+        .collect();
+    let marks: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            !glyph.invisible
+                && is_footnote_symbol(&glyph.unicode)
+                && !succeeded.contains(&glyph.id)
+                && !claimed.contains(&glyph.id)
+        })
+        .collect();
+    if marks.is_empty() {
+        return;
+    }
+    struct Host {
+        index: usize,
+        page: u32,
+        y: f32,
+        size: f32,
+        right: f32,
+    }
+    let mut hosts = Vec::new();
+    for (index, line) in drawn.iter().enumerate() {
+        let glyphs: Vec<&Glyph> = line
+            .glyph_ids
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|&slot| &extraction.glyphs[slot]))
+            .filter(|glyph| !glyph.unicode.trim().is_empty() && !is_footnote_symbol(&glyph.unicode))
+            .collect();
+        if glyphs.is_empty() || !line.text.chars().any(|ch| ch.is_alphabetic()) {
+            continue;
+        }
+        let size = glyphs
+            .iter()
+            .map(|glyph| glyph.font_size)
+            .fold(1.0f32, f32::max)
+            .max(1.0);
+        let left = glyphs
+            .iter()
+            .map(|glyph| glyph.bbox[0].min(glyph.matrix[4]))
+            .fold(f32::MAX, f32::min);
+        let right = glyphs
+            .iter()
+            .map(|glyph| glyph.bbox[2].max(glyph.matrix[4] + glyph.advance[0].max(0.0)))
+            .fold(f32::MIN, f32::max);
+        if right - left > size * 24.0 || line.text.chars().count() > 48 {
+            continue;
+        }
+        let y = glyphs.iter().map(|glyph| glyph.matrix[5]).sum::<f32>() / glyphs.len() as f32;
+        hosts.push(Host {
+            index,
+            page: line.page,
+            y,
+            size,
+            right,
+        });
+    }
+    let mut assigned: HashMap<usize, Vec<&Glyph>> = HashMap::new();
+    for mark in &marks {
+        let mut best: Option<(usize, f32)> = None;
+        for host in &hosts {
+            if host.page != mark.page_index {
+                continue;
+            }
+            let dy = mark.matrix[5] - host.y;
+            if dy < host.size * 0.08 || dy > host.size * 0.9 {
+                continue;
+            }
+            if mark.font_size > host.size * 0.85 {
+                continue;
+            }
+            let dx = mark.matrix[4] - host.right;
+            if dx < -host.size * 0.35 || dx > host.size * 3.2 {
+                continue;
+            }
+            if best.is_none_or(|(_, score)| dx.abs() < score) {
+                best = Some((host.index, dx.abs()));
+            }
+        }
+        if let Some((index, _)) = best {
+            assigned.entry(index).or_default().push(*mark);
+        }
+    }
+    if assigned.is_empty() {
+        return;
+    }
+    let owners = operator_owners(&extraction.glyphs);
+    let mut dropped: HashSet<u32> = HashSet::new();
+    for group in assigned.values() {
+        for mark in group {
+            let Some(span) = span_of(&mark.source) else {
+                dropped.insert(mark.id);
+                continue;
+            };
+            let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+            let Some(ids) = owners.get(&key) else {
+                dropped.insert(mark.id);
+                continue;
+            };
+            let covered = ids.iter().all(|id| {
+                let Some(glyph) = by_id.get(id).map(|&slot| &extraction.glyphs[slot]) else {
+                    return true;
+                };
+                if glyph.unicode.trim().is_empty() {
+                    return true;
+                }
+                succeeded.contains(id)
+                    || claimed.contains(id)
+                    || group.iter().any(|mark| mark.id == *id)
+            });
+            if !covered {
+                for id in ids {
+                    dropped.insert(*id);
+                }
+            }
+        }
+    }
+    for marks in assigned.values_mut() {
+        marks.retain(|mark| !dropped.contains(&mark.id));
+        marks.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    }
+    for (index, marks) in assigned {
+        if marks.is_empty() {
+            continue;
+        }
+        let line = &mut drawn[index];
+        let Some((_, font)) = embedded.iter().find(|(name, _)| name == &line.resource) else {
+            continue;
+        };
+        if marks.iter().any(|mark| {
+            mark.unicode
+                .chars()
+                .any(|ch| !ch.is_whitespace() && !font.has(ch as u32))
+        }) {
+            continue;
+        }
+        let mark_text: String = marks.iter().map(|mark| mark.unicode.as_str()).collect();
+        let mark_cids = cids_of(&mark_text, font);
+        if mark_cids.len() != mark_text.chars().count() {
+            continue;
+        }
+        let old_chars = line.text.chars().count();
+        if line.cids.len() != old_chars {
+            line.cids = cids_of(&line.text, font);
+        }
+        if line.cids.len() != old_chars {
+            continue;
+        }
+        if line.supers.len() != old_chars {
+            line.supers = vec![false; old_chars];
+        }
+        let already_raised = line.supers.iter().any(|flag| *flag);
+        let name_y = hosts
+            .iter()
+            .find(|host| host.index == index)
+            .map(|host| host.y)
+            .unwrap_or(line.y);
+        let scale = (marks[0].font_size / line.size.max(1.0)).clamp(0.45, 0.85);
+        let rise = ((marks[0].matrix[5] - name_y) / line.size.max(1.0)).clamp(0.12, 0.6);
+        if !already_raised {
+            line.sup_scale = scale;
+            line.sup_rise = rise;
+        }
+        let sup_size = line.size * line.sup_scale;
+        let mark_widths = char_widths(&mark_text, sup_size, font);
+        if line.widths.len() != old_chars {
+            line.widths = char_widths(&line.text, line.size, font);
+        }
+        line.gaps.resize(old_chars.saturating_sub(1), 0.0);
+        if old_chars > 0 {
+            // Gap after the last letter, then the source gap between marks
+            // that the superscript advance does not already cover.
+            line.gaps.push((line.size * 0.08).max(0.6));
+        }
+        let mut prev_x = marks[0].matrix[4];
+        for (offset, mark) in marks.iter().enumerate() {
+            if offset > 0 {
+                let source_step = mark.matrix[4] - prev_x;
+                let drawn_step = mark_widths[offset - 1];
+                line.gaps
+                    .push((source_step - drawn_step).max(line.size * 0.08));
+            }
+            prev_x = mark.matrix[4];
+        }
+        line.widths.extend(mark_widths);
+        line.cids.extend(mark_cids);
+        line.supers
+            .extend(std::iter::repeat_n(true, mark_text.chars().count()));
+        line.text.push_str(&mark_text);
+        for mark in &marks {
+            line.glyph_ids.push(mark.id);
+            keep.remove(&mark.id);
+            succeeded.insert(mark.id);
+        }
     }
 }
 
@@ -23280,6 +23594,216 @@ mod tests {
         assert!(
             axis.iter().all(|mid| (mid - anchor).abs() < 1.0),
             "column drifted {axis:?} {texts:?}"
+        );
+    }
+
+    fn spanned(mut glyph: Glyph, start: usize, end: usize) -> Glyph {
+        glyph.source.object_id = Some("10 0".into());
+        glyph.source.byte_start = start;
+        glyph.source.byte_end = end;
+        glyph
+    }
+
+    #[test]
+    fn an_unchanged_title_is_centered_on_the_rules() {
+        let title = spanned(
+            ink_glyph(1, 211.0, 630.0, 17.0, "Attention Is All You Need"),
+            0,
+            20,
+        );
+        let mut title = title;
+        title.bbox = [211.0, 620.0, 390.0, 646.0];
+        title.advance = [179.0, 0.0];
+        let mut aside = spanned(
+            ink_glyph(2, 72.0, 500.0, 11.0, "Mountain View office"),
+            30,
+            40,
+        );
+        aside.bbox = [72.0, 492.0, 210.0, 508.0];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs: vec![title, aside],
+            regions: vec![
+                crate::glyph::PaintedRegion {
+                    page_index: 0,
+                    bbox: [100.0, 658.0, 500.0, 662.0],
+                    kind: "path".into(),
+                },
+                crate::glyph::PaintedRegion {
+                    page_index: 0,
+                    bbox: [100.0, 614.0, 500.0, 614.0],
+                    kind: "path".into(),
+                },
+            ],
+            diagnostics: Vec::new(),
+        };
+        let font = uniform_font("Attention Is All You NeedMountain View office中");
+        let by_id = glyph_index(&extraction.glyphs);
+        let owners = operator_owners(&extraction.glyphs);
+        let mut drawn = vec![Drawn {
+            page: 0,
+            x: 108.0,
+            y: 700.0,
+            size: 11.0,
+            color: Color::black(),
+            cids: cids_of("中", &font),
+            resource: "RPT".into(),
+            skew: 0.0,
+            widths: char_widths("中", 11.0, &font),
+            gaps: Vec::new(),
+            text: "中".into(),
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids: vec![9],
+        }];
+        let mut succeeded = HashSet::new();
+        let mut keep = HashMap::from([(1, "unchanged".into()), (2, "unchanged".into())]);
+        super::adopt_unchanged_body_lines(
+            &mut drawn,
+            &mut succeeded,
+            &mut keep,
+            &extraction,
+            &by_id,
+            &[("RPT".into(), font)],
+            &owners,
+        );
+        let title = drawn
+            .iter()
+            .find(|line| line.text.contains("Attention"))
+            .expect("title redrawn");
+        let advance = title.widths.iter().sum::<f32>();
+        let mid = title.x + advance * 0.5;
+        assert!(
+            (mid - 300.0).abs() < 0.6,
+            "title mid {mid:.1} x {:.1} width {advance:.1}",
+            title.x
+        );
+        let aside = drawn
+            .iter()
+            .find(|line| line.text.contains("Mountain"))
+            .expect("left line redrawn");
+        assert!(
+            (aside.x - 72.0).abs() < 0.6,
+            "left line moved to {:.1}",
+            aside.x
+        );
+    }
+
+    #[test]
+    fn author_marks_hang_after_the_name() {
+        let mut name = ink_glyph(1, 248.0, 499.3, 10.0, "Aidan N. Gomez");
+        name.bbox = [248.0, 497.0, 319.3, 507.0];
+        name.advance = [71.3, 0.0];
+        let mut star = ink_glyph(2, 319.33, 502.92, 7.0, "∗");
+        star.bbox = [319.33, 502.0, 323.4, 509.0];
+        star.font_name = "CMSY7".into();
+        star.font_size = 7.0;
+        star = spanned(star, 100, 110);
+        let mut dagger = ink_glyph(3, 326.64, 502.92, 7.0, "†");
+        dagger.bbox = [326.64, 502.0, 330.3, 509.0];
+        dagger.font_name = "CMSY7".into();
+        dagger.font_size = 7.0;
+        dagger = spanned(dagger, 100, 110);
+        let mut note = ink_glyph(
+            4,
+            108.0,
+            120.0,
+            9.0,
+            "†Work performed while at Google Brain.",
+        );
+        note.bbox = [108.0, 112.0, 320.0, 128.0];
+        note = spanned(note, 200, 220);
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs: vec![name, star, dagger, note],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let font = uniform_font("Aidan N. Gomez∗†Work performed while at Google Brain.");
+        let name_text = "Aidan N. Gomez";
+        let widths = char_widths(name_text, 10.0, &font);
+        let mut drawn = vec![Drawn {
+            page: 0,
+            x: 248.4,
+            y: 499.3,
+            size: 10.0,
+            color: Color::black(),
+            cids: cids_of(name_text, &font),
+            resource: "RPT".into(),
+            skew: 0.0,
+            widths: widths.clone(),
+            gaps: vec![0.0; name_text.chars().count() - 1],
+            text: name_text.into(),
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids: vec![1],
+        }];
+        let mut succeeded = HashSet::from([1]);
+        let mut keep = HashMap::from([(2, "unchanged".into()), (3, "unchanged".into())]);
+        let by_id = glyph_index(&extraction.glyphs);
+        super::hang_kept_author_marks(
+            &mut drawn,
+            &mut succeeded,
+            &mut keep,
+            &extraction,
+            &by_id,
+            &[("RPT".into(), font)],
+        );
+        assert!(
+            succeeded.contains(&2) && succeeded.contains(&3),
+            "{succeeded:?}"
+        );
+        assert!(!keep.contains_key(&2) && !keep.contains_key(&3));
+        let line = &drawn[0];
+        assert_eq!(line.text, "Aidan N. Gomez∗†");
+        let chars: Vec<char> = line.text.chars().collect();
+        let star_at = chars.iter().position(|ch| *ch == '∗').expect("star");
+        let dagger_at = chars.iter().position(|ch| *ch == '†').expect("dagger");
+        assert!(line.supers[star_at] && line.supers[dagger_at]);
+        assert!(line.supers[..star_at].iter().all(|flag| !flag));
+        let mut cursor = line.x;
+        let mut star_x = 0.0;
+        let mut dagger_x = 0.0;
+        for (index, width) in line.widths.iter().enumerate() {
+            if index == star_at {
+                star_x = cursor;
+            }
+            if index == dagger_at {
+                dagger_x = cursor;
+            }
+            cursor += width;
+            if index + 1 < line.widths.len() {
+                cursor += line.gaps.get(index).copied().unwrap_or(0.0);
+            }
+        }
+        let name_right = line.x + widths.iter().sum::<f32>();
+        assert!(
+            star_x + 0.2 >= name_right,
+            "star {star_x:.2} overlaps the name ending {name_right:.2}"
+        );
+        assert!(
+            dagger_x >= star_x + line.widths[star_at] - 0.05,
+            "dagger {dagger_x:.2} overlaps star at {star_x:.2} width {:.2}",
+            line.widths[star_at]
+        );
+        assert!(
+            (dagger_x - star_x - 7.3).abs() < 1.2,
+            "marks lost the source step, dx {:.2}",
+            dagger_x - star_x
         );
     }
 

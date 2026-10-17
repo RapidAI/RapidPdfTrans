@@ -992,6 +992,96 @@ pub fn inline_math_baseline_drift(glyphs: &[Glyph]) -> Vec<BaselineDrift> {
     flags
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct TitleAxisDrift {
+    pub page: u32,
+    pub text: String,
+    pub delta: f32,
+}
+
+/// A display title between two horizontal rules, or a short page-centered
+/// title, whose ink midpoint has left the rule or page axis. Redrawing a
+/// wider face from the source left edge does that.
+pub fn title_axis_drift(extraction: &Extraction) -> Vec<TitleAxisDrift> {
+    let lines = paint_lines(&extraction.glyphs);
+    let mut flags = Vec::new();
+    for line in &lines {
+        let letters = line.chars_of_text();
+        if line.size < 14.0 || !(4..=80).contains(&letters) {
+            continue;
+        }
+        let media = extraction
+            .pages
+            .iter()
+            .find(|info| info.index == line.page)
+            .map(|info| info.media_box)
+            .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+        let page_left = media[0];
+        let page_right = media[2];
+        let page_width = (page_right - page_left).max(1.0);
+        let page_mid = (page_left + page_right) * 0.5;
+        let mid = (line.min_x + line.max_x) * 0.5;
+        let axis =
+            bracketing_rules(extraction, line.page, line.y, line.size).unwrap_or_else(|| {
+                let margin = (page_width * 0.12).max(line.size * 3.0);
+                let centered = line.min_x - page_left >= margin
+                    && page_right - line.max_x >= margin
+                    && (mid - page_mid).abs() <= (line.size * 1.6).max(28.0)
+                    && (line.max_x - line.min_x) < page_width * 0.8;
+                if centered {
+                    page_mid
+                } else {
+                    f32::NAN
+                }
+            });
+        if !axis.is_finite() {
+            continue;
+        }
+        let delta = (mid - axis).abs();
+        if delta > (line.size * 0.22).max(4.0) {
+            flags.push(TitleAxisDrift {
+                page: line.page + 1,
+                text: line.text.clone(),
+                delta,
+            });
+        }
+    }
+    flags
+}
+
+/// Shared midpoint of the horizontal rules above and below `y`.
+fn bracketing_rules(extraction: &Extraction, page: u32, y: f32, size: f32) -> Option<f32> {
+    let mut rules = Vec::new();
+    for region in &extraction.regions {
+        if region.page_index != page || region.kind != "path" {
+            continue;
+        }
+        let width = (region.bbox[2] - region.bbox[0]).abs();
+        let height = (region.bbox[3] - region.bbox[1]).abs();
+        if width < 120.0 || height > 6.0 {
+            continue;
+        }
+        let left = region.bbox[0].min(region.bbox[2]);
+        let right = region.bbox[0].max(region.bbox[2]);
+        let rule_y = (region.bbox[1] + region.bbox[3]) * 0.5;
+        rules.push((left, right, rule_y));
+    }
+    let above = rules
+        .iter()
+        .filter(|rule| rule.2 > y + size * 0.15 && rule.2 < y + size * 4.5)
+        .min_by(|left, right| left.2.total_cmp(&right.2))?;
+    let below = rules
+        .iter()
+        .filter(|rule| rule.2 < y - size * 0.05 && rule.2 > y - size * 4.5)
+        .max_by(|left, right| left.2.total_cmp(&right.2))?;
+    let overlap = above.1.min(below.1) - above.0.max(below.0);
+    let shorter = (above.1 - above.0).min(below.1 - below.0);
+    if overlap < shorter * 0.6 {
+        return None;
+    }
+    Some((above.0 + above.1 + below.0 + below.1) * 0.25)
+}
+
 fn math_face(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name.contains("cmm") || name.contains("cmr") || name.contains("cmsy") || name.contains("math")
@@ -1373,5 +1463,49 @@ mod tests {
         host.matrix = [10.0, 0.0, 0.0, 10.0, 200.0, 220.0];
         let lifted = inline_math_baseline_drift(&[math, host]);
         assert!(lifted.iter().any(|flag| flag.text == "6"), "{lifted:?}");
+    }
+
+    #[test]
+    fn a_title_between_rules_must_share_their_axis() {
+        let mut title = glyph(1, 212.0, 630.0);
+        title.unicode = "Attention Is All You Need".into();
+        title.font_size = 17.0;
+        title.matrix = [17.0, 0.0, 0.0, 17.0, 212.0, 630.0];
+        title.bbox = [212.0, 620.0, 422.0, 646.0];
+        title.advance = [210.0, 0.0];
+        let mut body = glyph(2, 108.0, 400.0);
+        body.unicode = "正文行保持左对齐而不被当成标题".into();
+        body.font_size = 10.0;
+        body.matrix = [10.0, 0.0, 0.0, 10.0, 108.0, 400.0];
+        body.bbox = [108.0, 392.0, 300.0, 408.0];
+        let mut page = page_with(vec![title, body]);
+        page.regions = vec![
+            rpt_core::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [108.0, 659.8, 504.0, 663.8],
+                kind: "path".into(),
+            },
+            rpt_core::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [108.0, 613.9, 504.0, 613.9],
+                kind: "path".into(),
+            },
+        ];
+        let off = title_axis_drift(&page);
+        assert!(
+            off.iter().any(|flag| flag.text.contains("Attention")),
+            "{off:?}"
+        );
+        assert!(
+            !off.iter().any(|flag| flag.text.contains("正文")),
+            "{off:?}"
+        );
+        page.glyphs[0].bbox = [201.0, 620.0, 411.0, 646.0];
+        page.glyphs[0].matrix[4] = 201.0;
+        let centered = title_axis_drift(&page);
+        assert!(
+            !centered.iter().any(|flag| flag.text.contains("Attention")),
+            "{centered:?}"
+        );
     }
 }
