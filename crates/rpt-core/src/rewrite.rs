@@ -5377,6 +5377,14 @@ fn centered_list_ink(ink: &[InkLine<'_>]) -> bool {
         .iter()
         .filter(|line| ink_line_text(line).contains(','))
         .count();
+    // A justified column also has a comma on most lines and a shared midpoint,
+    // because every full line is centered on the measure. A name list does
+    // not share a left edge (`Energy,` / `Legal and Policy,`).
+    let left_min = ink.iter().map(|line| line.left).fold(f32::MAX, f32::min);
+    let left_max = ink.iter().map(|line| line.left).fold(f32::MIN, f32::max);
+    if left_max - left_min <= size * 1.2 {
+        return false;
+    }
     commas + 1 >= ink.len()
         && ink.iter().all(|line| {
             let mid = (line.left + line.right) * 0.5;
@@ -17551,6 +17559,43 @@ mod tests {
         // "Work functions and the WFA." A 2.6em reach left that gap open.
         assert!(29.0 < super::body_hole_reach(10.9));
         assert!(29.0 < super::body_hole_reach(9.8));
+    }
+
+    #[test]
+    fn a_justified_paragraph_with_commas_is_not_a_centered_list() {
+        let mut glyphs = Vec::new();
+        for (id, (row, right, text)) in [
+            (
+                0,
+                (400.0, 504.0, "While for small values, additive attention,"),
+            ),
+            (
+                1,
+                (386.0, 504.0, "outperforms the product, for larger values,"),
+            ),
+            (
+                2,
+                (372.0, 504.0, "pushing softmax into a flat region, where"),
+            ),
+            (
+                3,
+                (358.0, 460.0, "we scale, the products by the dimension."),
+            ),
+        ] {
+            let mut glyph = ink_glyph(id, 108.0, row, 10.0, text);
+            glyph.bbox = [108.0, row - 2.0, right, row + 8.0];
+            glyphs.push(glyph);
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let lines = ink_lines(&refs);
+        assert!(
+            !centered_list_ink(&lines),
+            "a flush-left paragraph was centered: {:?}",
+            lines
+                .iter()
+                .map(|line| (line.left, line.right))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

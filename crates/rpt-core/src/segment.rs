@@ -3993,10 +3993,28 @@ fn marked_footnote(para: &[VisualLine<'_>]) -> bool {
 }
 
 fn footnote_line(text: &str) -> bool {
-    matches!(
-        text.trim_start().chars().next(),
+    let trimmed = text.trim_start();
+    if matches!(
+        trimmed.chars().next(),
         Some('*' | '∗' | '⋆' | '†' | '‡' | '§' | '¶' | '˚' | '\u{2042}')
-    )
+    ) {
+        return true;
+    }
+    // `4To illustrate why…` is a numbered note. The digit is glued to a
+    // word. `7B with`, `3.2.2 Multi-Head`, and `1 The agent` are not notes.
+    let digits = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if !(1..=2).contains(&digits) {
+        return false;
+    }
+    let word: String = trimmed[digits..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphabetic())
+        .collect();
+    word.len() >= 2
+        && word
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 /// The other column is an abstract or a heading, not the rest of this sentence.
@@ -4069,6 +4087,11 @@ fn page_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool {
         return false;
     };
     if lower.page != upper.page + 1 {
+        return false;
+    }
+    // A numbered note at the bottom of the page is not the sentence that
+    // continues above it. `4To illustrate…` must not claim `output values`.
+    if marked_footnote(prev) {
         return false;
     }
     // `(5)` is the equation's tag. The next page's `where w` defines that
@@ -8020,6 +8043,53 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("non-Expertise") || text.contains("nonExpertise")),
             "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_numbered_footnote_does_not_take_the_next_pages_sentence() {
+        let mut body = wide(
+            0,
+            108.0,
+            140.0,
+            "we then perform the attention function in parallel yielding dimensional",
+            390.0,
+            10.0,
+        );
+        body.page_index = 0;
+        let mut note = wide(
+            1,
+            108.0,
+            72.0,
+            "4To illustrate why the dot products get large assume the components",
+            360.0,
+            8.0,
+        );
+        note.page_index = 0;
+        let mut next = wide(
+            2,
+            108.0,
+            700.0,
+            "output values are concatenated and projected again as shown.",
+            340.0,
+            10.0,
+        );
+        next.page_index = 1;
+        let texts: Vec<_> = segment_glyphs(&[body, note, next])
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("yielding") && text.contains("output values")),
+            "the body lost its next-page tail: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| { text.contains("4To illustrate") && !text.contains("output values") }),
+            "the footnote absorbed the next page: {texts:?}"
         );
     }
 
