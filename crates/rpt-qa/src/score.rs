@@ -307,14 +307,44 @@ fn horizontal_containment(source: &[Line], output: &[Line]) -> f32 {
             }
             merged.push((left, right));
         }
-        if merged
+        let in_box = merged
             .iter()
-            .any(|(left, right)| x0 >= left - tol && x1 <= right + tol)
-        {
+            .any(|(left, right)| x0 >= left - tol && x1 <= right + tol);
+        // A centered title redrawn in a wider face stays on the source axis
+        // and sticks out of the English ink. Author marks hung past a wider
+        // name do the same. A line that leaves that axis still counts as out.
+        let on_axis = merged.iter().any(|(left, right)| {
+            let src_mid = (left + right) * 0.5;
+            let out_mid = (x0 + x1) * 0.5;
+            (out_mid - src_mid).abs() <= 8.0
+                && x0 < *right + size
+                && x1 > *left - size
+                && x0 >= *left - size * 1.5
+                && x1 <= *right + size * 2.2
+        });
+        // A raised author mark is its own baseline. It hangs just past the
+        // name it follows; that is not a block that left the column.
+        let hung_mark = mark_only(line)
+            && merged
+                .iter()
+                .any(|(_left, right)| x0 >= *right - size * 1.5 && x1 <= *right + size * 2.4);
+        if in_box || on_axis || hung_mark {
             inside += 1;
         }
     }
     ratio(inside, output.len())
+}
+
+/// A line of only footnote marks (`*`, `†`, `‡`, …). Author marks are drawn
+/// on their own raised baseline, so they are not part of the name line.
+fn mark_only(line: &Line) -> bool {
+    !line.glyphs.is_empty()
+        && line.glyphs.iter().all(|glyph| {
+            matches!(
+                glyph.unicode.trim(),
+                "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
+            )
+        })
 }
 
 fn embedded_translation_font_ok(pdf: &Path) -> bool {
@@ -800,6 +830,74 @@ mod tests {
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn line_at(x0: f32, x1: f32, y: f32, size: f32) -> Line {
+        let mut glyph = Glyph {
+            id: 1,
+            page_index: 0,
+            unicode: "A".into(),
+            unmapped: false,
+            char_code: vec![b'A'],
+            gid: None,
+            font_resource: "F1".into(),
+            font_name: "Times-Roman".into(),
+            font_object: None,
+            font_size: size,
+            matrix: [size, 0.0, 0.0, size, x0, y],
+            bbox: [x0, y - 2.0, x1, y + size],
+            advance: [x1 - x0, 0.0],
+            fill_color: rpt_core::Color::black(),
+            stroke_color: rpt_core::Color::black(),
+            render_mode: 0,
+            invisible: false,
+            clipped: false,
+            clip_uncertain: false,
+            vertical: false,
+            disposition: rpt_core::Disposition::Pending,
+            source: rpt_core::GlyphSource {
+                kind: rpt_core::SourceKind::PageContent,
+                object_id: None,
+                stream_index: 0,
+                operator_index: 0,
+                byte_start: 0,
+                byte_end: 1,
+                resource_name: None,
+            },
+        };
+        glyph.bbox[2] = x1;
+        Line {
+            page: 0,
+            bbox: [x0, y - 2.0, x1, y + size],
+            glyphs: vec![glyph],
+        }
+    }
+
+    #[test]
+    fn a_wider_line_on_the_source_axis_stays_contained() {
+        let source = vec![line_at(211.0, 399.0, 630.0, 17.0)];
+        let centered = vec![line_at(199.0, 413.0, 630.0, 17.0)];
+        let shifted = vec![line_at(211.0, 425.0, 630.0, 17.0)];
+        assert!(horizontal_containment(&source, &centered) > 0.99);
+        assert!(horizontal_containment(&source, &shifted) < 0.5);
+    }
+
+    #[test]
+    fn a_raised_author_mark_past_the_name_stays_contained() {
+        let source = vec![line_at(244.0, 331.0, 500.0, 10.0)];
+        let mut hung = line_at(328.0, 342.0, 504.0, 7.0);
+        hung.glyphs[0].unicode = "*".into();
+        hung.glyphs[0].bbox[2] = 334.0;
+        let mut dagger = hung.glyphs[0].clone();
+        dagger.unicode = "†".into();
+        dagger.matrix[4] = 335.0;
+        dagger.bbox[0] = 335.0;
+        dagger.bbox[2] = 342.0;
+        hung.glyphs.push(dagger);
+        let mut stray = line_at(180.0, 194.0, 504.0, 7.0);
+        stray.glyphs[0].unicode = "*".into();
+        assert!(horizontal_containment(&source, &[hung]) > 0.99);
+        assert!(horizontal_containment(&source, &[stray]) < 0.5);
     }
 
     #[test]
