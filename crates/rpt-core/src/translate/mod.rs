@@ -100,7 +100,7 @@ pub struct TranslateOptions {
     /// Empty uses `RPT_CJK_BOLD_FONT`, then Bold of the selected family.
     /// This path wins over `cjk_style`.
     pub cjk_bold_font: Option<String>,
-    /// `sans` (Heiti, default) or `serif` (Songti). Empty uses `RPT_CJK_STYLE`.
+    /// `serif` (Songti, default) or `sans` (Heiti). Empty uses `RPT_CJK_STYLE`.
     pub cjk_style: Option<String>,
     /// Chinese body size as a fraction of the source size. `0` uses 0.90,
     /// or `RPT_CJK_SIZE_SCALE` when that is set.

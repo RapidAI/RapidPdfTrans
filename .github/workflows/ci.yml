@@ -148,17 +148,17 @@ jobs:
           ]), encoding="utf-8")
           PY
           "$bin" translate smoke-in.pdf --output smoke-out.pdf --replay smoke-replay.json --json > smoke-out.json
-          "$bin" translate smoke-in.pdf --output smoke-serif.pdf --replay smoke-replay.json --cjk-style serif --json > smoke-serif.json
+          "$bin" translate smoke-in.pdf --output smoke-sans.pdf --replay smoke-replay.json --cjk-style sans --json > smoke-sans.json
           python - << 'PY'
           import json, pathlib
           report = json.loads(pathlib.Path("smoke-out.json").read_text(encoding="utf-8"))
           texts = " ".join(item.get("translated", "") for item in report.get("translations", []))
           assert "Transformer" in texts and "aeo0" in texts, texts
-          sans = pathlib.Path("smoke-out.pdf").read_bytes()
-          serif = pathlib.Path("smoke-serif.pdf").read_bytes()
-          assert b"RPTCJK" in sans, "no embedded CJK face"
-          assert b"NotoSansCJK" in sans, "default face is not Heiti"
-          assert b"NotoSerifCJK" in serif, "serif style did not embed Songti"
+          song = pathlib.Path("smoke-out.pdf").read_bytes()
+          hei = pathlib.Path("smoke-sans.pdf").read_bytes()
+          assert b"RPTCJK" in song, "no embedded CJK face"
+          assert b"NotoSerifCJK" in song, "default face is not Songti"
+          assert b"NotoSansCJK" in hei, "sans style did not embed Heiti"
           # Glyph limits are covered by the library tests on the Linux CI job.
-          print("smoke ok", len(sans), len(serif))
+          print("smoke ok", len(song), len(hei))
           PY

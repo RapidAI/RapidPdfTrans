@@ -70,12 +70,12 @@ pub fn face_style(font_name: &str) -> FaceStyle {
     }
 }
 
-/// Built-in CJK family. Sans is Source Han Sans / Noto Sans CJK SC (Heiti).
-/// Serif is Source Han Serif / Noto Serif CJK SC (Songti).
+/// Built-in CJK family. Serif is Source Han Serif / Noto Serif CJK SC (Songti)
+/// and is the default. Sans is Source Han Sans / Noto Sans CJK SC (Heiti).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CjkStyle {
-    #[default]
     Sans,
+    #[default]
     Serif,
 }
 
@@ -104,14 +104,14 @@ impl CjkStyle {
         }
     }
 
-    /// An explicit value wins. Otherwise `RPT_CJK_STYLE`, then Sans.
+    /// An explicit value wins. Otherwise `RPT_CJK_STYLE`, then Serif.
     pub fn resolve(explicit: Option<&str>) -> Result<Self, String> {
         if let Some(raw) = explicit.map(str::trim).filter(|text| !text.is_empty()) {
             return Self::parse(raw);
         }
         match std::env::var("RPT_CJK_STYLE") {
             Ok(value) if !value.trim().is_empty() => Self::parse(value.trim()),
-            _ => Ok(Self::Sans),
+            _ => Ok(Self::Serif),
         }
     }
 }
@@ -129,7 +129,7 @@ pub struct FontSources {
     /// unset). This path wins over [`Self::style`].
     pub bold: Option<std::path::PathBuf>,
     /// Family used when a path above is unset. `None` reads `RPT_CJK_STYLE`,
-    /// then Sans (Noto Sans CJK SC).
+    /// then Serif (Noto Serif CJK SC).
     pub style: Option<CjkStyle>,
 }
 
@@ -165,8 +165,8 @@ pub fn parse_font_spec(raw: &str) -> FontSpec {
 
 /// Subset a style-matched CJK face.
 ///
-/// The built-in family is Noto Sans CJK SC unless `sources.style` or
-/// `RPT_CJK_STYLE` selects Serif. Body text uses Regular. Titles and other
+/// The built-in family is Noto Serif CJK SC unless `sources.style` or
+/// `RPT_CJK_STYLE` selects Sans. Body text uses Regular. Titles and other
 /// bold source faces use Bold. `--cjk-font` and `--cjk-bold-font` replace
 /// those two weights and win over the family. A character the user face
 /// does not cover is taken from the same built-in family and weight, and
@@ -276,13 +276,9 @@ fn noto_paths(family: CjkStyle, bold: bool) -> &'static [(&'static str, u32)] {
 }
 
 fn noto_subset(family: CjkStyle, bold: bool, codepoints: &[u32]) -> Option<SubsetFont> {
-    // Song body still prefers an installed Light face. Heiti body is Regular.
-    if family == CjkStyle::Serif && !bold {
-        if let Some(font) = light_song_subset(codepoints) {
-            return Some(font);
-        }
-    }
     // Debian ships Regular and Bold. Face 2 of each collection is SC.
+    // Body text is Regular. Titles use Bold. Serif is tried first when it
+    // is the requested family, which is the default.
     for (path, face) in noto_paths(family, bold) {
         if std::path::Path::new(path).is_file() {
             if let Some(font) = subset_cff(path, *face, codepoints) {
@@ -295,29 +291,6 @@ fn noto_subset(family: CjkStyle, bold: bool, codepoints: &[u32]) -> Option<Subse
     let cached = ensure_noto(family, bold)?;
     let path = cached.to_str()?;
     subset_cff(path, 0, codepoints)
-}
-
-/// Source Han Serif / Noto Serif CJK SC Light, when it is installed.
-/// Regular is the fallback. A dedicated SC OTF is face 0.
-fn light_song_subset(codepoints: &[u32]) -> Option<SubsetFont> {
-    let mut paths = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(
-            std::path::PathBuf::from(home).join(".local/share/fonts/NotoSerifCJKsc-Light.otf"),
-        );
-    }
-    paths.push("/usr/local/share/fonts/NotoSerifCJKsc-Light.otf".into());
-    paths.push("/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf".into());
-    for path in paths {
-        if !path.is_file() {
-            continue;
-        }
-        let path = path.to_str()?;
-        if let Some(font) = subset_cff(path, 0, codepoints) {
-            return Some(font);
-        }
-    }
-    None
 }
 
 fn subset_user_with_fallback(
@@ -773,10 +746,12 @@ pub fn load_cjk_font() -> Option<Vec<u8>> {
         }
     }
     for path in [
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSerifCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     ] {
         if let Some(bytes) = cached_font_bytes(std::path::Path::new(path)) {
             return Some(bytes.as_ref().clone());
@@ -1570,37 +1545,20 @@ mod tests {
     }
 
     #[test]
-    fn default_style_is_noto_sans_regular_and_bold() {
-        let regular = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
-        let bold_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc";
-        if !std::path::Path::new(regular).is_file() || !std::path::Path::new(bold_path).is_file() {
+    fn default_style_is_noto_serif_regular_and_bold() {
+        let regular = "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc";
+        let bold_path = "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc";
+        let sans_regular = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+        let sans_bold = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc";
+        if !std::path::Path::new(regular).is_file()
+            || !std::path::Path::new(bold_path).is_file()
+            || !std::path::Path::new(sans_regular).is_file()
+            || !std::path::Path::new(sans_bold).is_file()
+        {
             return;
         }
+        assert_eq!(CjkStyle::default(), CjkStyle::Serif);
         let codes = [0x4E2Du32, 0x6587];
-        let sources = FontSources {
-            style: Some(CjkStyle::Sans),
-            ..FontSources::default()
-        };
-        let bold = subset_for_style(
-            FaceStyle {
-                serif: true,
-                bold: true,
-                italic: false,
-            },
-            &codes,
-            &sources,
-        )
-        .expect("bold");
-        let sans = subset_for_style(
-            FaceStyle {
-                serif: false,
-                bold: false,
-                italic: false,
-            },
-            &codes,
-            &sources,
-        )
-        .expect("sans");
         let body = subset_for_style(
             FaceStyle {
                 serif: true,
@@ -1611,22 +1569,66 @@ mod tests {
             &FontSources::default(),
         )
         .expect("body");
+        let title = subset_for_style(
+            FaceStyle {
+                serif: false,
+                bold: true,
+                italic: false,
+            },
+            &codes,
+            &FontSources::default(),
+        )
+        .expect("title");
         assert!(
-            face_name_contains(&bold.bytes, "Noto Sans CJK SC Bold"),
-            "title face is not Heiti Bold"
+            face_name_contains(&body.bytes, "Noto Serif CJK SC"),
+            "default body is not Songti"
+        );
+        assert!(!face_name_contains(&body.bytes, "Bold"), "body used Bold");
+        assert!(!face_name_contains(&body.bytes, "Light"), "body used Light");
+        assert!(!face_name_contains(&body.bytes, "Noto Sans"));
+        assert!(
+            face_name_contains(&title.bytes, "Noto Serif CJK SC"),
+            "default title is not Songti"
         );
         assert!(
-            face_name_contains(&sans.bytes, "Noto Sans CJK SC"),
-            "regular sans source is not Heiti"
+            face_name_contains(&title.bytes, "Bold"),
+            "title is not Bold"
         );
+        assert!(title.fallback.is_none() && title.notice.is_none());
+
+        let sans_sources = FontSources {
+            style: Some(CjkStyle::Sans),
+            ..FontSources::default()
+        };
+        let heiti = subset_for_style(
+            FaceStyle {
+                serif: false,
+                bold: false,
+                italic: false,
+            },
+            &codes,
+            &sans_sources,
+        )
+        .expect("heiti");
+        let heiti_bold = subset_for_style(
+            FaceStyle {
+                serif: true,
+                bold: true,
+                italic: false,
+            },
+            &codes,
+            &sans_sources,
+        )
+        .expect("heiti bold");
         assert!(
-            !face_name_contains(&sans.bytes, "Bold"),
-            "regular sans source used Bold"
+            face_name_contains(&heiti.bytes, "Noto Sans CJK SC"),
+            "sans style is not Heiti"
         );
-        assert!(face_name_contains(&body.bytes, "Noto Sans CJK SC"));
-        assert!(!face_name_contains(&body.bytes, "Bold"));
-        assert!(!face_name_contains(&body.bytes, "Noto Serif"));
-        assert!(bold.fallback.is_none() && bold.notice.is_none());
+        assert!(!face_name_contains(&heiti.bytes, "Bold"));
+        assert!(
+            face_name_contains(&heiti_bold.bytes, "Noto Sans CJK SC Bold"),
+            "sans title is not Heiti Bold"
+        );
     }
 
     #[test]
@@ -1668,6 +1670,8 @@ mod tests {
         assert!(face_name_contains(&bold.bytes, "Bold"));
         assert!(face_name_contains(&body.bytes, "Noto Serif CJK"));
         assert!(!face_name_contains(&body.bytes, "Noto Sans"));
+        assert!(!face_name_contains(&body.bytes, "Bold"));
+        assert!(!face_name_contains(&body.bytes, "Light"));
     }
 
     #[test]
@@ -1868,10 +1872,10 @@ mod tests {
             return;
         }
         let faces = [
-            (CjkStyle::Sans, false, "Noto Sans CJK SC"),
-            (CjkStyle::Sans, true, "Noto Sans CJK SC"),
             (CjkStyle::Serif, false, "Noto Serif CJK SC"),
             (CjkStyle::Serif, true, "Noto Serif CJK SC"),
+            (CjkStyle::Sans, false, "Noto Sans CJK SC"),
+            (CjkStyle::Sans, true, "Noto Sans CJK SC"),
         ];
         for (family, bold, needle) in faces {
             let path = ensure_noto(family, bold).expect("download");

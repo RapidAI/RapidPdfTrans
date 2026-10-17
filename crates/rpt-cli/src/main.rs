@@ -74,7 +74,7 @@ enum Command {
         /// Translate table cells and headers. By default only the table caption is translated.
         #[arg(long)]
         translate_tables: bool,
-        /// CJK family: `sans` (default, Noto Sans CJK SC) or `serif` (Noto Serif CJK SC).
+        /// CJK family: `serif` (default, Noto Serif CJK SC) or `sans` (Noto Sans CJK SC).
         /// `RPT_CJK_STYLE` is used when this flag is omitted.
         #[arg(long, value_parser = parse_cjk_style_arg)]
         cjk_style: Option<String>,

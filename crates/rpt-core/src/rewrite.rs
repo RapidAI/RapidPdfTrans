@@ -49,7 +49,7 @@ pub struct RewriteOptions {
     pub cjk_sans: Option<std::path::PathBuf>,
     /// Bold CJK file for titles and bold source faces. Wins over [`Self::cjk_style`].
     pub cjk_bold: Option<std::path::PathBuf>,
-    /// `sans` (default, Heiti) or `serif` (Songti). Empty uses `RPT_CJK_STYLE`.
+    /// `serif` (default, Songti) or `sans` (Heiti). Empty uses `RPT_CJK_STYLE`.
     pub cjk_style: Option<String>,
     /// Chinese body size as a fraction of the source size. `0` uses 0.90,
     /// or `RPT_CJK_SIZE_SCALE` when that is set. Titles stay a little larger.
@@ -23335,7 +23335,7 @@ ET";
 
     #[test]
     fn a_bold_italic_chapter_title_keeps_a_bold_face() {
-        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc").is_file() {
+        if !std::path::Path::new("/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc").is_file() {
             return;
         }
         let bytes = contents_pdf_named(
@@ -23381,17 +23381,15 @@ ET",
                 calls: 0,
                 cache_hits: 0,
             },
-            &RewriteOptions {
-                cjk_style: Some("sans".into()),
-                ..RewriteOptions::default()
-            },
+            &RewriteOptions::default(),
         )
         .unwrap();
         let saved = doc.save_bytes().unwrap();
         let saved_text = String::from_utf8_lossy(&saved);
         assert!(
-            saved_text.contains("NotoSansCJKjp-Bold") || saved_text.contains("NotoSansCJKsc-Bold"),
-            "chapter title was not painted with Heiti Bold"
+            saved_text.contains("NotoSerifCJKjp-Bold")
+                || saved_text.contains("NotoSerifCJKsc-Bold"),
+            "chapter title was not painted with Songti Bold"
         );
         let painted = PdfDocument::open_bytes(&saved).unwrap().extract();
         let title: Vec<_> = painted

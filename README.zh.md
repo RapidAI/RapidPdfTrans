@@ -65,7 +65,7 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 | `RPT_GOOGLE_API_KEY` | Cloud Translation v2 | 未设置 |
 | `RPT_GOOGLE_CREDENTIALS` | `google-v3` 服务账号 | 未设置 |
 | `RPT_GOOGLE_ACCESS_TOKEN` | `google-v3` 持有者令牌 | 未设置 |
-| `RPT_CJK_STYLE` | `sans`（黑体）或 `serif`（宋体） | `sans` |
+| `RPT_CJK_STYLE` | `serif`（宋体）或 `sans`（黑体） | `serif` |
 | `RPT_CJK_FONT` | 可选，常规字体；优先于风格 | 所选风格的 Regular |
 | `RPT_CJK_BOLD_FONT` | 可选，粗体；优先于风格 | 所选风格的 Bold |
 | `RPT_CJK_SANS` | 可选，只替换常规无衬线源字体 | 常规字体 |
@@ -77,21 +77,21 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 
 ### 字体
 
-默认中文是黑体：思源黑体 / Noto Sans CJK SC。正文用 Regular，标题、章节名、「摘要」和其它粗体源字体用 Bold。宋体（思源宋体 / Noto Serif CJK SC）是可选项。
+默认中文是宋体：思源宋体 / Noto Serif CJK SC。正文用 Regular，标题、章节名、「摘要」和其它粗体源字体用 Bold。黑体（思源黑体 / Noto Sans CJK SC）是可选项。
 
-`--cjk-style sans` 是默认。`--cjk-style serif` 选择宋体。同一个值也可以写成环境变量 `RPT_CJK_STYLE`，以及 Python 和 C 选项 JSON 里的 `cjk_style`。只接受 `sans` 和 `serif`。
+`--cjk-style serif` 是默认。`--cjk-style sans` 选择黑体。同一个值也可以写成环境变量 `RPT_CJK_STYLE`，以及 Python 和 C 选项 JSON 里的 `cjk_style`。只接受 `sans` 和 `serif`。
 
 `--cjk-font` 替换常规字体，`--cjk-bold-font` 替换粗体。这两个路径都优先于 `--cjk-style`。设置了 `--cjk-sans` 时，它仍只替换常规无衬线源字体，并且对这种源字体优先于 `--cjk-font`。三个路径都接受 `.ttf`、`.otf` 或 `.ttc`。路径末尾加 `#N` 选择字体集的第 N 个面（常见的 `msyh.ttc#0` 是微软雅黑）。同样的字符串也可以写成环境变量 `RPT_CJK_FONT`、`RPT_CJK_BOLD_FONT` 和 `RPT_CJK_SANS`。Python 的 `save` / `translate` 和 C 的 `rpt_save` / `rpt_translate` 在选项 JSON 里用 `cjk_font`、`cjk_bold_font`、`cjk_sans` 和 `cjk_style`（`cjk_bold` 与 `cjk_bold_font` 相同）。
 
 只嵌入这一页用到的字形。用户字体没有的字改用当前风格的内置字体（同一字重），并给出警告：
 
 ```text
-rpt: warning: CJK font /path/to/face.ttf has no glyph for U+4E2D; those characters use Noto Sans CJK
+rpt: warning: CJK font /path/to/face.ttf has no glyph for U+4E2D; those characters use Noto Serif CJK
 ```
 
-思源黑体和思源宋体是 SIL Open Font License 1.1。字体字节不放进 wheel，也不放进 SDK。本机已经安装对应家族（`fonts-noto-cjk`，或下面列出的路径）时用那份文件。没有安装时，第一次使用会下载所请求家族的简体 Regular 和 Bold：思源黑体（Sans 2.004，大约 16 MB 和 17 MB）；风格是 `serif` 时再下载思源宋体（Serif 2.003，大约 24 MB 和 25 MB）。缓存目录依次是 `RPT_FONT_CACHE`、Windows 的 `%LOCALAPPDATA%\rapidpdftrans`、macOS 的 `~/Library/Caches/rapidpdftrans`，以及 `$XDG_CACHE_HOME/rapidpdftrans` 或 `~/.cache/rapidpdftrans`。旁边会写上 `OFL.txt`。子集在 Rust 里完成，不需要 Python。粗体用 Bold。Debian 字体集里的简体中文是第 2 个面。
+思源宋体和思源黑体是 SIL Open Font License 1.1。字体字节不放进 wheel，也不放进 SDK。本机已经安装对应家族（`fonts-noto-cjk`，或下面列出的路径）时用那份文件。没有安装时，第一次使用会下载所请求家族的简体 Regular 和 Bold。默认先下载思源宋体（Serif 2.003，大约 24 MB 和 25 MB）。`--cjk-style sans` 再下载思源黑体（Sans 2.004，大约 16 MB 和 17 MB）。缓存目录依次是 `RPT_FONT_CACHE`、Windows 的 `%LOCALAPPDATA%\rapidpdftrans`、macOS 的 `~/Library/Caches/rapidpdftrans`，以及 `$XDG_CACHE_HOME/rapidpdftrans` 或 `~/.cache/rapidpdftrans`。旁边会写上 `OFL.txt`。子集在 Rust 里完成，不需要 Python。正文用 Regular，粗体用 Bold。Debian 字体集里的简体中文是第 2 个面。
 
-`--cjk-font` 未设置时，黑体正文用 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`（第 2 个面），或 `/usr/share/fonts/truetype/noto` 下的同名文件，再否则用缓存里的思源黑体 Regular。粗体用 `NotoSansCJK-Bold.ttc`（第 2 个面），再否则用缓存里的 Bold。`--cjk-style serif` 时，如果安装了 Noto Serif CJK SC Light（`~/.local/share/fonts/NotoSerifCJKsc-Light.otf`、`/usr/local/share/fonts/NotoSerifCJKsc-Light.otf` 或 `/usr/share/fonts/opentype/noto/NotoSerifCJKsc-Light.otf`）就用它做正文，否则用 `NotoSerifCJK-Regular.ttc`（第 2 个面），再否则用缓存里的 SC Regular。宋体粗体用 `NotoSerifCJK-Bold.ttc`（第 2 个面），再否则用缓存里的 SC Bold。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。
+`--cjk-font` 未设置时，宋体正文用 `/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc`（第 2 个面），或 `/usr/share/fonts/truetype/noto` 下的同名文件，再否则用缓存里的思源宋体 Regular。粗体用 `NotoSerifCJK-Bold.ttc`（第 2 个面），再否则用缓存里的 Bold。`--cjk-style sans` 时，正文用 `NotoSansCJK-Regular.ttc`（第 2 个面），粗体用 `NotoSansCJK-Bold.ttc`（第 2 个面），再否则用缓存里的黑体文件。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSerifCJK-Regular.ttc`，再然后同目录的 `NotoSansCJK-Regular.ttc`，以及 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`。
 
 ### 翻译
 
@@ -116,7 +116,7 @@ export RPT_LLM_API_KEY=...
 | `--translate-references` | 翻译参考文献。默认保留原文。 |
 | `--translate-figures` | 翻译图内文字。默认只翻译图注。 |
 | `--translate-tables` | 翻译单元格和表头。默认只翻译表注。 |
-| `--cjk-style` | `sans`（默认，黑体）或 `serif`（宋体）。也可写成 `RPT_CJK_STYLE` 和 JSON `cjk_style`。 |
+| `--cjk-style` | `serif`（默认，宋体）或 `sans`（黑体）。也可写成 `RPT_CJK_STYLE` 和 JSON `cjk_style`。 |
 | `--cjk-font`、`--cjk-bold-font`、`--cjk-sans` | TTF、OTF 或 TTC。这些路径优先于 `--cjk-style`。`#N` 选择字体集里的面。 |
 | `--cjk-size-scale`、`--cjk-leading` | 默认 `0.90` 和 `1.60`。 |
 | `--batch-size` | 每次请求的段落数。默认 `8`。 |
@@ -147,11 +147,11 @@ rpt: translation failed: no translator is configured and Google Translate is unr
 
 **没有翻译器。** 什么都没配置时会探测 Google Translate。要改用 LLM 网关，在 `rpt translate`、Python 的 `save` / `translate`、C++ 的 `save` 或 `rpt_save` 之前导出 `RPT_LLM_API_KEY`。写在选项 JSON 里的密钥会被忽略。
 
-**用户字体缺字。** 缺的字改用当前风格绘制（默认思源黑体，`serif` 时是思源宋体），并打印 `CJK font … has no glyph for U+…`。路径不是文件时，在发出请求之前就失败：`rpt: CJK font not found: ...`。无法识别的 `cjk_style` 同样会失败：`unknown cjk_style …; use sans or serif`。
+**用户字体缺字。** 缺的字改用当前风格绘制（默认思源宋体，`sans` 时是思源黑体），并打印 `CJK font … has no glyph for U+…`。路径不是文件时，在发出请求之前就失败：`rpt: CJK font not found: ...`。无法识别的 `cjk_style` 同样会失败：`unknown cjk_style …; use sans or serif`。
 
 ```bash
 ./target/release/rpt translate paper.pdf --from en --to zh \
-  --cjk-style serif \
+  --cjk-style sans \
   --output paper.zh.pdf
 ```
 
@@ -241,7 +241,7 @@ export RPT_LLM_API_KEY=...
 
 设置了 `RPT_LLM_API_KEY` 时，这条命令请求 `RPT_LLM_BASE_URL`（未设置时是 `https://hub.mypapers.top/api/llm/v1`），模型是 `RPT_LLM_MODEL`（未设置时是 `auto`）。密钥只有 `RPT_LLM_API_KEY`。没有 LLM 设置、也没有 `RPT_TRANSLATOR` 时，探测成功就改用 Google Translate。`--glossary transformer=Transformer` 是可选项，在调用前本地替换。并行请求默认是 4。
 
-中文字形从本机字体嵌入。默认是黑体，思源黑体 / Noto Sans CJK SC：正文 Regular，标题 Bold（`RPT_CJK_STYLE=sans`，或 `--cjk-style sans`）。`--cjk-style serif` 选择宋体，思源宋体 / Noto Serif CJK SC；如果安装了 SC Light，正文用 Light。`RPT_CJK_FONT` 和 `RPT_CJK_BOLD_FONT` 分别替换常规和粗体，并且优先于风格。只有设置了 `RPT_CJK_SANS` 时，它才替换常规无衬线源字体。路径可以以 `#N` 结尾来选择字体集里的面，包括 `msyh.ttc#0` 这种 TrueType 字体集。嵌入的是这一页用到的字形子集（Identity-H 和 ToUnicode）。TrueType 子集是一份独立的 TTF，`maxp` 覆盖每一个轮廓。用户字体缺的字改用当前风格，并在警告里列出。思源字体是 SIL OFL 1.1，不放进 wheel 或 SDK。没有系统字体的机器会在第一次使用时把所请求家族的 SC Regular 和 Bold 下载到 `RPT_FONT_CACHE`（或平台缓存目录），并在旁边保存 `OFL.txt`。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`，以及 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSansCJK-Regular.ttc`。水平前进量来自 `hmtx`，没有做 OpenType GSUB。
+中文字形从本机字体嵌入。默认是宋体，思源宋体 / Noto Serif CJK SC：正文 Regular，标题 Bold（`RPT_CJK_STYLE=serif`，或 `--cjk-style serif`）。`--cjk-style sans` 选择黑体，思源黑体 / Noto Sans CJK SC，同样是正文 Regular、标题 Bold。`RPT_CJK_FONT` 和 `RPT_CJK_BOLD_FONT` 分别替换常规和粗体，并且优先于风格。只有设置了 `RPT_CJK_SANS` 时，它才替换常规无衬线源字体。路径可以以 `#N` 结尾来选择字体集里的面，包括 `msyh.ttc#0` 这种 TrueType 字体集。嵌入的是这一页用到的字形子集（Identity-H 和 ToUnicode）。TrueType 子集是一份独立的 TTF，`maxp` 覆盖每一个轮廓。用户字体缺的字改用当前风格，并在警告里列出。思源字体是 SIL OFL 1.1，不放进 wheel 或 SDK。没有系统字体的机器会在第一次使用时把所请求家族的 SC Regular 和 Bold 下载到 `RPT_FONT_CACHE`（或平台缓存目录），默认先下载宋体，并在旁边保存 `OFL.txt`。这些字体无法子集时，回退顺序是已设置的 `RPT_CJK_FONT`，然后 `/usr/share/fonts/opentype/noto` 或 `/usr/share/fonts/truetype/noto` 下的 `NotoSerifCJK-Regular.ttc` 和 `NotoSansCJK-Regular.ttc`，再然后 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`、`/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`。水平前进量来自 `hmtx`，没有做 OpenType GSUB。
 
 默认输出是纯译文：译文在原位替换原文。双语是可选项。`--mode side-by-side` 左页原文、右页译文。`--mode alternating` 先放原文页，再放译文页。`--mode overlay` 保留原文并在同一页画出译文。`--bilingual` 选择左右并排；用 `--layout alternating` 或 `--layout overlay` 改版式。只写 `--layout` 不会改变默认。C ABI 的 `rpt_save`、C++ `save` 和 Python `save` 同样默认 `output_mode` 为 `replace`；只有明确要求双语时，`bilingual_layout` 才生效。单独的 layout 字段仍是纯译文。`--max-pages N` 只处理前 N 页。放不下、或与公式等保留字形共用操作符的段落，仍留原文。
 

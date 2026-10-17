@@ -209,7 +209,7 @@ pub unsafe extern "C" fn rpt_translate(
 /// `path` and `options_json` are null-terminated UTF-8 strings, or null.
 /// An `api_key` field in JSON is ignored. An LLM needs `RPT_LLM_API_KEY`.
 /// With no translator configured, a reachable Google Translate endpoint is used.
-/// `cjk_style` is `sans` (default, Noto Sans CJK SC) or `serif`.
+/// `cjk_style` is `serif` (default, Noto Serif CJK SC) or `sans`.
 /// `cjk_font`, `cjk_sans`, and `cjk_bold_font` are TTF, OTF, or TTC paths
 /// and win over `cjk_style`. A trailing `#N` selects face N (`msyh.ttc#0`).
 /// Characters missing from a user face are drawn from the selected family,

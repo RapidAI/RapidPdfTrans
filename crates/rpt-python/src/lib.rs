@@ -72,7 +72,7 @@ fn translate(path: &str, options_json: Option<&str>) -> PyResult<String> {
 /// `options_json` selects the output: `{"output_mode":"replace"}` (pure
 /// translation) or `{"output_mode":"bilingual","bilingual_layout":"side-by-side"}`.
 /// Layouts are `side-by-side`, `alternating`, and `overlay`.
-/// `cjk_style` is `sans` (default, Noto Sans CJK SC) or `serif`.
+/// `cjk_style` is `serif` (default, Noto Serif CJK SC) or `sans`.
 /// `cjk_font` and `cjk_bold_font` are `.ttf`, `.otf`, or `.ttc` paths and
 /// win over `cjk_style`; `#N` selects a collection face. A missing glyph
 /// uses the selected family and Python emits a warning.
