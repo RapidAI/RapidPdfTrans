@@ -760,6 +760,10 @@ pub fn rewrite_translation(
         .copied()
         .filter(|id| !keep.contains_key(id))
         .collect();
+    // A bar whose glyphs were erased and not redrawn as a formula still
+    // strikes the Chinese (`噪声尺度`). A bar we just moved sits in the
+    // destination box and stays with the radical.
+    blank_rules_on_erased_text(doc, extraction, &draw_ids, &stack_shifts)?;
     if !draw_ids.is_empty() && !embedded.is_empty() {
         embed_and_draw(doc, extraction, &drawn, &embedded)?;
         retarget_link_annotations(doc, extraction, &drawn, &draw_ids);
@@ -14051,6 +14055,292 @@ fn note_hairline(
             y: pt.ly + dy,
         });
     }
+}
+
+fn blank_rules_on_erased_text(
+    doc: &mut Document,
+    extraction: &Extraction,
+    erased: &HashSet<u32>,
+    shifts: &[ListingShift],
+) -> Result<()> {
+    if erased.is_empty() {
+        return Ok(());
+    }
+    let by_id = glyph_index(&extraction.glyphs);
+    let mut glyphs: Vec<&Glyph> = erased
+        .iter()
+        .filter_map(|id| {
+            by_id
+                .get(id)
+                .and_then(|index| extraction.glyphs.get(*index))
+        })
+        .filter(|glyph| !glyph.font_resource.is_empty())
+        .collect();
+    if glyphs.is_empty() {
+        return Ok(());
+    }
+    glyphs.sort_by(|left, right| {
+        left.page_index
+            .cmp(&right.page_index)
+            .then(right.matrix[5].total_cmp(&left.matrix[5]))
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let mut keep: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
+    for shift in shifts {
+        if shift.dx.abs() < 0.3 && shift.dy.abs() < 0.3 {
+            continue;
+        }
+        let mut x0 = f32::MAX;
+        let mut y0 = f32::MAX;
+        let mut x1 = f32::MIN;
+        let mut y1 = f32::MIN;
+        for id in &shift.ids {
+            let Some(glyph) = by_id
+                .get(id)
+                .and_then(|index| extraction.glyphs.get(*index))
+            else {
+                continue;
+            };
+            x0 = x0.min(glyph.bbox[0].min(glyph.bbox[2]));
+            y0 = y0.min(glyph.bbox[1].min(glyph.bbox[3]));
+            x1 = x1.max(glyph.bbox[0].max(glyph.bbox[2]));
+            y1 = y1.max(glyph.bbox[1].max(glyph.bbox[3]));
+        }
+        if x0.is_finite() {
+            keep.push((
+                shift.page,
+                x0 + shift.dx - 4.0,
+                y0 + shift.dy - 4.0,
+                x1 + shift.dx + 4.0,
+                y1 + shift.dy + 4.0,
+            ));
+        }
+    }
+    let mut by_stream: HashMap<ObjectId, PageCover> = HashMap::new();
+    for glyph in glyphs {
+        let Some(span) = span_of(&glyph.source) else {
+            continue;
+        };
+        let entry = by_stream.entry(span.object_id).or_insert(PageCover {
+            page: glyph.page_index,
+            rects: Vec::new(),
+        });
+        entry.rects.push((
+            glyph.bbox[0].min(glyph.bbox[2]) - 4.0,
+            glyph.bbox[1].min(glyph.bbox[3]) - 3.0,
+            glyph.bbox[0].max(glyph.bbox[2]) + 4.0,
+            glyph.bbox[1].max(glyph.bbox[3]) + 3.0,
+        ));
+    }
+    for (id, cover) in by_stream {
+        let kept: Vec<(f32, f32, f32, f32)> = keep
+            .iter()
+            .filter(|item| item.0 == cover.page)
+            .map(|item| (item.1, item.2, item.3, item.4))
+            .collect();
+        let Ok(object) = doc.get_object(id) else {
+            continue;
+        };
+        let Ok(stream) = object.as_stream() else {
+            continue;
+        };
+        let Ok(mut bytes) = stream.decompressed_content() else {
+            continue;
+        };
+        if !blank_covered_hairlines(&mut bytes, &cover.rects, &kept) {
+            continue;
+        }
+        let Ok(object) = doc.get_object_mut(id) else {
+            continue;
+        };
+        let Ok(stream) = object.as_stream_mut() else {
+            continue;
+        };
+        stream.set_plain_content(bytes);
+    }
+    Ok(())
+}
+
+struct PageCover {
+    page: u32,
+    rects: Vec<(f32, f32, f32, f32)>,
+}
+
+/// Space out a hairline that still lies on erased text. The replacement is
+/// the same number of bytes, so operator offsets recorded at extract time
+/// stay valid. A bar moved with its formula is inside `keep` and is left
+/// alone.
+fn blank_covered_hairlines(
+    bytes: &mut [u8],
+    cover: &[(f32, f32, f32, f32)],
+    keep: &[(f32, f32, f32, f32)],
+) -> bool {
+    if cover.is_empty() {
+        return false;
+    }
+    let tokens = content_tokens(bytes);
+    let mut ctm = form_ident();
+    let mut stack: Vec<(FormMtx, Option<CmHandle>, Option<usize>, bool)> = Vec::new();
+    let mut cm: Option<CmHandle> = None;
+    let mut q_start: Option<usize> = None;
+    let mut nums: Vec<(usize, usize, f32)> = Vec::new();
+    let mut subs: Vec<HairSub> = Vec::new();
+    let mut doomed: Vec<(usize, usize)> = Vec::new();
+    let mut group_doomed = false;
+    let mut loose_re: Option<usize> = None;
+
+    let covered = |x0: f32, y0: f32, x1: f32, y1: f32| -> bool {
+        let width = (x0 - x1).abs();
+        let height = (y0 - y1).abs();
+        if height > 1.2 || !(2.0..=40.0).contains(&width) {
+            return false;
+        }
+        let left = x0.min(x1);
+        let right = x0.max(x1);
+        let y = (y0 + y1) * 0.5;
+        if keep
+            .iter()
+            .any(|ink| left >= ink.0 && right <= ink.2 && y >= ink.1 && y <= ink.3)
+        {
+            return false;
+        }
+        cover
+            .iter()
+            .any(|ink| left >= ink.0 - 0.6 && right <= ink.2 + 0.6 && y >= ink.1 && y <= ink.3)
+    };
+
+    for token in &tokens {
+        match &token.kind {
+            ContentTokKind::Number(value) => nums.push((token.start, token.end, *value)),
+            ContentTokKind::Operator(op) => {
+                match *op {
+                    "q" => {
+                        stack.push((ctm, cm.clone(), q_start, group_doomed));
+                        q_start = Some(token.start);
+                        group_doomed = false;
+                        subs.clear();
+                    }
+                    "Q" => {
+                        if group_doomed {
+                            if let Some(start) = q_start {
+                                if token.end.saturating_sub(start) <= 400 {
+                                    doomed.push((start, token.end));
+                                }
+                            }
+                        }
+                        if let Some((prev, prev_cm, prev_q, prev_doomed)) = stack.pop() {
+                            ctm = prev;
+                            cm = prev_cm;
+                            q_start = prev_q;
+                            group_doomed = prev_doomed;
+                        } else {
+                            q_start = None;
+                            group_doomed = false;
+                        }
+                        subs.clear();
+                    }
+                    "cm" if nums.len() >= 6 => {
+                        let m = &nums[nums.len() - 6..];
+                        let applied = FormMtx {
+                            a: m[0].2,
+                            b: m[1].2,
+                            c: m[2].2,
+                            d: m[3].2,
+                            e: m[4].2,
+                            f: m[5].2,
+                        };
+                        let usable = form_is_ident(ctm)
+                            && applied.b.abs() < 0.02
+                            && applied.c.abs() < 0.02
+                            && applied.a > 0.05
+                            && applied.d > 0.05;
+                        cm = usable.then(|| CmHandle {
+                            x_at: (m[4].0, m[4].1),
+                            y_at: (m[5].0, m[5].1),
+                            tx: applied.e,
+                            ty: applied.f,
+                        });
+                        ctm = form_concat(ctm, applied);
+                    }
+                    "m" if nums.len() >= 2 => {
+                        let x = &nums[nums.len() - 2];
+                        let y = &nums[nums.len() - 1];
+                        let (px, py) = form_map(ctm, x.2, y.2);
+                        subs.push(HairSub {
+                            pts: vec![HairPt {
+                                x: px,
+                                y: py,
+                                x_at: (x.0, x.1),
+                                y_at: (y.0, y.1),
+                                lx: x.2,
+                                ly: y.2,
+                            }],
+                            curved: false,
+                        });
+                    }
+                    "l" if nums.len() >= 2 => {
+                        let x = &nums[nums.len() - 2];
+                        let y = &nums[nums.len() - 1];
+                        let (px, py) = form_map(ctm, x.2, y.2);
+                        if let Some(sub) = subs.last_mut() {
+                            sub.pts.push(HairPt {
+                                x: px,
+                                y: py,
+                                x_at: (x.0, x.1),
+                                y_at: (y.0, y.1),
+                                lx: x.2,
+                                ly: y.2,
+                            });
+                        }
+                    }
+                    "re" if nums.len() >= 4 => {
+                        let n = &nums[nums.len() - 4..];
+                        let (x, y, w, h) = (n[0].2, n[1].2, n[2].2, n[3].2);
+                        let (x0, y0) = form_map(ctm, x, y);
+                        let (x1, y1) = form_map(ctm, x + w, y + h);
+                        if covered(x0, y0, x1, y1) && q_start.is_some() {
+                            group_doomed = true;
+                        } else if covered(x0, y0, x1, y1) {
+                            loose_re = Some(n[0].0);
+                        }
+                    }
+                    "S" | "s" | "f" | "F" | "f*" => {
+                        if let Some(start) = loose_re.take() {
+                            doomed.push((start, token.end));
+                        }
+                        for sub in &subs {
+                            if sub.curved || sub.pts.len() < 2 {
+                                continue;
+                            }
+                            for pair in sub.pts.windows(2) {
+                                if covered(pair[0].x, pair[0].y, pair[1].x, pair[1].y) {
+                                    group_doomed = true;
+                                }
+                            }
+                        }
+                        subs.clear();
+                    }
+                    "n" => subs.clear(),
+                    _ => {}
+                }
+                nums.clear();
+            }
+            ContentTokKind::Break => nums.clear(),
+        }
+    }
+    if doomed.is_empty() {
+        return false;
+    }
+    doomed.sort_by_key(|span| std::cmp::Reverse(span.0));
+    doomed.dedup();
+    for (start, end) in doomed {
+        if end <= bytes.len() && start < end {
+            for byte in &mut bytes[start..end] {
+                *byte = b' ';
+            }
+        }
+    }
+    true
 }
 
 fn pdf_num_fitted(value: f32, width: usize) -> Option<String> {
@@ -30440,5 +30730,30 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n\
         assert!(text.contains("108 94.002 cm"), "{text}");
         assert!(text.contains("105 197 12 0.4 re"), "{text}");
         assert_eq!(bytes.len(), src.len());
+    }
+
+    #[test]
+    fn a_rule_on_erased_text_is_blanked_and_a_moved_bar_stays() {
+        let src = b"q\n1 0 0 1 120.056 265.599 cm\n[]0 d 0 J 0.398 w 0 0 m 15.047 0 l S\nQ\n\
+q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
+            .to_vec();
+        let mut bytes = src.clone();
+        assert!(blank_covered_hairlines(
+            &mut bytes,
+            &[(116.0, 253.0, 140.0, 276.0)],
+            &[],
+        ));
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!text.contains("120.056 265.599"), "{text}");
+        assert!(text.contains("108 94.002 cm"), "{text}");
+        assert_eq!(bytes.len(), src.len());
+
+        let mut kept = src.clone();
+        assert!(!blank_covered_hairlines(
+            &mut kept,
+            &[(116.0, 253.0, 140.0, 276.0)],
+            &[(116.0, 253.0, 140.0, 276.0)],
+        ));
+        assert_eq!(kept, src);
     }
 }
