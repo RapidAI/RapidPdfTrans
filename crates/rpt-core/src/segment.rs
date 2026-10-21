@@ -2550,7 +2550,14 @@ fn interior_glyphs(lines: &[VisualLine<'_>], flags: &SegmentFlags) -> Vec<(u32, 
         let body_font = body_fonts
             .entry(page)
             .or_insert_with(|| dominant_body_font(lines, page));
-        for index in figure_side(&block, lines, body_font, &caption_line, kind == "table") {
+        for index in figure_side(
+            &block,
+            lines,
+            body_font,
+            &caption_line,
+            kind == "table",
+            &claimed,
+        ) {
             if claimed[index] || caption_line[index] {
                 continue;
             }
@@ -2989,12 +2996,20 @@ fn caption_block(start: usize, lines: &[VisualLine<'_>], order: &[usize]) -> Vec
     let mut block = vec![start];
     let cap_w = (lines[start].right - lines[start].left).max(1.0);
     for &index in &order[pos + 1..] {
-        if lines[index].page != lines[start].page || caption_kind(&lines[index].text).is_some() {
+        if lines[index].page != lines[start].page {
             break;
         }
         // The other column sits between a caption and its wrap in reading
         // order. Treating that line as the end of the caption left the wrap
-        // inside the figure, still in English.
+        // inside the figure, still in English. A second caption beside this
+        // one (`Table 2` next to `Table 1`) is that other column, not the
+        // next caption below.
+        if caption_kind(&lines[index].text).is_some() {
+            if x_overlaps(&lines[start], &lines[index]) {
+                break;
+            }
+            continue;
+        }
         if !x_overlaps(&lines[start], &lines[index]) {
             continue;
         }
@@ -3028,6 +3043,7 @@ fn figure_side(
     body_font: &str,
     caption_line: &[bool],
     table: bool,
+    claimed: &[bool],
 ) -> Vec<usize> {
     let page = lines[block[0]].page;
     let top = block
@@ -3038,7 +3054,17 @@ fn figure_side(
         .iter()
         .map(|index| lines[*index].y)
         .fold(f32::MAX, f32::min);
-    let above = walk_interior(top, 1.0, page, block, lines, body_font, caption_line, table);
+    let above = walk_interior(
+        top,
+        1.0,
+        page,
+        block,
+        lines,
+        body_font,
+        caption_line,
+        table,
+        claimed,
+    );
     let below = walk_interior(
         bottom,
         -1.0,
@@ -3048,13 +3074,79 @@ fn figure_side(
         body_font,
         caption_line,
         table,
+        claimed,
     );
-    // A figure caption sits under the drawing; a table caption sits above the cells.
+    // A figure caption sits under the drawing. A table caption may sit above
+    // the cells or below them. The adjacent side is the table. A later grid
+    // can contain more numbers and is not this caption's interior.
+    if table {
+        let above_d = nearest_distance(&above, lines, top);
+        let below_d = nearest_distance(&below, lines, bottom);
+        let size = lines[block[0]].size.max(1.0);
+        if above.is_empty() {
+            return below;
+        }
+        if below.is_empty() {
+            return above;
+        }
+        let above_grid = grid_line_count(&above, lines);
+        let below_grid = grid_line_count(&below, lines);
+        // A running head can sit closer than the grid. The grid still wins
+        // when the other side has no rows. A second table further away does
+        // not: that side has rows too, so the nearer side is chosen.
+        if above_grid > 0 && below_grid == 0 && above_d < 160.0 {
+            return above;
+        }
+        if below_grid > 0 && above_grid == 0 && below_d < 160.0 {
+            return below;
+        }
+        if (above_d - below_d).abs() > size * 0.5 {
+            return if above_d < below_d { above } else { below };
+        }
+        if above_grid != below_grid {
+            return if above_grid > below_grid {
+                above
+            } else {
+                below
+            };
+        }
+    }
     if above.len() >= below.len() && !above.is_empty() {
         above
     } else {
         below
     }
+}
+
+fn nearest_distance(ids: &[usize], lines: &[VisualLine<'_>], origin: f32) -> f32 {
+    ids.iter()
+        .map(|index| (lines[*index].y - origin).abs())
+        .fold(f32::MAX, f32::min)
+}
+
+/// A header or a numeric row. A callout title has neither a column gap nor
+/// a pile of digits, so the tight band limit still stops in front of it.
+fn is_table_row_line(line: &VisualLine<'_>) -> bool {
+    let letters = line
+        .text
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count();
+    let digits = line.text.chars().filter(|ch| ch.is_ascii_digit()).count();
+    if column_gap(line) >= line.size.max(1.0) * 1.55 || (digits >= 2 && digits >= letters) {
+        return true;
+    }
+    // `4K` and `512` are cells. `Pos.` and a prose wrap are not.
+    let text = line.text.trim();
+    let chars = text.chars().count();
+    chars > 0 && chars <= 6 && digits >= 1 && letters <= 2
+}
+
+/// Lines that are a header or a numeric row, not a sentence beside the grid.
+fn grid_line_count(ids: &[usize], lines: &[VisualLine<'_>]) -> usize {
+    ids.iter()
+        .filter(|&&index| is_table_row_line(&lines[index]))
+        .count()
 }
 
 fn walk_interior(
@@ -3066,6 +3158,7 @@ fn walk_interior(
     body_font: &str,
     caption_line: &[bool],
     table: bool,
+    claimed: &[bool],
 ) -> Vec<usize> {
     let anchor = &lines[block[0]];
     let mut span_left = block
@@ -3081,7 +3174,11 @@ fn walk_interior(
     loop {
         let mut band: Vec<(usize, f32)> = Vec::new();
         for (index, line) in lines.iter().enumerate() {
-            if line.page != page || block.contains(&index) || picked.contains(&index) {
+            if line.page != page
+                || block.contains(&index)
+                || picked.contains(&index)
+                || claimed.get(index).copied().unwrap_or(false)
+            {
                 continue;
             }
             let dy = (line.y - cursor) * direction;
@@ -3110,28 +3207,121 @@ fn walk_interior(
         // next region, not another row. Figures keep the wider band.
         // The first row may sit well under a wrapped caption. Later rows
         // stay within about four leadings. A shaded callout 42pt under the
-        // last 10.5pt row is the next region, not another cell.
+        // last 10.5pt row is the next region, not another cell. A wrapped
+        // example row (`4K` then the next task) is further than that and
+        // still a row, so a column gap keeps the wider limit.
+        let size = lines[band[0].0].size.max(1.0);
+        // A wrapped cell (`nesota to form…`) has no column gap. The `2K`
+        // on the row above it is still this table, a little further up.
+        let rowish = table
+            && band
+                .iter()
+                .any(|(index, dy)| *dy <= size * 12.0 && is_table_row_line(&lines[*index]));
         let band_limit = if table && !picked.is_empty() {
-            lines[band[0].0].size.max(1.0) * 4.05
+            if rowish {
+                size * 12.0
+            } else {
+                size * 4.05
+            }
         } else {
             140.0
         };
         if nearest > band_limit || (cursor - origin_y).abs() > 420.0 {
             break;
         }
-        let size = lines[band[0].0].size.max(1.0);
         let group: Vec<usize> = band
             .into_iter()
             .filter(|(_, dy)| *dy <= nearest + size * 0.5)
             .map(|(index, _)| index)
             .collect();
-        if group.iter().any(|&index| {
-            caption_line.get(index).copied().unwrap_or(false)
-                || stops_interior(&lines[index], body_font)
-                || indexed_title_line(index, lines)
-                || is_running_header(&lines[index].text)
-                || is_display_heading(&lines[index])
-        }) {
+        let span_w = (span_right - span_left).max(anchor.right - anchor.left);
+        let stopping: Vec<bool> = group
+            .iter()
+            .map(|&index| {
+                stops_table_band(
+                    &lines[index],
+                    index,
+                    lines,
+                    body_font,
+                    caption_line,
+                    table,
+                    span_w,
+                )
+            })
+            .collect();
+        if stopping.iter().any(|stop| *stop) {
+            let rows: Vec<usize> = group
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(slot, _)| !stopping[*slot])
+                .map(|(_, index)| index)
+                .collect();
+            // `2K` sits on the same baseline as the example sentence. The
+            // sentence is wide enough to look like the next paragraph, and
+            // stopping there left the rows above it translated. A section
+            // heading on that baseline is still the next region.
+            let row_band = table && group.iter().any(|&index| is_table_row_line(&lines[index]));
+            let hard_stop = group.iter().any(|&index| {
+                let line = &lines[index];
+                caption_kind(&line.text).is_some()
+                    || is_running_header(&line.text)
+                    || indexed_title_line(index, lines)
+                    || (is_section_heading(line, body_font) && !short_row_label(line, span_w))
+                    || (is_display_heading(line) && !short_row_label(line, span_w))
+            });
+            if row_band && !hard_stop {
+                for index in &group {
+                    picked.push(*index);
+                    span_left = span_left.min(lines[*index].left);
+                    span_right = span_right.max(lines[*index].right);
+                }
+                cursor = group
+                    .iter()
+                    .map(|&index| lines[index].y)
+                    .fold(cursor, |acc, y| {
+                        if direction > 0.0 {
+                            acc.max(y)
+                        } else {
+                            acc.min(y)
+                        }
+                    });
+                continue;
+            }
+            if !rows.is_empty() {
+                for index in &rows {
+                    picked.push(*index);
+                }
+                break;
+            }
+            // A one-line caption note (`the number of clusters was specified`)
+            // sits between the caption and the header. The rows below it stay
+            // cells. A paragraph that continues is the next section.
+            if table
+                && caption_note_before_a_row(
+                    lines,
+                    page,
+                    &group,
+                    direction,
+                    span_left,
+                    span_right,
+                    body_font,
+                    caption_line,
+                    span_w,
+                )
+            {
+                cursor = group
+                    .iter()
+                    .map(|&index| lines[index].y)
+                    .fold(cursor, |acc, y| {
+                        if direction > 0.0 {
+                            acc.max(y)
+                        } else {
+                            acc.min(y)
+                        }
+                    });
+                continue;
+            }
             break;
         }
         for index in &group {
@@ -3280,6 +3470,127 @@ fn dotted_index_only(text: &str) -> bool {
     groups >= 2 && index == bytes.len()
 }
 
+/// A table walk keeps every cell, header, and row label. A numeric row used
+/// to look like a contents entry (`512` across a column gap), and the whole
+/// grid after it was translated. A prose sentence under the grid still stops
+/// the walk. A cell with a column gap is not that sentence.
+/// The barrier is a caption footnote, and a real row (a column gap) follows
+/// before another sentence.
+fn caption_note_before_a_row(
+    lines: &[VisualLine<'_>],
+    page: u32,
+    group: &[usize],
+    direction: f32,
+    span_left: f32,
+    span_right: f32,
+    body_font: &str,
+    caption_line: &[bool],
+    span_w: f32,
+) -> bool {
+    let note_y = group.iter().map(|&index| lines[index].y).fold(
+        if direction > 0.0 { f32::MIN } else { f32::MAX },
+        |acc, y| {
+            if direction > 0.0 {
+                acc.max(y)
+            } else {
+                acc.min(y)
+            }
+        },
+    );
+    let size = lines[group[0]].size.max(1.0);
+    let mut saw_row = false;
+    for (index, line) in lines.iter().enumerate() {
+        if line.page != page || group.contains(&index) {
+            continue;
+        }
+        let dy = (line.y - note_y) * direction;
+        if dy <= 0.4 || dy > size * 5.0 || !span_overlaps(span_left, span_right, line) {
+            continue;
+        }
+        if stops_table_band(line, index, lines, body_font, caption_line, true, span_w) {
+            return false;
+        }
+        if column_gap(line) >= line.size.max(1.0) * 1.55 {
+            saw_row = true;
+        }
+    }
+    saw_row
+}
+
+fn stops_table_band(
+    line: &VisualLine<'_>,
+    index: usize,
+    lines: &[VisualLine<'_>],
+    body_font: &str,
+    caption_line: &[bool],
+    table: bool,
+    span_w: f32,
+) -> bool {
+    // `3 Bits` is a row stub. `5.3 Optimizer` is the next section.
+    let row_label = table && short_row_label(line, span_w);
+    if caption_line.get(index).copied().unwrap_or(false)
+        || caption_kind(&line.text).is_some()
+        || is_running_header(&line.text)
+        || (!row_label && is_display_heading(line))
+        || indexed_title_line(index, lines)
+        || (!row_label && is_section_heading(line, body_font))
+    {
+        return true;
+    }
+    if !table {
+        return stops_interior(line, body_font);
+    }
+    // `512` across a column gap is not a contents row, and
+    // `positional embedding instead of sinusoids` is a cell whose numbers
+    // sit in the next column. A full-measure sentence under the grid stops.
+    if line.toc || column_gap(line) >= line.size.max(1.0) * 1.55 {
+        return false;
+    }
+    let width = line.right - line.left;
+    let full_measure = width >= span_w.max(1.0) * 0.82;
+    full_measure && (is_body_barrier(line, body_font) || starts_run_in(&line.text))
+}
+
+/// `3 Bits` and `2 Bits` share the body face, so they look like `1 Introduction`.
+/// A row stub is one short word and much narrower than the grid. A real
+/// heading (`1 Introduction`, `5.3 Optimizer`) is not.
+fn short_row_label(line: &VisualLine<'_>, span_w: f32) -> bool {
+    let width = line.right - line.left;
+    if width >= span_w.max(1.0) * 0.5 {
+        return false;
+    }
+    let Some((dotted, rest)) = section_heading_index(line.text.trim()) else {
+        return false;
+    };
+    if dotted {
+        return false;
+    }
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let letters = rest.chars().filter(|ch| ch.is_alphabetic()).count();
+    words.len() == 1 && letters > 0 && letters <= 6
+}
+
+/// The widest hole between ink on one baseline. A table column is wider than
+/// a word space.
+fn column_gap(line: &VisualLine<'_>) -> f32 {
+    let mut glyphs: Vec<&Glyph> = line.glyphs.to_vec();
+    glyphs.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
+    let mut best = 0.0f32;
+    let mut prev_right: Option<f32> = None;
+    for glyph in glyphs {
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        let left = glyph_left(glyph);
+        if let Some(prev) = prev_right {
+            best = best.max(left - prev);
+        }
+        let right = glyph_right(glyph);
+        prev_right = Some(prev_right.map(|prev| prev.max(right)).unwrap_or(right));
+    }
+    best
+}
+
 fn stops_interior(line: &VisualLine<'_>, body_font: &str) -> bool {
     // `DEFINITION Retrieval-Augmented…` uses a label face, so it is not a
     // body barrier, and the walk kept that first line inside the figure.
@@ -3294,10 +3605,30 @@ fn stops_interior(line: &VisualLine<'_>, body_font: &str) -> bool {
 
 /// Titles on a contents row are translated even when a table or a box
 /// claimed them. Leaders and page numbers are not on these lines.
+/// A numeric cell under a real table caption is not a contents title.
+/// `Table 1: Practices …… 5` still releases its title.
+fn toc_line_is_table_cell(line: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> bool {
+    if caption_kind(&line.text).is_some()
+        || !(under_table_caption(line, lines) || above_table_caption(line, lines))
+    {
+        return false;
+    }
+    if line.text.chars().filter(|ch| is_leader_dot(*ch)).count() >= 4 {
+        return false;
+    }
+    let letters = line
+        .text
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count();
+    let digits = line.text.chars().filter(|ch| ch.is_ascii_digit()).count();
+    column_gap(line) >= line.size.max(1.0) * 1.55 || digits > letters || letters <= 6
+}
+
 fn release_toc_titles(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     let mut titles = std::collections::HashSet::new();
     for line in lines {
-        if !line.toc {
+        if !line.toc || toc_line_is_table_cell(line, lines) {
             continue;
         }
         for glyph in &line.glyphs {
@@ -3352,11 +3683,25 @@ fn dominant_body_font(lines: &[VisualLine<'_>], page: u32) -> String {
 /// column starts to the right of a short caption, so the test is wider than
 /// the caption's own box.
 fn under_table_caption(line: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> bool {
+    table_caption_near(line, lines, true)
+}
+
+/// A numeric cell above a caption that sits under its grid. A paragraph above
+/// that caption is not a cell, so the body face is still taken from it.
+fn above_table_caption(line: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> bool {
+    table_caption_near(line, lines, false)
+}
+
+fn table_caption_near(line: &VisualLine<'_>, lines: &[VisualLine<'_>], below: bool) -> bool {
     lines.iter().any(|caption| {
+        let dy = if below {
+            caption.y - line.y
+        } else {
+            line.y - caption.y
+        };
         caption_kind(&caption.text) == Some("table")
             && caption.page == line.page
-            && line.y < caption.y - 1.0
-            && caption.y - line.y <= 320.0
+            && (1.0..=320.0).contains(&dy)
             && line.left < caption.right + 240.0
             && line.right > caption.left - 16.0
     })
@@ -7417,6 +7762,86 @@ mod tests {
     }
 
     #[test]
+    fn a_table_cell_stays_original_and_the_caption_is_one_segment() {
+        let mut id = 0u32;
+        let mut glyphs = Vec::new();
+        let mut put = |text: &str, x: f32, y: f32| {
+            let mut at = x;
+            for ch in text.chars() {
+                let mut item = glyph(id, at, y, &ch.to_string(), false);
+                id += 1;
+                item.font_size = 10.0;
+                item.matrix = [10.0, 0.0, 0.0, 10.0, at, y];
+                item.advance = [5.2, 0.0];
+                item.bbox = [at, y, at + 5.0, y + 8.0];
+                at += 5.2;
+                glyphs.push(item);
+            }
+        };
+        put(
+            "Table 3: Variations on the Transformer architecture. Unlisted values stay with the base and should not be compared to",
+            108.0,
+            700.0,
+        );
+        put("per-word perplexities.", 108.0, 688.0);
+        put("Layer", 108.0, 660.0);
+        put("Type", 220.0, 660.0);
+        put("Score", 360.0, 660.0);
+        put("base", 108.0, 648.0);
+        put("512", 220.0, 648.0);
+        put("24.9", 360.0, 648.0);
+        put("(A)", 108.0, 636.0);
+        put("1", 220.0, 636.0);
+        put("512", 300.0, 636.0);
+        put("positional embedding instead of sinusoids", 108.0, 624.0);
+        put("4.92", 340.0, 624.0);
+        put(
+            "In Table 3 rows we vary the number of attention heads and report the development result in the paragraph under the grid.",
+            108.0,
+            600.0,
+        );
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let captions: Vec<_> = seg
+            .segments
+            .iter()
+            .filter(|item| item.text.contains("Table 3:"))
+            .collect();
+        assert_eq!(
+            captions.len(),
+            1,
+            "caption split: {:?}",
+            captions.iter().map(|item| &item.text).collect::<Vec<_>>()
+        );
+        assert!(
+            captions[0].text.contains("per-word perplexities"),
+            "caption tail was its own unit: {}",
+            captions[0].text
+        );
+        assert!(
+            !captions[0].text.contains("positional embedding"),
+            "a cell joined the caption: {}",
+            captions[0].text
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        for cell in [
+            "Layer",
+            "512",
+            "(A)",
+            "positional embedding instead of sinusoids",
+            "4.92",
+        ] {
+            assert!(
+                !texts.iter().any(|text| text.contains(cell)),
+                "{cell} was translated: {texts:?}"
+            );
+        }
+        assert!(
+            texts.iter().any(|text| text.contains("development result")),
+            "the paragraph under the table was kept: {texts:?}"
+        );
+    }
+
+    #[test]
     fn arxiv_attention_caption_tails_join_the_caption() {
         let path = std::path::PathBuf::from("/tmp/fix/arxiv-attention.pdf");
         if !path.is_file() {
@@ -7448,6 +7873,298 @@ mod tests {
             "table 3 tail missing: {table3}"
         );
         assert!(table4.contains("of WSJ"), "table 4 tail missing: {table4}");
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.clone()).collect();
+        for cell in [
+            "positional embedding instead of sinusoids",
+            "Layer Type",
+            "Self-Attention (restricted)",
+            "Vinyals & Kaiser el al.",
+            "300K",
+            "(E) big",
+        ] {
+            assert!(
+                !texts.iter().any(|text| text.contains(cell)),
+                "{cell} left the table: {}",
+                texts
+                    .iter()
+                    .find(|text| text.contains(cell))
+                    .map(|text| text.chars().take(120).collect::<String>())
+                    .unwrap_or_default()
+            );
+        }
+        assert!(
+            texts.iter().any(|text| text.contains("In Table 3 rows")),
+            "the paragraph under table 3 was kept"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Our results in Table 4")),
+            "the paragraph under table 4 was kept"
+        );
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| caption_kind(text) == Some("table"))
+                .count(),
+            4,
+            "a table caption was split or dropped: {:?}",
+            texts
+                .iter()
+                .filter(|text| caption_kind(text) == Some("table"))
+                .map(|text| text.chars().take(60).collect::<String>())
+                .collect::<Vec<_>>()
+        );
+        let figures: Vec<_> = texts
+            .iter()
+            .filter(|text| caption_kind(text) == Some("figure"))
+            .map(|text| text.chars().take(72).collect::<String>())
+            .collect();
+        assert_eq!(figures.len(), 5, "a figure caption was split: {figures:?}");
+    }
+
+    #[test]
+    fn saved_papers_do_not_translate_a_table_cell() {
+        let mut paths = Vec::new();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/ci");
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "pdf") {
+                    paths.push(path);
+                }
+            }
+        }
+        let arxiv = std::path::PathBuf::from("/tmp/fix/arxiv-attention.pdf");
+        if arxiv.is_file() {
+            paths.push(arxiv);
+        }
+        paths.sort();
+        let mut leaked = Vec::new();
+        for path in &paths {
+            let extracted = crate::extract::PdfDocument::open(path)
+                .unwrap()
+                .extract_with(&crate::extract::ExtractOptions::default());
+            let seg = segment_placed(
+                &extracted.glyphs,
+                &SegmentFlags::default(),
+                &extracted.regions,
+                &extracted.pages,
+            );
+            let by_id: std::collections::HashMap<u32, &crate::glyph::Glyph> = extracted
+                .glyphs
+                .iter()
+                .map(|glyph| (glyph.id, glyph))
+                .collect();
+            let captions: Vec<_> = seg
+                .segments
+                .iter()
+                .filter(|item| caption_kind(&item.text) == Some("table"))
+                .collect();
+            if captions.is_empty() {
+                continue;
+            }
+            for item in &seg.segments {
+                if caption_kind(&item.text).is_some() {
+                    continue;
+                }
+                let glyphs: Vec<_> = item
+                    .glyph_ids
+                    .iter()
+                    .filter_map(|id| by_id.get(id).copied())
+                    .collect();
+                if glyphs.len() < 2 {
+                    continue;
+                }
+                let mut ordered = glyphs.clone();
+                ordered.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
+                let size = ordered[0].font_size.max(1.0);
+                let mut gap = 0.0f32;
+                let mut prev_right: Option<f32> = None;
+                for glyph in &ordered {
+                    if glyph.unicode.trim().is_empty() {
+                        continue;
+                    }
+                    let left = glyph_left(glyph);
+                    if let Some(prev) = prev_right {
+                        gap = gap.max(left - prev);
+                    }
+                    let right = glyph_right(glyph);
+                    prev_right = Some(prev_right.map(|prev| prev.max(right)).unwrap_or(right));
+                }
+                let letters = item
+                    .text
+                    .chars()
+                    .filter(|ch| ch.is_ascii_alphabetic())
+                    .count();
+                let digits = item.text.chars().filter(|ch| ch.is_ascii_digit()).count();
+                let row = gap >= size * 1.55 || (letters <= 4 && item.text.chars().count() <= 6);
+                // A two-column sentence has one gutter. A cell is short or numeric.
+                if !row || (letters >= 24 && digits * 2 < letters) {
+                    continue;
+                }
+                let trimmed = item.text.trim();
+                if trimmed.starts_with("Example ") {
+                    continue;
+                }
+                let y = glyphs
+                    .iter()
+                    .map(|glyph| glyph.bbox[1])
+                    .fold(f32::MIN, f32::max);
+                let left = glyphs
+                    .iter()
+                    .map(|glyph| glyph.bbox[0])
+                    .fold(f32::MAX, f32::min);
+                let right = glyphs
+                    .iter()
+                    .map(|glyph| glyph.bbox[2])
+                    .fold(0.0f32, f32::max);
+                let page = glyphs[0].page_index;
+                let page_h = extracted
+                    .pages
+                    .iter()
+                    .find(|info| info.index == page)
+                    .map(|info| info.media_box[3] - info.media_box[1])
+                    .unwrap_or(792.0);
+                if (y < 56.0 || y > page_h - 56.0) && is_page_folio_text(trimmed) {
+                    continue;
+                }
+                let under = captions.iter().any(|caption| {
+                    let marks: Vec<_> = caption
+                        .glyph_ids
+                        .iter()
+                        .filter_map(|id| by_id.get(id).copied())
+                        .collect();
+                    if marks.is_empty() || marks[0].page_index != page {
+                        return false;
+                    }
+                    let cap_y = marks
+                        .iter()
+                        .map(|glyph| glyph.bbox[1])
+                        .fold(f32::MIN, f32::max);
+                    // The caption may sit above the grid or under it.
+                    let dy = (cap_y - y).abs();
+                    if dy < 4.0 || dy > 360.0 {
+                        return false;
+                    }
+                    let cap_left = marks
+                        .iter()
+                        .map(|glyph| glyph.bbox[0])
+                        .fold(f32::MAX, f32::min);
+                    let cap_right = marks
+                        .iter()
+                        .map(|glyph| glyph.bbox[2])
+                        .fold(0.0f32, f32::max);
+                    (right.min(cap_right) - left.max(cap_left)).max(0.0) > 8.0
+                });
+                if under {
+                    leaked.push(format!(
+                        "{} p{} {}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        page + 1,
+                        item.text.chars().take(90).collect::<String>()
+                    ));
+                }
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "table cells would be translated:\n{}",
+            leaked.join("\n")
+        );
+    }
+
+    #[test]
+    fn abbas_table_cells_stay_original() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/ci/pmlr-v202-abbas23a.pdf");
+        let extracted = crate::extract::PdfDocument::open(&path)
+            .unwrap()
+            .extract_with(&crate::extract::ExtractOptions::default());
+        let seg = segment_placed(
+            &extracted.glyphs,
+            &SegmentFlags::default(),
+            &extracted.regions,
+            &extracted.pages,
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        for cell in ["2440", "2488", "Person", "40.0", "Bus", "0.2"] {
+            assert!(
+                !texts.iter().any(|text| text.contains(cell)),
+                "{cell} left the table: {}",
+                texts
+                    .iter()
+                    .find(|text| text.contains(cell))
+                    .map(|text| text.chars().take(80).collect::<String>())
+                    .unwrap_or_default()
+            );
+        }
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Algorithms comparison")),
+            "the paragraph under the tables was kept"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("In Table 3")),
+            "the paragraph under table 3 was kept"
+        );
+    }
+
+    #[test]
+    fn a_below_caption_keeps_row_labels_and_the_grid() {
+        let mut id = 0u32;
+        let mut glyphs = Vec::new();
+        let mut put = |text: &str, x: f32, y: f32| {
+            let mut at = x;
+            for ch in text.chars() {
+                let mut item = glyph(id, at, y, &ch.to_string(), false);
+                id += 1;
+                item.font_size = 10.0;
+                item.matrix = [10.0, 0.0, 0.0, 10.0, at, y];
+                item.advance = [5.2, 0.0];
+                item.bbox = [at, y, at + 5.0, y + 8.0];
+                at += 5.2;
+                glyphs.push(item);
+            }
+        };
+        put("PPL", 200.0, 640.0);
+        put("6.45", 320.0, 640.0);
+        put("3 Bits", 108.0, 620.0);
+        put("NF-Sym", 108.0, 600.0);
+        put("38.28", 320.0, 600.0);
+        put("2 Bits", 108.0, 560.0);
+        put("2.4e5", 320.0, 560.0);
+        put(
+            "Table 3: Ablation study of asymmetric quantization and clipping on the development set.",
+            108.0,
+            500.0,
+        );
+        put(
+            "In the paragraph under the grid we discuss the ablation and the development result stays translated.",
+            108.0,
+            460.0,
+        );
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        let captions: Vec<_> = texts
+            .iter()
+            .filter(|text| text.contains("Table 3:"))
+            .copied()
+            .collect();
+        assert_eq!(captions.len(), 1, "caption split: {captions:?}");
+        for cell in [
+            "PPL", "6.45", "3 Bits", "NF-Sym", "38.28", "2 Bits", "2.4e5",
+        ] {
+            assert!(
+                !texts.iter().any(|text| text.contains(cell)),
+                "{cell} was translated: {texts:?}"
+            );
+        }
+        assert!(
+            texts.iter().any(|text| text.contains("development result")),
+            "the paragraph under the caption was kept: {texts:?}"
+        );
     }
 
     #[test]
