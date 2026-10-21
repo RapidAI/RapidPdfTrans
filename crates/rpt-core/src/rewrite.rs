@@ -713,7 +713,12 @@ pub fn rewrite_translation(
         &mut succeeded,
         &mut keep,
     ));
-    let mut listing_shifts = close_column_holes(&mut drawn, extraction, &by_id);
+    // The star note, the dagger lines, and the venue line share one column.
+    // A footnote rule used to absorb the pull, and the lines under it still
+    // inherited that pull and landed on the note's first baseline.
+    let mut footnote_rules = Vec::new();
+    let mut listing_shifts =
+        close_column_holes_with(&mut drawn, extraction, &by_id, &mut footnote_rules);
     // The formula was seated on the line before this pull. Leaving it there
     // paints `≤ µ(Q̂) + µ(H)` on the proof after the lemma statement moved up.
     carry_formula_with_line(&drawn, &y_before, &mut stack_shifts);
@@ -784,6 +789,9 @@ pub fn rewrite_translation(
     let mut rule_shifts = stack_shifts.clone();
     rule_shifts.extend(listing_shifts.iter().cloned());
     shift_formula_rules(doc, extraction, &rule_shifts)?;
+    // The footnote rule is wider than a fraction bar, so the formula pass
+    // leaves it. It has to take the same step as the note it introduces.
+    shift_footnote_rules(doc, extraction, &footnote_rules)?;
 
     let draw_ids: HashSet<u32> = succeeded
         .iter()
@@ -12943,12 +12951,82 @@ fn clause_sits_on_kept_formula(
 
 /// An upward pull must stop under kept ink and under a table rule or a
 /// figure. Closing a hole used to slide a caption onto the rows it captions.
+/// The short rule directly above a footnote block. A table rule is the
+/// width of the column; a LaTeX footnote rule is about two inches.
+fn footnote_rule_above(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    page: u32,
+) -> Option<(f32, f32, f32)> {
+    if !block_opens_footnote(block, drawn, extraction, by_id) {
+        return None;
+    }
+    let size = block.size.max(1.0);
+    let mut best: Option<(f32, f32, f32)> = None;
+    for region in &extraction.regions {
+        if region.page_index != page || region.kind != "path" {
+            continue;
+        }
+        let y0 = region.bbox[1].min(region.bbox[3]);
+        let y1 = region.bbox[1].max(region.bbox[3]);
+        let x0 = region.bbox[0].min(region.bbox[2]);
+        let x1 = region.bbox[0].max(region.bbox[2]);
+        let width = x1 - x0;
+        let height = y1 - y0;
+        if height > 1.6 || !(60.0..=220.0).contains(&width) {
+            continue;
+        }
+        let y = (y0 + y1) * 0.5;
+        if y <= block.top + size * 0.15 || y > block.top + size * 1.8 {
+            continue;
+        }
+        if (x0 - block.left).abs() > size * 4.0 {
+            continue;
+        }
+        let overlap = block.right.min(x1) - block.left.max(x0);
+        if overlap < size * 2.0 {
+            continue;
+        }
+        if best.is_none_or(|(_, _, previous)| y < previous) {
+            best = Some((x0, x1, y));
+        }
+    }
+    best
+}
+
+fn block_opens_footnote(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    block.indices.iter().any(|&index| {
+        let line = &drawn[index];
+        if footnote_line(&line.text) {
+            return true;
+        }
+        let size = line.size.max(1.0);
+        line.glyph_ids.iter().any(|id| {
+            by_id.get(id).is_some_and(|slot| {
+                let glyph = &extraction.glyphs[*slot];
+                is_footnote_symbol(&glyph.unicode)
+                    && (glyph.matrix[5] - line.y).abs() <= size
+                    && glyph.matrix[4] <= line.x + size * 2.0
+            })
+        })
+    })
+}
+
 fn cap_upward_shift(
     block: &ColumnBlock,
     shift: f32,
     page: u32,
     extraction: &Extraction,
     used: &HashSet<u32>,
+    ignore_rule: Option<(f32, f32, f32)>,
+    lifted: &[RuleMove],
 ) -> f32 {
     if shift <= 0.4 {
         return shift;
@@ -12983,10 +13061,22 @@ fn cap_upward_shift(
         if region.page_index != page {
             continue;
         }
-        let y0 = region.bbox[1].min(region.bbox[3]);
-        let y1 = region.bbox[1].max(region.bbox[3]);
+        let mut y0 = region.bbox[1].min(region.bbox[3]);
+        let mut y1 = region.bbox[1].max(region.bbox[3]);
         let x0 = region.bbox[0].min(region.bbox[2]);
         let x1 = region.bbox[0].max(region.bbox[2]);
+        let mid = (y0 + y1) * 0.5;
+        if let Some((ix0, ix1, iy)) = ignore_rule {
+            if (mid - iy).abs() < 1.2 && (x0 - ix0).abs() < 2.0 && (x1 - ix1).abs() < 2.0 {
+                continue;
+            }
+        }
+        if let Some(rule) = lifted.iter().find(|rule| {
+            rule.page == page && (rule.y - mid).abs() < 1.2 && (rule.x0 - x0).abs() < 2.0
+        }) {
+            y0 += rule.dy;
+            y1 += rule.dy;
+        }
         let thin = y1 - y0 < 2.5 && x1 - x0 > 30.0;
         let image = region.kind == "image";
         if !thin && !image {
@@ -13329,10 +13419,31 @@ fn unique_token_end(text: &str, token: &str) -> Option<usize> {
     found
 }
 
+/// A short rule just above a footnote. `dy` is the step the note took, and
+/// the rule has to take it too or it stays in the gap under the abstract.
+struct RuleMove {
+    page: u32,
+    x0: f32,
+    x1: f32,
+    y: f32,
+    dy: f32,
+}
+
+#[cfg(test)]
 fn close_column_holes(
     drawn: &mut [Drawn],
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
+) -> Vec<ListingShift> {
+    let mut rules = Vec::new();
+    close_column_holes_with(drawn, extraction, by_id, &mut rules)
+}
+
+fn close_column_holes_with(
+    drawn: &mut [Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    rules: &mut Vec<RuleMove>,
 ) -> Vec<ListingShift> {
     let original_y: Vec<f32> = drawn.iter().map(|line| line.y).collect();
     let mut shifts: Vec<ListingShift> = Vec::new();
@@ -13384,6 +13495,8 @@ fn close_column_holes(
         let mut claimed_quotes = HashSet::new();
         let mut shift = 0.0f32;
         let mut prev: Option<ColumnBlock> = None;
+        // Footnote rules claimed on this page. Later lines see them at the
+        // y they will be painted, not the English y that capped the note.
         // Set when a heading refuses an inherited pull. The next paragraph's
         // few points of `extra` are its own superscript, not a hole.
         let mut hold_scripts = false;
@@ -13531,9 +13644,17 @@ fn close_column_holes(
             // `，否则为 0。` is the roman tail of `ϕ(a)=ϕ(a)`. Pulling that
             // tail closed a hole and left the formula on the old baseline.
             // The pull still applies to the paragraph under the formula.
-            let applied = if shift.abs() > 0.4
-                && clause_sits_on_kept_formula(&block, drawn, extraction, page)
-            {
+            let clause =
+                shift.abs() > 0.4 && clause_sits_on_kept_formula(&block, drawn, extraction, page);
+            // The LaTeX footnote rule sits a few points above `*同等贡献`.
+            // It introduces that note, so it moves with the note instead of
+            // pinning every later line against the English rule.
+            let owns_rule = if clause {
+                None
+            } else {
+                footnote_rule_above(&block, drawn, extraction, by_id, page)
+            };
+            let applied = if clause {
                 0.0
             } else if shift > 0.4 {
                 // A display equation in this chain is about to move by the
@@ -13550,10 +13671,31 @@ fn close_column_holes(
                         ceiling.extend(item.ids.iter().copied());
                     }
                 }
-                cap_upward_shift(&block, shift, page, extraction, &ceiling)
+                let limited =
+                    cap_upward_shift(&block, shift, page, extraction, &ceiling, owns_rule, rules);
+                // The painted step is what the next line inherits. Keeping
+                // the uncapped pull stacked †, ‡, and the venue line on the
+                // first footnote baseline, just under the rule.
+                shift = limited;
+                limited
             } else {
                 shift
             };
+            if let Some((x0, x1, y)) = owns_rule {
+                if applied.abs() > 0.4
+                    && !rules
+                        .iter()
+                        .any(|rule| rule.page == page && (rule.y - y).abs() < 1.2)
+                {
+                    rules.push(RuleMove {
+                        page,
+                        x0,
+                        x1,
+                        y,
+                        dy: applied,
+                    });
+                }
+            }
             for index in &block.indices {
                 drawn[*index].y += applied;
             }
@@ -13595,8 +13737,10 @@ fn close_column_holes(
                 }
             }
             let mut placed = block;
-            placed.top += shift;
-            placed.bottom += shift;
+            // `applied` is the step the ink took. `shift` can still be the
+            // pull a clause left for the paragraph under a kept formula.
+            placed.top += applied;
+            placed.bottom += applied;
             prev = Some(placed);
         }
         seat_listing_annotations(drawn, extraction, by_id, &placed_lines);
@@ -15162,6 +15306,66 @@ fn reposition_listings(
 /// `dx,dy` is the same shift applied to those glyphs.
 type FormulaBox = (f32, f32, f32, f32, f32, f32);
 
+fn shift_footnote_rules(
+    doc: &mut Document,
+    extraction: &Extraction,
+    rules: &[RuleMove],
+) -> Result<()> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let mut by_page: HashMap<u32, Vec<(f32, f32, f32, f32)>> = HashMap::new();
+    for rule in rules {
+        by_page
+            .entry(rule.page)
+            .or_default()
+            .push((rule.x0, rule.x1, rule.y, rule.dy));
+    }
+    let mut streams: HashMap<u32, HashSet<ObjectId>> = HashMap::new();
+    for glyph in &extraction.glyphs {
+        let Some(page_rules) = by_page.get(&glyph.page_index) else {
+            continue;
+        };
+        if page_rules.is_empty() {
+            continue;
+        }
+        let Some(span) = span_of(&glyph.source) else {
+            continue;
+        };
+        streams
+            .entry(glyph.page_index)
+            .or_default()
+            .insert(span.object_id);
+    }
+    for (page, ids) in streams {
+        let Some(page_rules) = by_page.get(&page) else {
+            continue;
+        };
+        for id in ids {
+            let Ok(object) = doc.get_object(id) else {
+                continue;
+            };
+            let Ok(stream) = object.as_stream() else {
+                continue;
+            };
+            let Ok(mut bytes) = stream.decompressed_content() else {
+                continue;
+            };
+            if !shift_hairlines(&mut bytes, &[], page_rules) {
+                continue;
+            }
+            let Ok(object) = doc.get_object_mut(id) else {
+                continue;
+            };
+            let Ok(stream) = object.as_stream_mut() else {
+                continue;
+            };
+            stream.set_plain_content(bytes);
+        }
+    }
+    Ok(())
+}
+
 fn shift_formula_rules(
     doc: &mut Document,
     extraction: &Extraction,
@@ -15222,7 +15426,7 @@ fn shift_formula_rules(
         let Ok(mut bytes) = stream.decompressed_content() else {
             continue;
         };
-        if !shift_hairlines(&mut bytes, &boxes) {
+        if !shift_hairlines(&mut bytes, &boxes, &[]) {
             continue;
         }
         let Ok(object) = doc.get_object_mut(id) else {
@@ -15313,9 +15517,14 @@ struct HairSub {
 
 /// Move hairline rules that sit on a shifted formula. Numbers keep their
 /// original width so a blanked text operator later in the stream stays at
-/// the offset recorded during extraction.
-fn shift_hairlines(bytes: &mut Vec<u8>, boxes: &[FormulaBox]) -> bool {
-    if boxes.is_empty() {
+/// the offset recorded during extraction. `rules` are footnote rules
+/// `(x0, x1, y, dy)` that are wider than a fraction bar.
+fn shift_hairlines(
+    bytes: &mut Vec<u8>,
+    boxes: &[FormulaBox],
+    rules: &[(f32, f32, f32, f32)],
+) -> bool {
+    if boxes.is_empty() && rules.is_empty() {
         return false;
     }
     let tokens = content_tokens(bytes);
@@ -15458,6 +15667,17 @@ fn shift_hairlines(bytes: &mut Vec<u8>, boxes: &[FormulaBox]) -> bool {
                                     boxes,
                                     &mut edits,
                                 );
+                                note_ruled_line(
+                                    pair[0].x,
+                                    pair[0].y,
+                                    pair[1].x,
+                                    pair[1].y,
+                                    cm.as_ref(),
+                                    ctm,
+                                    pair,
+                                    rules,
+                                    &mut edits,
+                                );
                             }
                         }
                         subs.clear();
@@ -15579,6 +15799,57 @@ fn note_hairline(
             x_at: pt.x_at,
             y_at: pt.y_at,
             x: pt.lx + dx,
+            y: pt.ly + dy,
+        });
+    }
+}
+
+/// A footnote rule is about two inches wide, so the fraction-bar pass skips
+/// it. `rules` names the rule in user space and the step it takes with the note.
+fn note_ruled_line(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    handle: Option<&CmHandle>,
+    ctm: FormMtx,
+    pts: &[HairPt],
+    rules: &[(f32, f32, f32, f32)],
+    edits: &mut HashMap<usize, HairEdit>,
+) {
+    if rules.is_empty() || (y0 - y1).abs() > 1.2 {
+        return;
+    }
+    let width = (x0 - x1).abs();
+    if !(60.0..=220.0).contains(&width) {
+        return;
+    }
+    let left = x0.min(x1);
+    let right = x0.max(x1);
+    let y = (y0 + y1) * 0.5;
+    let Some(hit) = rules.iter().find(|rule| {
+        (y - rule.2).abs() < 1.2 && (left - rule.0).abs() < 2.0 && (right - rule.1).abs() < 2.0
+    }) else {
+        return;
+    };
+    let dy = hit.3;
+    if let Some(handle) = handle {
+        edits.entry(handle.y_at.0).or_insert(HairEdit {
+            x_at: handle.x_at,
+            y_at: handle.y_at,
+            x: handle.tx,
+            y: handle.ty + dy,
+        });
+        return;
+    }
+    if !form_is_ident(ctm) {
+        return;
+    }
+    for pt in pts {
+        edits.entry(pt.y_at.0).or_insert(HairEdit {
+            x_at: pt.x_at,
+            y_at: pt.y_at,
+            x: pt.lx,
             y: pt.ly + dy,
         });
     }
@@ -32873,6 +33144,7 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n\
                 (116.0, 253.0, 140.0, 276.0, 49.7, 10.9),
                 (96.0, 198.0, 116.0, 204.0, 5.0, -3.0),
             ],
+            &[],
         );
         assert!(moved);
         let text = String::from_utf8(bytes.clone()).unwrap();
@@ -33017,6 +33289,129 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
             next.y,
             third.y
         );
+    }
+
+    #[test]
+    fn a_footnote_rule_does_not_stack_the_affiliation_and_venue() {
+        // The abstract is shorter, so the column wants to pull the footnotes
+        // up. The footnote rule used to absorb that pull, and †, ‡, and the
+        // venue line still inherited it, so they painted on `*同等贡献`.
+        let size = 9.0;
+        let note_ids = vec![10, 11, 12, 13];
+        let glyphs = vec![
+            ink_glyph(1, 108.0, 220.0, size, "A"),
+            ink_glyph(10, 108.0, 190.0, size, "*"),
+            ink_glyph(11, 108.0, 178.0, size, "n"),
+            ink_glyph(12, 108.0, 166.0, size, "o"),
+            ink_glyph(13, 108.0, 154.0, size, "t"),
+            ink_glyph(20, 108.0, 142.0, size, "†"),
+            ink_glyph(21, 108.0, 130.0, size, "‡"),
+            ink_glyph(22, 108.0, 112.0, size, "3"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [108.0, 197.6, 251.5, 198.4],
+                kind: "path".into(),
+            }],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(108.0, 320.0, size, "摘要在这里结束。", vec![1]),
+            test_draw(
+                108.0,
+                190.0,
+                size,
+                "*同等贡献。作者排序随机。",
+                note_ids.clone(),
+            ),
+            test_draw(
+                108.0,
+                178.0,
+                size,
+                "Illia 一起设计并实现了。",
+                note_ids.clone(),
+            ),
+            test_draw(108.0, 166.0, size, "极大加速了我们的研究。", note_ids),
+            test_draw(
+                108.0,
+                142.0,
+                size,
+                "†在 Google Brain 工作期间完成。",
+                vec![20],
+            ),
+            test_draw(
+                108.0,
+                130.0,
+                size,
+                "‡在 Google Research 工作期间完成。",
+                vec![21],
+            ),
+            test_draw(108.0, 112.0, size, "第31届神经信息处理系统大会。", vec![22]),
+        ];
+        let mut rules = Vec::new();
+        close_column_holes_with(&mut drawn, &extraction, &by_id, &mut rules);
+        let y_of = |prefix: &str| {
+            drawn
+                .iter()
+                .find(|line| line.text.starts_with(prefix))
+                .unwrap()
+                .y
+        };
+        let star = y_of("*");
+        let tail = y_of("极");
+        let dagger = y_of("†");
+        let double = y_of("‡");
+        let venue = y_of("第");
+        let abstract_y = y_of("摘");
+        assert!(
+            star > tail + size && tail > dagger + size * 0.4,
+            "footnote order collapsed: abstract {abstract_y} star {star} tail {tail} dagger {dagger} double {double} venue {venue}"
+        );
+        assert!(
+            dagger > double + size * 0.4 && double > venue + size * 0.4,
+            "affiliation lines share a baseline: dagger {dagger} double {double} venue {venue}"
+        );
+        assert!(
+            (star - dagger).abs() > size,
+            "† landed on the star note: star {star} † {dagger}"
+        );
+        assert!(
+            (star - venue).abs() > size && (dagger - venue).abs() > size * 0.4,
+            "the venue line overlaps a footnote: star {star} † {dagger} venue {venue}"
+        );
+        assert!(
+            abstract_y - star < size * 4.0,
+            "the footnote stayed under the English rule, gap {}",
+            abstract_y - star
+        );
+        let rule = rules
+            .iter()
+            .find(|rule| (rule.y - 198.0).abs() < 1.0)
+            .expect("footnote rule was left on the English baseline");
+        assert!(
+            (rule.dy - (star - 190.0)).abs() < 1.0,
+            "rule dy {} did not follow the note to {star}",
+            rule.dy
+        );
+    }
+
+    #[test]
+    fn a_footnote_rule_moves_with_the_note() {
+        let src = b"q\n1 0 0 1 108 189.525 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n".to_vec();
+        let mut bytes = src.clone();
+        assert!(shift_hairlines(
+            &mut bytes,
+            &[],
+            &[(108.0, 251.462, 189.525, 80.0)],
+        ));
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("108 269.525 cm"), "{text}");
+        assert_eq!(bytes.len(), src.len());
     }
 
     #[test]
