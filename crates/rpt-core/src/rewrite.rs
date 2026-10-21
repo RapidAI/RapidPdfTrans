@@ -453,7 +453,11 @@ pub fn rewrite_translation(
                 .chain(echo_chars.chars())
                 .chain(unchanged_body_chars.chars())
                 .chain(subentry_chars.chars())
-                .chain(heading_chars.chars()),
+                .chain(heading_chars.chars())
+                // Author marks are hung onto a name whose own style never
+                // contained `†`. A face without that glyph leaves the
+                // source star on the last letter.
+                .chain(AUTHOR_MARK_CHARS.chars()),
         );
         if let Some(font) = subset_ttf(&font_bytes, &chars) {
             place_segments(
@@ -517,7 +521,8 @@ pub fn rewrite_translation(
                     .chain(echo_chars.chars())
                     .chain(unchanged_body_chars.chars())
                     .chain(subentry_chars.chars())
-                    .chain(heading_chars.chars()),
+                    .chain(heading_chars.chars())
+                    .chain(AUTHOR_MARK_CHARS.chars()),
             );
             let Some(font) = subset_for_style(
                 style,
@@ -3434,6 +3439,10 @@ fn inherent_keep(glyph: &Glyph) -> Option<&'static str> {
 fn is_footnote_symbol(text: &str) -> bool {
     matches!(text.trim(), "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#")
 }
+
+/// Marks hung after a name. Every face subset includes them, because the
+/// name's own style often never contained the dagger.
+const AUTHOR_MARK_CHARS: &str = "*∗†‡§¶";
 
 fn is_math_font(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
@@ -9646,6 +9655,9 @@ fn layout_segment(
     let available = (top_y - bottom_y).max(0.0);
     let bold = paragraph_is_bold(&ink);
     let numbered = numbered_hanging(&ink);
+    // `1 Introduction` comes back as `1介绍`. The source space stays.
+    let heading_spaced = space_section_index(&ink, text);
+    let text = heading_spaced.as_deref().unwrap_or(text);
     let mut level = heading_level(ink.len(), source_size, bold, text);
     if numbered.is_some() {
         level = HeadingLevel::Body;
@@ -11601,6 +11613,14 @@ fn hang_kept_author_marks(
         return;
     }
     let owners = operator_owners(&extraction.glyphs);
+    // Four author stars share one text operator. A mark hung on another
+    // name still covers that operator; requiring each name's own group to
+    // own every star dropped the whole row and left the source star beside
+    // the star the translation had already copied.
+    let assigned_ids: HashSet<u32> = assigned
+        .values()
+        .flat_map(|group| group.iter().map(|mark| mark.id))
+        .collect();
     let mut dropped: HashSet<u32> = HashSet::new();
     for group in assigned.values() {
         for mark in group {
@@ -11620,9 +11640,7 @@ fn hang_kept_author_marks(
                 if glyph.unicode.trim().is_empty() {
                     return true;
                 }
-                succeeded.contains(id)
-                    || claimed.contains(id)
-                    || group.iter().any(|mark| mark.id == *id)
+                succeeded.contains(id) || claimed.contains(id) || assigned_ids.contains(id)
             });
             if !covered {
                 for id in ids {
@@ -11643,6 +11661,9 @@ fn hang_kept_author_marks(
         let Some((_, font)) = embedded.iter().find(|(name, _)| name == &line.resource) else {
             continue;
         };
+        // The model often copies the star into the name (`诺姆·沙泽尔*`).
+        // The source mark is drawn after the name, so a copied star is a second one.
+        line.text = trim_trailing_author_marks(&line.text);
         // CMSY draws U+2217. The CJK face has `*`, the same stand-in the
         // body uses, so the mark is not left on the source x.
         let raw_marks: String = marks.iter().map(|mark| mark.unicode.as_str()).collect();
@@ -12623,6 +12644,35 @@ pub(crate) fn body_hole_reach(size: f32) -> f32 {
     size.max(1.0) * 3.4
 }
 
+/// A line that shares its baseline with another line beside it is one cell
+/// of a row (an author name above its column). Pulling that cell into the
+/// vacant gap under the title leaves `诺姆·沙泽尔` alone above the grid.
+fn row_beside(block: &ColumnBlock, drawn: &[Drawn]) -> bool {
+    if block.listing || block.indices.is_empty() {
+        return false;
+    }
+    let page = drawn[block.indices[0]].page;
+    let size = block.size.max(1.0);
+    drawn.iter().enumerate().any(|(index, line)| {
+        if line.page != page || block.indices.contains(&index) {
+            return false;
+        }
+        if (line.y - block.top).abs() > size * 0.45 {
+            return false;
+        }
+        if line.text.trim().chars().count() < 3 {
+            return false;
+        }
+        let left = line.x;
+        let right = draw_ink_right(line);
+        if right - left < size * 2.0 {
+            return false;
+        }
+        let overlap = block.right.min(right) - block.left.max(left);
+        overlap < size * 0.4
+    })
+}
+
 /// The source gap between two blocks is empty: every glyph in it belongs to
 /// a drawn line (its operator is blank) and no figure image sits there.
 fn vacant_column_gap(
@@ -13583,6 +13633,7 @@ fn close_column_holes_with(
                 } else if same_baseline {
                     extra = 0.0;
                 } else if source_gap > reach
+                    && !row_beside(&block, drawn)
                     && vacant_column_gap(prev, &block, page, extraction, drawn)
                 {
                     // The lines that used to fill this gap were translated
@@ -13654,7 +13705,7 @@ fn close_column_holes_with(
             } else {
                 footnote_rule_above(&block, drawn, extraction, by_id, page)
             };
-            let applied = if clause {
+            let mut applied = if clause {
                 0.0
             } else if shift > 0.4 {
                 // A display equation in this chain is about to move by the
@@ -13681,6 +13732,20 @@ fn close_column_holes_with(
             } else {
                 shift
             };
+            // The English intro ends a few points above the footnote rule.
+            // Closing that gap paints the rule through the last intro line.
+            // Hold the note so the rule keeps about one blank line of air.
+            // Later notes inherit this smaller step, so † and ‡ stay apart.
+            if let (Some((_, _, rule_y)), Some(above)) = (owns_rule, prev.as_ref()) {
+                if applied > 0.4 {
+                    let clearance = above.size.max(block.size).max(1.0) * 1.75;
+                    let room = above.bottom - rule_y - clearance;
+                    if applied > room {
+                        applied = room.max(0.0);
+                        shift = applied;
+                    }
+                }
+            }
             if let Some((x0, x1, y)) = owns_rule {
                 if applied.abs() > 0.4
                     && !rules
@@ -14731,6 +14796,79 @@ fn index_sits_left_of(extraction: &Extraction, line: &InkLine<'_>) -> bool {
     marks.sort_by(|left, right| glyph_ink_left(left).total_cmp(&glyph_ink_left(right)));
     let text: String = marks.iter().map(|glyph| glyph.unicode.trim()).collect();
     is_section_index_text(text.trim())
+}
+
+/// `1 Introduction` translated as `1介绍`. Put the source space back
+/// between the section index and the Han title. A body digit glued to a
+/// word (`第4章`, `41.8分`) is not this heading.
+fn space_section_index(ink: &[InkLine<'_>], translated: &str) -> Option<String> {
+    if ink.len() != 1 {
+        return None;
+    }
+    let mut glyphs: Vec<&Glyph> = ink[0].glyphs.to_vec();
+    glyphs.sort_by(|left, right| glyph_ink_left(left).total_cmp(&glyph_ink_left(right)));
+    let source = spaced_glyph_run(&glyphs);
+    let source = source.trim();
+    if source.chars().count() > 80 {
+        return None;
+    }
+    let index = section_index_token(source)?;
+    let after = source.get(index.len()..)?;
+    if !after.starts_with(|ch: char| ch.is_whitespace()) || after.trim().is_empty() {
+        return None;
+    }
+    let translated = translated.trim();
+    if !translated.starts_with(index) {
+        return None;
+    }
+    let rest = &translated[index.len()..];
+    let next = rest.chars().next()?;
+    if next.is_whitespace() || next.is_ascii_alphanumeric() {
+        return None;
+    }
+    Some(format!("{index} {rest}"))
+}
+
+/// `1`, `3.2`, `3.2.1` at the start of a heading. Each group is at most two
+/// digits, so `41.8` is not a section index.
+fn section_index_token(source: &str) -> Option<&str> {
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    let mut groups = 0u8;
+    loop {
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == start || index - start > 2 {
+            return None;
+        }
+        groups += 1;
+        if groups > 4 {
+            return None;
+        }
+        if index < bytes.len() && bytes[index] == b'.' {
+            let after = index + 1;
+            if after < bytes.len() && bytes[after].is_ascii_digit() {
+                index = after;
+                continue;
+            }
+        }
+        break;
+    }
+    if index == 0 {
+        return None;
+    }
+    let token = &source[..index];
+    // `41.8` is a measurement. `3.2` and `3.2.1` are headings. A two-digit
+    // first group with a single fraction is not a section index.
+    let mut parts = token.split('.');
+    let first = parts.next().unwrap_or("");
+    let dots = parts.count();
+    if dots == 1 && first.len() == 2 && first.parse::<u32>().unwrap_or(0) > 12 {
+        return None;
+    }
+    Some(token)
 }
 
 fn is_section_index_text(text: &str) -> bool {
@@ -17027,6 +17165,16 @@ fn cover_unhit_clusters(
         {
             continue;
         }
+        // An author star is its own CMSY operator, a few points above the
+        // name. The translation already copied it (`诺姆·沙泽尔*`). The
+        // Chinese name is shorter than the English, so the source star sits
+        // outside the drawn box and used to be stamped again at the source x.
+        if cluster
+            .iter()
+            .all(|glyph| is_footnote_symbol(&glyph.unicode))
+        {
+            continue;
+        }
         let page = cluster[0].page_index;
         let bbox = cluster_bbox(&cluster);
         if drawn_hits(drawn, font, page, bbox) {
@@ -19021,6 +19169,27 @@ fn superscript_metrics(glyphs: &[&Glyph]) -> Option<SupMetrics> {
         scale: scales[scales.len() / 2],
         rise: rises[rises.len() / 2],
     })
+}
+
+/// Drop a star the translation copied onto the end of a name. The source
+/// mark is hung after the letters, and keeping both paints `诺姆·沙泽尔**`.
+fn trim_trailing_author_marks(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut keep = chars.len();
+    while keep > 0 && is_copied_author_mark(chars[keep - 1]) {
+        keep -= 1;
+    }
+    while keep > 0 && chars[keep - 1].is_whitespace() {
+        keep -= 1;
+    }
+    if keep == 0 || keep == chars.len() {
+        return text.to_string();
+    }
+    chars[..keep].iter().collect()
+}
+
+fn is_copied_author_mark(ch: char) -> bool {
+    matches!(ch, '*' | '∗' | '⋆' | '†' | '‡' | '§' | '¶')
 }
 
 fn affil_marker(text: &str) -> bool {
@@ -25400,6 +25569,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_numbered_heading_keeps_the_space_before_the_title() {
+        let mut heading = ink_glyph(1, 108.0, 470.0, 12.0, "1 Introduction");
+        heading.bbox = [108.0, 458.0, 220.0, 482.0];
+        heading.advance = [112.0, 0.0];
+        let glyphs = vec![heading];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let font = uniform_font("1 介绍");
+        let refs: Vec<&Glyph> = extraction.glyphs.iter().collect();
+        let drawn = layout_segment(
+            &refs,
+            "1介绍",
+            &font,
+            &extraction,
+            false,
+            "RPT",
+            0.0,
+            CjkMeasure::resolve(0.90, 1.60),
+        )
+        .expect("heading fits");
+        let text = drawn
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            text.contains("1 介绍"),
+            "heading lost the space: {text:?} lines {:?}",
+            drawn
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn spanned(mut glyph: Glyph, start: usize, end: usize) -> Glyph {
         glyph.source.object_id = Some("10 0".into());
         glyph.source.byte_start = start;
@@ -25496,6 +25711,92 @@ mod tests {
             (aside.x - 72.0).abs() < 0.6,
             "left line moved to {:.1}",
             aside.x
+        );
+    }
+
+    #[test]
+    fn a_copied_author_star_is_not_drawn_twice() {
+        assert_eq!(
+            super::trim_trailing_author_marks("诺姆·沙泽尔*"),
+            "诺姆·沙泽尔"
+        );
+        assert_eq!(
+            super::trim_trailing_author_marks("诺姆·沙泽尔∗"),
+            "诺姆·沙泽尔"
+        );
+        assert_eq!(
+            super::trim_trailing_author_marks("伊利亚·波洛苏欣 *"),
+            "伊利亚·波洛苏欣"
+        );
+        assert_eq!(
+            super::trim_trailing_author_marks("Aidan N. Gomez"),
+            "Aidan N. Gomez"
+        );
+    }
+
+    #[test]
+    fn a_copied_author_star_is_not_stamped_at_the_source_x() {
+        let name = "诺姆·沙泽尔*";
+        let font = uniform_font(&format!("{name}Q"));
+        let widths = char_widths(name, 9.0, &font);
+        let mut drawn = vec![Drawn {
+            page: 0,
+            x: 200.0,
+            y: 549.3,
+            size: 9.0,
+            color: Color::black(),
+            cids: cids_of(name, &font),
+            resource: "RPT".into(),
+            skew: 0.0,
+            widths,
+            gaps: vec![0.0; name.chars().count() - 1],
+            text: name.into(),
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids: vec![1, 2],
+        }];
+        let mut letters = ink_glyph(1, 244.0, 549.3, 10.0, "Noam");
+        letters.bbox = [244.0, 547.0, 290.0, 557.0];
+        let mut star = ink_glyph(2, 300.76, 552.92, 6.97, "∗");
+        star.bbox = [300.76, 551.5, 304.1, 558.5];
+        star.font_name = "CMSY7".into();
+        // A letter the translation dropped still has to be stamped. The
+        // author star must not, because the name line already ends with one.
+        let mut dropped = ink_glyph(3, 420.0, 560.0, 10.0, "Q");
+        dropped.bbox = [420.0, 558.0, 428.0, 568.0];
+        let glyphs = [&letters, &star, &dropped];
+        super::cover_unhit_clusters(
+            &mut drawn,
+            &glyphs,
+            &font,
+            "RPT",
+            0.0,
+            &Color::black(),
+            &[1, 2, 3],
+            &[],
+        );
+        assert!(
+            !drawn.iter().any(|line| (line.x - 300.76).abs() < 0.5),
+            "source star stamped: {:?}",
+            drawn
+                .iter()
+                .map(|line| (line.x, line.y, line.text.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            drawn
+                .iter()
+                .filter(|line| line.text.contains('*') || line.text.contains('∗'))
+                .count(),
+            1,
+            "one star, on the name"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|line| line.text == "Q" && (line.x - 420.0).abs() < 0.5),
+            "a dropped letter is still covered"
         );
     }
 
@@ -33397,6 +33698,126 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
             (rule.dy - (star - 190.0)).abs() < 1.0,
             "rule dy {} did not follow the note to {star}",
             rule.dy
+        );
+        let painted = rule.y + rule.dy;
+        assert!(
+            abstract_y - painted > size * 1.5,
+            "footnote rule sits on the line above it: abstract {abstract_y} rule {painted}"
+        );
+    }
+
+    #[test]
+    fn a_tight_footnote_rule_keeps_air_under_the_intro() {
+        // The Chinese intro is shorter, so the closer pulls the note up to
+        // the English gap. That gap is only a few points, and the rule then
+        // cuts the last intro line.
+        let size = 10.0;
+        let glyphs = vec![
+            ink_glyph(1, 108.0, 192.0, size, "A"),
+            ink_glyph(10, 108.0, 180.0, size, "*"),
+            ink_glyph(20, 108.0, 168.0, size, "†"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![crate::glyph::PaintedRegion {
+                page_index: 0,
+                bbox: [108.0, 187.6, 251.5, 188.4],
+                kind: "path".into(),
+            }],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(108.0, 250.0, size, "的界限。", vec![1]),
+            test_draw(
+                108.0,
+                180.0,
+                size,
+                "*同等贡献。列表顺序是随机的。",
+                vec![10],
+            ),
+            test_draw(
+                108.0,
+                168.0,
+                size,
+                "†在 Google Brain 期间完成的工作。",
+                vec![20],
+            ),
+        ];
+        let mut rules = Vec::new();
+        close_column_holes_with(&mut drawn, &extraction, &by_id, &mut rules);
+        let y_of = |prefix: &str| {
+            drawn
+                .iter()
+                .find(|line| line.text.starts_with(prefix))
+                .unwrap()
+                .y
+        };
+        let intro = y_of("的");
+        let star = y_of("*");
+        let dagger = y_of("†");
+        let rule = rules
+            .iter()
+            .find(|rule| (rule.y - 188.0).abs() < 1.0)
+            .expect("footnote rule");
+        let painted = rule.y + rule.dy;
+        assert!(
+            intro - painted >= size * 1.7,
+            "rule cleared only {:.1}pt under the intro at {intro}",
+            intro - painted
+        );
+        assert!(
+            painted > star + size * 0.3,
+            "rule dropped into the note: rule {painted} star {star}"
+        );
+        assert!(
+            star > dagger + size * 0.4,
+            "† stacked on the star note: star {star} † {dagger}"
+        );
+    }
+
+    #[test]
+    fn an_author_name_stays_in_its_column_under_the_title() {
+        // The title covers the middle column. Closing the vacant gap under
+        // it used to lift only that name, so `诺姆·沙泽尔` sat alone above
+        // the author grid.
+        let size = 10.0;
+        let glyphs = vec![
+            ink_glyph(1, 200.0, 640.0, 14.0, "Attention"),
+            ink_glyph(2, 120.0, 560.0, size, "Ashish"),
+            ink_glyph(3, 240.0, 560.0, size, "Noam"),
+            ink_glyph(4, 350.0, 560.0, size, "Niki"),
+            ink_glyph(5, 450.0, 560.0, size, "Jakob"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(200.0, 640.0, 14.0, "Attention Is All You Need", vec![1]),
+            test_draw(120.0, 560.0, size, "阿什什·瓦斯瓦尼", vec![2]),
+            test_draw(240.0, 560.0, size, "诺姆·沙泽尔", vec![3]),
+            test_draw(350.0, 560.0, size, "尼基·帕尔玛", vec![4]),
+            test_draw(450.0, 560.0, size, "雅各布·乌什科雷特", vec![5]),
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let y_of = |text: &str| drawn.iter().find(|line| line.text == text).unwrap().y;
+        let noam = y_of("诺姆·沙泽尔");
+        let ashish = y_of("阿什什·瓦斯瓦尼");
+        let niki = y_of("尼基·帕尔玛");
+        assert!(
+            (noam - ashish).abs() < 0.6 && (noam - niki).abs() < 0.6,
+            "middle name left the row: noam {noam} ashish {ashish} niki {niki}"
+        );
+        assert!(
+            y_of("Attention Is All You Need") - noam > 40.0,
+            "middle name rose into the title gap"
         );
     }
 

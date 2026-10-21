@@ -1637,6 +1637,166 @@ fn flaw_count(source: &str, translated: &str) -> usize {
         + usize::from(residual_english(translated))
         + usize::from(leftover_source_word(source, translated))
         + usize::from(comma_list_incomplete(source, translated))
+        + usize::from(changed_source_number(source, translated))
+}
+
+/// A number token: digits, with a decimal (`41.8`) or thousands commas
+/// (`1,000`). A placeholder `⟦0⟧` is not a number in the sentence.
+struct NumberToken {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+fn number_tokens(text: &str) -> Vec<NumberToken> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index].1 == '⟦' {
+            index += 1;
+            while index < chars.len() && chars[index].1 != '⟧' {
+                index += 1;
+            }
+            index = (index + 1).min(chars.len());
+            continue;
+        }
+        if !chars[index].1.is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < chars.len() && chars[index].1.is_ascii_digit() {
+            index += 1;
+        }
+        while index < chars.len() {
+            let mark = chars[index].1;
+            let digits = if mark == '.' {
+                true
+            } else if mark == ',' {
+                let tail = index + 1;
+                (0..3).all(|step| {
+                    chars
+                        .get(tail + step)
+                        .is_some_and(|(_, ch)| ch.is_ascii_digit())
+                }) && !chars
+                    .get(tail + 3)
+                    .is_some_and(|(_, ch)| ch.is_ascii_digit())
+            } else {
+                false
+            };
+            if !digits {
+                break;
+            }
+            index += 1;
+            let group = index;
+            while index < chars.len() && chars[index].1.is_ascii_digit() {
+                index += 1;
+            }
+            if index == group {
+                index -= 1;
+                break;
+            }
+            if mark == '.' {
+                continue;
+            }
+            break;
+        }
+        let byte_start = chars[start].0;
+        let byte_end = chars
+            .get(index)
+            .map(|(offset, _)| *offset)
+            .unwrap_or(text.len());
+        tokens.push(NumberToken {
+            start: byte_start,
+            end: byte_end,
+            text: text[byte_start..byte_end].to_string(),
+        });
+    }
+    tokens
+}
+
+fn number_shape(token: &str) -> (usize, usize) {
+    match token.split_once('.') {
+        Some((whole, frac)) => (
+            whole.chars().filter(|ch| ch.is_ascii_digit()).count(),
+            frac.chars().filter(|ch| ch.is_ascii_digit()).count(),
+        ),
+        None => (token.chars().filter(|ch| ch.is_ascii_digit()).count(), 0),
+    }
+}
+
+/// `41.8` became `41.0`. Every source number has to appear, with the same
+/// multiplicity, and not as a prefix of a longer number.
+pub(crate) fn changed_source_number(source: &str, translated: &str) -> bool {
+    let mut pool: Vec<String> = number_tokens(translated)
+        .into_iter()
+        .map(|token| token.text)
+        .collect();
+    for token in number_tokens(source) {
+        if let Some(found) = pool.iter().position(|item| item == &token.text) {
+            pool.remove(found);
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+/// Put a substituted number back when the translation still has a same-shaped
+/// stand-in (`41.0` for `41.8`). A dropped number, or two different
+/// substitutions of the same shape, is left for another translation.
+fn restore_changed_numbers(source: &str, translated: &str) -> String {
+    let source_tokens = number_tokens(source);
+    let translated_tokens = number_tokens(translated);
+    if source_tokens.is_empty() || translated_tokens.is_empty() {
+        return translated.to_string();
+    }
+    let mut used = vec![false; translated_tokens.len()];
+    let mut missing = Vec::new();
+    for token in &source_tokens {
+        if let Some(found) = translated_tokens
+            .iter()
+            .enumerate()
+            .position(|(index, item)| !used[index] && item.text == token.text)
+        {
+            used[found] = true;
+        } else {
+            missing.push(token.text.as_str());
+        }
+    }
+    let mut spare: Vec<usize> = used
+        .iter()
+        .enumerate()
+        .filter_map(|(index, taken)| (!taken).then_some(index))
+        .collect();
+    let mut replacements: Vec<(usize, &str)> = Vec::new();
+    for source_number in missing {
+        let shape = number_shape(source_number);
+        let Some(slot) = spare
+            .iter()
+            .position(|&index| number_shape(&translated_tokens[index].text) == shape)
+        else {
+            continue;
+        };
+        let index = spare.remove(slot);
+        replacements.push((index, source_number));
+    }
+    if replacements.is_empty() {
+        return translated.to_string();
+    }
+    replacements.sort_by_key(|(index, _)| translated_tokens[*index].start);
+    let mut out = String::with_capacity(translated.len());
+    let mut cursor = 0usize;
+    for (index, source_number) in replacements {
+        let token = &translated_tokens[index];
+        out.push_str(&translated[cursor..token.start]);
+        out.push_str(source_number);
+        cursor = token.end;
+    }
+    out.push_str(&translated[cursor..]);
+    out
 }
 
 /// A comma list dropped a topic or a proper noun (`RISC-V`, `(SBOM)`, `Rust`).
@@ -2353,6 +2513,7 @@ pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String 
     text = gloss_run_in_label(source, &text);
     text = normalize_prompt_sample(source, &text);
     text = unify_enumerated_item_heads(&text);
+    text = restore_changed_numbers(source, &text);
     let source_end = source.trim_end();
     if source_end.ends_with("user") && !source.to_ascii_lowercase().contains("request") {
         text = text.replace("用户请求", "用户");
@@ -4538,6 +4699,41 @@ mod tests {
         ));
         assert!(translation_flaw("Text summarization", "Text 摘要"));
         assert!(!translation_flaw("Text classification", "文本分类"));
+        let bleu = "our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs";
+        assert!(
+            changed_source_number(bleu, "我们的模型建立了 BLEU 分数 41.0，训练了 3.5 天。"),
+            "41.8 changed to 41.0 was accepted"
+        );
+        assert!(
+            !changed_source_number(bleu, "我们的模型建立了 BLEU 分数 41.8，训练了 3.5 天。"),
+            "an unchanged 41.8 was rejected"
+        );
+        assert!(
+            changed_source_number("score of 28.4 BLEU", "分数 28 BLEU"),
+            "28.4 shortened to 28 was accepted"
+        );
+        assert_eq!(
+            restore_changed_numbers(bleu, "我们的模型建立了 BLEU 分数 41.0，训练了 3.5 天。"),
+            "我们的模型建立了 BLEU 分数 41.8，训练了 3.5 天。"
+        );
+        assert_eq!(
+            repair_body_translation(bleu, "我们的模型建立了 BLEU 分数 41.0，训练了 3.5 天。"),
+            "我们的模型建立了 BLEU 分数 41.8，训练了 3.5 天。"
+        );
+        let mut ex = extraction_from_lines(&[bleu]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &NumberThenExact).unwrap();
+        assert!(
+            report.segments[0].translated.contains("41.8"),
+            "{}",
+            report.segments[0].translated
+        );
+        assert!(
+            !report.segments[0].translated.contains("41.0"),
+            "{}",
+            report.segments[0].translated
+        );
+        assert!(report.calls >= 2, "calls={}", report.calls);
         assert!(!translation_flaw(
             "The projects target modern versions of Python and use standard tools.",
             "这些项目面向较新的 Python 版本，并使用标准工具。"
@@ -4552,6 +4748,26 @@ mod tests {
             report.segments[0].translated
         );
         assert!(report.calls >= 2, "calls={}", report.calls);
+    }
+
+    struct NumberThenExact;
+    impl Translator for NumberThenExact {
+        fn complete(&self, system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = if system.contains("changed a number") {
+                        "我们的模型建立了 BLEU 分数 41.8，训练了 3.5 天。"
+                    } else {
+                        "我们的模型建立了 BLEU 分数 41.0，训练了 3.5 天。"
+                    };
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
     }
 
     struct SpaceThenClean;
