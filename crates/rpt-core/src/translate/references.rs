@@ -728,7 +728,45 @@ fn is_section_break(text: &str) -> bool {
     if is_reference_heading(text) || is_reference_entry(text) {
         return false;
     }
-    is_end_heading(text) || looks_like_section_title(text) || appendix_letter_heading(text)
+    is_end_heading(text)
+        || looks_like_section_title(text)
+        || appendix_letter_heading(text)
+        || is_caption_heading(text)
+}
+
+/// `Figure 3: An example of the attention mechanism` and `Table 2. Results`
+/// follow the bibliography when the appendix has no "Appendix" heading.
+/// A citation that merely mentions a figure still starts with `[1]` or a year.
+fn is_caption_heading(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    let Some(rest) = ["figure", "fig.", "table", "tab.", "fig"]
+        .iter()
+        .find_map(|prefix| {
+            let rest = lower.strip_prefix(prefix)?;
+            let boundary = rest.chars().next()?;
+            if prefix.chars().all(|ch| ch.is_ascii_alphabetic())
+                && !(boundary.is_ascii_whitespace() || boundary == '.' || boundary.is_ascii_digit())
+            {
+                return None;
+            }
+            Some(rest)
+        })
+    else {
+        return false;
+    };
+    let rest = rest.trim_start_matches([' ', '.']);
+    let mut digits = 0usize;
+    for ch in rest.chars() {
+        if ch.is_ascii_digit() {
+            digits += 1;
+            if digits > 3 {
+                return false;
+            }
+            continue;
+        }
+        return digits > 0 && matches!(ch, ':' | '.' | ' ' | '：');
+    }
+    false
 }
 
 /// `A Derivations` and `A.1 From Region-Specific Sufficiency`. AAAI letters
@@ -1496,6 +1534,94 @@ mod tests {
         assert!(kept.contains("Schmidt"), "{kept}");
         assert!(!kept.contains("See the notes"), "{kept}");
         assert!(!kept.contains("Anhang"), "{kept}");
+    }
+
+    #[test]
+    fn a_figure_caption_after_the_bibliography_is_not_a_reference() {
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(&mut glyphs, &mut id, 0, 72.0, 700.0, "References");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            680.0,
+            "[1] Smith, A. (2020). A paper about testing methods.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            660.0,
+            "[40] Zhu, Y. Fast and accurate shift-reduce parsing. ACL, 2013.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            1,
+            108.0,
+            120.0,
+            "Figure 3: An example of the attention mechanism following long-distance dependencies.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            1,
+            108.0,
+            100.0,
+            "The heads clearly learned to perform different tasks.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(kept.contains("[40] Zhu"), "{kept}");
+        assert!(!kept.contains("Figure 3"), "{kept}");
+        assert!(!kept.contains("different tasks"), "{kept}");
+        assert!(!is_caption_heading("fight the long deadline today"));
+        assert!(is_caption_heading(
+            "Figure 3: An example of the attention mechanism"
+        ));
+        assert!(is_caption_heading("Table 2. Complexity per layer"));
+    }
+
+    #[test]
+    fn saved_papers_do_not_keep_a_caption_inside_the_bibliography() {
+        let mut paths = Vec::new();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/ci");
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "pdf") {
+                    paths.push(path);
+                }
+            }
+        }
+        let arxiv = std::path::PathBuf::from("/tmp/fix/arxiv-attention.pdf");
+        if arxiv.is_file() {
+            paths.push(arxiv);
+        }
+        paths.sort();
+        for path in paths {
+            let extracted = PdfDocument::open(&path).unwrap().extract();
+            let ids = reference_glyph_ids(&extracted.glyphs);
+            let kept = text_of(&extracted.glyphs, &ids);
+            for needle in [
+                "Figure 1:",
+                "Figure 2:",
+                "Figure 3:",
+                "Figure 4:",
+                "Figure 5:",
+                "Table 1:",
+                "Table 2:",
+            ] {
+                assert!(
+                    !kept.contains(needle),
+                    "{} kept a caption {needle}",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]

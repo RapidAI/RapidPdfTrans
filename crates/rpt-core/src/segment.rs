@@ -3003,7 +3003,15 @@ fn caption_block(start: usize, lines: &[VisualLine<'_>], order: &[usize]) -> Vec
             break;
         }
         let width = lines[index].right - lines[index].left;
-        if width < cap_w * 0.35 && lines[index].text.chars().count() < 24 {
+        // `per-word perplexities.` and `of WSJ)` are the short last line of
+        // a caption. They start in lowercase and the line above does not end
+        // the sentence. A short cell under a finished caption still stops.
+        let sentence_tail = !sentence_end(lines[prev].text.trim_end())
+            && lines[index]
+                .text
+                .trim_start()
+                .starts_with(|ch: char| ch.is_ascii_lowercase());
+        if !sentence_tail && width < cap_w * 0.35 && lines[index].text.chars().count() < 24 {
             break;
         }
         block.push(index);
@@ -7360,6 +7368,241 @@ mod tests {
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
         assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
         assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
+    }
+
+    #[test]
+    fn a_short_caption_tail_stays_with_the_caption() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let line_a = "Table 3: Variations on the Transformer architecture. Unlisted values are identical to those of the base";
+        let line_b = "model. All metrics are on the English-to-German translation development set, newstest2013. Listed";
+        let line_c =
+            "perplexities are per-wordpiece, according to our byte-pair encoding, and should not be compared to";
+        let tail = "per-word perplexities.";
+        let glyphs = vec![
+            wide(0, 108.0, 720.0, body, 400.0, 9.0),
+            wide(1, 108.0, 680.0, line_a, 396.0, 9.0),
+            wide(2, 108.0, 668.0, line_b, 396.0, 9.0),
+            wide(3, 108.0, 656.0, line_c, 396.0, 9.0),
+            wide(4, 108.0, 644.0, tail, 96.0, 9.0),
+            wide(5, 125.0, 600.0, "Layer Type", 70.0, 9.0),
+            wide(6, 220.0, 600.0, "Complexity", 70.0, 9.0),
+            wide(7, 108.0, 500.0, body, 400.0, 9.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let caption = seg
+            .segments
+            .iter()
+            .find(|item| item.text.contains("Table 3:"))
+            .expect("caption");
+        assert!(
+            caption.text.contains("per-word perplexities"),
+            "{}",
+            caption.text
+        );
+        assert!(
+            !seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 4 && reason == "table"),
+            "caption tail was a table cell: {:?}",
+            seg.kept
+        );
+        assert!(
+            seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 5 && reason == "table"),
+            "header should stay a cell: {:?}",
+            seg.kept
+        );
+    }
+
+    #[test]
+    fn arxiv_attention_caption_tails_join_the_caption() {
+        let path = std::path::PathBuf::from("/tmp/fix/arxiv-attention.pdf");
+        if !path.is_file() {
+            return;
+        }
+        let extracted = crate::extract::PdfDocument::open(&path)
+            .unwrap()
+            .extract_with(&crate::extract::ExtractOptions::default());
+        let seg = segment_placed(
+            &extracted.glyphs,
+            &SegmentFlags::default(),
+            &extracted.regions,
+            &extracted.pages,
+        );
+        let table3 = seg
+            .segments
+            .iter()
+            .find(|item| item.text.contains("should not be compared to"))
+            .map(|item| item.text.clone())
+            .unwrap_or_default();
+        let table4 = seg
+            .segments
+            .iter()
+            .find(|item| item.text.starts_with("Table 4:"))
+            .map(|item| item.text.clone())
+            .unwrap_or_default();
+        assert!(
+            table3.contains("per-word perplexities"),
+            "table 3 tail missing: {table3}"
+        );
+        assert!(table4.contains("of WSJ"), "table 4 tail missing: {table4}");
+    }
+
+    #[test]
+    fn saved_papers_keep_a_caption_tail_with_the_caption() {
+        let mut paths = Vec::new();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/ci");
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "pdf") {
+                    paths.push(path);
+                }
+            }
+        }
+        let arxiv = std::path::PathBuf::from("/tmp/fix/arxiv-attention.pdf");
+        if arxiv.is_file() {
+            paths.push(arxiv);
+        }
+        paths.sort();
+        let mut missed = Vec::new();
+        for path in &paths {
+            let extracted = crate::extract::PdfDocument::open(path)
+                .unwrap()
+                .extract_with(&crate::extract::ExtractOptions::default());
+            let seg = segment_placed(
+                &extracted.glyphs,
+                &SegmentFlags::default(),
+                &extracted.regions,
+                &extracted.pages,
+            );
+            let kept: std::collections::HashSet<u32> = seg
+                .kept
+                .iter()
+                .filter(|(_, reason)| reason == "table" || reason == "figure")
+                .map(|(id, _)| *id)
+                .collect();
+            let caption_ids: std::collections::HashSet<u32> = seg
+                .segments
+                .iter()
+                .filter(|item| {
+                    let text = item.text.trim();
+                    text.starts_with("Table")
+                        || text.starts_with("Figure")
+                        || text.starts_with("Fig.")
+                })
+                .flat_map(|item| item.glyph_ids.iter().copied())
+                .collect();
+            let mut by_page: std::collections::HashMap<u32, Vec<&crate::glyph::Glyph>> =
+                std::collections::HashMap::new();
+            for glyph in &extracted.glyphs {
+                by_page.entry(glyph.page_index).or_default().push(glyph);
+            }
+            for glyphs in by_page.values_mut() {
+                glyphs.sort_by(|a, b| {
+                    b.bbox[1]
+                        .total_cmp(&a.bbox[1])
+                        .then(a.bbox[0].total_cmp(&b.bbox[0]))
+                });
+                let mut lines: Vec<Vec<&crate::glyph::Glyph>> = Vec::new();
+                for glyph in glyphs.iter().copied() {
+                    let y = glyph.bbox[1];
+                    if let Some(line) = lines.last_mut() {
+                        if (line[0].bbox[1] - y).abs() <= 1.5 {
+                            line.push(glyph);
+                            continue;
+                        }
+                    }
+                    lines.push(vec![glyph]);
+                }
+                for (index, line) in lines.iter().enumerate() {
+                    let text: String = line.iter().map(|glyph| glyph.unicode.as_str()).collect();
+                    let trimmed = text.trim();
+                    if !trimmed.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+                        continue;
+                    }
+                    if trimmed
+                        .chars()
+                        .filter(|ch| ch.is_ascii_alphabetic())
+                        .count()
+                        < 2
+                    {
+                        continue;
+                    }
+                    if !line.iter().any(|glyph| kept.contains(&glyph.id)) {
+                        continue;
+                    }
+                    let Some(prev) = lines[..index].iter().rev().find(|prev| {
+                        let letters = prev
+                            .iter()
+                            .filter(|glyph| {
+                                glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+                            })
+                            .count();
+                        letters >= 4 && prev.iter().any(|glyph| caption_ids.contains(&glyph.id))
+                    }) else {
+                        continue;
+                    };
+                    if !prev.iter().all(|glyph| caption_ids.contains(&glyph.id)) {
+                        continue;
+                    }
+                    let prev_text: String =
+                        prev.iter().map(|glyph| glyph.unicode.as_str()).collect();
+                    if sentence_end(prev_text.trim_end()) {
+                        continue;
+                    }
+                    let size = line[0].font_size.max(prev[0].font_size).max(1.0);
+                    let dy = prev[0].bbox[1] - line[0].bbox[1];
+                    if dy < size * 0.6 || dy > size * 1.8 {
+                        continue;
+                    }
+                    let left = line
+                        .iter()
+                        .map(|glyph| glyph.bbox[0])
+                        .fold(f32::MAX, f32::min);
+                    let prev_left = prev
+                        .iter()
+                        .map(|glyph| glyph.bbox[0])
+                        .fold(f32::MAX, f32::min);
+                    if (left - prev_left).abs() > 36.0 {
+                        continue;
+                    }
+                    missed.push(format!(
+                        "{} p{} after {:?}: {:?}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        line[0].page_index + 1,
+                        prev_text.chars().rev().take(48).collect::<String>(),
+                        trimmed.chars().take(80).collect::<String>()
+                    ));
+                }
+            }
+            if path.ends_with("arxiv-attention.pdf") {
+                let table3 = seg
+                    .segments
+                    .iter()
+                    .find(|item| item.text.contains("should not be compared to"))
+                    .map(|item| item.text.clone())
+                    .unwrap_or_default();
+                assert!(
+                    table3.contains("per-word perplexities"),
+                    "table 3 tail missing: {table3}"
+                );
+                let table4 = seg
+                    .segments
+                    .iter()
+                    .find(|item| item.text.starts_with("Table 4:"))
+                    .map(|item| item.text.clone())
+                    .unwrap_or_default();
+                assert!(table4.contains("of WSJ"), "table 4 tail missing: {table4}");
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "caption tails kept inside a table or figure:\n{}",
+            missed.join("\n")
+        );
     }
 
     #[test]

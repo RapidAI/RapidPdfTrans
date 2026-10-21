@@ -5508,9 +5508,43 @@ fn substitute_covered(text: &str, font: &SubsetFont) -> String {
                 }
             }
         }
+        // Google inserts U+200B inside a word (`清楚​​地`). The CJK face
+        // has no zero-width space, and one missing character used to reject
+        // the whole paragraph and leave it in English.
+        if uncovered_format(ch) {
+            continue;
+        }
         out.push(ch);
     }
     out
+}
+
+/// Invisible characters a translation may insert and a body face will not
+/// cover. Dropping them is not a missing glyph.
+fn uncovered_format(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'
+            | '\u{200C}'
+            | '\u{200D}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'
+            | '\u{202B}'
+            | '\u{202C}'
+            | '\u{202D}'
+            | '\u{202E}'
+            | '\u{2060}'
+            | '\u{2066}'
+            | '\u{2067}'
+            | '\u{2068}'
+            | '\u{2069}'
+            | '\u{FEFF}'
+    )
 }
 
 /// A short centered line is only as wide as its own English ink. Chinese may
@@ -23656,9 +23690,58 @@ mod tests {
         assert_eq!(substitute_covered("˚部分工作", &font), "*部分工作");
         assert_eq!(substitute_covered("x˜", &font), "x~");
         assert_eq!(substitute_covered("ď", &font), "d");
+        assert_eq!(
+            substitute_covered("清楚\u{200b}\u{200b}地", &font),
+            "清楚地"
+        );
+        assert_eq!(substitute_covered("模型\u{feff}。", &font), "模型。");
         assert!(stand_ins('˚').contains(&'*'));
         assert!(stand_ins('˜').contains(&'~'));
         assert!(stand_ins('ď').contains(&'d'));
+    }
+
+    #[test]
+    fn a_zero_width_space_does_not_leave_the_paragraph_in_english() {
+        let source = "As side benefit, self-attention could yield more interpretable models.";
+        let translated = "作为附带好处，自注意力可以产生更多可解释的模型。清楚\u{200b}\u{200b}地";
+        let visible: String = translated
+            .chars()
+            .filter(|ch| !uncovered_format(*ch))
+            .collect();
+        let font = uniform_font(&visible);
+        assert!(!font.has(0x200B));
+        let mut line = ink_glyph(1, 108.0, 420.0, 10.0, source);
+        line.bbox = [108.0, 410.0, 520.0, 430.0];
+        line.advance = [412.0, 0.0];
+        let glyphs = vec![line];
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs: glyphs.clone(),
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let drawn = layout_segment(
+            &refs,
+            translated,
+            &font,
+            &extraction,
+            false,
+            "RPT",
+            0.0,
+            CjkMeasure::resolve(0.90, 1.60),
+        )
+        .expect("a zero-width space must not reject the paragraph");
+        let text: String = drawn.iter().map(|line| line.text.as_str()).collect();
+        assert!(text.contains("清楚地"), "{text}");
+        assert!(!text.contains('\u{200b}'));
+        assert!(!text.contains("side benefit"), "{text}");
     }
 
     #[test]
