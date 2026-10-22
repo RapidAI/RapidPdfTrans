@@ -836,9 +836,58 @@ pub(crate) fn is_reference_entry(text: &str) -> bool {
         return true;
     }
     if starts_numbered_marker(trimmed) && (contains_year(trimmed) || looks_author_list(trimmed)) {
+        // `2. Skip-Thought (Kiros et al., 2015), a sequence-to-sequence model`
+        // cites a paper inside a numbered appendix item. Two of those used to
+        // open a bibliography and keep the rest of the appendix in English.
+        if numbered_prose_item(trimmed) {
+            return false;
+        }
         return true;
     }
     looks_author_year_start(trimmed) && contains_year(trimmed)
+}
+
+/// `1. CBoW, the average of the embeddings` is a sentence. `1. Vaswani, A.`
+/// is the start of a bibliography entry.
+fn numbered_prose_item(text: &str) -> bool {
+    if looks_author_list(text) {
+        return false;
+    }
+    let Some(rest) = strip_section_prefix(text.trim()) else {
+        return false;
+    };
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    if words.len() < 6 {
+        return false;
+    }
+    let hits = words
+        .iter()
+        .filter(|word| {
+            let bare = word.trim_matches(|ch: char| !ch.is_ascii_alphabetic());
+            matches!(
+                bare.to_ascii_lowercase().as_str(),
+                "the"
+                    | "a"
+                    | "an"
+                    | "of"
+                    | "to"
+                    | "for"
+                    | "with"
+                    | "and"
+                    | "we"
+                    | "is"
+                    | "are"
+                    | "in"
+                    | "on"
+                    | "by"
+                    | "that"
+                    | "from"
+                    | "as"
+                    | "or"
+            )
+        })
+        .count();
+    hits >= 2
 }
 
 /// `[AGTG21]`, `[BE98]`, and `[AHK+ 02]`. A numeric `[1]` is handled
@@ -937,7 +986,14 @@ fn looks_author_year_start(text: &str) -> bool {
         return false;
     }
     let after = text[len..].trim_start();
-    after.starts_with(',') || after.starts_with('，')
+    let Some(rest) = after.strip_prefix(',').or_else(|| after.strip_prefix('，')) else {
+        return false;
+    };
+    // `CBoW, the average` is a sentence. `Vaswani, A.` and `Smith, 2015` are names.
+    rest.trim_start()
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
 fn contains_year(text: &str) -> bool {
@@ -1769,6 +1825,75 @@ mod tests {
             !kept.contains("workfunctionrecurrence"),
             "the appendix proof was kept"
         );
+    }
+
+    #[test]
+    fn a_numbered_model_list_is_not_a_bibliography() {
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            700.0,
+            "B.3 SENTENCE REPRESENTATION MODELS",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            680.0,
+            "1. CBoW, the average of the GloVe embeddings of the tokens in the sentence.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            660.0,
+            "2. Skip-Thought (Kiros et al., 2015), a sequence-to-sequence model trained to generate the next sentence.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            640.0,
+            "3. InferSent (Conneau et al., 2017), a BiLSTM with max-pooling trained on MNLI.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            600.0,
+            "The GLUE website limits users to two submissions per day.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            520.0,
+            "1. Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, L., and Polosukhin, I. Attention is all you need. In NIPS, 2017.",
+        );
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            500.0,
+            "2. Devlin, J., Chang, M., Lee, K., and Toutanova, K. BERT: Pre-training of deep bidirectional transformers. In NAACL, 2019.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(!kept.contains("CBoW"), "{kept}");
+        assert!(!kept.contains("Skip-Thought"), "{kept}");
+        assert!(!kept.contains("GLUE website"), "{kept}");
+        assert!(kept.contains("Vaswani"), "{kept}");
+        assert!(kept.contains("Devlin"), "{kept}");
     }
 
     #[test]

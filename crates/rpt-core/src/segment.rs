@@ -432,13 +432,18 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // `columns.`, and the gutter is ~16pt, so it used to look like a
         // justified tail of the left column. One column is about 20em, so a
         // 24em span already includes the gutter.
+        // `2.5 Data` sits 17.6pt past `self-attention`. A justified space on
+        // that line is 10.9pt, so the gutter is not twice the next gap and
+        // the heading was read as the tail of the left column.
         let two_column_tail = line.len() >= 40
             && span >= size * 24.0
             && left_w >= size * 16.0
             && right_w >= size * 3.0
             && gap >= size * 1.25
             && gap + 0.05 >= largest
-            && (second <= 0.05 || gap >= second * 2.0);
+            && (second <= 0.05
+                || gap >= second * 2.0
+                || (section_index_stub(&line[index..]) && gap >= second * 1.25));
         // `references column, {` The brace is the left edge of a listing in
         // the next column. A one-glyph tail used to look like a justified space.
         let lone_mark = gap >= size * 1.15
@@ -473,6 +478,39 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
 
 /// The next body-sized glyph is another column, or nothing follows.
 /// A parenthetical index has the sentence continuing immediately.
+fn section_index_stub(rest: &[&Glyph]) -> bool {
+    let text: String = rest.iter().map(|glyph| glyph.unicode.as_str()).collect();
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if bytes.first().is_none_or(|byte| !byte.is_ascii_digit()) {
+        return false;
+    }
+    let mut index = 0usize;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if !(1..=2).contains(&index) {
+        return false;
+    }
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+        let start = index;
+        while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    text[index..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
 fn trailing_gutter_mark(rest: &[&Glyph], body_size: f32) -> bool {
     let Some(first) = rest.first() else {
         return false;
@@ -11830,6 +11868,59 @@ mod tests {
         );
         assert!(
             !texts.iter().any(|text| text.contains("emoperates")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_section_index_across_a_justified_gutter_stays_in_its_column() {
+        // Measured on a two-column conference page: body size 10.9, justified
+        // space 10.9, gutter 17.6 before `2.5 Data` (46.9pt wide).
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut x = 72.0f32;
+        let left = "with L layers. Each block uses A self-attention";
+        let wide_at = left.find(" uses ").unwrap();
+        for (index, ch) in left.chars().enumerate() {
+            let advance: f32 = if index == wide_at { 15.3 } else { 4.5 };
+            glyphs.push(block(id, x, 276.0, 4.4, 10.9, &ch.to_string()));
+            x += advance;
+            id += 1;
+        }
+        let gutter = x + 17.6;
+        x = gutter;
+        for ch in "2.5 Data".chars() {
+            let advance: f32 = if ch == ' ' { 11.3 } else { 5.0 };
+            glyphs.push(block(id, x, 276.4, advance, 10.9, &ch.to_string()));
+            x += advance;
+            id += 1;
+        }
+        glyphs.push(block(
+            id,
+            72.0,
+            262.0,
+            140.0,
+            10.9,
+            "heads and hidden dimension H.",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .all(|text| !(text.contains("self-attention") && text.contains("2.5"))),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("2.5") && text.contains("Data")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("heads and hidden")),
             "{texts:?}"
         );
     }

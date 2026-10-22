@@ -43,7 +43,7 @@ use prompt::{
     fallback_prompt, lint_prompt, parse_translations, solo_retry_prompt, system_prompt,
     user_payload, PromptSegment,
 };
-use protect::{restore, shield};
+use protect::{restore, shield, shield_keeping_numbers};
 
 pub const DEFAULT_LLM_BASE_URL: &str = "https://hub.mypapers.top/api/llm/v1";
 pub const DEFAULT_LLM_MODEL: &str = "auto";
@@ -1425,6 +1425,89 @@ fn abbreviated_word(word: &str) -> bool {
         )
 }
 
+/// Ask for one piece. A reply that drops `⟦0⟧` in `a ⟦0⟧% relative reduction`
+/// is not English: the web translator omitted the token. Ask that piece
+/// again with the numbers visible, and keep it only when every source
+/// number is still present.
+fn translate_piece(
+    source: &str,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+    system: &str,
+) -> Option<String> {
+    let shielded = shield(source, &opts.glossary);
+    match complete_shielded(source, &shielded, translator, calls, system) {
+        PieceReply::Done(text) => Some(text),
+        PieceReply::Echo => None,
+        PieceReply::DroppedPlaceholder => {
+            let bare = shield_keeping_numbers(source, &opts.glossary);
+            let PieceReply::Done(text) =
+                complete_shielded(source, &bare, translator, calls, system)
+            else {
+                return None;
+            };
+            let fixed = restore_changed_numbers(source, &text);
+            if needs_english_retry(source, &fixed) || changed_source_number(source, &fixed) {
+                None
+            } else {
+                Some(fixed)
+            }
+        }
+    }
+}
+
+enum PieceReply {
+    Done(String),
+    /// Placeholders restored, and the reply is still an English body.
+    Echo,
+    /// The reply could not be restored because a shielded token was missing.
+    DroppedPlaceholder,
+}
+
+fn complete_shielded(
+    source: &str,
+    shielded: &protect::Shielded,
+    translator: &dyn Translator,
+    calls: &mut usize,
+    system: &str,
+) -> PieceReply {
+    let prompt = PromptSegment {
+        id: 0,
+        text: shielded.text.clone(),
+        context_before: Vec::new(),
+        context_after: Vec::new(),
+    };
+    let Some(user) = user_payload(std::slice::from_ref(&prompt)).ok() else {
+        return PieceReply::DroppedPlaceholder;
+    };
+    *calls += 1;
+    let Some(raw) = translator.complete(system, &user).ok() else {
+        return PieceReply::DroppedPlaceholder;
+    };
+    let Some(parsed) = parse_translations(&raw).ok() else {
+        return PieceReply::DroppedPlaceholder;
+    };
+    let Some(text) = parsed
+        .iter()
+        .find(|(id, _)| *id == 0)
+        .or_else(|| (parsed.len() == 1).then(|| &parsed[0]))
+        .map(|(_, text)| text.clone())
+    else {
+        return PieceReply::DroppedPlaceholder;
+    };
+    match restore_expanded(&text, &shielded.slots) {
+        Ok(restored) => {
+            if needs_english_retry(source, &restored) {
+                PieceReply::Echo
+            } else {
+                PieceReply::Done(restored)
+            }
+        }
+        Err(_) => PieceReply::DroppedPlaceholder,
+    }
+}
+
 /// Translate one echoed paragraph as separate sentences and with no neighbor
 /// context. Returns nothing when a long sentence is still English, so a mixed
 /// paragraph is not painted as if it were done.
@@ -1443,31 +1526,13 @@ fn translate_sentences(
         vec![source.to_string()]
     };
     let mut translated = Vec::with_capacity(pieces.len());
+    let system = system_prompt(&opts.source_lang, &opts.target_lang, false, true);
     for piece in &pieces {
         if piece.trim().is_empty() {
             translated.push(piece.clone());
             continue;
         }
-        let shielded = shield(piece, &opts.glossary);
-        let prompt = PromptSegment {
-            id: 0,
-            text: shielded.text,
-            context_before: Vec::new(),
-            context_after: Vec::new(),
-        };
-        let user = user_payload(std::slice::from_ref(&prompt)).ok()?;
-        let system = system_prompt(&opts.source_lang, &opts.target_lang, false, true);
-        *calls += 1;
-        let raw = translator.complete(&system, &user).ok()?;
-        let parsed = parse_translations(&raw).ok()?;
-        let text = parsed
-            .iter()
-            .find(|(id, _)| *id == 0)
-            .map(|(_, text)| text.clone())?;
-        let restored = restore_expanded(&text, &shielded.slots).ok()?;
-        if needs_english_retry(piece, &restored) {
-            return None;
-        }
+        let restored = translate_piece(piece, opts, translator, calls, &system)?;
         translated.push(restored);
     }
     let joined = translated.concat();
@@ -1485,28 +1550,8 @@ fn translate_fallback(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Option<String> {
-    let shielded = shield(source, &opts.glossary);
-    let prompt = PromptSegment {
-        id: 0,
-        text: shielded.text,
-        context_before: Vec::new(),
-        context_after: Vec::new(),
-    };
-    let user = user_payload(std::slice::from_ref(&prompt)).ok()?;
     let system = fallback_prompt(&opts.target_lang);
-    *calls += 1;
-    let raw = translator.complete(&system, &user).ok()?;
-    let parsed = parse_translations(&raw).ok()?;
-    let text = parsed
-        .iter()
-        .find(|(id, _)| *id == 0)
-        .map(|(_, text)| text.clone())?;
-    let restored = restore_expanded(&text, &shielded.slots).ok()?;
-    if needs_english_retry(source, &restored) {
-        None
-    } else {
-        Some(restored)
-    }
+    translate_piece(source, opts, translator, calls, &system)
 }
 
 /// One paragraph, no neighbors, and a prompt that is not the batch echo retry.
@@ -1518,29 +1563,8 @@ fn translate_solo(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Option<String> {
-    let shielded = shield(source, &opts.glossary);
-    let prompt = PromptSegment {
-        id: 0,
-        text: shielded.text,
-        context_before: Vec::new(),
-        context_after: Vec::new(),
-    };
-    let user = user_payload(std::slice::from_ref(&prompt)).ok()?;
     let system = solo_retry_prompt(&opts.target_lang);
-    *calls += 1;
-    let raw = translator.complete(&system, &user).ok()?;
-    let parsed = parse_translations(&raw).ok()?;
-    let text = parsed
-        .iter()
-        .find(|(id, _)| *id == 0)
-        .or_else(|| (parsed.len() == 1).then(|| &parsed[0]))
-        .map(|(_, text)| text.clone())?;
-    let restored = restore_expanded(&text, &shielded.slots).ok()?;
-    if needs_english_retry(source, &restored) {
-        None
-    } else {
-        Some(restored)
-    }
+    translate_piece(source, opts, translator, calls, &system)
 }
 
 /// `restore` rejects a reply that wrote `20` instead of ⟦0⟧. A Chinese
@@ -5408,6 +5432,91 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
         }
+    }
+
+    /// `a 29% relative reduction` shields three numbers. The web translator
+    /// drops the first token even when that sentence is sent alone, and the
+    /// paragraph used to stay in English. The retry leaves the numbers visible.
+    struct DropLeadingPercent;
+    impl Translator for DropLeadingPercent {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap_or("");
+                    let text = if let Some(start) = text.find('⟦') {
+                        let after = &text[start..];
+                        let end = after
+                            .find('⟧')
+                            .map(|rel| start + rel + '⟧'.len_utf8())
+                            .unwrap_or(text.len());
+                        format!("译文 {}{}", &text[..start], &text[end..])
+                    } else {
+                        let mut out = String::from("误差相对减少了");
+                        for token in number_tokens(text) {
+                            out.push_str(&token.text);
+                            out.push('，');
+                        }
+                        out.push('。');
+                        out
+                    };
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_dropped_leading_percent_is_translated_with_the_numbers_visible() {
+        let source = "On C10, the improvement denotes a 29% relative reduction in error from 7.33% to 5.19%. The layers stay small.";
+        let mut ex = extraction_from_lines(&[source]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &DropLeadingPercent)
+                .unwrap();
+        let translated = &report.segments[0].translated;
+        assert!(translated.contains("误差"), "{translated}");
+        assert!(translated.contains("29"), "{translated}");
+        assert!(translated.contains("7.33"), "{translated}");
+        assert!(translated.contains("5.19"), "{translated}");
+        assert!(!translated.contains("relative reduction"), "{translated}");
+    }
+
+    struct DropEveryNumber;
+    impl Translator for DropEveryNumber {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap_or("");
+                    let text = if let Some(start) = text.find('⟦') {
+                        let after = &text[start..];
+                        let end = after
+                            .find('⟧')
+                            .map(|rel| start + rel + '⟧'.len_utf8())
+                            .unwrap_or(text.len());
+                        format!("{}{}", &text[..start], &text[end..])
+                    } else {
+                        "已经译出。".to_string()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_visible_number_retry_that_drops_the_number_stays_english() {
+        let source = "On C10, the improvement denotes a 29% relative reduction in error from 7.33% to 5.19%.";
+        let mut ex = extraction_from_lines(&[source]);
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &DropEveryNumber).unwrap();
+        assert_eq!(report.segments[0].translated, source);
     }
 
     #[test]

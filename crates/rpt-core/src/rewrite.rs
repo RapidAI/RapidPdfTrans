@@ -226,11 +226,38 @@ pub fn rewrite_translation(
         // equation has more math glyphs than words and stays original.
         let prose_math = prose_carries_inline_math(&segment_glyphs);
         let placing_stack = segment.translated.contains('⟦');
+        // The upper limit of a sum sits one em under the last prose line, so
+        // it was read as a script of that line (`takes` + `n`). The sum
+        // operator then shares the paragraph. Both stay printed with the
+        // equation; they do not keep the sentence in English.
+        if prose_math && !placing_stack {
+            for glyph in &segment_glyphs {
+                if detached_display_atom(glyph, &segment_glyphs) {
+                    keep.insert(glyph.id, "math-block".into());
+                }
+            }
+        }
         if !placing_stack
             && segment.glyph_ids.iter().any(|id| {
                 extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
                     if glyph.disposition.is_final() {
-                        return true;
+                        if prose_math && detached_display_atom(glyph, &segment_glyphs) {
+                            return false;
+                        }
+                        let reason = match &glyph.disposition {
+                            Disposition::KeptOriginal { reason } => reason.as_str(),
+                            _ => "",
+                        };
+                        // Inline `α` is already final, so the sentence used to
+                        // stay in English. A sum on its own operator under
+                        // `where α is the temperature` is the same kind of hold.
+                        let inline_formula = reason == "formula"
+                            && (prose_math
+                                || crate::translate::is_inline_math_symbol(&glyph.unicode));
+                        let lone_mark = (reason == "formula" || reason == "unmapped")
+                            && prose_math
+                            && operator_holds_only(glyph, &owners);
+                        return !(inline_formula || lone_mark);
                     }
                     match keep.get(id).map(String::as_str) {
                         // `$9.7\times$` is a prose line. Redraw the operator with
@@ -3474,6 +3501,53 @@ fn operator_owners(glyphs: &[Glyph]) -> HashMap<(u32, u16, usize, usize), Vec<u3
             .push(glyph.id);
     }
     owners
+}
+
+/// A formula glyph that sits under every prose line in the segment.
+/// The upper limit of a display sum is one em below `takes the following
+/// form`, not a subscript of that sentence.
+fn detached_display_atom(glyph: &Glyph, glyphs: &[&Glyph]) -> bool {
+    match inherent_keep(glyph) {
+        Some("formula" | "unmapped") => {}
+        _ => return false,
+    }
+    let mut body = 1.0f32;
+    let mut bottom = f32::MAX;
+    let mut prose = false;
+    for other in glyphs {
+        if inherent_keep(other).is_some() {
+            continue;
+        }
+        if !other.unicode.chars().any(|ch| ch.is_ascii_alphabetic()) {
+            continue;
+        }
+        prose = true;
+        body = body.max(other.font_size);
+        bottom = bottom.min(other.matrix[5]);
+    }
+    if !prose {
+        return false;
+    }
+    let gy = glyph.matrix[5];
+    gy < bottom - body * 0.45
+        && glyphs.iter().all(|other| {
+            inherent_keep(other).is_some()
+                || !other.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+                || (other.matrix[5] - gy).abs() > body * 0.35
+        })
+}
+
+fn operator_holds_only(
+    glyph: &Glyph,
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+) -> bool {
+    let Some(span) = span_of(&glyph.source) else {
+        return false;
+    };
+    let key = (span.object_id.0, span.object_id.1, span.start, span.end);
+    owners
+        .get(&key)
+        .is_some_and(|ids| ids.len() == 1 && ids[0] == glyph.id)
 }
 
 fn operators_are_private(
@@ -24355,6 +24429,207 @@ mod tests {
             "{:?}",
             display.disposition
         );
+    }
+
+    #[test]
+    fn a_sum_under_the_paragraph_does_not_keep_the_sentence_in_english() {
+        let source = "Therefore the final negative sampling loss takes the following form:";
+        let translated = "因此负采样损失采用以下形式。";
+        let codes: Vec<u32> = source
+            .chars()
+            .chain(translated.chars())
+            .map(|ch| ch as u32)
+            .collect();
+        let font = box_ttf(&codes);
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let body = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Times-Roman",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let italic = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "CMMI10",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let mut encoding = lopdf::Dictionary::new();
+        encoding.set("Type", "Encoding");
+        encoding.set("BaseEncoding", "WinAnsiEncoding");
+        encoding.set(
+            "Differences",
+            vec![
+                lopdf::Object::Integer(1),
+                lopdf::Object::Name(b"summationdisplay".to_vec()),
+            ],
+        );
+        let sum = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "CMEX10",
+            "Encoding" => encoding,
+        });
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", body);
+        fonts.set("F2", italic);
+        fonts.set("F3", sum);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        // One em under `takes`: the upper limit `n`, then the sum, which has
+        // no Unicode. A single Tj would leave every letter at x=72, so the
+        // limit would sit outside the line and never join it.
+        let sentence = "Therefore the final negative sampling loss takes the following form:";
+        let mut content = b"BT\n".to_vec();
+        let mut x = 72.0f32;
+        for ch in sentence.chars() {
+            content.extend(format!("/F1 10 Tf 1 0 0 1 {x:.1} 700 Tm ({ch}) Tj\n").into_bytes());
+            x += 1.0;
+        }
+        let takes = "Therefore the final negative sampling loss "
+            .chars()
+            .count() as f32;
+        let nx = 72.0 + takes + 4.0;
+        content.extend(format!("/F2 7 Tf 1 0 0 1 {nx:.1} 690 Tm (n) Tj\n").into_bytes());
+        content.extend(format!("/F3 10 Tf 1 0 0 1 {:.1} 686 Tm <01> Tj\n", nx - 6.0).into_bytes());
+        content.extend(b"ET");
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+
+        struct PaintLoss;
+        impl Translator for PaintLoss {
+            fn complete(&self, _system: &str, user: &str) -> Result<String> {
+                let payload: serde_json::Value = serde_json::from_str(user).unwrap();
+                let translations: Vec<serde_json::Value> = payload["segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|seg| {
+                        let text = seg["text"].as_str().unwrap_or("");
+                        let translated = if text.contains("sampling") {
+                            "因此负采样损失采用以下形式。"
+                        } else {
+                            text
+                        };
+                        serde_json::json!({"id": seg["id"], "text": translated})
+                    })
+                    .collect();
+                Ok(serde_json::json!({"translations": translations}).to_string())
+            }
+        }
+
+        let mut opened = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = opened.extract();
+        let limit_id = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| {
+                glyph.unicode == "n" && glyph.font_name.to_ascii_uppercase().contains("CMMI")
+            })
+            .expect("upper limit")
+            .id;
+        let operator = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unmapped)
+            .expect("sum operator");
+        assert!(
+            operator.font_name.to_ascii_uppercase().contains("CMEX"),
+            "{}",
+            operator.font_name
+        );
+        let operator_id = operator.id;
+        let report =
+            translate_extraction(&mut extraction, &TranslateOptions::default(), &PaintLoss)
+                .unwrap();
+        let sentence = report
+            .segments
+            .iter()
+            .find(|segment| segment.source.contains("sampling"))
+            .expect("sentence");
+        assert!(
+            sentence.glyph_ids.contains(&limit_id),
+            "the limit should be grouped with the sentence, source {:?}",
+            sentence.source
+        );
+        assert!(
+            sentence.glyph_ids.contains(&operator_id),
+            "the sum should be grouped with the sentence"
+        );
+        opened
+            .rewrite(
+                &mut extraction,
+                &report,
+                &RewriteOptions {
+                    font_bytes: Some(font),
+                    ..RewriteOptions::default()
+                },
+            )
+            .unwrap();
+        let word = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.unicode == "T")
+            .unwrap();
+        assert!(
+            matches!(word.disposition, Disposition::Rewritten { .. }),
+            "prose stayed {:?}; segments {:?}",
+            word.disposition,
+            report
+                .segments
+                .iter()
+                .map(|segment| segment.source.as_str())
+                .collect::<Vec<_>>()
+        );
+        let kept_limit = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.id == limit_id)
+            .unwrap();
+        let kept_sum = extraction
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.id == operator_id)
+            .unwrap();
+        assert!(
+            matches!(&kept_limit.disposition, Disposition::KeptOriginal { reason } if reason == "math-block"),
+            "{:?}",
+            kept_limit.disposition
+        );
+        assert!(
+            matches!(&kept_sum.disposition, Disposition::KeptOriginal { reason } if reason == "math-block"),
+            "{:?}",
+            kept_sum.disposition
+        );
+        let text = PdfDocument::open_bytes(&opened.save_bytes().unwrap())
+            .unwrap()
+            .extract()
+            .plain_text();
+        assert!(text.contains("因此"), "{text}");
+        assert!(!text.contains("Therefore"), "{text}");
     }
 
     #[test]

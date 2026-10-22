@@ -11,12 +11,23 @@ pub struct Shielded {
 }
 
 pub fn shield(input: &str, glossary: &[(String, String)]) -> Shielded {
+    shield_inner(input, glossary, true)
+}
+
+/// Shield URLs, citations, and glossary terms, but leave numbers in the
+/// sentence. A web translator drops a leading `⟦0⟧%` and then the restore
+/// rejects the whole paragraph. The numbers stay visible on that retry.
+pub(crate) fn shield_keeping_numbers(input: &str, glossary: &[(String, String)]) -> Shielded {
+    shield_inner(input, glossary, false)
+}
+
+fn shield_inner(input: &str, glossary: &[(String, String)], numbers: bool) -> Shielded {
     let glossary = sorted_glossary(glossary);
     let mut slots = Vec::new();
     let mut out = String::new();
     let mut i = 0;
     while i < input.len() {
-        if let Some((end, replacement)) = match_one(input, i, &glossary) {
+        if let Some((end, replacement)) = match_one(input, i, &glossary, numbers) {
             push_placeholder(&mut out, slots.len());
             slots.push(replacement);
             i = end;
@@ -77,7 +88,12 @@ fn sorted_glossary(glossary: &[(String, String)]) -> Vec<(String, String)> {
     terms
 }
 
-fn match_one(input: &str, i: usize, glossary: &[(String, String)]) -> Option<(usize, String)> {
+fn match_one(
+    input: &str,
+    i: usize,
+    glossary: &[(String, String)],
+    numbers: bool,
+) -> Option<(usize, String)> {
     if let Some(end) = match_existing_placeholder(input, i) {
         return Some((end, input[i..end].to_string()));
     }
@@ -93,8 +109,10 @@ fn match_one(input: &str, i: usize, glossary: &[(String, String)]) -> Option<(us
     if let Some(end) = match_citation(input, i) {
         return Some((end, input[i..end].to_string()));
     }
-    if let Some(end) = match_number(input, i) {
-        return Some((end, input[i..end].to_string()));
+    if numbers {
+        if let Some(end) = match_number(input, i) {
+            return Some((end, input[i..end].to_string()));
+        }
     }
     match_glossary(input, i, glossary)
 }
