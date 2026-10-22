@@ -224,9 +224,8 @@ impl Extraction {
             return None;
         }
         let message = format!(
-            "coverage incomplete: {} glyphs unresolved, {} left in an English body paragraph; saved the PDF and left those paragraphs unchanged",
-            report.unresolved_ids.len(),
-            report.english_body
+            "coverage incomplete: {} glyphs missed, {} left in an English body paragraph; {} glyphs kept on purpose (references, figures, tables, code, math, names); saved the PDF and left those paragraphs unchanged",
+            report.real_misses, report.english_body, report.intentional
         );
         self.diagnostics.push(Diagnostic {
             page_index: None,
@@ -338,6 +337,31 @@ impl Extraction {
     pub fn to_json_pretty(&self) -> Result<String> {
         serde_json::to_string_pretty(&self.to_json_value()?)
             .map_err(|e| Error::Message(e.to_string()))
+    }
+
+    /// Page and coverage counts. Glyph geometry stays behind
+    /// [`Extraction::to_json_value`].
+    pub fn to_summary_value(&self) -> Result<serde_json::Value> {
+        let coverage = self.coverage_report();
+        let mut coverage_value =
+            serde_json::to_value(&coverage).map_err(|e| Error::Message(e.to_string()))?;
+        if let Some(obj) = coverage_value.as_object_mut() {
+            let total = coverage.unresolved_ids.len();
+            if total > 32 {
+                if let Some(ids) = obj.get_mut("unresolved_ids").and_then(|v| v.as_array_mut()) {
+                    ids.truncate(32);
+                }
+                obj.insert("unresolved_ids_truncated".into(), serde_json::json!(true));
+            }
+            obj.insert("unresolved_count".into(), serde_json::json!(total));
+        }
+        Ok(serde_json::json!({
+            "coordinate_space": self.coordinate_space,
+            "pages": self.pages,
+            "glyph_count": self.glyphs.len(),
+            "diagnostics": self.diagnostics,
+            "coverage": coverage_value,
+        }))
     }
 }
 

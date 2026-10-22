@@ -112,7 +112,10 @@ export RPT_LLM_API_KEY=...
 | `--bilingual-output` | 用同一次翻译再写一份双语 PDF。 |
 | `--max-pages N` | 只处理前 N 页。 |
 | `--model`、`--base-url` | 覆盖这一次的 `RPT_LLM_MODEL` 和 `RPT_LLM_BASE_URL`。 |
-| `--glossary source=target` | 可重复。调用前在本地替换。 |
+| `--glossary source=target` | 可重复。也可以是 CSV 文件（`src,tgt` 或 `source,target`，表头可省略）。调用前在本地替换。 |
+| `--system-prompt TEXT` | 追加到系统提示词。已存在的文件路径会读取文件；`@路径` 一定按文件读。 |
+| `--timeout-secs N` | 单次请求超时，默认 `60` 秒。卡住的连接会按退避重试，最多四次。 |
+| `--progress text` | 进度写到标准错误：`text`（默认）、`json`（每行一个对象）或 `off`。`waiting Ns` 是停住；段数在涨就是在干活。重写阶段每五秒打一行 `rewriting`，写完打 `wrote`。 |
 | `--translate-references` | 翻译参考文献。默认保留原文。 |
 | `--translate-figures` | 翻译图内文字。默认只翻译图注。 |
 | `--translate-tables` | 翻译单元格和表头。默认只翻译表注。 |
@@ -123,9 +126,13 @@ export RPT_LLM_API_KEY=...
 | `--jobs` | 并行请求数。默认 `4`，或 `RPT_TRANSLATE_JOBS`，上限 `8`。排版仍是单线程。 |
 | `--replay file.json` | 复用以前的翻译 JSON，不再请求模型。 |
 | `--compact` | 标准输出上一行 JSON。 |
-| `--json` | 为兼容而保留。JSON 总会写到标准输出。 |
+| `--json` | 为兼容而保留。标准输出始终是摘要。 |
+| `--glyphs` | 标准输出改为完整的逐字形 JSON，而不是摘要。 |
+| `--detail FILE` | 把完整的逐字形 JSON 写到文件。除非同时加 `--glyphs`，标准输出仍是摘要。 |
 
-`--json` 不指定文件。`--output` 成功之后，进程还会打印抽取 JSON，其中有 `translations` 数组和 `translator` 对象（`model`、`backend`、`base_url`、`calls`、`cache_hits`）。
+`--json` 不指定文件。标准输出是摘要：页面信息、`glyph_count`、覆盖率计数、`translations` 数组，以及 `translator` 对象（`model`、`backend`、`base_url`、`calls`、`cache_hits`）。逐字形文档用 `--glyphs` 或 `--detail`。
+
+进度在标准错误，不进这份 JSON。只有真正漏译（正文仍是英文、溢出、缺字形、缺字体、列表不完整）才算覆盖率未完成。参考文献、图、表、代码、公式和人名单独计数，不会让本次失败。作者姓名保持拉丁字母。模型原样返回的标题会再请求一次，多出来的副标题不会画上去。
 
 ### 示例输出
 
@@ -218,7 +225,9 @@ go test ./...
 
 ## 预编译包
 
-`.github/workflows/sdk.yml` 为每个平台打包头文件、共享库和静态库，并带上 CMake 配置和 Unix pkg-config。`.github/workflows/wheels.yml` 用 cibuildwheel 构建 CPython 3.10+ 的 abi3 wheel（每个平台一个 wheel，可在 3.10 及更新的 CPython 上加载）。两个工作流在 pull request、`workflow_dispatch` 和 `v*` tag 上运行。pull request 只上传构建产物。tag 名必须与 `Cargo.toml` 里的 `workspace.package.version` 一致（版本 `0.1.4` 对应 tag `v0.1.4`），才会把压缩包、wheel 和 sdist 挂到 GitHub Release，并把 wheel 和 sdist 发布到 PyPI。
+`.github/workflows/sdk.yml` 为每个平台打包头文件、共享库和静态库，并带上 CMake 配置和 Unix pkg-config。`.github/workflows/wheels.yml` 用 cibuildwheel 构建 CPython 3.10+ 的 abi3 wheel（每个平台一个 wheel，可在 3.10 及更新的 CPython 上加载）。两个工作流在 pull request、`workflow_dispatch` 和 `v*` tag 上运行。pull request 只上传构建产物。tag 名必须与 `Cargo.toml` 里的 `workspace.package.version` 一致（版本 `0.1.5` 对应 tag `v0.1.5`），才会把压缩包、wheel 和 sdist 挂到 GitHub Release，并把 wheel 和 sdist 发布到 PyPI。
+
+`.github/workflows/release-cli.yml` 在 `main`、`v*` tag 和 `workflow_dispatch` 上构建 Linux x86_64 与 aarch64 的 `rpt`（glibc 和 musl）。它只上传构建产物，不发布 GitHub Release。
 
 不构建 32 位 macOS：没有对应的托管 runner，当前 CPython 也不提供 32 位 macOS 安装包。musllinux wheel 只覆盖 x86_64 和 aarch64，因为 Rust 没有 `i686-unknown-linux-musl` 或 `armv7-unknown-linux-musleabihf` 的宿主编译器，而 cibuildwheel 在目标容器里编译。Intel macOS 使用 `macos-15-intel`；GitHub 已不再提供 `macos-13`。PyPI 上传使用仓库 secret `PYPI_APIKEY`（PyPI API token），并设置 `skip-existing`。不使用 trusted publishing。
 

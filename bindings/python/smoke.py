@@ -13,7 +13,7 @@ import rapidpdftrans
 
 def main() -> int:
     path = sys.argv[1] if len(sys.argv) > 1 else "testdata/hello.pdf"
-    if rapidpdftrans.version() != "0.1.4":
+    if rapidpdftrans.version() != "0.1.5":
         print("unexpected version", rapidpdftrans.version())
         return 1
     text = rapidpdftrans.extract(path)

@@ -1,0 +1,62 @@
+name: Release CLI
+
+# Linux rpt binaries. Artifacts only: this workflow does not create a GitHub Release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    branches: [main]
+
+jobs:
+  rpt:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: rpt-linux-x86_64
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            artifact: rpt-linux-x86_64-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: rpt-linux-aarch64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: rpt-linux-aarch64-musl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build rpt
+        run: cargo build -p rpt-cli --release --target ${{ matrix.target }}
+      - name: Pack the binary
+        run: |
+          bin="target/${{ matrix.target }}/release/rpt"
+          file "$bin"
+          # musl targets should not need libgcc_s or libc.so.6
+          if [[ "${{ matrix.target }}" == *musl* ]]; then
+            if ldd "$bin" 2>&1 | grep -E 'libc\.so|libgcc_s' ; then
+              echo "musl binary is dynamically linked to glibc" >&2
+              exit 1
+            fi
+          fi
+          mkdir -p dist
+          cp "$bin" dist/rpt
+          tar -C dist -czf "${{ matrix.artifact }}.tar.gz" rpt
+          sha256sum "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
+          if-no-files-found: error

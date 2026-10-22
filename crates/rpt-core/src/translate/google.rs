@@ -9,7 +9,7 @@
 //! used by tests. [`Debug`] redacts them.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -62,6 +62,8 @@ pub struct GoogleTranslator {
     base_url: String,
     /// Cached minted token and expiry unix seconds.
     minted: std::sync::Mutex<Option<(String, u64)>>,
+    /// Same counter the job prints as `retries`.
+    retries: Mutex<Arc<AtomicUsize>>,
 }
 
 impl std::fmt::Debug for GoogleTranslator {
@@ -256,7 +258,7 @@ impl GoogleTranslator {
         self
     }
 
-    fn with_timeout(mut self, timeout: Duration) -> Self {
+    pub(crate) fn with_timeout(mut self, timeout: Duration) -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .proxy(None)
@@ -304,13 +306,40 @@ impl GoogleTranslator {
             account,
             base_url,
             minted: std::sync::Mutex::new(None),
+            retries: Mutex::new(Arc::new(AtomicUsize::new(0))),
         }
+    }
+
+    fn note_retry(&self) {
+        if let Ok(counter) = self.retries.lock() {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// v2 and v3 have no retry of their own. A 429, a 5xx, a dropped socket,
+    /// or a timeout waits and tries again. Four attempts, then the error.
+    fn with_backoff<T>(&self, mut op: impl FnMut() -> Result<T>) -> Result<T> {
+        let mut delay = Duration::from_millis(400);
+        let mut last = None;
+        for attempt in 0..4 {
+            match op() {
+                Ok(value) => return Ok(value),
+                Err(err) if google_retryable(&err) && attempt < 3 => {
+                    self.note_retry();
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                    last = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Translate("Google request failed".into())))
     }
 
     fn translate_many(&self, texts: &[String]) -> Result<Vec<String>> {
         match self.api {
-            GoogleApi::V2 => self.translate_v2(texts),
-            GoogleApi::V3 => self.translate_v3(texts),
+            GoogleApi::V2 => self.with_backoff(|| self.translate_v2(texts)),
+            GoogleApi::V3 => self.with_backoff(|| self.translate_v3(texts)),
             GoogleApi::Unofficial => self.translate_unofficial_many(texts),
         }
     }
@@ -406,6 +435,7 @@ impl GoogleTranslator {
             match self.translate_unofficial_once(text) {
                 Ok(text) => return Ok(text),
                 Err(err) if google_retryable(&err) && attempt < 3 => {
+                    self.note_retry();
                     std::thread::sleep(delay);
                     delay *= 2;
                     last = Some(err);
@@ -627,6 +657,12 @@ impl GoogleTranslator {
 }
 
 impl Translator for GoogleTranslator {
+    fn bind_retries(&self, counter: Arc<AtomicUsize>) {
+        if let Ok(mut slot) = self.retries.lock() {
+            *slot = counter;
+        }
+    }
+
     fn complete(&self, _system: &str, user: &str) -> Result<String> {
         let value: Value = serde_json::from_str(user).map_err(|_| {
             Error::Translate("Google backend expected the segment JSON payload".into())
@@ -916,10 +952,11 @@ fn split_separator(text: &str, expected: usize) -> Option<Vec<String>> {
 }
 
 fn google_retryable(err: &Error) -> bool {
-    let msg = err.to_string();
+    let msg = err.to_string().to_ascii_lowercase();
     ["429", "500", "502", "503"]
         .iter()
-        .any(|code| msg.contains(&format!("HTTP status {code}")))
+        .any(|code| msg.contains(&format!("http status {code}")))
+        || msg.contains("timeout")
         || crate::translate::llm::connection_dropped(&msg)
 }
 

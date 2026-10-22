@@ -124,7 +124,14 @@ pub fn rewrite_translation(
         ) => Some(layout),
         _ => None,
     };
-    let original = compose.map(|_| doc.clone());
+    // Page bytes only. Image and font objects stay in `doc` and are reused
+    // by the bilingual forms, so a side-by-side file is not a second copy of
+    // every XObject.
+    let saved_pages = if compose.is_some() {
+        Some(snapshot_pages(doc))
+    } else {
+        None
+    };
     let overlay = matches!(opts.mode, OutputMode::Bilingual(BilingualLayout::Overlay));
     let by_id = glyph_index(&extraction.glyphs);
     let mut keep: HashMap<u32, String> = HashMap::new();
@@ -161,7 +168,10 @@ pub fn rewrite_translation(
                 &segment.source,
                 &crate::translate::localize_part_heading(&segment.translated),
             );
-            let translated = crate::translate::restore_credit_names(&segment.source, &translated);
+            let translated = crate::translate::restore_credit_names(
+                &segment.source,
+                &crate::translate::strip_spurious_subtitle(&segment.source, &translated),
+            );
             !segment.glyph_ids.is_empty()
                 && !segment.source.trim().is_empty()
                 && !translated.trim().is_empty()
@@ -328,7 +338,10 @@ pub fn rewrite_translation(
             &crate::translate::localize_part_heading(&segment.translated),
         );
         let translated = crate::translate::restore_list_number(&segment.source, &translated);
-        let translated = crate::translate::restore_credit_names(&segment.source, &translated);
+        let translated = crate::translate::restore_credit_names(
+            &segment.source,
+            &crate::translate::strip_spurious_subtitle(&segment.source, &translated),
+        );
         let translated = crate::translate::repair_body_translation(&segment.source, &translated);
         let translated = if prompt_samples.get(index).copied().unwrap_or(false) {
             crate::translate::unmix_prompt_line(&segment.source, &translated)
@@ -362,8 +375,10 @@ pub fn rewrite_translation(
             && !crate::translate::is_name_byline(&segment.source)
             && !crate::translate::is_institution_line(&segment.source)
         {
+            let reason =
+                crate::translate::intentional_keep_kind(&segment.source).unwrap_or("english-body");
             for id in &segment.glyph_ids {
-                keep.insert(*id, "english-body".into());
+                keep.insert(*id, reason.into());
             }
             continue;
         }
@@ -927,17 +942,36 @@ pub fn rewrite_translation(
         .filter(|glyph| !glyph.disposition.is_final())
         .map(|glyph| glyph.id)
         .collect();
-    let leftover_reason = if job_translates {
-        "untranslated"
-    } else {
-        "kept"
-    };
+    let segment_of: HashMap<u32, &str> = report
+        .segments
+        .iter()
+        .flat_map(|segment| {
+            segment
+                .glyph_ids
+                .iter()
+                .map(|id| (*id, segment.source.as_str()))
+        })
+        .collect();
     for id in leftover {
-        extraction.mark_kept(id, leftover_reason)?;
+        let source = segment_of.get(&id).copied();
+        let reason = if let Some(kind) = source.and_then(crate::translate::intentional_keep_kind) {
+            kind
+        } else if source.is_none() || !job_translates {
+            // Never sent to the translator: a figure, a formula atom, a
+            // margin mark. That is a keep, not a missed paragraph.
+            "kept"
+        } else {
+            "untranslated"
+        };
+        extraction.mark_kept(id, reason)?;
     }
     let _ = spans;
-    if let (Some(layout), Some(original)) = (compose, original) {
-        compose_bilingual(doc, &original, layout)?;
+    if let (Some(layout), Some(saved)) = (compose, saved_pages) {
+        let translated_pages = snapshot_pages(doc);
+        compose_bilingual(doc, saved, translated_pages, layout)?;
+        // The old page objects are no longer in the page tree. Dropping them
+        // leaves the shared image XObjects, which the new forms still reference.
+        let _ = doc.prune_objects();
     }
     // Side-by-side imports the original page, including any OpenType font
     // stored under a CIDFontType0C subtype. Unwrap after compose so both
@@ -977,34 +1011,32 @@ fn record_unfitted_line_warnings(extraction: &mut Extraction) {
     }
 }
 
+fn snapshot_pages(doc: &Document) -> Vec<PageSnap> {
+    doc.get_pages()
+        .into_values()
+        .map(|id| snap_page(doc, id))
+        .collect()
+}
+
 /// Place each original page beside, or just before, its translated page.
+/// Resource dictionaries already point at objects in `doc`, so image and
+/// font XObjects are not copied.
 fn compose_bilingual(
-    translated: &mut Document,
-    original: &Document,
+    doc: &mut Document,
+    source_pages: Vec<PageSnap>,
+    target_pages: Vec<PageSnap>,
     layout: BilingualLayout,
 ) -> Result<()> {
-    let source_ids: Vec<ObjectId> = original.get_pages().into_values().collect();
-    let target_ids: Vec<ObjectId> = translated.get_pages().into_values().collect();
-    if source_ids.len() != target_ids.len() {
+    if source_pages.len() != target_pages.len() {
         return Err(Error::Pdf(
             "bilingual compose saw different page counts".into(),
         ));
     }
-    let source_pages: Vec<PageSnap> = source_ids
-        .iter()
-        .map(|id| snap_page(original, *id))
-        .collect();
-    let target_pages: Vec<PageSnap> = target_ids
-        .iter()
-        .map(|id| snap_page(translated, *id))
-        .collect();
-    let mut imported = HashMap::new();
     let mut kids = Vec::new();
-    let root = pages_root(translated)?;
+    let root = pages_root(doc)?;
     for (src, dst) in source_pages.into_iter().zip(target_pages) {
-        let src_resources = remap_dict(translated, original, src.resources, &mut imported)?;
-        let src_form = make_form(translated, src.content, src_resources, src.media);
-        let dst_form = make_form(translated, dst.content, dst.resources, dst.media);
+        let src_form = make_form(doc, src.content, src.resources, src.media);
+        let dst_form = make_form(doc, dst.content, dst.resources, dst.media);
         match layout {
             BilingualLayout::SideBySide => {
                 let width = dst.media[2] - dst.media[0];
@@ -1021,23 +1053,17 @@ fn compose_bilingual(
                     "q /RPTSrc Do Q\nq 1 0 0 1 {} 0 cm /RPTDst Do Q\n",
                     pdf_num(width)
                 );
-                kids.push(make_page(
-                    translated, root, media, dst.rotate, xobjects, content,
-                ));
+                kids.push(make_page(doc, root, media, dst.rotate, xobjects, content));
             }
             BilingualLayout::Alternating => {
-                kids.push(single_page(
-                    translated, root, src.media, src.rotate, src_form,
-                ));
-                kids.push(single_page(
-                    translated, root, dst.media, dst.rotate, dst_form,
-                ));
+                kids.push(single_page(doc, root, src.media, src.rotate, src_form));
+                kids.push(single_page(doc, root, dst.media, dst.rotate, dst_form));
             }
             BilingualLayout::Overlay => {}
         }
     }
     let count = kids.len() as i64;
-    let pages = translated
+    let pages = doc
         .get_object_mut(root)
         .map_err(|err| Error::Pdf(err.to_string()))?
         .as_dict_mut()
@@ -1214,68 +1240,6 @@ fn number_of(doc: &Document, object: &Object) -> Option<f32> {
         Object::Reference(id) => doc.get_object(*id).ok().and_then(|obj| number_of(doc, obj)),
         _ => None,
     }
-}
-
-fn remap_dict(
-    dst: &mut Document,
-    src: &Document,
-    dict: Dictionary,
-    map: &mut HashMap<ObjectId, ObjectId>,
-) -> Result<Dictionary> {
-    let mut out = Dictionary::new();
-    for (key, value) in dict.into_iter() {
-        out.set(key, remap_object(dst, src, value, map)?);
-    }
-    Ok(out)
-}
-
-fn remap_object(
-    dst: &mut Document,
-    src: &Document,
-    object: Object,
-    map: &mut HashMap<ObjectId, ObjectId>,
-) -> Result<Object> {
-    match object {
-        Object::Reference(id) => Ok(Object::Reference(import_object(dst, src, id, map)?)),
-        Object::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(remap_object(dst, src, item, map)?);
-            }
-            Ok(Object::Array(out))
-        }
-        Object::Dictionary(dict) => Ok(Object::Dictionary(remap_dict(dst, src, dict, map)?)),
-        Object::Stream(stream) => {
-            let dict = remap_dict(dst, src, stream.dict, map)?;
-            Ok(Object::Stream(Stream {
-                dict,
-                content: stream.content,
-                allows_compression: stream.allows_compression,
-                start_position: None,
-            }))
-        }
-        other => Ok(other),
-    }
-}
-
-fn import_object(
-    dst: &mut Document,
-    src: &Document,
-    id: ObjectId,
-    map: &mut HashMap<ObjectId, ObjectId>,
-) -> Result<ObjectId> {
-    if let Some(existing) = map.get(&id) {
-        return Ok(*existing);
-    }
-    let new_id = dst.new_object_id();
-    map.insert(id, new_id);
-    let object = src
-        .get_object(id)
-        .map_err(|err| Error::Pdf(err.to_string()))?
-        .clone();
-    let mapped = remap_object(dst, src, object, map)?;
-    dst.set_object(new_id, mapped);
-    Ok(new_id)
 }
 
 /// One column of ink. A paragraph that finishes at the top of the next
@@ -8817,7 +8781,10 @@ fn display_title(segment: &crate::translate::TranslatedSegment) -> String {
         &segment.source,
         &crate::translate::localize_part_heading(&segment.translated),
     );
-    let translated = crate::translate::restore_credit_names(&segment.source, &translated);
+    let translated = crate::translate::restore_credit_names(
+        &segment.source,
+        &crate::translate::strip_spurious_subtitle(&segment.source, &translated),
+    );
     if translated.trim().is_empty() {
         segment.source.clone()
     } else {
@@ -23493,8 +23460,8 @@ fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
     // A long byline (`Jacob Devlin Ming-Wei Chang …`, 49 letters) is not body
     // prose. Shorter name lines stay `unchanged` so word-gap redraw still runs.
     if job_translates && english_body_source(source) {
-        if crate::translate::is_name_byline(source) {
-            "name"
+        if let Some(kind) = crate::translate::intentional_keep_kind(source) {
+            kind
         } else {
             "english-body"
         }

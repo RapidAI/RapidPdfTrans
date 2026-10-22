@@ -17,11 +17,14 @@
 mod backend;
 mod google;
 mod llm;
+mod progress;
 mod prompt;
 mod protect;
 mod references;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,6 +61,34 @@ const MAX_JOBS: usize = 8;
 /// translator only through `&self`.
 pub trait Translator: Sync {
     fn complete(&self, system: &str, user: &str) -> Result<String>;
+
+    /// Share the job's retry counter so a stalled call shows up as a retry.
+    fn bind_retries(&self, _counter: Arc<AtomicUsize>) {}
+}
+
+/// How `rpt translate` reports work on stderr.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ProgressMode {
+    /// Library default. The CLI default is [`ProgressMode::Text`].
+    #[default]
+    Off,
+    /// `pages/segments, rate, calls, retries`, or `waiting Ns` when nothing moved.
+    Text,
+    /// One JSON object per update.
+    Json,
+}
+
+impl ProgressMode {
+    pub fn parse(text: &str) -> Result<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "quiet" => Ok(Self::Off),
+            "text" | "stderr" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            other => Err(Error::Options(format!(
+                "unknown progress mode `{other}`; use text, json, or off"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -77,7 +108,13 @@ pub struct TranslateOptions {
     /// calling thread either way.
     pub jobs: usize,
     pub temperature: f32,
+    /// Per-request deadline. A stalled socket is abandoned and retried.
+    /// `0` is raised to 1. The default is 60.
     pub timeout_secs: u64,
+    /// Extra instructions appended to the built-in system prompt.
+    pub system_prompt: Option<String>,
+    /// Stderr progress. The library default is off.
+    pub progress: ProgressMode,
     /// Sent only when set. Left unset so reasoning models can still emit content.
     pub max_tokens: Option<u32>,
     /// `maclaw`, `openai`, `google`, `google-v2`, `google-v3`, or `google-unofficial`.
@@ -186,7 +223,9 @@ impl Default for TranslateOptions {
             batch_size: 8,
             jobs: 0,
             temperature: 0.0,
-            timeout_secs: 300,
+            timeout_secs: 60,
+            system_prompt: None,
+            progress: ProgressMode::Off,
             max_tokens: None,
             translator: None,
             skip_references: true,
@@ -310,7 +349,13 @@ impl TranslateOptions {
             opts.temperature = t as f32;
         }
         if let Some(t) = value.get("timeout_secs").and_then(|v| v.as_u64()) {
-            opts.timeout_secs = t;
+            opts.timeout_secs = t.max(1);
+        }
+        if let Some(v) = string_field(&value, &["system_prompt", "systemPrompt"]) {
+            opts.system_prompt = Some(v);
+        }
+        if let Some(v) = string_field(&value, &["progress"]) {
+            opts.progress = ProgressMode::parse(&v)?;
         }
         if let Some(t) = value.get("max_tokens").and_then(|v| v.as_u64()) {
             opts.max_tokens = Some(t as u32);
@@ -395,6 +440,60 @@ fn string_field(value: &Value, names: &[&str]) -> Option<String> {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     })
+}
+
+/// CSV glossary. A header `src,tgt` or `source,target` is optional.
+/// Each data row is `source,target`. Quotes wrap a field that contains a comma.
+pub fn parse_glossary_csv(text: &str) -> Result<Vec<(String, String)>> {
+    let mut rows = Vec::new();
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let cols = split_csv_line(line);
+        if cols.len() < 2 {
+            return Err(Error::Options(format!(
+                "glossary CSV line {} needs src,tgt",
+                lineno + 1
+            )));
+        }
+        rows.push((cols[0].clone(), cols[1].clone()));
+    }
+    if rows.is_empty() {
+        return Err(Error::Options("glossary CSV is empty".into()));
+    }
+    let header = rows[0].0.eq_ignore_ascii_case("src")
+        || rows[0].0.eq_ignore_ascii_case("source")
+        || rows[0].1.eq_ignore_ascii_case("tgt")
+        || rows[0].1.eq_ignore_ascii_case("target");
+    let pairs: Vec<(String, String)> = rows
+        .into_iter()
+        .skip(usize::from(header))
+        .filter(|(source, _)| !source.is_empty())
+        .collect();
+    if pairs.is_empty() {
+        return Err(Error::Options("glossary CSV has no entries".into()));
+    }
+    Ok(pairs)
+}
+
+fn split_csv_line(line: &str) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                cols.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    cols.push(cur.trim().to_string());
+    cols
 }
 
 fn parse_glossary(value: Option<&Value>) -> Vec<(String, String)> {
@@ -490,11 +589,18 @@ pub fn translate_extraction(
         }
     }
     cache_hits += load_checkpoint(&segments, &mut translated, &mut cache);
+    let progress = progress::Progress::start(
+        opts.progress,
+        &segments,
+        &translated.iter().map(Option::is_some).collect::<Vec<_>>(),
+    );
+    translator.bind_retries(progress.retries_handle());
+    let _heartbeat = progress.spawn();
     // One owner per distinct source string. A repeated paragraph is filled
     // from that owner after the workers join, so two jobs never translate it.
     let batches = plan_unique_batches(&segments, &translated, opts.batch_size);
     let dispatched = dispatch_batches(
-        &segments, &shielded, &batches, opts, translator, jobs, &mut calls,
+        &segments, &shielded, &batches, opts, translator, jobs, &mut calls, &progress,
     )?;
     let rendered = dispatched.rendered;
     let failed = dispatched.failed;
@@ -502,6 +608,8 @@ pub fn translate_extraction(
     // translation that already landed on that paragraph.
     apply_rendered(&segments, &mut translated, &mut cache, rendered);
     for batch in failed {
+        let before = calls;
+        let pages = batch_pages(&segments, &batch);
         match translate_batch(&segments, &shielded, &batch, opts, translator, &mut calls) {
             Ok(part) => apply_rendered(&segments, &mut translated, &mut cache, part),
             Err(err) => {
@@ -523,6 +631,7 @@ pub fn translate_extraction(
                 }
             }
         }
+        progress.finish_batch(&pages, calls.saturating_sub(before));
     }
     for i in 0..segments.len() {
         if translated[i].is_some() {
@@ -547,7 +656,9 @@ pub fn translate_extraction(
         translator,
         jobs,
         &mut calls,
+        &progress,
     );
+    progress.emit_done();
 
     finish_report(
         extraction,
@@ -881,7 +992,8 @@ fn finish_report(
     gloss_echoed_words(segments, &mut texts);
     let mut report_segments = Vec::with_capacity(segments.len());
     for (i, seg) in segments.iter().enumerate() {
-        let text = texts[i].clone();
+        let text = settle_translation(&seg.text, &texts[i]);
+        texts[i] = text.clone();
         let kept = seg.glyph_ids.iter().any(|id| reference_ids.contains(id));
         if !kept {
             for id in &seg.glyph_ids {
@@ -1041,6 +1153,7 @@ fn dispatch_batches(
     translator: &dyn Translator,
     jobs: usize,
     calls: &mut usize,
+    progress: &progress::Progress,
 ) -> Result<BatchDispatch> {
     if batches.is_empty() {
         return Ok(BatchDispatch {
@@ -1052,9 +1165,19 @@ fn dispatch_batches(
         let mut rendered = Vec::new();
         let mut failed = Vec::new();
         for batch in batches {
+            let before = *calls;
             match translate_batch(segments, shielded, batch, opts, translator, calls) {
-                Ok(part) => rendered.extend(part),
-                Err(_) => failed.push(batch.clone()),
+                Ok(part) => {
+                    progress.finish_batch(
+                        &batch_pages(segments, batch),
+                        (*calls).saturating_sub(before),
+                    );
+                    rendered.extend(part);
+                }
+                Err(_) => {
+                    progress.add_calls((*calls).saturating_sub(before));
+                    failed.push(batch.clone());
+                }
             }
         }
         return Ok(BatchDispatch { rendered, failed });
@@ -1084,6 +1207,7 @@ fn dispatch_batches(
                 ) {
                     Ok(part) => {
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                        progress.finish_batch(&batch_pages(segments, &batches[index]), local_calls);
                         append_checkpoint(segments, &part);
                         let Ok(mut guard) = slots.lock() else {
                             break;
@@ -1100,6 +1224,7 @@ fn dispatch_batches(
                     }
                     Err(_) => {
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                        progress.add_calls(local_calls);
                         // Keep going. Other workers still own other paragraphs.
                         if let Ok(mut guard) = failed.lock() {
                             guard.push(batches[index].clone());
@@ -1150,6 +1275,13 @@ fn apply_rendered(
 }
 
 /// Paragraphs still in English, one request each, stored on that index.
+fn batch_pages(segments: &[Segment], batch: &[usize]) -> Vec<u32> {
+    batch
+        .iter()
+        .filter_map(|index| segments.get(*index).map(|segment| segment.page_index))
+        .collect()
+}
+
 fn retry_english_leftovers(
     segments: &[Segment],
     translated: &mut [Option<String>],
@@ -1159,6 +1291,7 @@ fn retry_english_leftovers(
     translator: &dyn Translator,
     jobs: usize,
     calls: &mut usize,
+    progress: &progress::Progress,
 ) {
     let pending: Vec<usize> = translated
         .iter()
@@ -1177,8 +1310,12 @@ fn retry_english_leftovers(
     let improved = if jobs <= 1 || pending.len() == 1 {
         let mut improved = Vec::new();
         for index in pending {
+            let before = *calls;
             if let Some(text) = translate_solo(&segments[index].text, opts, translator, calls) {
+                progress.add_calls((*calls).saturating_sub(before));
                 improved.push((index, text));
+            } else {
+                progress.add_calls((*calls).saturating_sub(before));
             }
         }
         improved
@@ -1200,11 +1337,13 @@ fn retry_english_leftovers(
                         translate_solo(&segments[index].text, opts, translator, &mut local_calls)
                     {
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                        progress.add_calls(local_calls);
                         if let Ok(mut guard) = improved.lock() {
                             guard.push((index, text));
                         }
                     } else {
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                        progress.add_calls(local_calls);
                     }
                 });
             }
@@ -1526,7 +1665,7 @@ fn translate_sentences(
         vec![source.to_string()]
     };
     let mut translated = Vec::with_capacity(pieces.len());
-    let system = system_prompt(&opts.source_lang, &opts.target_lang, false, true);
+    let system = system_for(opts, false, true);
     for piece in &pieces {
         if piece.trim().is_empty() {
             translated.push(piece.clone());
@@ -1550,7 +1689,7 @@ fn translate_fallback(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Option<String> {
-    let system = fallback_prompt(&opts.target_lang);
+    let system = append_system_extra(opts, fallback_prompt(&opts.target_lang));
     translate_piece(source, opts, translator, calls, &system)
 }
 
@@ -1563,7 +1702,7 @@ fn translate_solo(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Option<String> {
-    let system = solo_retry_prompt(&opts.target_lang);
+    let system = append_system_extra(opts, solo_retry_prompt(&opts.target_lang));
     translate_piece(source, opts, translator, calls, &system)
 }
 
@@ -3292,6 +3431,145 @@ pub(crate) fn restore_list_marker(source: &str, translated: &str) -> String {
     format!("{shown} {translated_trim}")
 }
 
+/// Drop a model-invented subtitle when the English source is still in the reply.
+///
+/// arXiv 2609.32283 came back as the untranslated title plus a second line
+/// `性能基准测试`. A real translation does not still contain the source.
+pub(crate) fn strip_spurious_subtitle(source: &str, translated: &str) -> String {
+    let source = source.trim();
+    if !echoes_full_source(source, translated) {
+        return translated.to_string();
+    }
+    let lines: Vec<&str> = translated
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() >= 2 {
+        let tail = lines[lines.len() - 1];
+        if cjk_gloss(tail) {
+            let head = lines[..lines.len() - 1].join("\n");
+            if echoes_full_source(source, &head) {
+                return head;
+            }
+        }
+    }
+    if let Some(cut) = trailing_cjk_gloss(translated) {
+        let head = translated[..cut]
+            .trim_end()
+            .trim_end_matches([':', '：', '-', '—', '–', ' ', '　']);
+        if echoes_full_source(source, head) {
+            return head.to_string();
+        }
+    }
+    translated.to_string()
+}
+
+fn echoes_full_source(source: &str, translated: &str) -> bool {
+    let src = latin_skeleton(source);
+    src.len() >= 20 && latin_skeleton(translated).contains(&src)
+}
+
+fn latin_skeleton(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn cjk_gloss(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().count() <= 24
+        && text.chars().any(is_cjk_char)
+        && text.chars().filter(|ch| ch.is_ascii_alphabetic()).count() <= 2
+}
+
+fn trailing_cjk_gloss(text: &str) -> Option<usize> {
+    let mut last_latin_end = None;
+    for (idx, ch) in text.char_indices() {
+        if ch.is_ascii_alphabetic() {
+            last_latin_end = Some(idx + ch.len_utf8());
+        }
+    }
+    let end = last_latin_end?;
+    cjk_gloss(text[end..].trim()).then_some(end)
+}
+
+/// Names, code, math, and bibliography lines are kept on purpose.
+pub(crate) fn intentional_keep_kind(source: &str) -> Option<&'static str> {
+    let source = source.trim();
+    if source.is_empty() {
+        return None;
+    }
+    if is_author_list(source) || is_institution_line(source) {
+        return Some("name");
+    }
+    if looks_like_code(source) {
+        return Some("code");
+    }
+    if looks_like_reference(source) {
+        return Some("references");
+    }
+    if looks_like_display_math(source) {
+        return Some("formula");
+    }
+    None
+}
+
+fn looks_like_code(source: &str) -> bool {
+    let symbols = source
+        .chars()
+        .filter(|ch| matches!(ch, '{' | '}' | ';' | '`' | '=' | '(' | ')' | '[' | ']'))
+        .count();
+    let letters = source.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    letters > 0 && symbols >= 4 && symbols * 3 >= letters
+}
+
+fn looks_like_reference(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    lower.contains("doi.org")
+        || lower.contains("arxiv:")
+        || (lower.contains("et al")
+            && source.contains('(')
+            && source.chars().any(|ch| ch.is_ascii_digit()))
+}
+
+fn looks_like_display_math(source: &str) -> bool {
+    let letters = source.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    let marks = source
+        .chars()
+        .filter(|ch| matches!(ch, '=' | '+' | '\\' | '^' | '_' | '∑' | '∫'))
+        .count();
+    letters < 12 && marks >= 2 && source.chars().any(|ch| matches!(ch, '=' | '\\'))
+}
+
+/// A byline of people, including `Ada Lovelace, Grace Hopper`.
+/// A comma list of products (`Ada, Go, Rust`) is not a byline: those tokens
+/// are single words, and a personal name here is at least two.
+pub(crate) fn is_author_list(text: &str) -> bool {
+    let text = text.trim();
+    if is_personal_name(text) || is_name_byline(text) {
+        return true;
+    }
+    let parts: Vec<&str> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.len() >= 2
+        && parts.iter().all(|part| {
+            let part =
+                part.trim_matches(|ch: char| matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆'));
+            is_personal_name(part) || is_name_byline(part)
+        })
+}
+
+fn settle_translation(source: &str, translated: &str) -> String {
+    let translated = strip_spurious_subtitle(source, translated);
+    restore_credit_names(source, &translated)
+}
+
 /// A credit line whose personal name was translated. Role words stay in
 /// Chinese; the name is the original Latin (`Copy editor: Julie McNamee`).
 pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
@@ -3308,9 +3586,10 @@ pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
     {
         return "特别销售部".to_string();
     }
-    // A cover or byline that is only a person's name stays in the original
-    // Latin, the same way a credit line keeps `Dustin Archibald`.
-    if is_personal_name(source.trim()) {
+    // A cover, a byline, or a comma-separated author list stays in Latin.
+    // `Jacob Devlin Ming-Wei Chang …` and `Zaifeng Pan, Michael Wang` are
+    // names, not sentences to transliterate.
+    if is_author_list(source.trim()) {
         return source.trim().to_string();
     }
     let Some(name) = credit_personal_name(source) else {
@@ -3735,10 +4014,17 @@ fn url_char_mask(chars: &[char]) -> Vec<bool> {
 fn needs_english_retry(source: &str, translated: &str) -> bool {
     let source = source.trim();
     let translated = translated.trim();
-    if cjk_count(source) > 0 || cjk_count(translated) > 0 {
+    if is_author_list(source) || is_institution_line(source) || url_or_email_only(source) {
         return false;
     }
-    if is_personal_name(source) || url_or_email_only(source) {
+    // The source sentence is still there, and the reply only added a short
+    // Chinese subtitle (`性能基准测试`). A translation that keeps the source
+    // words inside a Chinese sentence is not this case.
+    let stripped = strip_spurious_subtitle(source, translated);
+    if stripped.trim() != translated.trim() && echoes_full_source(source, &stripped) {
+        return true;
+    }
+    if cjk_count(source) > 0 || cjk_count(translated) > 0 {
         return false;
     }
     // A dingbat the model dropped (` Prompt engineering` → `Prompt engineering`)
@@ -4000,7 +4286,7 @@ fn call_batch(
         .map(|&i| prompt_for(segments, shielded, i, opts.context_window))
         .collect::<Vec<_>>();
     let user = user_payload(&prompts)?;
-    let system = system_prompt(&opts.source_lang, &opts.target_lang, strict, echo);
+    let system = system_for(opts, strict, echo);
     *calls += 1;
     let raw = translator.complete(&system, &user)?;
     let parsed = parse_translations(&raw)?;
@@ -4015,6 +4301,26 @@ fn call_batch(
         by_id.push((id, text));
     }
     Ok(by_id)
+}
+
+fn system_for(opts: &TranslateOptions, strict: bool, echo: bool) -> String {
+    append_system_extra(
+        opts,
+        system_prompt(&opts.source_lang, &opts.target_lang, strict, echo),
+    )
+}
+
+fn append_system_extra(opts: &TranslateOptions, mut prompt: String) -> String {
+    if let Some(extra) = opts
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        prompt.push('\n');
+        prompt.push_str(extra);
+    }
+    prompt
 }
 
 fn restore_all(
@@ -4355,7 +4661,7 @@ mod tests {
     }
 
     #[test]
-    fn bert_author_byline_is_a_name_line_and_keeps_a_chinese_rendering() {
+    fn bert_author_byline_stays_in_latin() {
         let byline = "Jacob Devlin Ming-Wei Chang Kenton Lee Kristina Toutanova";
         assert_eq!(
             byline.chars().filter(|ch| ch.is_ascii_alphabetic()).count(),
@@ -4364,10 +4670,10 @@ mod tests {
         assert!(is_name_byline(byline));
         assert!(!is_personal_name(byline));
         assert!(!whole_line_is_personal_name(byline));
-        assert!(needs_english_retry(byline, byline));
+        assert!(!needs_english_retry(byline, byline));
         let chinese = "雅各布·德夫林 张明威 李肯顿 克里斯蒂娜·托塔诺娃";
         assert!(!needs_english_retry(byline, chinese));
-        assert_eq!(restore_credit_names(byline, chinese), chinese);
+        assert_eq!(restore_credit_names(byline, chinese), byline);
         assert_eq!(
             restore_credit_names("Google AI Language", "谷歌人工智能语言"),
             "Google AI Language"
@@ -4390,6 +4696,48 @@ mod tests {
         assert!(!is_name_byline(
             "The transformer architecture replaces recurrence with self attention over the input."
         ));
+    }
+
+    #[test]
+    fn agentreplay_title_is_retried_and_author_names_stay_latin() {
+        let title = "AgentReplay: Token-Wise Trace Replay Is Essential for Fair Serving System Performance Benchmarking";
+        let echoed = format!("{title}\n性能基准测试");
+        assert_eq!(strip_spurious_subtitle(title, &echoed), title);
+        assert!(needs_english_retry(title, &echoed));
+        let inline = format!("{title}：性能基准测试");
+        assert_eq!(strip_spurious_subtitle(title, &inline), title);
+        let good = "AgentReplay：令牌级轨迹重放对于公平的服务系统性能基准测试至关重要";
+        assert_eq!(strip_spurious_subtitle(title, good), good);
+        assert!(!needs_english_retry(title, good));
+        let authors =
+            "Zaifeng Pan, Michael Wang, Chris Wu, Zhengding Hu, Xinwei Qiang, Zhongkai Yu, Yufei Ding";
+        let chinese = "潘再峰、迈克尔·王、吴克里斯、胡正定、强欣伟、余仲凯、丁宇飞";
+        assert!(is_author_list(authors));
+        assert_eq!(restore_credit_names(authors, chinese), authors);
+        assert!(!needs_english_retry(authors, chinese));
+        assert!(!is_author_list("Ada, Go, Rust, PostgreSQL, LLVM, Nix"));
+    }
+
+    #[test]
+    fn default_timeout_is_one_minute_and_glossary_csv_parses() {
+        assert_eq!(TranslateOptions::default().timeout_secs, 60);
+        let (opts, _) = TranslateOptions::from_json(
+            r#"{"timeout_secs":15,"system_prompt":"Keep SI units.","progress":"json"}"#,
+        )
+        .unwrap();
+        assert_eq!(opts.timeout_secs, 15);
+        assert_eq!(opts.system_prompt.as_deref(), Some("Keep SI units."));
+        assert_eq!(opts.progress, ProgressMode::Json);
+        let pairs = parse_glossary_csv("src,tgt\nAgentReplay,AgentReplay\ntrace,轨迹\n").unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                ("AgentReplay".into(), "AgentReplay".into()),
+                ("trace".into(), "轨迹".into()),
+            ]
+        );
+        let bare = parse_glossary_csv("warmup,预热\n").unwrap();
+        assert_eq!(bare, vec![("warmup".into(), "预热".into())]);
     }
 
     #[test]

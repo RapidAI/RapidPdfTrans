@@ -112,10 +112,13 @@ Flags that exist on `rpt translate`:
 | `--bilingual-output` | Also write a bilingual PDF from the same translation. |
 | `--max-pages N` | Only the first N pages. |
 | `--model`, `--base-url` | Override `RPT_LLM_MODEL` and `RPT_LLM_BASE_URL` for this run. |
-| `--glossary source=target` | Repeat for more than one term. Applied locally before the call. |
+| `--glossary source=target` | Repeat for more than one term. A path to a CSV file (`src,tgt` or `source,target`, header optional) is read instead. Applied locally before the call. |
+| `--system-prompt TEXT` | Extra instructions appended to the system prompt. A path to an existing file is read; `@path` always reads a file. |
+| `--timeout-secs N` | Per-request deadline. Default `60`. A stalled call is retried with backoff (four attempts). |
+| `--progress text` | Stderr progress: `text` (default), `json` (one object per line), or `off`. A `waiting Ns` line is a stall; a rising segment count is work. Rewrite prints `rewriting` every five seconds, then `wrote`. |
 | `--translate-references` | Translate the bibliography. Default is to keep it. |
 | `--translate-figures` | Translate text inside figures. Default is the caption only. |
-| `--translate-tables` | Translate cells and headers. Default is the caption only. |
+| `--translate-tables` | Translate table cells and headers. Default is the caption only. |
 | `--cjk-style` | `serif` (default, Songti) or `sans` (Heiti). Also `RPT_CJK_STYLE` and JSON `cjk_style`. |
 | `--cjk-font`, `--cjk-bold-font`, `--cjk-sans` | TTF, OTF, or TTC. These paths win over `--cjk-style`. `#N` selects a collection face. |
 | `--cjk-size-scale`, `--cjk-leading` | Default `0.90` and `1.60`. |
@@ -123,9 +126,13 @@ Flags that exist on `rpt translate`:
 | `--jobs` | Parallel model requests. Default `4`, or `RPT_TRANSLATE_JOBS`, capped at `8`. Layout stays single-threaded. |
 | `--replay file.json` | Reuse a previous translation JSON. No model call. |
 | `--compact` | One-line JSON on stdout. |
-| `--json` | Accepted for compatibility. JSON is always written to stdout. |
+| `--json` | Accepted for compatibility. A summary is always written to stdout. |
+| `--glyphs` | Print the full per-glyph JSON on stdout instead of the summary. |
+| `--detail FILE` | Write the full per-glyph JSON to a file. Stdout stays the summary unless `--glyphs` is set. |
 
-`--json` does not select a file. After `--output` succeeds, the process also prints the extraction JSON, including a `translations` array and a `translator` object (`model`, `backend`, `base_url`, `calls`, `cache_hits`).
+`--json` does not select a file. Stdout is a summary: page info, `glyph_count`, coverage counts, a `translations` array, and a `translator` object (`model`, `backend`, `base_url`, `calls`, `cache_hits`). The per-glyph document is `--glyphs` or `--detail`.
+
+Progress goes to stderr, not into that JSON. Coverage is incomplete only for a real miss (an untranslated body paragraph, overflow, a missing glyph or font, or an incomplete list). References, figures, tables, code, math, and names are counted separately and do not fail the run. Author names stay in Latin. A title the model echoes is retried, and an extra subtitle is not painted.
 
 ### Example output
 
@@ -227,7 +234,9 @@ go test ./...
 
 ## Prebuilt packages
 
-`.github/workflows/sdk.yml` archives the headers, the shared library, and the static library for each platform, with a CMake config and a Unix pkg-config file. `.github/workflows/wheels.yml` builds CPython 3.10+ abi3 wheels with cibuildwheel (one wheel per platform loads on CPython 3.10 and newer). Both workflows run on pull requests, `workflow_dispatch`, and tags `v*`. Pull requests upload build artifacts only. A tag whose name matches `workspace.package.version` in `Cargo.toml` (`v0.1.4` for version `0.1.4`) attaches the archives, wheels, and sdist to a GitHub Release and publishes the wheels and sdist to PyPI.
+`.github/workflows/sdk.yml` archives the headers, the shared library, and the static library for each platform, with a CMake config and a Unix pkg-config file. `.github/workflows/wheels.yml` builds CPython 3.10+ abi3 wheels with cibuildwheel (one wheel per platform loads on CPython 3.10 and newer). Both workflows run on pull requests, `workflow_dispatch`, and tags `v*`. Pull requests upload build artifacts only. A tag whose name matches `workspace.package.version` in `Cargo.toml` (`v0.1.5` for version `0.1.5`) attaches the archives, wheels, and sdist to a GitHub Release and publishes the wheels and sdist to PyPI.
+
+`.github/workflows/release-cli.yml` builds the `rpt` binary for Linux x86_64 and aarch64, glibc and musl, on `main`, on tags `v*`, and on `workflow_dispatch`. It uploads the tarballs as artifacts and does not publish a GitHub Release.
 
 32-bit macOS is not built: there is no hosted runner for it, and current CPython does not ship a 32-bit macOS installer. musllinux wheels are built for x86_64 and aarch64. Rust does not publish a host compiler for `i686-unknown-linux-musl` or `armv7-unknown-linux-musleabihf`, and cibuildwheel compiles inside that container. Intel macOS uses `macos-15-intel`; GitHub no longer provides `macos-13`. PyPI upload uses the `PYPI_APIKEY` repository secret (a PyPI API token) from the tag's wheel workflow, with `skip-existing` set. It does not use trusted publishing.
 

@@ -13,7 +13,7 @@ pub enum Error {
     #[error("glyph {0} already has a final disposition ({1})")]
     AlreadyFinal(u32, String),
     #[error(
-        "coverage incomplete: {unresolved} glyphs unresolved, {english_body} left in an English body paragraph"
+        "coverage incomplete: {unresolved} glyphs missed, {english_body} left in an English body paragraph; references, figures, tables, code, math, and names are not counted"
     )]
     CoverageIncomplete {
         unresolved: usize,

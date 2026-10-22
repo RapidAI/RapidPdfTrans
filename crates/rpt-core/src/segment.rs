@@ -7772,6 +7772,44 @@ mod tests {
     }
 
     #[test]
+    fn translate_tables_puts_cell_text_in_a_segment() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let mut header = wide(1, 72.0, 600.0, "Method", 50.0, 10.0);
+        header.font_name = "NimbusRomNo9L-Regu".into();
+        let mut score = wide(2, 220.0, 600.0, "Score", 40.0, 10.0);
+        score.font_name = "NimbusRomNo9L-Regu".into();
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(
+                3,
+                72.0,
+                640.0,
+                "Table 1: Pass rates for each method on the benchmark.",
+                360.0,
+                10.0,
+            ),
+            header,
+            score,
+            wide(4, 72.0, 500.0, body, 360.0, 10.0),
+        ];
+        let seg = segment_with(
+            &glyphs,
+            &SegmentFlags {
+                skip_figures: true,
+                skip_tables: false,
+            },
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Method")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|text| text.contains("Score")), "{texts:?}");
+        assert!(seg.kept.iter().all(|(_, reason)| reason != "table"));
+    }
+
+    #[test]
     fn a_short_caption_tail_stays_with_the_caption() {
         let body =
             "This sentence is long enough to count as ordinary body text in the column today.";

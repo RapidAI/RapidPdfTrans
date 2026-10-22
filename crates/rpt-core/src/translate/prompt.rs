@@ -34,7 +34,9 @@ Preserve punctuation that belongs to the segment. \
 Copy every number exactly as it appears, including decimals. Do not round, truncate, or alter digits. \
 When a segment is a comma-separated list of topics and names, translate descriptive topics into {dst} and keep product, project, language, and organization names in their original Latin spelling. \
 Every comma-separated item must appear in the output, in the same order. Do not drop or merge items. Copy parenthetical acronyms such as (RTC) and (SBOM) unchanged. \
-Return one object per input id. Do not merge, drop, or invent ids.",
+Return one object per input id. Do not merge, drop, or invent ids. \
+Keep every personal name and every author byline in its original Latin spelling. Do not transliterate names. \
+Translate the document title. Do not leave a title in the source language, and do not append a subtitle, gloss, or second line that the source does not contain.",
         src = language_name(source_lang),
         dst = language_name(target_lang),
     );
@@ -63,8 +65,9 @@ pub fn solo_retry_prompt(target_lang: &str) -> String {
 This is a separate attempt for this paragraph alone. Earlier replies copied the English source. \
 Reply with JSON only, no markdown, in exactly this shape: \
 {{\"translations\":[{{\"id\":0,\"text\":\"...\"}}]}}. \
-The text must be {dst}. Translate the paragraph, including a list of author names. \
-Keep numbers, URLs, and every ⟦N⟧ placeholder unchanged. Do not add notes."
+The text must be {dst}. Translate the paragraph. \
+Keep a list of author names in its original Latin spelling. \
+Keep numbers, URLs, and every ⟦N⟧ placeholder unchanged. Do not add a subtitle the source does not have. Do not add notes."
     )
 }
 

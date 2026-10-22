@@ -43,7 +43,7 @@ impl TranslatorBackend {
                 if let Some(client) =
                     GoogleTranslator::probe_unofficial(&opts.source_lang, &opts.target_lang)
                 {
-                    Ok(Self::Google(client))
+                    Ok(Self::Google(with_timeout(client, opts)))
                 } else {
                     Err(Error::Translate(
                         "no translator is configured and Google Translate is unreachable; set RPT_LLM_API_KEY or RPT_TRANSLATOR"
@@ -190,12 +190,10 @@ fn named(opts: &TranslateOptions, name: &str) -> Result<TranslatorBackend> {
         }
         "google" | "google-v2" => Ok(TranslatorBackend::Google(google_v2(opts)?)),
         "google-v3" => Ok(TranslatorBackend::Google(google_v3(opts)?)),
-        "google-unofficial" | "google-web" => {
-            Ok(TranslatorBackend::Google(GoogleTranslator::unofficial(
-                &opts.source_lang,
-                &opts.target_lang,
-            )))
-        }
+        "google-unofficial" | "google-web" => Ok(TranslatorBackend::Google(with_timeout(
+            GoogleTranslator::unofficial(&opts.source_lang, &opts.target_lang),
+            opts,
+        ))),
         other => Err(Error::Translate(format!(
             "unknown translator `{other}`; expected maclaw, openai, google-v2, google-v3, or google-unofficial"
         ))),
@@ -215,7 +213,11 @@ fn google_v2(opts: &TranslateOptions) -> Result<GoogleTranslator> {
             client = client.with_base_url(base);
         }
     }
-    Ok(client)
+    Ok(with_timeout(client, opts))
+}
+
+fn with_timeout(client: GoogleTranslator, opts: &TranslateOptions) -> GoogleTranslator {
+    client.with_timeout(std::time::Duration::from_secs(opts.timeout_secs.max(1)))
 }
 
 fn google_v3(opts: &TranslateOptions) -> Result<GoogleTranslator> {
@@ -235,7 +237,7 @@ fn google_v3(opts: &TranslateOptions) -> Result<GoogleTranslator> {
                     client = client.with_base_url(base);
                 }
             }
-            return Ok(client);
+            return Ok(with_timeout(client, opts));
         }
     }
     let json = if let Ok(raw) = std::env::var("RPT_GOOGLE_CREDENTIALS_JSON") {
@@ -271,7 +273,7 @@ fn google_v3(opts: &TranslateOptions) -> Result<GoogleTranslator> {
             client = client.with_base_url(base);
         }
     }
-    Ok(client)
+    Ok(with_timeout(client, opts))
 }
 
 #[cfg(test)]

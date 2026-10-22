@@ -59,10 +59,10 @@ pub use overlap::{find_alignment_drift, find_overlaps, BlockAlign, OverlapHit};
 pub use rewrite::{rewrite_translation, RewriteOptions};
 pub use segment::{segment_glyphs, segment_with, Segment, SegmentFlags, Segmentation};
 pub use translate::{
-    citation_end, identical_reference_operators, reference_glyph_ids, replay_extraction,
-    translate_extraction, BilingualLayout, LlmTranslator, OutputMode, TranslateOptions,
-    TranslateReport, TranslatedSegment, Translator, TranslatorBackend, DEFAULT_LLM_BASE_URL,
-    DEFAULT_LLM_MODEL,
+    citation_end, identical_reference_operators, parse_glossary_csv, reference_glyph_ids,
+    replay_extraction, translate_extraction, BilingualLayout, LlmTranslator, OutputMode,
+    ProgressMode, TranslateOptions, TranslateReport, TranslatedSegment, Translator,
+    TranslatorBackend, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
 };
 
 #[cfg(test)]

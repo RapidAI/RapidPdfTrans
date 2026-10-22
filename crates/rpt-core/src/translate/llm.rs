@@ -10,7 +10,8 @@
 //! options JSON, and [`Debug`] prints it as `redacted`.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -28,6 +29,9 @@ pub struct LlmTranslator {
     /// Shared pool. Cloning the agent into a timeout thread reuses idle TLS
     /// connections. A stalled call keeps only the connection it checked out.
     agent: ureq::Agent,
+    /// Retries of a timed-out or dropped call. The job binds this so stderr
+    /// progress can show that the process is retrying rather than idle.
+    retries: Mutex<Arc<AtomicUsize>>,
     /// Successful `(system, user)` replies. Errors are not stored.
     cache: Mutex<HashMap<(String, String), String>>,
 }
@@ -72,6 +76,7 @@ impl LlmTranslator {
             max_tokens: opts.max_tokens,
             timeout,
             agent: config.into(),
+            retries: Mutex::new(Arc::new(AtomicUsize::new(0))),
             cache: Mutex::new(HashMap::new()),
         })
     }
@@ -86,6 +91,12 @@ impl LlmTranslator {
 }
 
 impl Translator for LlmTranslator {
+    fn bind_retries(&self, counter: Arc<AtomicUsize>) {
+        if let Ok(mut slot) = self.retries.lock() {
+            *slot = counter;
+        }
+    }
+
     fn complete(&self, system: &str, user: &str) -> Result<String> {
         let key = (system.to_string(), user.to_string());
         if let Ok(guard) = self.cache.lock() {
@@ -93,6 +104,8 @@ impl Translator for LlmTranslator {
                 return Ok(hit.clone());
             }
         }
+        // Four attempts. A stalled socket is cut at `timeout` (default 60s),
+        // then retried with backoff. The job cannot sit on one idle connection.
         let mut delay = std::time::Duration::from_secs(2);
         let mut last = None;
         for attempt in 0..4 {
@@ -103,7 +116,8 @@ impl Translator for LlmTranslator {
                     }
                     return Ok(text);
                 }
-                Err(err) if http_status_retryable(&err) && attempt < 3 => {
+                Err(err) if request_retryable(&err) && attempt < 3 => {
+                    self.note_retry();
                     std::thread::sleep(delay);
                     delay *= 2;
                     last = Some(err);
@@ -184,12 +198,25 @@ fn http_error(err: ureq::Error, api_key: &str) -> Error {
     Error::Translate(scrub_secrets(&msg, api_key))
 }
 
+fn request_retryable(err: &Error) -> bool {
+    let msg = err.to_string();
+    http_status_retryable(err) || msg.to_ascii_lowercase().contains("timeout")
+}
+
 fn http_status_retryable(err: &Error) -> bool {
     let msg = err.to_string();
     ["500", "502", "503", "429"]
         .iter()
         .any(|code| msg.contains(&format!("HTTP status {code}")))
         || connection_dropped(&msg)
+}
+
+impl LlmTranslator {
+    fn note_retry(&self) {
+        if let Ok(counter) = self.retries.lock() {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A gateway that closes the socket mid-response.
@@ -243,6 +270,19 @@ mod tests {
         assert!(connection_dropped("io: Peer disconnected"));
         assert!(connection_dropped("io: unexpected end of file"));
         assert!(!connection_dropped("LLM HTTP status 401"));
+    }
+
+    #[test]
+    fn a_timeout_is_retried_and_a_client_error_is_not() {
+        assert!(request_retryable(&Error::Translate(
+            "timeout: global".into()
+        )));
+        assert!(request_retryable(&Error::Translate(
+            "LLM HTTP status 503".into()
+        )));
+        assert!(!request_retryable(&Error::Translate(
+            "LLM HTTP status 401".into()
+        )));
     }
 
     fn read_request(stream: &mut std::net::TcpStream) -> String {

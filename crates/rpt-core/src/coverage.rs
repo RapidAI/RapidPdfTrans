@@ -13,10 +13,18 @@ pub struct CoverageReport {
     pub rewritten: usize,
     pub kept_original: usize,
     pub non_text: usize,
-    /// Glyphs left in English because a body paragraph was not painted.
-    /// A report with any of these is not complete.
+    /// Latin glyphs whose keep reason is a real miss (`english-body` only).
+    /// Overflow, a missing font, and an untranslated body paragraph are
+    /// [`CoverageReport::real_misses`]. References, figures, tables, code,
+    /// math, and names are [`CoverageReport::intentional`].
     #[serde(default)]
     pub english_body: usize,
+    /// Glyphs kept on purpose. They do not make the document incomplete.
+    #[serde(default)]
+    pub intentional: usize,
+    /// Pending glyphs, glyphs waiting for rewrite, and real misses.
+    #[serde(default)]
+    pub real_misses: usize,
     pub unresolved_ids: Vec<u32>,
     pub complete: bool,
 }
@@ -28,6 +36,7 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
     let mut kept = 0;
     let mut non_text = 0;
     let mut english_body = 0;
+    let mut intentional = 0;
     let mut unresolved_ids = Vec::new();
     for g in glyphs {
         match &g.disposition {
@@ -42,9 +51,13 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
             Disposition::Rewritten { .. } => rewritten += 1,
             Disposition::KeptOriginal { reason } => {
                 kept += 1;
-                if failed_body_reason(reason) && glyph_is_latin_letter(g) {
-                    english_body += 1;
+                if real_miss_reason(reason) && glyph_is_latin_letter(g) {
+                    if reason == "english-body" {
+                        english_body += 1;
+                    }
                     unresolved_ids.push(g.id);
+                } else if intentional_reason(reason) {
+                    intentional += 1;
                 }
             }
             Disposition::NonText { .. } => non_text += 1,
@@ -59,12 +72,14 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
         kept_original: kept,
         non_text,
         english_body,
+        intentional,
+        real_misses: unresolved_ids.len(),
         unresolved_ids,
         complete,
     }
 }
 
-fn failed_body_reason(reason: &str) -> bool {
+fn real_miss_reason(reason: &str) -> bool {
     matches!(
         reason,
         "missing-glyph"
@@ -74,6 +89,40 @@ fn failed_body_reason(reason: &str) -> bool {
             | "no-stream"
             | "english-body"
             | "incomplete-list"
+    )
+}
+
+/// Kept because the line is not body prose. These do not fail the document.
+fn intentional_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "references"
+            | "figure"
+            | "table"
+            | "code"
+            | "math"
+            | "math-block"
+            | "formula"
+            | "formula-hole"
+            | "formula-join"
+            | "formula-stay"
+            | "name"
+            | "toc"
+            | "margin"
+            | "ocr"
+            | "unchanged"
+            | "shared-operator"
+            | "kept"
+            | "punctuation"
+            | "whitespace"
+            | "url"
+            | "folio"
+            | "line-kept"
+            | "vertical"
+            | "clipped"
+            | "type3"
+            | "annotation"
+            | "unmapped"
     )
 }
 
@@ -176,8 +225,23 @@ mod tests {
         .unwrap();
         let failed_report = report(&failed);
         assert!(!failed_report.complete);
-        assert_eq!(failed_report.english_body, 1);
+        assert_eq!(failed_report.real_misses, 1);
+        assert_eq!(failed_report.english_body, 0);
         assert!(assert_complete(&failed).is_err());
+        let mut kept_on_purpose = vec![glyph(3), glyph(4), glyph(5), glyph(6)];
+        for (glyph, reason) in
+            kept_on_purpose
+                .iter_mut()
+                .zip(["references", "figure", "table", "name"])
+        {
+            glyph.disposition = Disposition::KeptOriginal {
+                reason: reason.into(),
+            };
+        }
+        let intentional = report(&kept_on_purpose);
+        assert!(intentional.complete, "{intentional:?}");
+        assert_eq!(intentional.intentional, 4);
+        assert_eq!(intentional.real_misses, 0);
         let err = mark(
             &mut glyphs,
             0,
