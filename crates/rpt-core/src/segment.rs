@@ -2013,14 +2013,21 @@ fn detach_toc_marks(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
     let mut kept = Vec::new();
     let mut expanded = Vec::with_capacity(lines.len());
     for line in lines.drain(..) {
-        let marks = toc_mark_glyphs(&line);
-        if marks.is_empty() {
+        let (marks, scripts) = toc_mark_glyphs(&line);
+        if marks.is_empty() && scripts.is_empty() {
             expanded.push(line);
             continue;
         }
-        let mark_ids: std::collections::HashSet<u32> = marks.iter().copied().collect();
+        let mark_ids: std::collections::HashSet<u32> =
+            marks.iter().chain(scripts.iter()).copied().collect();
         for id in &marks {
             kept.push((*id, "toc".into()));
+        }
+        // `x_0` and `x_1` share a subscript baseline. The gap between `0` and
+        // `1` looks like a contents page number, but blanking `1` and seating
+        // it on the equation deletes the subscript. Keep the digit in place.
+        for id in &scripts {
+            kept.push((*id, "formula".into()));
         }
         let mut ordered = line.glyphs.clone();
         ordered.sort_by(|left, right| glyph_left(left).total_cmp(&glyph_left(right)));
@@ -2047,9 +2054,13 @@ fn push_toc_title<'a>(expanded: &mut Vec<VisualLine<'a>>, title: &mut Vec<&'a Gl
     expanded.push(part);
 }
 
-fn toc_mark_glyphs(line: &VisualLine<'_>) -> Vec<u32> {
+/// Real contents page numbers, and digits that only share that gap.
+/// The second list is a subscript (`0` then `1` under `x_0, x_1`), not a
+/// page number. Both leave the line so the remaining token stays put.
+fn toc_mark_glyphs(line: &VisualLine<'_>) -> (Vec<u32>, Vec<u32>) {
     let tokens = line_tokens(&line.glyphs, line.size);
-    let mut keep = Vec::new();
+    let mut pages = Vec::new();
+    let mut scripts = Vec::new();
     for (index, token) in tokens.iter().enumerate().skip(1) {
         if !is_toc_page_token(&token.text) {
             continue;
@@ -2069,17 +2080,24 @@ fn toc_mark_glyphs(line: &VisualLine<'_>) -> Vec<u32> {
             continue;
         }
         if leaders {
-            keep.extend(prev.ids.iter().copied());
+            pages.extend(prev.ids.iter().copied());
         }
-        keep.extend(token.ids.iter().copied());
+        // The token before a page number is a title or a run of dots.
+        // `0` an em before `1` is the other subscript, not a title.
+        let titled = prev.text.chars().any(|ch| ch.is_alphabetic());
+        if !leaders && !titled {
+            scripts.extend(token.ids.iter().copied());
+            continue;
+        }
+        pages.extend(token.ids.iter().copied());
     }
     // `.......1` is one token when the page number sits against the dots.
     for id in toc_leader_suffix(&line.glyphs) {
-        if !keep.contains(&id) {
-            keep.push(id);
+        if !pages.contains(&id) && !scripts.contains(&id) {
+            pages.push(id);
         }
     }
-    keep
+    (pages, scripts)
 }
 
 /// Leader dots at the right edge, plus a page number glued to them.
@@ -11953,6 +11971,38 @@ mod tests {
         item.matrix = [size, 0.0, 0.0, size, x, y];
         item.bbox = [x, y, x + w, y + size];
         item
+    }
+
+    #[test]
+    fn subscript_digits_on_one_baseline_are_not_page_numbers() {
+        // `x_0` and `x_1` put `0` and `1` on the subscript baseline, an em
+        // apart. That gap used to mark `1` as a contents page number.
+        let glyphs = vec![
+            block(0, 417.0, 449.0, 4.0, 7.0, "0"),
+            block(1, 432.0, 449.0, 4.0, 7.0, "1"),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        assert!(
+            seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 1 && reason == "formula"),
+            "{:?}",
+            seg.kept
+        );
+        assert!(
+            !seg.kept.iter().any(|(_, reason)| reason == "toc"),
+            "{:?}",
+            seg.kept
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.contains(&"0"),
+            "the other subscript stays its own token: {texts:?}"
+        );
+        assert!(
+            !seg.segments.iter().any(|item| item.glyph_ids.contains(&1)),
+            "the page-number gap must not pull the subscript into a title"
+        );
     }
 
     #[test]
