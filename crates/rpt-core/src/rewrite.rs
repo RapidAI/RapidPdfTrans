@@ -806,6 +806,10 @@ pub fn rewrite_translation(
         &owners,
         &mut listing_shifts,
     ));
+    // `ℓth layer` never put the letter in the segment. The line moved up
+    // and left ℓth on the old baseline, or the letter stayed inside 索引.
+    // Carry the letter and its superscript with that line, then blank the source.
+    carry_unmapped_atoms(&drawn, &y_before, extraction, &mut stack_shifts);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     // An unmapped `ℓ` never entered the line, so the translation was drawn
@@ -14756,6 +14760,161 @@ fn keep_absorbed_ink_in_the_hole(shift: &mut ListingShift, extraction: &Extracti
     }
 }
 
+/// `ℓ` is not in the segment, so nothing else moves it when the line does.
+/// A superscript on that letter (`th`) has to take the same step, and the
+/// source copy is blanked when the shift is drawn. A letter already inside
+/// an equation (`(ℓ+1)`, `x_ℓ`) stays with that equation.
+fn carry_unmapped_atoms(
+    drawn: &[Drawn],
+    y_before: &[f32],
+    extraction: &Extraction,
+    shifts: &mut Vec<ListingShift>,
+) {
+    let mut claimed: HashSet<u32> = shifts
+        .iter()
+        .flat_map(|shift| shift.ids.iter().copied())
+        .collect();
+    let mut extra = Vec::new();
+    for glyph in &extraction.glyphs {
+        if claimed.contains(&glyph.id)
+            || glyph.invisible
+            || glyph.font_size <= 8.0
+            || !unmapped_math_glyph(glyph)
+            || unmapped_letter_in_formula(glyph, extraction)
+        {
+            continue;
+        }
+        let Some(line_index) = host_line_for_unmapped(glyph, drawn, y_before) else {
+            continue;
+        };
+        let line = &drawn[line_index];
+        let body = glyph.font_size.max(1.0);
+        let mut ids = vec![glyph.id];
+        for id in scripts_on_math_letter(glyph, extraction, body) {
+            if id != glyph.id && !claimed.contains(&id) {
+                ids.push(id);
+            }
+        }
+        let mut left = glyph_ink_left(glyph);
+        let mut right = glyph_ink_right(glyph);
+        for id in ids.iter().skip(1) {
+            let Some(script) = extraction.glyphs.iter().find(|item| item.id == *id) else {
+                continue;
+            };
+            left = left.min(glyph_ink_left(script));
+            right = right.max(glyph_ink_right(script));
+        }
+        let dy = line.y - glyph.matrix[5];
+        let dx = clear_atom_of_han(line, left, right);
+        if dx.abs() < 0.4 && dy.abs() < 0.4 {
+            continue;
+        }
+        claimed.extend(ids.iter().copied());
+        extra.push(ListingShift {
+            page: glyph.page_index,
+            ids,
+            dx,
+            dy,
+            host_y: line.y,
+        });
+    }
+    shifts.extend(extra);
+}
+
+/// Body math on the same baseline means this letter is already inside an
+/// equation. Pulling it onto the Chinese line detaches it from `x` or `(`.
+fn unmapped_letter_in_formula(glyph: &Glyph, extraction: &Extraction) -> bool {
+    let body = glyph.font_size.max(1.0);
+    extraction.glyphs.iter().any(|other| {
+        if other.id == glyph.id || other.page_index != glyph.page_index {
+            return false;
+        }
+        if other.font_size <= body * 0.84 || !cm_equation_font(&other.font_name) {
+            return false;
+        }
+        let dx = (other.matrix[4] - glyph.matrix[4]).abs();
+        let dy = (other.matrix[5] - glyph.matrix[5]).abs();
+        dx > 0.4 && dx <= body * 1.6 && dy <= body * 0.35
+    })
+}
+
+/// The line this letter was set on. A later pull changes `line.y` and leaves
+/// `y_before` on the English baseline, which is where the letter still is.
+fn host_line_for_unmapped(glyph: &Glyph, drawn: &[Drawn], y_before: &[f32]) -> Option<usize> {
+    let mut best: Option<(usize, f32, bool)> = None;
+    for (index, line) in drawn.iter().enumerate() {
+        if line.page != glyph.page_index || !line.text.chars().any(is_han_char) {
+            continue;
+        }
+        let size = line.size.max(glyph.font_size).max(1.0);
+        let right = draw_ink_right(line);
+        let x = glyph.matrix[4];
+        if x < line.x - size * 2.0 || x > right + size * 0.6 {
+            continue;
+        }
+        let before = y_before.get(index).copied().unwrap_or(line.y);
+        let before_distance = (before - glyph.matrix[5]).abs();
+        let current_distance = (line.y - glyph.matrix[5]).abs();
+        let (distance, from_before) = if before_distance <= size * 0.45 {
+            (before_distance, true)
+        } else if current_distance <= size * 0.45 {
+            (current_distance, false)
+        } else {
+            continue;
+        };
+        let better = best.is_none_or(|(_, previous, previous_before)| {
+            if from_before != previous_before {
+                from_before
+            } else {
+                distance < previous
+            }
+        });
+        if better {
+            best = Some((index, distance, from_before));
+        }
+    }
+    best.map(|(index, _, _)| index)
+}
+
+/// Move a letter that cuts through 索引 to just before that word. The
+/// superscript, if any, is already included in `right`.
+fn clear_atom_of_han(line: &Drawn, left: f32, right: f32) -> f32 {
+    let chars: Vec<char> = line.text.chars().collect();
+    if chars.is_empty() || line.widths.len() != chars.len() {
+        return 0.0;
+    }
+    let size = line.size.max(1.0);
+    let mut hit = None;
+    for (index, ch) in chars.iter().enumerate() {
+        if !is_han_char(*ch) {
+            continue;
+        }
+        let origin = char_origin(line, &chars, index);
+        let overlap = (origin + line.widths[index]).min(right) - origin.max(left);
+        if overlap > 0.8 {
+            hit = Some(index);
+            break;
+        }
+    }
+    let Some(mut index) = hit else {
+        return 0.0;
+    };
+    while index > 0 && is_han_char(chars[index - 1]) {
+        let gap = line.gaps.get(index - 1).copied().unwrap_or(0.0);
+        if gap > size * 0.45 {
+            break;
+        }
+        index -= 1;
+    }
+    let word_left = char_origin(line, &chars, index);
+    let dx = (word_left - 0.6) - right;
+    if dx >= -0.4 {
+        0.0
+    } else {
+        dx
+    }
+}
+
 fn yield_to_standing_math(drawn: &mut [Drawn], extraction: &Extraction, shifts: &[ListingShift]) {
     let mut delta: HashMap<u32, (f32, f32)> = HashMap::new();
     for shift in shifts {
@@ -26446,6 +26605,153 @@ mod tests {
         // 索 occupies 68..78. ℓ occupies 78..82.2. 引 must start after that.
         let yin = char_origin(&drawn[0], &chars, 1);
         assert!(yin >= 82.2, "引 still covers the ell, origin {yin}");
+    }
+
+    #[test]
+    fn an_unmapped_ell_follows_its_line_with_the_superscript() {
+        let mut ell = math_glyph(1, 308.0, 480.0, "", true);
+        ell.unicode.clear();
+        ell.unmapped = true;
+        let mut tee = math_glyph(2, 313.0, 483.6, "t", true);
+        tee.font_size = 7.0;
+        tee.font_name = "CMMI7".into();
+        tee.matrix = [7.0, 0.0, 0.0, 7.0, 313.0, 483.6];
+        tee.bbox = [313.0, 483.6, 316.0, 489.0];
+        let mut aitch = math_glyph(3, 316.2, 483.6, "h", true);
+        aitch.font_size = 7.0;
+        aitch.font_name = "CMMI7".into();
+        aitch.matrix = [7.0, 0.0, 0.0, 7.0, 316.2, 483.6];
+        aitch.bbox = [316.2, 483.6, 321.0, 489.0];
+        let text = "层接收所有前面层的特征图，";
+        let count = text.chars().count();
+        let line = Drawn {
+            page: 0,
+            x: 324.0,
+            y: 492.0,
+            size: 9.0,
+            color: Color::black(),
+            cids: vec![1; count],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: text.into(),
+            glyph_ids: vec![10],
+            widths: vec![9.0; count],
+            gaps: vec![0.0; count.saturating_sub(1)],
+            supers: vec![false; count],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![ell, tee, aitch],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut shifts = Vec::new();
+        carry_unmapped_atoms(&[line], &[480.0], &extraction, &mut shifts);
+        assert_eq!(shifts.len(), 1, "{}", shifts.len());
+        assert!(
+            shifts[0].ids.contains(&1) && shifts[0].ids.contains(&2) && shifts[0].ids.contains(&3),
+            "the superscript stayed on the old baseline: {:?}",
+            shifts[0].ids
+        );
+        assert!((shifts[0].dy - 12.0).abs() < 0.1, "dy {}", shifts[0].dy);
+        assert!(
+            shifts[0].dx.abs() < 0.4,
+            "ℓth was already left of the line, dx {}",
+            shifts[0].dx
+        );
+    }
+
+    #[test]
+    fn an_unmapped_ell_inside_a_word_moves_before_the_word() {
+        let mut ell = math_glyph(1, 78.0, 200.0, "", true);
+        ell.unicode.clear();
+        ell.unmapped = true;
+        ell.bbox = [78.0, 200.0, 84.0, 208.0];
+        let mut sub = math_glyph(2, 174.0, 201.5, "", true);
+        sub.unicode.clear();
+        sub.unmapped = true;
+        sub.font_size = 7.0;
+        sub.font_name = "CMMI7".into();
+        sub.matrix = [7.0, 0.0, 0.0, 7.0, 174.0, 201.5];
+        sub.bbox = [174.0, 201.5, 178.0, 207.0];
+        let mut base = math_glyph(3, 168.0, 200.0, "x", true);
+        base.font_name = "CMBX10".into();
+        let text = "索引图层";
+        let count = text.chars().count();
+        let line = Drawn {
+            page: 0,
+            x: 68.0,
+            y: 200.0,
+            size: 9.0,
+            color: Color::black(),
+            cids: vec![1; count],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: text.into(),
+            glyph_ids: vec![10],
+            widths: vec![10.0; count],
+            gaps: vec![0.0; count.saturating_sub(1)],
+            supers: vec![false; count],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![ell, sub, base],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut shifts = Vec::new();
+        carry_unmapped_atoms(&[line], &[200.0], &extraction, &mut shifts);
+        assert_eq!(shifts.len(), 1, "shifts {}", shifts.len());
+        assert_eq!(shifts[0].ids, vec![1]);
+        assert!(shifts[0].dy.abs() < 0.1, "dy {}", shifts[0].dy);
+        let moved_right = 84.0 + shifts[0].dx;
+        assert!(moved_right < 68.0, "ℓ still cuts 索引, right {moved_right}");
+    }
+
+    #[test]
+    fn an_ell_inside_an_equation_stays_with_the_equation() {
+        let mut ell = math_glyph(1, 70.0, 200.0, "", true);
+        ell.unicode.clear();
+        ell.unmapped = true;
+        let mut open = math_glyph(2, 66.0, 200.0, "(", false);
+        open.font_name = "CMR10".into();
+        let mut plus = math_glyph(3, 80.0, 200.0, "+", false);
+        plus.font_name = "CMR10".into();
+        let text = "层过渡之后还有";
+        let count = text.chars().count();
+        let line = Drawn {
+            page: 0,
+            x: 40.0,
+            y: 200.0,
+            size: 9.0,
+            color: Color::black(),
+            cids: vec![1; count],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: text.into(),
+            glyph_ids: vec![10],
+            widths: vec![10.0; count],
+            gaps: vec![0.0; count.saturating_sub(1)],
+            supers: vec![false; count],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![ell, open, plus],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut shifts = Vec::new();
+        carry_unmapped_atoms(&[line], &[200.0], &extraction, &mut shifts);
+        assert!(shifts.is_empty(), "ℓ left (ℓ + 1), shifts {}", shifts.len());
     }
 
     #[test]
