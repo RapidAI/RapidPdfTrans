@@ -147,7 +147,7 @@ An explicit `RPT_TRANSLATOR=maclaw` with no key still reports that `RPT_LLM_API_
 
 **Missing translator.** With nothing configured, RapidPdfTrans probes Google Translate. Export `RPT_LLM_API_KEY` before `rpt translate`, Python `save` / `translate`, C++ `save`, or `rpt_save` to use the LLM gateway instead. A key placed in options JSON is ignored.
 
-**A user face is missing a character.** That character is drawn from the selected family (Noto Serif CJK by default, Noto Sans CJK when the style is `sans`) and the run prints `CJK font … has no glyph for U+….`. A path that is not a file fails before any request: `rpt: CJK font not found: ...`. An unknown `cjk_style` fails the same way: `unknown cjk_style …; use sans or serif`.
+**Tofu (empty boxes).** A custom face with no outline for a character does not leave an empty box when the selected family has that character. The run prints `rpt: warning: CJK font … has no glyph for U+…` and draws it from Noto Serif CJK, or from Noto Sans CJK when the style is `sans`. An empty box means the fallback family lacks the character too. Pass a `.ttf`, `.otf`, or `.ttc` that contains it. `#N` selects one face of a collection. A path that is not a file fails before any request: `rpt: CJK font not found: ...`. An unknown `cjk_style` fails the same way: `unknown cjk_style …; use sans or serif`.
 
 ```bash
 ./target/release/rpt translate paper.pdf --from en --to zh \

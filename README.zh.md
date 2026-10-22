@@ -147,7 +147,7 @@ rpt: translation failed: no translator is configured and Google Translate is unr
 
 **没有翻译器。** 什么都没配置时会探测 Google Translate。要改用 LLM 网关，在 `rpt translate`、Python 的 `save` / `translate`、C++ 的 `save` 或 `rpt_save` 之前导出 `RPT_LLM_API_KEY`。写在选项 JSON 里的密钥会被忽略。
 
-**用户字体缺字。** 缺的字改用当前风格绘制（默认思源宋体，`sans` 时是思源黑体），并打印 `CJK font … has no glyph for U+…`。路径不是文件时，在发出请求之前就失败：`rpt: CJK font not found: ...`。无法识别的 `cjk_style` 同样会失败：`unknown cjk_style …; use sans or serif`。
+**豆腐块（空白方框）。** 自定义字体没有某个字的轮廓时，如果当前字体族有这个字，不会画成空白方框。程序打印 `rpt: warning: CJK font … has no glyph for U+…`，并从思源宋体取这个字；`--cjk-style sans` 时从思源黑体取。空白方框表示回退字体族也没有这个字。把包含该字的 `.ttf`、`.otf` 或 `.ttc` 传给 `--cjk-font`。`#N` 用来选择字体集里的一个面。路径不是文件时，在发出请求之前就失败：`rpt: CJK font not found: ...`。无法识别的 `cjk_style` 同样会失败：`unknown cjk_style …; use sans or serif`。
 
 ```bash
 ./target/release/rpt translate paper.pdf --from en --to zh \
