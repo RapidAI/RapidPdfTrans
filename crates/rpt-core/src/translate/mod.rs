@@ -3086,6 +3086,7 @@ fn gloss_replacement(inner: &str) -> Option<String> {
         || inner.contains("http")
         || inner.contains("www.")
         || inner.to_ascii_lowercase().contains("et al")
+        || inner.contains('⟦')
         || inner
             .chars()
             .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
@@ -4198,6 +4199,23 @@ mod tests {
         assert!(binomial.contains("(k + 1)"), "{binomial}");
         let gloss = repair_body_translation(
             "algorithms (against oblivious adversaries) exist",
+            "算法（against oblivious adversaries）存在",
+        );
+        assert!(!gloss.contains("against"), "{gloss}");
+    }
+
+    #[test]
+    fn a_placeholder_inside_parentheses_is_not_an_english_gloss() {
+        let kept = repair_body_translation(
+            "p(event at time ⟦0⟧ z(t)) = λ(z(t)). The interval ⟦1⟧ follows.",
+            "事件发生率：p(⟦0⟧ z(t) 时刻的事件) = λ(z(t))。⟦1⟧区间由泊松过程给出。",
+        );
+        assert!(kept.contains("⟦0⟧") && kept.contains("z(t)"), "{kept}");
+        assert!(kept.contains("⟦1⟧"), "{kept}");
+        let citation = repair_body_translation("given by (Palm, 1943)", "由(Palm, 1943)给出");
+        assert!(citation.contains("(Palm, 1943)"), "{citation}");
+        let gloss = repair_body_translation(
+            "agents (against oblivious adversaries) exist",
             "算法（against oblivious adversaries）存在",
         );
         assert!(!gloss.contains("against"), "{gloss}");

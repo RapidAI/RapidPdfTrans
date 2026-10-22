@@ -8673,11 +8673,114 @@ fn run_in_label_indent(
 /// space marks the hole. Layout deletes both and draws the original glyphs
 /// into a gap of `formula_hole_width` points. The marker's own font advances
 /// are not the gap: a 9pt subscript must not reserve a full em.
+/// A delimiter-only atom (`|{`) never becomes its own ⟦N⟧ in the source,
+/// because reading order skips fences. The later groups keep their indexes,
+/// so the sentence names ⟦1⟧ and ⟦3⟧ and not ⟦2⟧. Seat the missing atom
+/// beside its neighbors instead of leaving the paragraph in English.
+fn mention_omitted_stacks(text: &str, glyphs: &[&Glyph]) -> String {
+    if !text.contains('⟦') {
+        return text.to_string();
+    }
+    let body = prose_body_size(glyphs).max(1.0);
+    let stacks = placeholder_groups(glyphs, body);
+    if stacks.is_empty() {
+        return text.to_string();
+    }
+    let anchor = |ids: &[u32]| {
+        ids.iter()
+            .filter_map(|id| glyphs.iter().find(|glyph| glyph.id == *id))
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min)
+    };
+    let chars: Vec<char> = text.chars().collect();
+    struct Mark {
+        start: usize,
+        end: usize,
+        x: f32,
+    }
+    let mut marks = Vec::new();
+    let mut mentioned = HashSet::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '⟦' {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        while end < chars.len() && chars[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > index + 1 && end < chars.len() && chars[end] == '⟧' {
+            let number: String = chars[index + 1..end].iter().collect();
+            if let Ok(slot) = number.parse::<usize>() {
+                if slot < stacks.len() {
+                    mentioned.insert(slot);
+                    marks.push(Mark {
+                        start: index,
+                        end: end + 1,
+                        x: anchor(&stacks[slot]),
+                    });
+                }
+            }
+            index = end + 1;
+            continue;
+        }
+        index += 1;
+    }
+    if marks.is_empty() {
+        return text.to_string();
+    }
+    // Only a fence-only atom is absent from the source. A formula the
+    // translation dropped stays unnamed, so lift still refuses that
+    // paragraph instead of pulling a display sum into the line.
+    let fence_only = |ids: &[u32]| {
+        let members: Vec<&Glyph> = ids
+            .iter()
+            .filter_map(|id| glyphs.iter().copied().find(|glyph| glyph.id == *id))
+            .collect();
+        !members.is_empty() && members.iter().all(|glyph| stack_delimiter(glyph))
+    };
+    let mut omitted: Vec<usize> = (0..stacks.len())
+        .filter(|slot| !mentioned.contains(slot) && fence_only(&stacks[*slot]))
+        .collect();
+    if omitted.is_empty() {
+        return text.to_string();
+    }
+    omitted.sort_by(|&left, &right| anchor(&stacks[left]).total_cmp(&anchor(&stacks[right])));
+    let mut inserts: Vec<(usize, f32, String)> = Vec::new();
+    for slot in omitted {
+        let x = anchor(&stacks[slot]);
+        let at = if let Some(mark) = marks
+            .iter()
+            .filter(|mark| mark.x <= x + body * 0.05)
+            .max_by(|left, right| left.x.total_cmp(&right.x))
+        {
+            mark.end
+        } else {
+            marks
+                .iter()
+                .min_by(|left, right| left.x.total_cmp(&right.x))
+                .map(|mark| mark.start)
+                .unwrap_or(0)
+        };
+        inserts.push((at, x, format!("⟦{slot}⟧")));
+    }
+    inserts.sort_by(|left, right| right.0.cmp(&left.0).then(right.1.total_cmp(&left.1)));
+    let mut chars = chars;
+    for (at, _, token) in inserts {
+        let piece: Vec<char> = token.chars().collect();
+        chars.splice(at..at, piece);
+    }
+    chars.into_iter().collect()
+}
+
 fn expand_stack_placeholders(
     text: &str,
     glyphs: &[&Glyph],
     font: &SubsetFont,
 ) -> (String, HashMap<usize, f32>) {
+    let completed = mention_omitted_stacks(text, glyphs);
+    let text = completed.as_str();
     if !text.contains('⟦') || !font.has(0x3000) || !font.has(u32::from(b'0')) {
         return (text.to_string(), HashMap::new());
     }
@@ -24428,6 +24531,89 @@ mod tests {
             matches!(&display.disposition, Disposition::KeptOriginal { reason } if reason == "formula" || reason == "kept"),
             "{:?}",
             display.disposition
+        );
+    }
+
+    #[test]
+    fn an_omitted_fence_stack_is_seated_between_its_neighbors() {
+        let mut glyphs = Vec::new();
+        let mut id = 1u32;
+        let mut x = 72.0f32;
+        for ch in "latent representation ".chars() {
+            glyphs.push(math_glyph(id, x, 500.0, &ch.to_string(), false));
+            id += 1;
+            x += 6.0;
+        }
+        for (at, text) in [
+            (220.0, "z"),
+            (226.0, "t"),
+            (280.0, "|"),
+            (286.0, "{"),
+            (360.0, "x"),
+            (366.0, "i"),
+        ] {
+            glyphs.push(math_glyph(id, at, 500.0, text, true));
+            id += 1;
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let body = prose_body_size(&refs);
+        let groups = placeholder_groups(&refs, body);
+        assert_eq!(groups.len(), 3, "body {body}: {groups:?}");
+        let fence: String = groups[1]
+            .iter()
+            .filter_map(|gid| glyphs.iter().find(|glyph| glyph.id == *gid))
+            .map(|glyph| glyph.unicode.as_str())
+            .collect();
+        assert!(
+            fence.contains('|') && fence.contains('{'),
+            "the middle atom is not the fence: {fence}"
+        );
+        let named = "获得分布 q⟦0⟧ ⟦2⟧ 的参数。";
+        let seated = mention_omitted_stacks(named, &refs);
+        let at0 = seated.find("⟦0⟧").expect(&seated);
+        let at1 = seated.find("⟦1⟧").expect(&seated);
+        let at2 = seated.find("⟦2⟧").expect(&seated);
+        assert!(at0 < at1 && at1 < at2, "{seated}");
+        assert_eq!(mention_omitted_stacks("q⟦0⟧⟦1⟧⟦2⟧", &refs), "q⟦0⟧⟦1⟧⟦2⟧");
+        let mut codes = std::collections::HashMap::new();
+        for (gid, ch) in (1u16..).zip("获得分布q的参数。0123456789　".chars()) {
+            codes.insert(ch as u32, (gid, 1000u16));
+        }
+        let font = crate::font::SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: codes,
+            fallback: None,
+            notice: None,
+        };
+        let (expanded, holes) = expand_stack_placeholders(named, &refs, &font);
+        assert!(!expanded.contains('⟦'), "{expanded}");
+        assert_eq!(holes.len(), 3, "{expanded} {holes:?}");
+        let chars = expanded.chars().count();
+        let line = Drawn {
+            page: 0,
+            x: 72.0,
+            y: 500.0,
+            size: 10.0,
+            color: Color::black(),
+            cids: vec![1; chars],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: expanded.clone(),
+            glyph_ids: Vec::new(),
+            widths: vec![5.0; chars],
+            gaps: vec![0.0; chars.saturating_sub(1)],
+            supers: vec![false; chars],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let mut lines = vec![line];
+        let shifts = lift_stack_placeholders(&mut lines, &refs, &font).expect("lift");
+        assert_eq!(shifts.len(), 3);
+        let painted: String = lines.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            painted.contains('获') && !painted.contains('\u{3000}'),
+            "{painted}"
         );
     }
 
