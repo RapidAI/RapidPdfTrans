@@ -28,10 +28,10 @@ use crate::font::{
 use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 use crate::layout::{
     apply_formula_hole_widths, balance_lines, char_widths, cids_of, cjk_indent_ems,
-    fit_cjk_block_with, heading_level, is_cjk_body, justify_gaps, justify_gaps_holes,
-    justify_wrapped_line, measure, pack_into_slots_holes, pack_narrow_tail_holes,
-    prompt_line_is_full, prompt_line_is_full_holes, scale_for_heading, spread_to_lines, wrap_text,
-    CjkMeasure, HeadingLevel, LineSlots,
+    fit_cjk_block_with, formula_advances, heading_level, is_cjk_body, justify_gaps,
+    justify_gaps_holes, justify_wrapped_line, measure, pack_into_slots_holes,
+    pack_narrow_tail_holes, prompt_line_is_full, prompt_line_is_full_holes, scale_for_heading,
+    spread_to_lines, wrap_text, wrap_text_holes, CjkMeasure, HeadingLevel, LineSlots,
 };
 use crate::pdfutil::{dict_of, object_id_string};
 use crate::translate::{
@@ -14384,6 +14384,33 @@ fn paragraph_chain(pieces: &[BodyPiece], start: usize, used: &HashSet<usize>) ->
                 continue;
             }
         }
+        // `). ResNets [11] add a` is not the last line of its sentence. The
+        // next prose line (`skip-connection that bypasses…`) is a healthy
+        // full-width row, so the fragment test leaves it out and `添加一个`
+        // stays a short ragged line. Pull that continuation until the
+        // sentence ends. A new paragraph (`Growth rate.`) still starts
+        // with a capital and is rejected by `paragraph_continues`.
+        let top = chain
+            .iter()
+            .map(|slot| pieces[*slot].source_top)
+            .fold(pieces[cursor].source_top, f32::max);
+        let bottom = chain
+            .iter()
+            .map(|slot| pieces[*slot].source_bottom)
+            .fold(pieces[cursor].source_bottom, f32::min);
+        if paragraph_continues(&pieces[anchor], &pieces[cursor], column_left, column_right)
+            && !source_ends_sentence(&pieces[anchor].source)
+            && pieces[cursor].column_ok
+            && !pieces[cursor].contents_row
+            && top - bottom < size * 8.0
+        {
+            chain.push(cursor);
+            if pieces[cursor].has_cjk {
+                anchor = cursor;
+            }
+            cursor += 1;
+            continue;
+        }
         break;
     }
     chain
@@ -14526,6 +14553,13 @@ fn source_continues(text: &str) -> bool {
     ch.is_ascii_lowercase() || matches!(ch, ')' | ']' | ',' | ';' | ':' | '-' | '—' | '–' | '−')
 }
 
+fn source_ends_sentence(text: &str) -> bool {
+    text.trim_end()
+        .chars()
+        .next_back()
+        .is_some_and(|ch| matches!(ch, '.' | '!' | '?' | '。' | '！' | '？'))
+}
+
 fn source_starts_paragraph(text: &str) -> bool {
     let text = text.trim_start();
     let text = text.trim_start_matches(['(', '[', '"', '\'', '“', '‘']);
@@ -14585,7 +14619,8 @@ fn reflow_paragraph_chain(
     let host = chain.iter().find(|index| pieces[**index].has_cjk)?;
     let host = &pieces[*host];
     let font = embedded_font(&host.resource, embedded)?;
-    let (text, jobs) = join_reflow_text(drawn, pieces, chain, extraction, shifts, font);
+    let (text, flags, jobs, holes) =
+        join_reflow_text(drawn, pieces, chain, extraction, shifts, font);
     if text.chars().filter(|ch| is_cjk_body(*ch)).count() < 4 {
         return None;
     }
@@ -14623,9 +14658,10 @@ fn reflow_paragraph_chain(
     if indent < size * 0.4 || indent > size * 2.6 {
         indent = 0.0;
     }
-    let mut lines = wrap_text(&text, size, (width - indent).max(size), width, font)?;
+    let mut lines = wrap_text_holes(&text, size, (width - indent).max(size), width, font, &holes)?;
     attach_leading_closers(&mut lines);
     lines.retain(|line| !plain_trim(line).is_empty());
+    let line_flags = distribute_flags(&text, &flags, &lines);
     if lines.len() < 2 && chain.len() < 2 {
         return None;
     }
@@ -14675,7 +14711,7 @@ fn reflow_paragraph_chain(
         .map(|(index, line)| {
             let line_width = if index == 0 { width - indent } else { width };
             let mut justify = justify_wrapped_line(&lines, index);
-            if !prompt_line_is_full(line, size, line_width, font) {
+            if !prompt_line_is_full_holes(line, size, line_width, font, &holes) {
                 justify = false;
             }
             let x = if index == 0 {
@@ -14683,21 +14719,33 @@ fn reflow_paragraph_chain(
             } else {
                 column_left
             };
+            let flags = line_flags.get(index).map(Vec::as_slice).unwrap_or(&[]);
+            let (text, supers, widths, gaps) =
+                commit_formula_line(line, flags, size, font, &holes, line_width, justify);
+            let subscript = supers.iter().any(|flag| *flag);
             Drawn {
                 page: host.page,
                 x,
                 y: baselines[index],
                 size,
                 color: host.color.clone(),
-                cids: cids_of(line, font),
+                cids: cids_of(&text, font),
                 resource: host.resource.clone(),
                 skew: host.skew,
-                widths: char_widths(line, size, font),
-                gaps: justify_gaps(line, size, line_width, font, justify),
-                text: line.clone(),
-                supers: vec![false; line.chars().count()],
-                sup_scale: host.sup_scale,
-                sup_rise: host.sup_rise,
+                widths,
+                gaps,
+                text,
+                supers,
+                sup_scale: if subscript {
+                    SUBSCRIPT_SCALE
+                } else {
+                    host.sup_scale
+                },
+                sup_rise: if subscript {
+                    SUBSCRIPT_RISE
+                } else {
+                    host.sup_rise
+                },
                 glyph_ids: ids.clone(),
             }
         })
@@ -14711,6 +14759,186 @@ fn reflow_paragraph_chain(
     })
 }
 
+/// A lowered digit drawn back into `x0`. `show_text` multiplies the rise by
+/// the line size, so -0.32em sits the digit under the baseline, and 0.62
+/// keeps it smaller than the letter it belongs to.
+const SUBSCRIPT_SCALE: f32 = 0.62;
+const SUBSCRIPT_RISE: f32 = -0.32;
+
+struct ReflowBuf {
+    text: String,
+    flags: Vec<bool>,
+    jobs: Vec<HoleJob>,
+    holes: HashMap<usize, f32>,
+}
+
+impl ReflowBuf {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            flags: Vec::new(),
+            jobs: Vec::new(),
+            holes: HashMap::new(),
+        }
+    }
+
+    fn push(&mut self, ch: char, flag: bool) {
+        self.text.push(ch);
+        self.flags.push(flag);
+    }
+
+    fn push_str(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.push(ch, false);
+        }
+    }
+
+    /// `NN　` is the same marker the body layout uses, so wrapping and
+    /// justification measure the formula instead of a run of em squares.
+    fn emit_hole(&mut self, width: f32, job: HoleJob) {
+        let index = self.holes.len();
+        let width = width.max(0.4);
+        if index <= 99 {
+            self.holes.insert(index, width);
+            self.push_str(&format!("{index:02}\u{3000}"));
+        } else {
+            self.push('\u{3000}', false);
+        }
+        self.jobs.push(job);
+    }
+
+    fn finish(self) -> (String, Vec<bool>, Vec<HoleJob>, HashMap<usize, f32>) {
+        let (text, flags) = collapse_ascii_spaces(&self.text, &self.flags);
+        (text, flags, self.jobs, self.holes)
+    }
+}
+
+/// `c⟦0⟧onnect` leaves the spaces around the dropped letter, so the line
+/// reads `网络  连接`. One ASCII space is the gap. Ideographic spaces are
+/// formula holes and stay.
+fn collapse_ascii_spaces(text: &str, flags: &[bool]) -> (String, Vec<bool>) {
+    let mut out = String::new();
+    let mut out_flags = Vec::new();
+    let mut prev_space = false;
+    for (index, ch) in text.chars().enumerate() {
+        let space = ch == ' ';
+        if space && prev_space {
+            continue;
+        }
+        prev_space = space;
+        out.push(ch);
+        out_flags.push(flags.get(index).copied().unwrap_or(false));
+    }
+    (out, out_flags)
+}
+
+fn distribute_flags(source: &str, flags: &[bool], lines: &[String]) -> Vec<Vec<bool>> {
+    let src: Vec<char> = source.chars().collect();
+    let mut cursor = 0usize;
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut line_flags = Vec::new();
+        for ch in line.chars() {
+            while cursor < src.len() && src[cursor] != ch {
+                let skipped = src[cursor];
+                if skipped.is_whitespace() && skipped != '\u{3000}' {
+                    cursor += 1;
+                    continue;
+                }
+                break;
+            }
+            if cursor < src.len() && src[cursor] == ch {
+                line_flags.push(flags.get(cursor).copied().unwrap_or(false));
+                cursor += 1;
+            } else {
+                line_flags.push(false);
+            }
+        }
+        out.push(line_flags);
+    }
+    out
+}
+
+/// Drop the two index digits. The ideographic space keeps the font's own
+/// advance, and the gap after it is the rest of the formula width, so the
+/// next character starts where `char_origin` says it does. Justification
+/// gaps were computed on the marked line, whose measure already included
+/// that width.
+fn commit_formula_line(
+    line: &str,
+    flags: &[bool],
+    size: f32,
+    font: &SubsetFont,
+    holes: &HashMap<usize, f32>,
+    line_width: f32,
+    justify: bool,
+) -> (String, Vec<bool>, Vec<f32>, Vec<f32>) {
+    let chars: Vec<char> = line.chars().collect();
+    let advances = formula_advances(line, size, font, holes);
+    let gaps = justify_gaps_holes(line, size, line_width, font, justify, holes);
+    let mut out = String::new();
+    let mut out_flags = Vec::new();
+    let mut widths = Vec::new();
+    let mut out_gaps = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some(end) = formula_marker_end(&chars, index) {
+            let id = (chars[index] as u8 - b'0') as usize * 10
+                + (chars[index + 1] as u8 - b'0') as usize;
+            let reserved = holes.get(&id).copied().unwrap_or(size).max(0.4);
+            let natural = char_widths("\u{3000}", size, font)
+                .first()
+                .copied()
+                .unwrap_or(size)
+                .max(0.01);
+            let justify_after = gaps.get(end - 1).copied().unwrap_or(0.0);
+            out.push('\u{3000}');
+            out_flags.push(false);
+            widths.push(natural);
+            out_gaps.push((reserved - natural) + justify_after);
+            index = end;
+            continue;
+        }
+        let mut width = advances.get(index).copied().unwrap_or(size);
+        let flag = flags.get(index).copied().unwrap_or(false);
+        if flag {
+            width *= SUBSCRIPT_SCALE;
+        }
+        out.push(chars[index]);
+        out_flags.push(flag);
+        widths.push(width);
+        out_gaps.push(gaps.get(index).copied().unwrap_or(0.0));
+        index += 1;
+    }
+    if !out_gaps.is_empty() {
+        out_gaps.pop();
+    }
+    while out_gaps.len() >= widths.len() && !out_gaps.is_empty() {
+        out_gaps.pop();
+    }
+    while out_gaps.len() + 1 < widths.len() {
+        out_gaps.push(0.0);
+    }
+    (out, out_flags, widths, out_gaps)
+}
+
+fn formula_marker_end(chars: &[char], index: usize) -> Option<usize> {
+    if index + 2 >= chars.len() {
+        return None;
+    }
+    if !(chars[index].is_ascii_digit()
+        && chars[index + 1].is_ascii_digit()
+        && chars[index + 2] == '\u{3000}')
+    {
+        return None;
+    }
+    let mut end = index + 3;
+    while end < chars.len() && chars[end] == '\u{3000}' {
+        end += 1;
+    }
+    Some(end)
+}
+
 /// Piece texts plus a hole for each formula that the segmenter left in the
 /// gap. `x = H(x` sits between `layer transition:` and `). ResNets`, and
 /// `(ℓ+1)` sits on the next line before `layer [16]`. Joining the words
@@ -14722,9 +14950,8 @@ fn join_reflow_text(
     extraction: &Extraction,
     shifts: &[ListingShift],
     font: &SubsetFont,
-) -> (String, Vec<HoleJob>) {
-    let mut text = String::new();
-    let mut jobs = Vec::new();
+) -> (String, Vec<bool>, Vec<HoleJob>, HashMap<usize, f32>) {
+    let mut buf = ReflowBuf::new();
     let seated = seated_shift_ids(drawn, pieces, chain, shifts);
     let column_left = chain
         .iter()
@@ -14754,19 +14981,21 @@ fn join_reflow_text(
                 &owned,
                 column_left,
             ) {
-                let spaces = hole_spaces(cluster.right - cluster.left, size, font);
-                text.push_str(&"\u{3000}".repeat(spaces));
-                jobs.push(HoleJob::Place {
-                    ids: cluster.ids,
-                    left: cluster.left,
-                    anchor_y: cluster.anchor_y,
-                });
+                buf.emit_hole(
+                    packed_ids_width(&cluster.ids, extraction, size),
+                    HoleJob::Place {
+                        ids: cluster.ids,
+                        left: cluster.left,
+                        anchor_y: cluster.anchor_y,
+                    },
+                );
             }
         }
-        append_piece_text(&mut text, &mut jobs, drawn, piece, extraction, shifts, font);
+        append_piece_text(&mut buf, drawn, piece, extraction, shifts, font);
     }
-    let jobs = coalesce_hole_jobs(&text, jobs);
-    (text, jobs)
+    let text = buf.text.clone();
+    buf.jobs = coalesce_hole_jobs(&text, buf.jobs);
+    buf.finish()
 }
 
 /// Adjacent holes are one run of ideographic spaces, so two jobs would
@@ -14816,17 +15045,155 @@ fn coalesce_hole_jobs(text: &str, jobs: Vec<HoleJob>) -> Vec<HoleJob> {
 struct MathCluster {
     ids: Vec<u32>,
     left: f32,
-    right: f32,
     anchor_y: f32,
 }
 
-fn hole_spaces(width: f32, size: f32, font: &SubsetFont) -> usize {
-    let em = font
-        .em_advance(u32::from('\u{3000}'))
-        .map(|advance| advance * size)
-        .unwrap_or(size)
-        .max(size * 0.5);
-    ((width / em).ceil() as usize).clamp(1, 18)
+fn packed_ids_width(ids: &[u32], extraction: &Extraction, body: f32) -> f32 {
+    let by_id = glyph_index(&extraction.glyphs);
+    let glyphs = ids_glyphs(ids, extraction, &by_id);
+    pack_formula_atoms(&glyphs, body).0
+}
+
+fn preserve_hole_width(
+    line: &Drawn,
+    old_x: f32,
+    extraction: &Extraction,
+    shifts: &[ListingShift],
+    fallback: f32,
+) -> f32 {
+    let Some(shift) = shifts
+        .iter()
+        .find(|shift| preserve_shift_matches(shift, line.y, old_x, extraction, &HashSet::new()))
+    else {
+        return fallback.max(line.size.max(1.0) * 0.35);
+    };
+    packed_ids_width(&shift.ids, extraction, line.size.max(1.0))
+}
+
+struct PackedAtom {
+    ids: Vec<u32>,
+    source_left: f32,
+    anchor_y: f32,
+    offset: f32,
+}
+
+/// Bases keep their scripts. Atoms are then set with a small gap, so
+/// `x_ℓ = H_ℓ(x_{ℓ−1})` does not keep the loose source spacing and the
+/// subscript no longer runs into `)`.
+fn pack_formula_atoms(glyphs: &[&Glyph], body: f32) -> (f32, Vec<PackedAtom>) {
+    let body = body.max(1.0);
+    if glyphs.is_empty() {
+        return (body * 0.35, Vec::new());
+    }
+    let mut order: Vec<&Glyph> = glyphs.to_vec();
+    order.sort_by(|left, right| {
+        left.matrix[4]
+            .total_cmp(&right.matrix[4])
+            .then(right.font_size.total_cmp(&left.font_size))
+    });
+    let max_size = order
+        .iter()
+        .map(|glyph| glyph.font_size)
+        .fold(body, f32::max);
+    let base_cut = max_size * 0.84;
+    let mut groups: Vec<Vec<&Glyph>> = Vec::new();
+    let mut base_slots: Vec<usize> = Vec::new();
+    for glyph in &order {
+        if glyph.font_size > base_cut {
+            base_slots.push(groups.len());
+            groups.push(vec![*glyph]);
+        }
+    }
+    if groups.is_empty() {
+        groups.push(order.clone());
+    } else {
+        for glyph in &order {
+            if glyph.font_size > base_cut {
+                continue;
+            }
+            let mut best: Option<(usize, f32)> = None;
+            for slot in &base_slots {
+                let base = groups[*slot][0];
+                let dx = glyph.matrix[4] - base.matrix[4];
+                let dy = (glyph.matrix[5] - base.matrix[5]).abs();
+                if !(-0.40..=1.80).contains(&(dx / body)) || dy > body * 0.90 {
+                    continue;
+                }
+                let dist = dx.abs() + dy;
+                if best.is_none_or(|(_, have)| dist < have) {
+                    best = Some((*slot, dist));
+                }
+            }
+            if let Some((slot, _)) = best {
+                groups[slot].push(*glyph);
+            } else {
+                groups.push(vec![*glyph]);
+            }
+        }
+    }
+    groups.sort_by(|left, right| atom_ink_left(left).total_cmp(&atom_ink_left(right)));
+    let mut atoms = Vec::with_capacity(groups.len());
+    let mut cursor = 0.0f32;
+    for (index, group) in groups.iter().enumerate() {
+        let source_left = atom_ink_left(group);
+        let source_right = group
+            .iter()
+            .map(|glyph| atom_ink_right(glyph))
+            .fold(source_left, f32::max);
+        let width = (source_right - source_left).max(body * 0.2);
+        let anchor = group
+            .iter()
+            .copied()
+            .max_by(|left, right| {
+                left.font_size
+                    .total_cmp(&right.font_size)
+                    .then(left.matrix[4].total_cmp(&right.matrix[4]))
+            })
+            .unwrap_or(group[0]);
+        atoms.push(PackedAtom {
+            ids: group.iter().map(|glyph| glyph.id).collect(),
+            source_left,
+            anchor_y: anchor.matrix[5],
+            offset: cursor,
+        });
+        cursor += width;
+        if index + 1 < groups.len() {
+            let gap = if atom_is_fence(group) || atom_is_fence(&groups[index + 1]) {
+                body * 0.04
+            } else {
+                body * 0.16
+            };
+            cursor += gap;
+        }
+    }
+    let total = (cursor + 0.3).max(body * 0.35);
+    (total, atoms)
+}
+
+fn atom_ink_left(glyphs: &[&Glyph]) -> f32 {
+    glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[4].min(glyph.bbox[0]).min(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min)
+}
+
+fn atom_ink_right(glyph: &Glyph) -> f32 {
+    glyph_ink_right(glyph).max(glyph_paint_right(glyph))
+}
+
+fn atom_is_fence(glyphs: &[&Glyph]) -> bool {
+    let mut seen = false;
+    for glyph in glyphs {
+        let text = glyph.unicode.trim();
+        if text.is_empty() {
+            continue;
+        }
+        seen = true;
+        if !matches!(text, "(" | ")" | "[" | "]" | "{" | "}" | "（" | "）") {
+            return false;
+        }
+    }
+    seen
 }
 
 fn seated_shift_ids(
@@ -14856,8 +15223,7 @@ fn shift_sits_on_line(shift: &ListingShift, line: &Drawn) -> bool {
 }
 
 fn append_piece_text(
-    text: &mut String,
-    jobs: &mut Vec<HoleJob>,
+    buf: &mut ReflowBuf,
     drawn: &[Drawn],
     piece: &BodyPiece,
     extraction: &Extraction,
@@ -14876,7 +15242,7 @@ fn append_piece_text(
             row.push(lines[index]);
             index += 1;
         }
-        append_baseline_row(text, jobs, &row, extraction, shifts, font);
+        append_baseline_row(buf, &row, extraction, shifts, font);
     }
 }
 
@@ -14884,8 +15250,7 @@ fn append_piece_text(
 /// under `x` must go back into `x0`, and `连接` / `的输出` keep the formula
 /// that sits in the gap between them.
 fn append_baseline_row(
-    text: &mut String,
-    jobs: &mut Vec<HoleJob>,
+    buf: &mut ReflowBuf,
     row: &[&Drawn],
     extraction: &Extraction,
     shifts: &[ListingShift],
@@ -14893,7 +15258,7 @@ fn append_baseline_row(
 ) {
     let mut row = row.to_vec();
     row.sort_by(|left, right| left.x.total_cmp(&right.x));
-    let mut nested: Vec<(usize, usize, String)> = Vec::new();
+    let mut nested: Vec<(usize, usize, String, bool)> = Vec::new();
     let mut slices: Vec<&Drawn> = Vec::new();
     for line in &row {
         let host = slices
@@ -14907,7 +15272,12 @@ fn append_baseline_row(
                 .iter()
                 .position(|item| std::ptr::eq(*item, host))
                 .unwrap_or(0);
-            nested.push((slot, at, plain_trim(&line.text).to_string()));
+            nested.push((
+                slot,
+                at,
+                plain_trim(&line.text).to_string(),
+                lowered_digit(host, line),
+            ));
         } else if !plain_trim(&line.text).is_empty() {
             slices.push(line);
         }
@@ -14915,16 +15285,19 @@ fn append_baseline_row(
     let mut claimed = HashSet::new();
     for (slice_index, line) in slices.iter().enumerate() {
         let mut chars: Vec<char> = plain_trim(&line.text).chars().collect();
-        let mut extras: Vec<(usize, String)> = nested
+        let mut char_flags = vec![false; chars.len()];
+        let mut extras: Vec<(usize, String, bool)> = nested
             .iter()
-            .filter(|(slot, _, _)| *slot == slice_index)
-            .map(|(_, at, extra)| (*at, extra.clone()))
+            .filter(|(slot, _, _, _)| *slot == slice_index)
+            .map(|(_, at, extra, lowered)| (*at, extra.clone(), *lowered))
             .collect();
         extras.sort_by_key(|left| std::cmp::Reverse(left.0));
-        for (at, extra) in extras {
+        for (at, extra, lowered) in extras {
             let piece: Vec<char> = extra.chars().collect();
+            let piece_flags = vec![lowered; piece.len()];
             let at = at.min(chars.len());
             chars.splice(at..at, piece);
+            char_flags.splice(at..at, piece_flags);
         }
         if slice_index > 0 {
             let previous = slices[slice_index - 1];
@@ -14932,7 +15305,6 @@ fn append_baseline_row(
             let gap_left = draw_ink_right(previous);
             let gap_right = line.x;
             if gap_right > gap_left + size * 0.25 {
-                let width = gap_right - gap_left;
                 let mut ids = Vec::new();
                 let mut anchor_y = line.y;
                 let mut source_left = gap_left;
@@ -14959,25 +15331,26 @@ fn append_baseline_row(
                     claimed.insert(shift.ids.clone());
                 }
                 if !ids.is_empty() {
-                    text.push_str(&"\u{3000}".repeat(hole_spaces(width.max(size), size, font)));
-                    jobs.push(HoleJob::Place {
-                        ids,
-                        left: source_left,
-                        anchor_y,
-                    });
+                    buf.emit_hole(
+                        packed_ids_width(&ids, extraction, size),
+                        HoleJob::Place {
+                            ids,
+                            left: source_left,
+                            anchor_y,
+                        },
+                    );
                 }
             }
         }
-        let piece_text: String = chars.iter().collect();
-        if piece_text.is_empty() {
+        if chars.is_empty() {
             continue;
         }
-        if let (Some(prev), Some(next)) = (text.chars().last(), piece_text.chars().next()) {
+        if let (Some(prev), Some(next)) = (buf.text.chars().next_back(), chars.first().copied()) {
             if prev.is_ascii_alphanumeric() && next.is_ascii_alphanumeric() && prev != '\u{3000}' {
-                text.push(' ');
+                buf.push(' ', false);
             }
         }
-        let mut inserts = shift_inserts(line, &chars, extraction, shifts, font);
+        let mut inserts = shift_inserts(line, &chars, extraction, shifts);
         inserts.retain(|(_, _, job)| match job {
             HoleJob::Place { ids, .. } => !claimed
                 .iter()
@@ -14986,14 +15359,49 @@ fn append_baseline_row(
         });
         inserts.sort_by_key(|(at, _, _)| *at);
         let mut cursor = 0usize;
-        for (at, spaces, job) in inserts {
-            append_chars_with_holes(text, jobs, line, &chars, cursor, at);
-            text.push_str(&"\u{3000}".repeat(spaces));
-            jobs.push(job);
+        for (at, _width, job) in inserts {
+            append_chars_with_holes(
+                buf,
+                line,
+                &chars,
+                &char_flags,
+                cursor,
+                at,
+                extraction,
+                shifts,
+                font,
+            );
+            let HoleJob::Place { ids, .. } = &job else {
+                buf.jobs.push(job);
+                cursor = at;
+                continue;
+            };
+            let width = packed_ids_width(ids, extraction, line.size.max(1.0));
+            buf.emit_hole(width, job);
             cursor = at;
         }
-        append_chars_with_holes(text, jobs, line, &chars, cursor, chars.len());
+        append_chars_with_holes(
+            buf,
+            line,
+            &chars,
+            &char_flags,
+            cursor,
+            chars.len(),
+            extraction,
+            shifts,
+            font,
+        );
     }
+}
+
+/// A digit drawn under its letter. Splicing it as a body character paints
+/// `x0` with a full-size zero on the baseline.
+fn lowered_digit(host: &Drawn, extra: &Drawn) -> bool {
+    let text = plain_trim(&extra.text);
+    let count = text.chars().count();
+    (1..=2).contains(&count)
+        && text.chars().all(|ch| ch.is_ascii_digit())
+        && host.y - extra.y > host.size.max(1.0) * 0.12
 }
 
 fn line_nests_in(host: &Drawn, extra: &Drawn) -> bool {
@@ -15030,7 +15438,6 @@ fn shift_inserts(
     chars: &[char],
     extraction: &Extraction,
     shifts: &[ListingShift],
-    font: &SubsetFont,
 ) -> Vec<(usize, usize, HoleJob)> {
     if chars.is_empty() || line.widths.len() != chars.len() {
         return Vec::new();
@@ -15078,7 +15485,7 @@ fn shift_inserts(
             .unwrap_or(line.y - shift.dy);
         inserts.push((
             at,
-            hole_spaces((right - left).max(size * 0.6), size, font),
+            0,
             HoleJob::Place {
                 ids: shift.ids.clone(),
                 left: source_left,
@@ -15150,29 +15557,43 @@ fn hole_run_start(chars: &[char], run: usize) -> Option<usize> {
 }
 
 fn append_chars_with_holes(
-    text: &mut String,
-    jobs: &mut Vec<HoleJob>,
+    buf: &mut ReflowBuf,
     line: &Drawn,
     chars: &[char],
+    flags: &[bool],
     start: usize,
     end: usize,
+    extraction: &Extraction,
+    shifts: &[ListingShift],
+    font: &SubsetFont,
 ) {
     let mut cursor = start;
     while cursor < end {
         if chars[cursor] != '\u{3000}' {
-            text.push(chars[cursor]);
+            buf.push(chars[cursor], flags.get(cursor).copied().unwrap_or(false));
             cursor += 1;
             continue;
         }
         let hole = cursor;
+        let mut run = 0usize;
         while cursor < end && chars[cursor] == '\u{3000}' {
-            text.push('\u{3000}');
+            run += 1;
             cursor += 1;
         }
-        jobs.push(HoleJob::Preserve {
-            old_y: line.y,
-            old_x: hole_origin(line, chars, hole),
-        });
+        let old_x = hole_origin(line, chars, hole);
+        let natural = char_widths("\u{3000}", line.size.max(1.0), font)
+            .first()
+            .copied()
+            .unwrap_or(line.size)
+            .max(0.4);
+        let fallback = natural * run as f32;
+        buf.emit_hole(
+            preserve_hole_width(line, old_x, extraction, shifts, fallback),
+            HoleJob::Preserve {
+                old_y: line.y,
+                old_x,
+            },
+        );
     }
 }
 
@@ -15245,7 +15666,6 @@ fn gap_math_clusters(
         built.push(MathCluster {
             ids: cluster.iter().map(|glyph| glyph.id).collect(),
             left,
-            right,
             anchor_y: anchor.matrix[5],
         });
     }
@@ -15335,7 +15755,7 @@ fn apply_reflow_holes(
     shifts: &mut Vec<ListingShift>,
     extraction: &Extraction,
 ) {
-    let marks = hole_marks(lines);
+    let marks = hole_slots(lines);
     if jobs.is_empty() || marks.len() != jobs.len() {
         if std::env::var_os("RPT_REFLOW_DEBUG").is_some() && !jobs.is_empty() {
             eprintln!(
@@ -15389,27 +15809,43 @@ fn apply_reflow_holes(
                 left,
                 anchor_y,
             } => {
-                let dx = x - left;
-                let dy = y - anchor_y;
-                if let Some(index) = shifts.iter().position(|shift| {
-                    !shift.ids.is_empty() && shift.ids.iter().all(|id| ids.contains(id))
-                }) {
-                    shifts[index].dx = dx;
-                    shifts[index].dy = dy;
-                    shifts[index].host_y = y;
-                    for id in ids {
-                        if !shifts[index].ids.contains(id) {
-                            shifts[index].ids.push(*id);
+                let by_id = glyph_index(&extraction.glyphs);
+                let glyphs = ids_glyphs(ids, extraction, &by_id);
+                let body = glyphs
+                    .iter()
+                    .map(|glyph| glyph.font_size)
+                    .fold(1.0f32, f32::max)
+                    .max(1.0);
+                let (_reserved, atoms) = pack_formula_atoms(&glyphs, body);
+                let idset: HashSet<u32> = ids.iter().copied().collect();
+                for shift in shifts.iter_mut() {
+                    shift.ids.retain(|id| !idset.contains(id));
+                }
+                shifts.retain(|shift| !shift.ids.is_empty());
+                let page = lines
+                    .iter()
+                    .find(|line| (line.y - y).abs() < 0.4)
+                    .map(|line| line.page);
+                if let Some(page) = page {
+                    if atoms.is_empty() {
+                        shifts.push(ListingShift {
+                            page,
+                            ids: ids.clone(),
+                            dx: x - left,
+                            dy: y - anchor_y,
+                            host_y: y,
+                        });
+                    } else {
+                        for atom in &atoms {
+                            shifts.push(ListingShift {
+                                page,
+                                ids: atom.ids.clone(),
+                                dx: (x + atom.offset) - atom.source_left,
+                                dy: y - atom.anchor_y,
+                                host_y: y,
+                            });
                         }
                     }
-                } else if let Some(line) = lines.iter().find(|line| (line.y - y).abs() < 0.4) {
-                    shifts.push(ListingShift {
-                        page: line.page,
-                        ids: ids.clone(),
-                        dx,
-                        dy,
-                        host_y: y,
-                    });
                 }
                 if let Some(line) = lines.iter_mut().find(|line| (line.y - y).abs() < 0.4) {
                     for id in ids {
@@ -15531,6 +15967,23 @@ fn shift_anchor<'a>(shift: &ListingShift, extraction: &'a Extraction) -> Option<
                 .total_cmp(&right.font_size)
                 .then(right.matrix[4].total_cmp(&left.matrix[4]))
         })
+}
+
+/// One mark per ideographic space. Adjacent formula holes are two marks;
+/// a run used to be one, which dropped the second atom.
+fn hole_slots(lines: &[Drawn]) -> Vec<(f32, f32)> {
+    let mut ordered: Vec<&Drawn> = lines.iter().collect();
+    ordered.sort_by(|left, right| right.y.total_cmp(&left.y).then(left.x.total_cmp(&right.x)));
+    let mut marks = Vec::new();
+    for line in ordered {
+        let chars: Vec<char> = line.text.chars().collect();
+        for (index, ch) in chars.iter().enumerate() {
+            if *ch == '\u{3000}' {
+                marks.push((line.y, char_origin(line, &chars, index)));
+            }
+        }
+    }
+    marks
 }
 
 fn hole_marks(lines: &[Drawn]) -> Vec<(f32, f32)> {
@@ -24231,6 +24684,11 @@ mod tests {
             map.insert(ch as u32, (id, advance));
         }
         map.entry(' ' as u32).or_insert((900, 300));
+        map.entry(0x3000).or_insert((890, 1000));
+        for digit in b'0'..=b'9' {
+            map.entry(u32::from(digit))
+                .or_insert((800 + u16::from(digit - b'0'), 500));
+        }
         SubsetFont {
             bytes: Vec::new(),
             units_per_em: 1000,
@@ -24444,7 +24902,7 @@ mod tests {
                 412.0,
                 9.0,
                 Color::black(),
-                "ResNet传统卷积网络连接的输出",
+                "ResNet传统卷积网络  连接的输出",
                 &font,
                 "SONG",
                 0.0,
@@ -24531,6 +24989,14 @@ mod tests {
                 .iter()
                 .any(|line| line.text.contains("特征映射") && !line.text.contains("层作为")),
             "the next column was pulled into the paragraph: {:?}",
+            drawn
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            drawn.iter().all(|line| !line.text.contains("  ")),
+            "a split word left a double space: {:?}",
             drawn
                 .iter()
                 .map(|line| line.text.as_str())
@@ -24870,19 +25336,26 @@ mod tests {
             "the formula hole is not before the closer: {}",
             host.text
         );
+        let on_host: Vec<_> = shifts
+            .iter()
+            .filter(|shift| (shift.host_y - host.y).abs() < 0.4)
+            .collect();
+        let x_shift = on_host.iter().find(|shift| shift.ids.contains(&10));
+        let h_shift = on_host.iter().find(|shift| shift.ids.contains(&12));
         assert!(
-            shifts.iter().any(|shift| {
-                shift.ids.contains(&10)
-                    && shift.ids.contains(&12)
-                    && (shift.host_y - host.y).abs() < 0.4
-                    && (122.0 + shift.dx) > host.x
-                    && (122.0 + shift.dx) < host.x + 220.0
-            }),
-            "the formula stayed on the old baseline: {:?}",
+            x_shift.is_some_and(|shift| !shift.ids.contains(&12))
+                && h_shift.is_some_and(|shift| !shift.ids.contains(&10)),
+            "the formula stayed one rigid cluster: {:?}",
             shifts
                 .iter()
                 .map(|shift| (shift.ids.clone(), shift.dx, shift.dy, shift.host_y))
                 .collect::<Vec<_>>()
+        );
+        let x_at = 122.0 + x_shift.expect("x").dx;
+        let h_at = 154.0 + h_shift.expect("H").dx;
+        assert!(
+            x_at > host.x && x_at < host.x + 220.0 && h_at > x_at + 8.0 && h_at - x_at < 24.0,
+            "atoms overlap or kept the source gap: x {x_at} H {h_at}"
         );
         assert!(
             drawn.iter().all(|line| (line.size - 9.0).abs() < 0.05),
@@ -24978,6 +25451,144 @@ mod tests {
         assert!(
             !joined.contains("组成0") && !joined.contains("成0"),
             "the subscript landed at the end of the line: {joined}"
+        );
+        let host = drawn
+            .iter()
+            .find(|line| line.text.contains("x0"))
+            .expect("x0 line");
+        let chars: Vec<char> = host.text.chars().collect();
+        let zero = chars.iter().position(|ch| *ch == '0').expect("0");
+        assert!(
+            host.supers.get(zero).copied().unwrap_or(false),
+            "the zero is a full-size character: {:?}",
+            host.supers
+        );
+        assert!(
+            host.sup_rise < 0.0,
+            "the zero was not lowered: {}",
+            host.sup_rise
+        );
+        assert!(
+            host.widths[zero] < host.size * 0.5 * 0.9,
+            "the zero kept a body advance: {}",
+            host.widths[zero]
+        );
+    }
+
+    #[test]
+    fn a_script_widens_its_atom_past_the_base() {
+        let base = ink_glyph(1, 100.0, 100.0, 10.0, "x");
+        let mut sub = ink_glyph(2, 104.0, 97.0, 6.0, "1");
+        sub.bbox = [104.0, 94.0, 112.0, 100.0];
+        let (width, atoms) = pack_formula_atoms(&[&base, &sub], 10.0);
+        assert_eq!(atoms.len(), 1, "the subscript was split off the base");
+        assert!(width > 12.0, "the hole ignored the subscript ink: {width}");
+    }
+
+    #[test]
+    fn a_short_formula_line_continues_the_sentence() {
+        let glyphs = vec![
+            wide_glyph(
+                1,
+                50.0,
+                140.0,
+                286.0,
+                9.0,
+                "ResNets. Traditional convolutional networks connect",
+            ),
+            wide_glyph(2, 50.0, 128.0, 112.0, 9.0, "layer transition:"),
+            wide_glyph(3, 190.0, 128.0, 286.0, 9.0, "). ResNets [11] add a"),
+            wide_glyph(
+                4,
+                50.0,
+                116.0,
+                286.0,
+                9.0,
+                "skip-connection that bypasses the layer.",
+            ),
+        ];
+        let extraction = page_extraction(glyphs);
+        let by_id = glyph_index(&extraction.glyphs);
+        let text = "层过渡：）。添加一个使用恒等函数绕过这一层ResNet传统卷积网络连接";
+        let font = song_font(text);
+        let mut drawn = vec![
+            drawn_line(
+                0,
+                50.0,
+                140.0,
+                9.0,
+                Color::black(),
+                "ResNet传统卷积网络连接",
+                &font,
+                "SONG",
+                0.0,
+                &[1],
+                false,
+                236.0,
+            ),
+            drawn_line(
+                0,
+                50.0,
+                128.0,
+                9.0,
+                Color::black(),
+                "层过渡：",
+                &font,
+                "SONG",
+                0.0,
+                &[2],
+                false,
+                62.0,
+            ),
+            drawn_line(
+                0,
+                190.0,
+                128.0,
+                7.5,
+                Color::black(),
+                "）。添加一个",
+                &font,
+                "SONG",
+                0.0,
+                &[3],
+                false,
+                90.0,
+            ),
+            drawn_line(
+                0,
+                50.0,
+                116.0,
+                9.0,
+                Color::black(),
+                "使用恒等函数绕过这一层",
+                &font,
+                "SONG",
+                0.0,
+                &[4],
+                false,
+                236.0,
+            ),
+        ];
+        let embedded = vec![("SONG".into(), font)];
+        let mut shifts = Vec::new();
+        reflow_split_paragraphs(&mut drawn, &extraction, &by_id, &embedded, &mut shifts);
+        let line = drawn
+            .iter()
+            .find(|line| line.text.contains("添加一个"))
+            .expect("添加一个");
+        let advance = line.widths.iter().sum::<f32>() + line.gaps.iter().sum::<f32>();
+        assert!(
+            line.text.contains("使用") || (236.0 - advance).abs() < 20.0,
+            "the formula line stayed short: advance {advance} {:?}",
+            line.text
+        );
+        assert!(
+            drawn.iter().any(|line| line.text.contains("使用恒等")),
+            "the continuation was dropped: {:?}",
+            drawn
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
