@@ -215,6 +215,7 @@ impl Progress {
         }
     }
 
+    #[cfg(test)]
     pub fn watchdog_messages(&self) -> Vec<String> {
         self.watchdog
             .lock()
