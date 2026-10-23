@@ -300,6 +300,50 @@ Glyph records include the page, Unicode (which may be several characters, or emp
 
 `rpt-bench` scores a translated PDF on dropped lines, placeholder and formula retention, overflow, style, non-text SSIM, and reference-operator byte identity. `python3 corpus/bench/run.py` records the identity ceiling (each CI PDF compared with itself) in `corpus/benchmarks/`. BabelDOC and PDFMathTranslate, when installed, should share `corpus/bench/identity_server.py` so the translator is the same. Metric definitions are in `corpus/benchmarks/README.md`.
 
+### Live run against BabelDOC 0.6.4
+
+Recorded 2026-10-23T01:01:19Z. rpt 0.1.4 is commit `e7df215`. rpt 0.1.5 is commit `59ff1ce`. BabelDOC is the PyPI release 0.6.4 (`bitstring` 4.4.0; 5.0.0 fails to import `BitStream`). Gateway `https://hub.mypapers.top/api/llm/v1`, model `auto`, concurrency 4. Peak RSS is `/usr/bin/time -v` maximum resident set size. Coverage is `rpt-bench pair --render-pages 0` line coverage: a source text line whose box still meets an output glyph. The last column is rpt's own coverage object.
+
+| PDF | engine | wall | peak RSS | output | coverage | rpt coverage |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| arXiv 2610.02163, 11 pages, 285,600 bytes | rpt 0.1.4 | 627.7s | 431.7 MB | 1,120,581 | 0.8672 | incomplete, 102 unresolved |
+| arXiv 2610.02163, 11 pages, 285,600 bytes | rpt 0.1.5 | 328.6s | 189.5 MB | 1,084,324 | 0.8772 | incomplete, 102 real misses, 4,364 intentional |
+| arXiv 2610.02163, 11 pages, 285,600 bytes | BabelDOC 0.6.4 | 431.2s | 2,126.2 MB | 829,495 | 0.9311 | — |
+| arXiv 2610.03665, 16 pages, 607,541 bytes | rpt 0.1.4 | 798.1s | 579.4 MB | 1,729,640 | 0.8999 | incomplete, 786 unresolved |
+| arXiv 2610.03665, 16 pages, 607,541 bytes | rpt 0.1.5 | 676.2s | 203.0 MB | 1,707,061 | 0.9011 | incomplete, 786 real misses, 17,683 intentional |
+| arXiv 2610.03665, 16 pages, 607,541 bytes | BabelDOC 0.6.4 | 620.9s | 1,984.7 MB | 1,308,117 | 0.9523 | — |
+| large-30p, 30 pages, 43,418,334 bytes | rpt 0.1.4 | 96.7s | 1,656.4 MB | 44,165,179 | 1.0000 | complete, 0 unresolved |
+| large-30p, 30 pages, 43,418,334 bytes | rpt 0.1.5 | 403.6s | 267.1 MB | 44,181,722 | 1.0000 | complete, 0 real misses, 69,750 intentional |
+| large-30p, 30 pages, 43,418,334 bytes | BabelDOC 0.6.4 | 503.2s | 2,442.4 MB | 753,874 | 1.0000 | — |
+
+`large-30p` is produced by `corpus/bench/prod_bench.py` (sha256 `3ee761fab420a44b1f83c0ed603eaec4378b4c41fba38444386b6f2bc4d7dd28`). Each page is letter size, one uncompressed 800×600 RGB image, and the same 40 Helvetica lines. The original ~45 MB production PDF was not in this checkout; this file is that shape (the earlier copy was 43,414,698 bytes). Both rpt versions made 4 model calls and 725 in-process cache hits on it. User CPU time was 86.0s for 0.1.4 and 87.5s for 0.1.5. The 0.1.5 process ran at 21% CPU for 403.6s, so the extra wall time was waiting. BabelDOC's written mono PDF for that file is 753,874 bytes with 30 pages and 30 images; an intermediate mono file in its work directory was 44,076,339 bytes. `babeldoc --warmup` had already downloaded fonts and the layout model, so that download is outside the timed runs.
+
+```bash
+sudo apt-get install -y time   # provides /usr/bin/time
+python3 -m venv .venv
+.venv/bin/pip install 'BabelDOC==0.6.4' 'bitstring>=4.3,<5'
+.venv/bin/babeldoc --warmup
+
+git worktree add /tmp/rpt-014 e7df215
+cargo build -p rpt-cli --release --manifest-path /tmp/rpt-014/Cargo.toml
+cargo build -p rpt-cli -p rpt-qa --release --bin rpt --bin rpt-bench
+
+export RPT_LLM_API_KEY=...
+export RPT_LLM_BASE_URL=https://hub.mypapers.top/api/llm/v1
+export RPT_LLM_MODEL=auto
+unset RPT_TRANSLATE_CHECKPOINT RPT_CORPUS_DIR RPT_FONT_DIR RPT_CJK_FONT RPT_TRANSLATOR RPT_GOOGLE_API_KEY
+
+python3 corpus/bench/prod_bench.py \
+  --rpt-014 /tmp/rpt-014/target/release/rpt \
+  --rpt-015 target/release/rpt \
+  --rpt-bench target/release/rpt-bench \
+  --babeldoc .venv/bin/babeldoc \
+  --jobs 4 \
+  --work /tmp/rpt-prod-bench
+```
+
+rpt is `--jobs 4`, default batch size 8, replace mode. BabelDOC is `--qps 4 --pool-max-workers 4 --ignore-cache --no-dual --no-auto-extract-glossary --watermark-output-mode no_watermark --primary-font-family serif`. The script writes `table.md` and `results.jsonl` under `--work`. The API key stays in the environment.
+
 ## Roadmap
 
 1. **M1.** Content-stream interpreter, glyph coverage, pluggable translator, C / Python / Go / C++ skeletons, CLI.

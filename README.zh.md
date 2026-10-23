@@ -287,6 +287,50 @@ export RPT_LLM_API_KEY=...
 
 `rpt-bench` 用掉字、占位符与公式保留、溢出、样式、非文字区域 SSIM，以及参考文献操作符是否逐字节相同来给译文 PDF 打分。`python3 corpus/bench/run.py` 把 CI 子集的恒等对照写到 `corpus/benchmarks/`。指标说明见 `corpus/benchmarks/README.md`。
 
+### 与 BabelDOC 0.6.4 的实测
+
+记录时间 2026-10-23T01:01:19Z。rpt 0.1.4 是提交 `e7df215`，rpt 0.1.5 是提交 `59ff1ce`。BabelDOC 是 PyPI 上的 0.6.4（`bitstring` 4.4.0；5.0.0 无法导入 `BitStream`）。网关 `https://hub.mypapers.top/api/llm/v1`，模型 `auto`，并发 4。峰值 RSS 来自 `/usr/bin/time -v` 的 maximum resident set size。覆盖率是 `rpt-bench pair --render-pages 0` 的行覆盖：源文字行的框仍然碰到输出字形。最后一列是 rpt 自己的覆盖报告。
+
+| PDF | 引擎 | 耗时 | 峰值 RSS | 输出 | 覆盖率 | rpt 覆盖 |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| arXiv 2610.02163，11 页，285,600 字节 | rpt 0.1.4 | 627.7s | 431.7 MB | 1,120,581 | 0.8672 | 不完整，102 未解决 |
+| arXiv 2610.02163，11 页，285,600 字节 | rpt 0.1.5 | 328.6s | 189.5 MB | 1,084,324 | 0.8772 | 不完整，102 处真实漏译，4,364 处有意保留 |
+| arXiv 2610.02163，11 页，285,600 字节 | BabelDOC 0.6.4 | 431.2s | 2,126.2 MB | 829,495 | 0.9311 | — |
+| arXiv 2610.03665，16 页，607,541 字节 | rpt 0.1.4 | 798.1s | 579.4 MB | 1,729,640 | 0.8999 | 不完整，786 未解决 |
+| arXiv 2610.03665，16 页，607,541 字节 | rpt 0.1.5 | 676.2s | 203.0 MB | 1,707,061 | 0.9011 | 不完整，786 处真实漏译，17,683 处有意保留 |
+| arXiv 2610.03665，16 页，607,541 字节 | BabelDOC 0.6.4 | 620.9s | 1,984.7 MB | 1,308,117 | 0.9523 | — |
+| large-30p，30 页，43,418,334 字节 | rpt 0.1.4 | 96.7s | 1,656.4 MB | 44,165,179 | 1.0000 | 完整，0 未解决 |
+| large-30p，30 页，43,418,334 字节 | rpt 0.1.5 | 403.6s | 267.1 MB | 44,181,722 | 1.0000 | 完整，0 处真实漏译，69,750 处有意保留 |
+| large-30p，30 页，43,418,334 字节 | BabelDOC 0.6.4 | 503.2s | 2,442.4 MB | 753,874 | 1.0000 | — |
+
+`large-30p` 由 `corpus/bench/prod_bench.py` 生成（sha256 `3ee761fab420a44b1f83c0ed603eaec4378b4c41fba38444386b6f2bc4d7dd28`）。每页是 letter，一张未压缩的 800×600 RGB 图，外加同样的 40 行 Helvetica。原来那份约 45 MB 的生产 PDF 不在这份检出里；这个文件是同一形状（先前那份是 43,414,698 字节）。两个 rpt 版本对它都是 4 次模型调用、725 次进程内缓存命中。用户态 CPU 时间分别是 86.0s（0.1.4）和 87.5s（0.1.5）。0.1.5 在 403.6s 里 CPU 占用 21%，多出来的墙钟时间是在等待。BabelDOC 写出的单语 PDF 是 753,874 字节，仍有 30 页和 30 张图；它工作目录里的中间单语文件是 44,076,339 字节。计时前已经跑过 `babeldoc --warmup`，字体和版面模型的下载不在计时里。
+
+```bash
+sudo apt-get install -y time   # 提供 /usr/bin/time
+python3 -m venv .venv
+.venv/bin/pip install 'BabelDOC==0.6.4' 'bitstring>=4.3,<5'
+.venv/bin/babeldoc --warmup
+
+git worktree add /tmp/rpt-014 e7df215
+cargo build -p rpt-cli --release --manifest-path /tmp/rpt-014/Cargo.toml
+cargo build -p rpt-cli -p rpt-qa --release --bin rpt --bin rpt-bench
+
+export RPT_LLM_API_KEY=...
+export RPT_LLM_BASE_URL=https://hub.mypapers.top/api/llm/v1
+export RPT_LLM_MODEL=auto
+unset RPT_TRANSLATE_CHECKPOINT RPT_CORPUS_DIR RPT_FONT_DIR RPT_CJK_FONT RPT_TRANSLATOR RPT_GOOGLE_API_KEY
+
+python3 corpus/bench/prod_bench.py \
+  --rpt-014 /tmp/rpt-014/target/release/rpt \
+  --rpt-015 target/release/rpt \
+  --rpt-bench target/release/rpt-bench \
+  --babeldoc .venv/bin/babeldoc \
+  --jobs 4 \
+  --work /tmp/rpt-prod-bench
+```
+
+rpt 使用 `--jobs 4`、默认批大小 8、替换模式。BabelDOC 使用 `--qps 4 --pool-max-workers 4 --ignore-cache --no-dual --no-auto-extract-glossary --watermark-output-mode no_watermark --primary-font-family serif`。脚本把 `table.md` 和 `results.jsonl` 写到 `--work`。密钥只留在环境变量里。
+
 `corpus/manifest.json` 记录真实论文和可再分发图书的直接下载 URL、来源、许可证、sha256、大小和特征标签。`python3 corpus/fetch.py` 把它们下载到被 git 忽略的缓存，这些文件不进仓库。例外是 `corpus/ci/`：九篇 CC BY 4.0 论文，每篇不到 700 KB，URL 和许可证写在 `corpus/ci/manifest.json`，CI 直接用它们。`testdata/hello.pdf` 由 `cargo run -p rpt-core --example hello_pdf` 生成，只用于单元测试，不是语料。`rpt-qa` 对每份文件做抽取和字形覆盖率检查，用 Poppler 对文字，并对一份逐字节相同的副本做渲染对比（整页 SSIM，以及去掉字形框之后的非文字区域 SSIM）。lopdf 另存是另一次结构往返，会改写文件，报告里单独列出。CI 只跑标记了 `ci: true` 的小子集。全量语料在夜间的 `Corpus fidelity` 工作流。说明见 `corpus/README.md`。
 
 ## 里程碑
