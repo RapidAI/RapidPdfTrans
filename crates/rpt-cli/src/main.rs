@@ -83,7 +83,7 @@ enum Command {
         /// Translate text inside figures. By default only the figure caption is translated.
         #[arg(long)]
         translate_figures: bool,
-        /// Translate table cells and headers. By default only the table caption is translated.
+        /// Translate table cells as well as headers. By default the caption and the column header are translated, and cells stay in the source language.
         #[arg(long)]
         translate_tables: bool,
         /// CJK family: `serif` (default, Noto Serif CJK SC) or `sans` (Noto Sans CJK SC).

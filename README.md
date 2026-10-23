@@ -118,7 +118,7 @@ Flags that exist on `rpt translate`:
 | `--progress text` | Stderr progress: `text` (default), `json` (one object per line), or `off`. Lines name the phase (`connect`, `recv-body`, `retry`) and the segment. A `waiting Ns` line is a stall. A `watchdog: aborting segment …` line names a batch that passed the deadline. Rewrite prints `rewriting` every five seconds, then `wrote`. |
 | `--translate-references` | Translate the bibliography. Default is to keep it. |
 | `--translate-figures` | Translate text inside figures. Default is the caption only. |
-| `--translate-tables` | Translate table cells and headers. Default is the caption only. |
+| `--translate-tables` | Translate table cells as well as headers. Default translates the caption and the column header; cells stay in the source language. |
 | `--cjk-style` | `serif` (default, Songti) or `sans` (Heiti). Also `RPT_CJK_STYLE` and JSON `cjk_style`. |
 | `--cjk-font`, `--cjk-bold-font`, `--cjk-sans` | TTF, OTF, or TTC. These paths win over `--cjk-style`. `#N` selects a collection face. |
 | `--cjk-size-scale`, `--cjk-leading` | Default `0.90` and `1.60`. |

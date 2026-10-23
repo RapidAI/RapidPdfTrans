@@ -118,7 +118,7 @@ export RPT_LLM_API_KEY=...
 | `--progress text` | 进度写到标准错误：`text`（默认）、`json`（每行一个对象）或 `off`。每行带阶段（`connect`、`recv-body`、`retry`）和段落。`waiting Ns` 是停住。`watchdog: aborting segment …` 点名已经超过截止时间的那一批。重写阶段每五秒打一行 `rewriting`，写完打 `wrote`。 |
 | `--translate-references` | 翻译参考文献。默认保留原文。 |
 | `--translate-figures` | 翻译图内文字。默认只翻译图注。 |
-| `--translate-tables` | 翻译单元格和表头。默认只翻译表注。 |
+| `--translate-tables` | 连单元格一起翻译。默认翻译表注和列表头，单元格保留原文。 |
 | `--cjk-style` | `serif`（默认，宋体）或 `sans`（黑体）。也可写成 `RPT_CJK_STYLE` 和 JSON `cjk_style`。 |
 | `--cjk-font`、`--cjk-bold-font`、`--cjk-sans` | TTF、OTF 或 TTC。这些路径优先于 `--cjk-style`。`#N` 选择字体集里的面。 |
 | `--cjk-size-scale`、`--cjk-leading` | 默认 `0.90` 和 `1.60`。 |

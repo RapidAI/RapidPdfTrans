@@ -4,8 +4,8 @@
 //! not call a model. A segment is one paragraph: visual lines in the same
 //! column, joined so a later rewrite can reflow the block inside that box.
 //! Superscripts and footnote marks are attached to the line they sit on.
-//! Figure interiors and table cells are not segments; only their captions
-//! are. Unmapped glyphs stay out of every segment.
+//! Figure interiors and table cells are not segments. A table caption and
+//! its column header are. Unmapped glyphs stay out of every segment.
 
 use crate::geom::Rect;
 use crate::glyph::{Glyph, PageInfo, PaintedRegion};
@@ -615,7 +615,9 @@ enum RunFace {
 
 fn run_face(name: &str) -> Option<RunFace> {
     let style = crate::font::face_style(name);
-    if style.bold {
+    // NimbusRom-Medi is LaTeX bold. It is not FaceStyle::bold, so a running
+    // header in that face is not enlarged, but a run-in heading still splits.
+    if style.bold || crate::font::medium_weight(name) {
         Some(RunFace::Bold)
     } else if style.italic {
         Some(RunFace::Italic)
@@ -669,6 +671,14 @@ fn letter_count(glyph: &Glyph) -> usize {
         .chars()
         .filter(|ch| ch.is_ascii_alphabetic())
         .count()
+}
+
+/// `SIAM Publications, 1993.` names the year in the first few words. A year
+/// later in the line (`Qwen Team, 2026` or `Lloyd, 1982`) is part of the
+/// sentence that follows a run-in heading.
+fn year_in_prefix(text: &str, chars: usize) -> bool {
+    let prefix: String = text.chars().take(chars).collect();
+    has_year(&prefix)
 }
 
 fn has_year(text: &str) -> bool {
@@ -747,7 +757,10 @@ fn styled_run_in<'a>(line: &VisualLine<'a>) -> Option<(Vec<&'a Glyph>, Vec<&'a G
     let label = line_text(&ordered[..split]);
     let tail = line_text(&ordered[split..]);
     let tail_letters = tail.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    if tail_letters < 8 || has_year(&tail) {
+    // An italic title plus `SIAM Publications, 1993.` is one citation. A bold
+    // run-in still splits when the sentence names a year (`K-Means: The
+    // K-means problem (Lloyd, 1982) is`).
+    if tail_letters < 8 || (kind == RunFace::Italic && year_in_prefix(&tail, 26)) {
         return None;
     }
     let end = label_terminator(&label)?;
@@ -1736,6 +1749,9 @@ fn assemble(
     // as a caption, and a boxed contents list looks like a figure. The
     // title is still translated. Leaders and page numbers stay.
     release_toc_titles(&lines, &mut kept);
+    // Column headers are the same kind of label as the caption. Numeric
+    // cells stay in the source language.
+    release_table_headers(&lines, &mut kept);
     kept.extend(margin_stamps(&lines));
     release_hyphen_continuations(&lines, &mut kept);
     // A theorem frame is a box, so a short wrap (`version. We write…`,
@@ -3695,6 +3711,218 @@ fn release_toc_titles(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
         return;
     }
     kept.retain(|(id, reason)| !(titles.contains(id) && (reason == "table" || reason == "figure")));
+}
+
+/// The column-header band of a grid. The caption may sit above the grid or
+/// under it, so the band is the top of the table, not whichever row is
+/// nearest the caption. A wrapped header (`SWE-bench` / `Verified (%)`) is
+/// a few points apart. The next body row is a full leading further down, and
+/// a prose cell (`diver watch was the Seamaster.`) is not a header.
+fn release_table_headers(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
+    let table_ids: std::collections::HashSet<u32> = kept
+        .iter()
+        .filter(|(_, reason)| reason == "table")
+        .map(|(id, _)| *id)
+        .collect();
+    // A ruled grid is also a painted figure. Its column titles are kept as
+    // figure labels, while the cells stay table rows. Both have to be visible
+    // to the header walk, or `Method` never leaves the grid.
+    let figure_ids: std::collections::HashSet<u32> = kept
+        .iter()
+        .filter(|(_, reason)| reason == "figure")
+        .map(|(id, _)| *id)
+        .collect();
+    if table_ids.is_empty() {
+        return;
+    }
+    let mut release = std::collections::HashSet::new();
+    for (caption_index, caption) in lines.iter().enumerate() {
+        if caption_kind(&caption.text) != Some("table") {
+            continue;
+        }
+        let near_table = |line: &VisualLine<'_>| {
+            lines.iter().any(|other| {
+                other.page == line.page
+                    && other
+                        .glyphs
+                        .iter()
+                        .any(|glyph| table_ids.contains(&glyph.id))
+                    && (other.y - line.y).abs() <= line.size.max(other.size).max(1.0) * 4.5
+            })
+        };
+        let mut candidates: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(index, line)| {
+                *index != caption_index
+                    && line.page == caption.page
+                    && span_overlaps(caption.left - 24.0, caption.right + 280.0, line)
+                    && line.glyphs.iter().any(|glyph| {
+                        table_ids.contains(&glyph.id)
+                            || (figure_ids.contains(&glyph.id) && near_table(line))
+                    })
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if candidates.is_empty() {
+            continue;
+        }
+        let below = candidates
+            .iter()
+            .filter(|index| lines[**index].y < caption.y - 0.8)
+            .count();
+        let downward = below * 2 >= candidates.len();
+        candidates.retain(|index| {
+            if downward {
+                lines[*index].y < caption.y - 0.8
+            } else {
+                lines[*index].y > caption.y + 0.8
+            }
+        });
+        candidates.sort_by(|&left, &right| lines[right].y.total_cmp(&lines[left].y));
+        let mut rows: Vec<Vec<usize>> = Vec::new();
+        for index in candidates {
+            let line = &lines[index];
+            if let Some(row) = rows.last_mut() {
+                let anchor = &lines[row[0]];
+                let size = anchor.size.max(line.size).max(1.0);
+                if (anchor.y - line.y).abs() <= size * 0.55 {
+                    row.push(index);
+                    continue;
+                }
+            }
+            rows.push(vec![index]);
+        }
+        if rows.is_empty() {
+            continue;
+        }
+        // The grid is one stack of rows. Another table on this page is a
+        // wider gap away, and its header belongs to its own caption.
+        let nearest = rows
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                (row_y(left, lines) - caption.y)
+                    .abs()
+                    .total_cmp(&(row_y(right, lines) - caption.y).abs())
+            })
+            .map(|(index, _)| index)
+            .unwrap();
+        let mut lo = nearest;
+        let mut hi = nearest;
+        while lo > 0 && rows_share_grid(&rows[lo - 1], &rows[lo], lines) {
+            lo -= 1;
+        }
+        while hi + 1 < rows.len() && rows_share_grid(&rows[hi], &rows[hi + 1], lines) {
+            hi += 1;
+        }
+        let block = &rows[lo..=hi];
+        let mut start = 0usize;
+        while start < block.len() && !header_row(&block[start], lines) {
+            if numeric_row(&block[start], lines) {
+                break;
+            }
+            let next = start + 1;
+            if next >= block.len() || !tight_header_gap(&block[start], &block[next], lines) {
+                break;
+            }
+            start += 1;
+        }
+        let mut end = start;
+        while end < block.len() && header_row(&block[end], lines) {
+            if end > start && !tight_header_gap(&block[end - 1], &block[end], lines) {
+                // `ImageNet-100` then `Method` / `Obj`, and the next row is
+                // `4.5`. A word cell such as `no` or `Base` is not that row.
+                let size = row_size(&block[end], lines);
+                let gap = (row_y(&block[end - 1], lines) - row_y(&block[end], lines)).abs();
+                let body_follows = end + 1 < block.len() && numeric_row(&block[end + 1], lines);
+                if gap <= size * 1.75 && body_follows {
+                    end += 1;
+                }
+                break;
+            }
+            end += 1;
+        }
+        for row in &block[start..end] {
+            for index in row {
+                for glyph in &lines[*index].glyphs {
+                    if table_ids.contains(&glyph.id) || figure_ids.contains(&glyph.id) {
+                        release.insert(glyph.id);
+                    }
+                }
+            }
+        }
+    }
+    if release.is_empty() {
+        return;
+    }
+    kept.retain(|(id, reason)| {
+        !(release.contains(id) && (reason == "table" || reason == "figure"))
+    });
+}
+
+fn row_y(row: &[usize], lines: &[VisualLine<'_>]) -> f32 {
+    row.iter().map(|&index| lines[index].y).sum::<f32>() / row.len() as f32
+}
+
+fn row_size(row: &[usize], lines: &[VisualLine<'_>]) -> f32 {
+    row.iter()
+        .map(|&index| lines[index].size)
+        .fold(1.0f32, f32::max)
+        .max(1.0)
+}
+
+fn rows_share_grid(upper: &[usize], lower: &[usize], lines: &[VisualLine<'_>]) -> bool {
+    let size = row_size(upper, lines).max(row_size(lower, lines));
+    (row_y(upper, lines) - row_y(lower, lines)).abs() <= size * 2.4
+}
+
+fn tight_header_gap(upper: &[usize], lower: &[usize], lines: &[VisualLine<'_>]) -> bool {
+    let size = row_size(lower, lines);
+    (row_y(upper, lines) - row_y(lower, lines)).abs() <= size * 0.95
+}
+
+struct RowShape {
+    letters: usize,
+    digits: usize,
+    longest: usize,
+    words: usize,
+}
+
+fn row_shape(row: &[usize], lines: &[VisualLine<'_>]) -> RowShape {
+    let mut letters = 0usize;
+    let mut digits = 0usize;
+    let mut longest = 0usize;
+    let mut words = 0usize;
+    for index in row {
+        let mut line_letters = 0usize;
+        for ch in lines[*index].text.chars() {
+            if ch.is_ascii_alphabetic() {
+                letters += 1;
+                line_letters += 1;
+            } else if ch.is_ascii_digit() {
+                digits += 1;
+            }
+        }
+        longest = longest.max(line_letters);
+        words = words.max(lines[*index].text.split_whitespace().count());
+    }
+    RowShape {
+        letters,
+        digits,
+        longest,
+        words,
+    }
+}
+
+fn numeric_row(row: &[usize], lines: &[VisualLine<'_>]) -> bool {
+    let shape = row_shape(row, lines);
+    shape.digits >= 2 && shape.digits * 2 >= shape.letters
+}
+
+fn header_row(row: &[usize], lines: &[VisualLine<'_>]) -> bool {
+    let shape = row_shape(row, lines);
+    !numeric_row(row, lines) && shape.letters >= 2 && shape.longest <= 48 && shape.words < 5
 }
 
 fn x_overlaps(anchor: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
@@ -7754,6 +7982,7 @@ mod tests {
             ),
             header,
             score,
+            wide(5, 72.0, 580.0, "30.4", 28.0, 10.0),
             wide(4, 72.0, 500.0, body, 360.0, 10.0),
         ];
         let seg = segment_with(&glyphs, &SegmentFlags::default());
@@ -7763,11 +7992,17 @@ mod tests {
             "{texts:?}"
         );
         assert!(
-            !texts.iter().any(|text| text.contains("Method")),
-            "{texts:?}"
+            texts.iter().any(|text| text.contains("Method")),
+            "column header should be translated: {texts:?}"
+        );
+        assert!(texts.iter().any(|text| text.contains("Score")), "{texts:?}");
+        assert!(
+            !texts.iter().any(|text| text.contains("30.4")),
+            "a numeric cell stays in the source language: {texts:?}"
         );
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
-        assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
+        assert!(kept.contains(&5), "{:?}", seg.kept);
+        assert!(!kept.contains(&1) && !kept.contains(&2), "{:?}", seg.kept);
         assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
     }
 
@@ -7847,11 +8082,21 @@ mod tests {
             seg.kept
         );
         assert!(
-            seg.kept
+            !seg.kept
                 .iter()
-                .any(|(id, reason)| *id == 5 && reason == "table"),
-            "header should stay a cell: {:?}",
+                .any(|(id, reason)| (*id == 5 || *id == 6) && reason == "table"),
+            "column header should be translated: {:?}",
             seg.kept
+        );
+        assert!(
+            seg.segments
+                .iter()
+                .any(|item| item.text.contains("Layer Type")),
+            "header missing: {:?}",
+            seg.segments
+                .iter()
+                .map(|item| &item.text)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -7917,8 +8162,11 @@ mod tests {
             captions[0].text
         );
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Layer")),
+            "column header stayed in the grid: {texts:?}"
+        );
         for cell in [
-            "Layer",
             "512",
             "(A)",
             "positional embedding instead of sinusoids",
@@ -7968,9 +8216,12 @@ mod tests {
         );
         assert!(table4.contains("of WSJ"), "table 4 tail missing: {table4}");
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.clone()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Layer Type")),
+            "column header stayed in the grid"
+        );
         for cell in [
             "positional embedding instead of sinusoids",
-            "Layer Type",
             "Self-Attention (restricted)",
             "Vinyals & Kaiser el al.",
             "300K",
@@ -8151,7 +8402,26 @@ mod tests {
                         .fold(0.0f32, f32::max);
                     (right.min(cap_right) - left.max(cap_left)).max(0.0) > 8.0
                 });
-                if under {
+                if !under {
+                    continue;
+                }
+                // A column header is translated with the caption. A numeric
+                // cell, a complexity (`O(n)`), a prose cell, or a one-word
+                // body label (`yes`, `Ours`) is not.
+                let words = trimmed.split_whitespace().count();
+                let letters = trimmed
+                    .chars()
+                    .filter(|ch| ch.is_ascii_alphabetic())
+                    .count();
+                let digits = trimmed.chars().filter(|ch| ch.is_ascii_digit()).count();
+                let numeric_cell = digits >= 2 && digits * 2 >= letters && !trimmed.contains('×');
+                let prose_cell = words >= 5 || letters >= 24;
+                let formula_cell = trimmed.trim_start().starts_with("O(");
+                let token = trimmed
+                    .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                    .to_ascii_lowercase();
+                let body_label = matches!(token.as_str(), "yes" | "no" | "ours" | "step" | "base");
+                if numeric_cell || prose_cell || formula_cell || body_label {
                     leaked.push(format!(
                         "{} p{} {}",
                         path.file_name().unwrap_or_default().to_string_lossy(),
@@ -8668,8 +8938,8 @@ mod tests {
             "{texts:?}"
         );
         assert!(
-            !texts.iter().any(|text| text.contains("Method")),
-            "{texts:?}"
+            texts.iter().any(|text| text.contains("Method")),
+            "column header stayed in the grid: {texts:?}"
         );
         let reason = |id: u32| -> Vec<&str> {
             seg.kept
@@ -8692,8 +8962,12 @@ mod tests {
                 reason(id)
             );
         }
-        assert_eq!(reason(13), vec!["table"]);
-        assert_eq!(reason(14), vec!["table"]);
+        assert!(
+            reason(13).is_empty() && reason(14).is_empty(),
+            "column header stayed a cell: {:?} {:?}",
+            reason(13),
+            reason(14)
+        );
     }
 
     #[test]
@@ -8815,6 +9089,7 @@ mod tests {
         );
         paint(&mut glyphs, "Method", 90.0, 590.0);
         paint(&mut glyphs, "Score", 240.0, 590.0);
+        paint(&mut glyphs, "30.4", 240.0, 572.0);
         let seg = segment_with(&glyphs, &SegmentFlags::default());
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
         assert!(
@@ -8822,9 +9097,10 @@ mod tests {
             "{texts:?}"
         );
         assert!(
-            !texts.iter().any(|text| text.contains("Method")),
-            "{texts:?}"
+            texts.iter().any(|text| text.contains("Method")),
+            "column header stayed in the grid: {texts:?}"
         );
+        assert!(!texts.iter().any(|text| text.contains("30.4")), "{texts:?}");
         assert!(seg.kept.iter().any(|(_, reason)| reason == "table"));
         assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
     }
@@ -8984,7 +9260,54 @@ mod tests {
                 && glyph.matrix[4] < 140.0
         });
         let cell = cell.expect("table header");
-        assert!(kept.contains(&cell.id), "table header should stay original");
+        assert!(
+            !kept.contains(&cell.id),
+            "column header should be translated"
+        );
+        let placed = segment_placed(
+            &extraction.glyphs,
+            &SegmentFlags::default(),
+            &extraction.regions,
+            &extraction.pages,
+        );
+        let reasons: Vec<_> = placed
+            .kept
+            .iter()
+            .filter(|(id, _)| *id == cell.id)
+            .map(|(_, reason)| reason.clone())
+            .collect();
+        let in_seg = placed
+            .segments
+            .iter()
+            .any(|item| item.glyph_ids.contains(&cell.id));
+        let numeric = extraction.glyphs.iter().find(|glyph| {
+            glyph.page_index == 5
+                && glyph.unicode.chars().any(|ch| ch.is_ascii_digit())
+                && glyph.matrix[5] < 630.0
+                && glyph.matrix[5] > 560.0
+                && glyph.font_name.contains("Regu")
+        });
+        let numeric = numeric.expect("table cell");
+        assert!(
+            kept.contains(&numeric.id),
+            "a numeric cell stays original: {} @ {:.1}",
+            numeric.unicode,
+            numeric.matrix[5]
+        );
+        let num_reasons: Vec<_> = placed
+            .kept
+            .iter()
+            .filter(|(id, _)| *id == numeric.id)
+            .map(|(_, reason)| reason.as_str())
+            .collect();
+        assert!(
+            in_seg && reasons.is_empty(),
+            "a ruled column header stayed a figure label: reasons={reasons:?} in_segment={in_seg}"
+        );
+        assert!(
+            placed.kept.iter().any(|(id, _)| *id == numeric.id),
+            "a numeric cell was released with the header: {num_reasons:?}"
+        );
         assert!(seg.kept.iter().any(|(_, reason)| reason == "figure"));
         assert!(seg.kept.iter().any(|(_, reason)| reason == "table"));
         let author = seg
@@ -9018,6 +9341,190 @@ mod tests {
             .glyph_ids
             .iter()
             .all(|id| !margin_ids.contains(id)));
+        assert!(
+            seg.segments.iter().any(|item| {
+                item.page_index == 5
+                    && item.text.contains("outperforms")
+                    && !item.text.contains("Under the")
+            }),
+            "medium run-in heading should split from the body"
+        );
+        assert!(
+            seg.segments.iter().any(|item| {
+                item.page_index == 5
+                    && item.text.contains("judge-guided")
+                    && !item.text.contains("exceeds")
+            }),
+            "the second medium run-in should split from the body"
+        );
+    }
+
+    #[test]
+    fn corpus_bold_run_ins_split_from_the_following_body() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/ci");
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("pdf") {
+                continue;
+            }
+            let doc = crate::extract::PdfDocument::open(&path).unwrap();
+            let extraction = doc.extract_with(&crate::extract::ExtractOptions {
+                max_pages: Some(8),
+                ..crate::extract::ExtractOptions::default()
+            });
+            let seg = segment_glyphs(&extraction.glyphs);
+            let by_id: std::collections::HashMap<u32, &crate::glyph::Glyph> = extraction
+                .glyphs
+                .iter()
+                .map(|glyph| (glyph.id, glyph))
+                .collect();
+            for item in &seg {
+                if let Some(detail) = mixed_bold_run_in(&item.glyph_ids, &by_id) {
+                    panic!(
+                        "{} page {} keeps a bold run-in with the body: {detail}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        item.page_index + 1
+                    );
+                }
+            }
+        }
+    }
+
+    fn mixed_bold_run_in(
+        ids: &[u32],
+        by_id: &std::collections::HashMap<u32, &crate::glyph::Glyph>,
+    ) -> Option<String> {
+        let mut glyphs: Vec<&crate::glyph::Glyph> =
+            ids.iter().filter_map(|id| by_id.get(id).copied()).collect();
+        if glyphs.len() < 6 {
+            return None;
+        }
+        glyphs.sort_by(|left, right| {
+            right.matrix[5]
+                .total_cmp(&left.matrix[5])
+                .then(left.matrix[4].total_cmp(&right.matrix[4]))
+        });
+        let top = glyphs[0].matrix[5];
+        let size = glyphs
+            .iter()
+            .map(|glyph| glyph.font_size)
+            .fold(1.0f32, f32::max)
+            .max(1.0);
+        let line: Vec<&crate::glyph::Glyph> = glyphs
+            .iter()
+            .copied()
+            .filter(|glyph| (glyph.matrix[5] - top).abs() <= size * 0.45)
+            .collect();
+        let mut label = String::new();
+        let mut saw_emphasis = false;
+        let mut body_letters = 0usize;
+        let mut tail_upper = false;
+        for glyph in &line {
+            let letters = glyph
+                .unicode
+                .chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .count();
+            let math = glyph.font_name.to_ascii_uppercase().contains("CMMI")
+                || glyph.font_name.to_ascii_uppercase().contains("CMSY")
+                || glyph.font_name.to_ascii_uppercase().contains("MATH");
+            if letters == 0 || math {
+                // A period later in the sentence is not the heading's stop.
+                // A math letter (`k` after `cond.:`) is not the next sentence.
+                if body_letters == 0 && !math {
+                    label.push_str(&glyph.unicode);
+                }
+                continue;
+            }
+            let style = crate::font::face_style(&glyph.font_name);
+            let emphasis = style.bold || crate::font::medium_weight(&glyph.font_name);
+            if emphasis {
+                saw_emphasis = true;
+                label.push_str(&glyph.unicode);
+            } else if !saw_emphasis {
+                return None;
+            } else {
+                if body_letters == 0 {
+                    tail_upper = glyph
+                        .unicode
+                        .chars()
+                        .find(|ch| ch.is_ascii_alphabetic())
+                        .is_some_and(|ch| ch.is_ascii_uppercase());
+                }
+                body_letters += letters;
+            }
+        }
+        let ended = label.trim_end().ends_with('.') || label.trim_end().ends_with(':');
+        // `cond.: k passed` continues in lowercase. A run-in heading opens
+        // the next sentence with a capital (`execution. Under`).
+        if saw_emphasis && ended && body_letters >= 8 && tail_upper {
+            let body: String = line.iter().map(|glyph| glyph.unicode.as_str()).collect();
+            return Some(body.chars().take(120).collect());
+        }
+        // The heading is the whole first line. The roman body is the next
+        // line of the same segment, so the heading would be set in the body face.
+        if saw_emphasis && ended && body_letters == 0 {
+            let later = glyphs
+                .iter()
+                .filter(|glyph| glyph.matrix[5] < top - size * 0.45)
+                .filter(|glyph| {
+                    let style = crate::font::face_style(&glyph.font_name);
+                    glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+                        && !style.bold
+                        && !crate::font::medium_weight(&glyph.font_name)
+                        && !style.italic
+                })
+                .count();
+            if later >= 8 {
+                return Some(label.chars().take(80).collect());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn open_logic_bold_labels_split_when_the_book_is_present() {
+        let Some(path) = std::env::var_os("RPT_OPEN_LOGIC_PDF") else {
+            return;
+        };
+        let doc = crate::extract::PdfDocument::open(path).unwrap();
+        let extraction = doc.extract_with(&crate::extract::ExtractOptions {
+            max_pages: Some(40),
+            ..crate::extract::ExtractOptions::default()
+        });
+        let seg = segment_glyphs(&extraction.glyphs);
+        let texts: Vec<_> = seg
+            .iter()
+            .filter(|item| item.page_index == 32)
+            .map(|item| item.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("Definition 1.24")
+                    && text.contains("Cartesian")
+                    && !text.contains("Given")
+            }),
+            "definition label should split: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Proposition 1.27") && !text.contains("elements")),
+            "proposition label should split: {texts:?}"
+        );
+        let by_id: std::collections::HashMap<u32, &crate::glyph::Glyph> = extraction
+            .glyphs
+            .iter()
+            .map(|glyph| (glyph.id, glyph))
+            .collect();
+        for item in seg.iter().filter(|item| item.page_index == 32) {
+            if let Some(detail) = mixed_bold_run_in(&item.glyph_ids, &by_id) {
+                panic!("open logic page 33 keeps a bold run-in with the body: {detail}");
+            }
+        }
     }
 
     #[test]
@@ -10292,6 +10799,48 @@ mod tests {
     }
 
     #[test]
+    fn a_medium_run_in_heading_is_its_own_segment() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            72.0,
+            400.0,
+            "Proactive compaction outperforms full-history execution. ",
+            "NimbusRomNo9L-Medi",
+        );
+        glyphs.extend(paint_word(
+            &mut id,
+            430.0,
+            400.0,
+            "Under the setting, all evaluated",
+            "NimbusRomNo9L-Regu",
+        ));
+        glyphs.extend(paint_word(
+            &mut id,
+            72.0,
+            386.0,
+            "proactive methods continue the paragraph.",
+            "NimbusRomNo9L-Regu",
+        ));
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("outperforms")
+                && text.contains("execution")
+                && !text.contains("Under")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Under") && !text.contains("outperforms")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn an_italic_proof_label_is_its_own_segment() {
         let mut id = 0u32;
         let mut glyphs = paint_word(&mut id, 46.0, 400.0, "Proof. ", "CMTI10");
@@ -11395,7 +11944,14 @@ mod tests {
             segs.iter().any(|seg| {
                 seg.text.contains("as I’ll") && seg.text.contains("explain in the next section")
             }),
-            "a sentence that ends on I’ll stayed split at the page break"
+            "a sentence that ends on I’ll stayed split at the page break: {}",
+            segs.iter()
+                .filter(|seg| {
+                    seg.text.contains("I’ll") || seg.text.contains("explain in the next")
+                })
+                .map(|seg| seg.text.chars().take(180).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(" || ")
         );
     }
 

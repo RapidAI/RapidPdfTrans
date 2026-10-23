@@ -127,7 +127,7 @@ pub struct TranslateOptions {
     pub skip_references: bool,
     /// Leave text inside figures original. Only the caption is translated.
     pub skip_figures: bool,
-    /// Leave table cells and headers original. Only the caption is translated.
+    /// Leave table cells original. The caption and the column header are translated.
     pub skip_tables: bool,
     /// Regular CJK font file. Empty uses `RPT_CJK_FONT`, then the family
     /// selected by `cjk_style`. A trailing `#N` selects face N of a
@@ -2744,7 +2744,139 @@ pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String 
     text = split_run_in_heading(source, &text);
     text = drop_line_hyphen_stub(source, &text);
     text = retain_coined_acronym(source, &text);
+    text = strip_residual_clauses(source, &text);
     collapse_double_spaces(&text)
+}
+
+/// `But if` left in a Chinese sentence. A short source clause that starts
+/// with a function word is not a name or a formula, so it is dropped.
+/// Placeholders, acronyms, and single variables stay.
+fn strip_residual_clauses(source: &str, text: &str) -> String {
+    if cjk_count(text) < 2 {
+        return text.to_string();
+    }
+    let words: Vec<&str> = source.split_whitespace().collect();
+    let mut phrases = Vec::new();
+    for start in 0..words.len() {
+        let head = word_letters(words[start]);
+        if !is_clause_function_word(&head) {
+            continue;
+        }
+        for len in 2..=4 {
+            if start + len > words.len() {
+                break;
+            }
+            let window = &words[start..start + len];
+            let letters: usize = window.iter().map(|word| word_letters(word).len()).sum();
+            if letters < 5 {
+                continue;
+            }
+            let phrase = window.join(" ");
+            if phrase.contains('⟦') || phrase.contains('⟧') {
+                continue;
+            }
+            phrases.push(phrase);
+        }
+    }
+    phrases.sort_by_key(|phrase| std::cmp::Reverse(phrase.len()));
+    phrases.dedup();
+    let mut out = text.to_string();
+    for phrase in phrases {
+        out = remove_bounded_phrase(&out, &phrase);
+    }
+    out
+}
+
+fn word_letters(word: &str) -> String {
+    word.chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn is_clause_function_word(word: &str) -> bool {
+    matches!(
+        word,
+        "but"
+            | "if"
+            | "then"
+            | "and"
+            | "or"
+            | "when"
+            | "whenever"
+            | "since"
+            | "because"
+            | "although"
+            | "though"
+            | "while"
+            | "whereas"
+            | "however"
+            | "therefore"
+            | "thus"
+            | "hence"
+            | "so"
+            | "that"
+            | "which"
+            | "where"
+            | "after"
+            | "before"
+            | "until"
+            | "unless"
+            | "for"
+            | "with"
+            | "from"
+            | "into"
+            | "than"
+            | "the"
+            | "of"
+    )
+}
+
+fn remove_bounded_phrase(text: &str, phrase: &str) -> String {
+    let lower_text = text.to_ascii_lowercase();
+    let lower_phrase = phrase.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut rest = text;
+    let mut lower_rest = lower_text.as_str();
+    while let Some(at) = lower_rest.find(&lower_phrase) {
+        let end = at + lower_phrase.len();
+        let prev_ok = at == 0
+            || !lower_rest[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_alphabetic());
+        let next_ok = end >= lower_rest.len()
+            || !lower_rest[end..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic());
+        if prev_ok && next_ok && !inside_placeholder(lower_rest, at) {
+            out.push_str(&rest[..at]);
+            rest = &rest[end..];
+            lower_rest = &lower_rest[end..];
+            continue;
+        }
+        let Some(ch) = rest[at..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        let width = ch.len_utf8();
+        let next = at + width;
+        if next > rest.len() {
+            break;
+        }
+        rest = &rest[next..];
+        lower_rest = &lower_rest[next..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn inside_placeholder(text: &str, at: usize) -> bool {
+    let before = &text[..at];
+    let open = before.rfind('⟦');
+    let close = before.rfind('⟧');
+    open.is_some_and(|open_at| close.is_none_or(|close_at| close_at < open_at))
 }
 
 /// `3. DenseNets` came back as `3。密集网络`, and `2006. The PASCAL` as
@@ -6264,6 +6396,20 @@ mod tests {
             "基于图的聚类方法，其中主要是 multicut，在理论上很有吸引力。"
         ));
         assert!(!residual_english_clause(body, &format!("译{body}")));
+    }
+
+    #[test]
+    fn a_short_residual_clause_is_dropped_from_chinese() {
+        let source = "Bx1 = empty. But if A = {x1}, then the union follows and so has n elements.";
+        let translated = "B⟦0⟧ = ∅。But if A = ⟦1⟧，则并集成立。";
+        let out = repair_body_translation(source, translated);
+        assert!(!out.to_ascii_lowercase().contains("but if"), "{out}");
+        assert!(out.contains('⟦') && out.contains("则"), "{out}");
+        let kept = repair_body_translation(
+            "Online judge-guided SFT and outcome-based RL both add gains.",
+            "在线评判引导的 SFT 与基于结果的 RL 都有增益。",
+        );
+        assert!(kept.contains("SFT") && kept.contains("RL"), "{kept}");
     }
 
     #[test]

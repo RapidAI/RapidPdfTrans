@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- A bold or italic run-in heading stays bold (or italic) in the translation and is set on the same line as the sentence that follows. LaTeX medium (`NimbusRom-Medi`) is that bold face. A medium running header is not enlarged.
+- A table column header is translated with the caption. Numeric cells stay in the source language.
+- A formula hole reserves the width of the ink that was seated in it, including neighbors absorbed after the hole was measured, so the following text does not land on the formula. A formula that reflow left on the next word is moved back onto that hole. A brace tail the echo did not consume (`a,b},`) is dropped. Letters of the sentence on that baseline are not treated as part of the formula, so the translation is not pushed onto the words that follow the hole.
+- A line that starts after a formula on the same baseline keeps that x. The translation is not pulled left onto the formula.
+- A period that shares its text operator with a translated word (`∅. But if`) is drawn again, and the English word is blanked.
+- A short leftover English clause (`But if`) is removed from a Chinese sentence. Same-baseline formula ink that covers translated text is reported as an overlap.
+
 ## 0.1.6 — 2026-10-23
 
 Tag `v0.1.6`. This changelog is the release note.

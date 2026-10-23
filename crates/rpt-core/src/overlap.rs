@@ -376,6 +376,9 @@ pub fn find_overlaps(extraction: &Extraction) -> Vec<OverlapHit> {
         let lines = text_lines(&glyphs);
         let translated: Vec<&TextLine> = lines.iter().filter(|line| line.translated).collect();
         let others: Vec<&TextLine> = lines.iter().filter(|line| !line.translated).collect();
+        // A formula and the Chinese that follows it share a baseline, so they
+        // are one line once any character is CJK. Compare the glyphs.
+        hits.extend(same_baseline_ink_hits(page, &glyphs));
         for line in &translated {
             for other in &others {
                 if boxes_overlap(line.bbox, other.bbox) {
@@ -570,6 +573,56 @@ fn snippet(text: &str) -> String {
     text.chars().take(32).collect()
 }
 
+fn glyph_is_translated(glyph: &Glyph) -> bool {
+    glyph.font_name.contains("RPTCJK")
+        || glyph
+            .unicode
+            .chars()
+            .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+}
+
+fn glyph_box(glyph: &Glyph) -> [f32; 4] {
+    let left = glyph.bbox[0].min(glyph.bbox[2]).min(glyph.matrix[4]);
+    let right = glyph.bbox[0]
+        .max(glyph.bbox[2])
+        .max(glyph.matrix[4] + glyph.advance[0].max(0.0));
+    let bottom = glyph.bbox[1].min(glyph.bbox[3]);
+    let top = glyph.bbox[1].max(glyph.bbox[3]);
+    [left, bottom, right, top]
+}
+
+/// `B_{x1} ∩ B_{x2}` left on the proof line, with `如果` drawn across it.
+/// The line grouper treats that baseline as one translated line.
+fn same_baseline_ink_hits(page: u32, glyphs: &[&Glyph]) -> Vec<OverlapHit> {
+    let translated: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| glyph_is_translated(glyph) && !glyph.unicode.trim().is_empty())
+        .collect();
+    let others: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| !glyph_is_translated(glyph) && !glyph.unicode.trim().is_empty())
+        .collect();
+    let mut hits = Vec::new();
+    for other in others {
+        let other_box = glyph_box(other);
+        let covered = translated.iter().any(|glyph| {
+            let size = glyph.font_size.max(other.font_size).max(1.0);
+            (glyph.matrix[5] - other.matrix[5]).abs() <= size * 0.85
+                && boxes_overlap(glyph_box(glyph), other_box)
+        });
+        if covered {
+            hits.push(OverlapHit {
+                page_index: page,
+                kind: "text",
+                detail: format!("translated text covers {:?}", snippet(&other.unicode)),
+            });
+        }
+    }
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +683,26 @@ mod tests {
         ];
         let hits = find_overlaps(&extraction(glyphs));
         assert!(hits.iter().any(|hit| hit.kind == "text"), "{hits:?}");
+    }
+
+    #[test]
+    fn a_formula_on_the_chinese_baseline_is_an_overlap() {
+        // Proposition 1.27's proof: the hole is too narrow, so `如果` sits
+        // on `Bx1`.
+        let mut formula = glyph(0, 120.0, 400.0, "Bx1", "CMSY10");
+        formula.bbox = [120.0, 392.0, 168.0, 408.0];
+        formula.advance = [48.0, 0.0];
+        let mut han = glyph(1, 150.0, 400.0, "如果", "RPTCJK-RPT0");
+        han.bbox = [150.0, 392.0, 190.0, 408.0];
+        han.advance = [40.0, 0.0];
+        let hits = find_overlaps(&extraction(vec![formula, han]));
+        assert!(hits.iter().any(|hit| hit.kind == "text"), "{hits:?}");
+        let mut clear = glyph(2, 180.0, 400.0, "则", "RPTCJK-RPT0");
+        clear.bbox = [180.0, 392.0, 196.0, 408.0];
+        clear.advance = [16.0, 0.0];
+        let formula_only = glyph(0, 120.0, 400.0, "Bx1", "CMSY10");
+        let hits = find_overlaps(&extraction(vec![formula_only, clear]));
+        assert!(hits.is_empty(), "{hits:?}");
     }
 
     #[test]

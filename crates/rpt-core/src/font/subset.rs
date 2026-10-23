@@ -55,8 +55,10 @@ pub fn face_style(font_name: &str) -> FaceStyle {
     ]
     .iter()
     .any(|needle| upper.contains(needle));
-    // Medium (NimbusRom-Medi) stays regular. SemiBold and Bold use the Bold
-    // weight of the selected CJK family. A sans source face is not Bold.
+    // SemiBold and Bold use the Bold weight of the selected CJK family.
+    // Medium (NimbusRom-Medi, the usual LaTeX \textbf face) is not `bold`
+    // here: a running header in that face must not be enlarged as a
+    // subsection. `medium_weight` still selects the bold CJK face.
     let bold = ["BOLD", "BLACK", "HEAVY", "SEMIBOLD", "DEMIBOLD", "CMBX"]
         .iter()
         .any(|needle| upper.contains(needle));
@@ -68,6 +70,30 @@ pub fn face_style(font_name: &str) -> FaceStyle {
         bold,
         italic,
     }
+}
+
+/// LaTeX `\textbf` on the URW Palladio / Nimbus Roman set is `Medi`, not
+/// `Bold`. A run-in heading in that face is emphasized. `FaceStyle::bold`
+/// stays false so a medium running header is not scaled up as a subsection.
+pub fn medium_weight(font_name: &str) -> bool {
+    let upper = font_name.to_ascii_uppercase();
+    upper
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .filter(|part| !part.is_empty())
+        .any(medium_token)
+}
+
+fn medium_token(part: &str) -> bool {
+    if part == "MED" || part == "MEDI" || part == "MEDIUM" {
+        return true;
+    }
+    if let Some(rest) = part
+        .strip_prefix("MEDIUM")
+        .or_else(|| part.strip_prefix("MEDI"))
+    {
+        return rest.is_empty() || rest.starts_with("ITAL") || rest.starts_with("OBLI");
+    }
+    false
 }
 
 /// Built-in CJK family. Serif is Source Han Serif / Noto Serif CJK SC (Songti)
@@ -1489,6 +1515,11 @@ mod tests {
         let medium = face_style("NimbusRomNo9L-Medi");
         assert!(medium.serif);
         assert!(!medium.bold);
+        assert!(medium_weight("NimbusRomNo9L-Medi"));
+        assert!(medium_weight("NimbusRomNo9L-MediItal"));
+        assert!(medium_weight("TeXGyreTermes-Medium"));
+        assert!(!medium_weight("NimbusRomNo9L-Regu"));
+        assert!(!medium_weight("NimbusRomNo9L-Bold"));
         let regular = face_style("NimbusRomNo9L-Regu");
         assert!(regular.serif && !regular.bold);
         let bold = face_style("NimbusRomNo9L-Bold");
