@@ -13,7 +13,7 @@
 - A body sentence that contains formulas is translated, including a definition line (`and`) and a Let/Since line. A pure equation stays in the source. When the model copies the definition and only changes the stop, `and` is still written as `且` in place of that word.
 - A transpose tack (`⊤`) and a precedes sign (`≺`) in a prose sentence use an ASCII stand-in the CJK face can draw. One missing mark no longer leaves the paragraph in English. A variation selector is dropped the same way as a zero-width space. An unmapped math symbol is dropped rather than keeping the paragraph in English. A formula hole (`⟦N⟧`) is not one of those symbols.
 - A prose paragraph is drawn when the translation names the formula holes it still contains. Extra formula runs that were never a hole do not pin the paragraph in English.
-- One segment's connect and retry budget is about two request timeouts, so a stuck segment cannot keep retrying for many minutes.
+- One segment's connect and retry budget is about two request timeouts, so a stuck segment cannot keep retrying for many minutes. A batch that times out shares that budget with its splits and the echo pass, instead of starting a new two-timeout chain on every half.
 - A line that starts after a formula on the same baseline keeps that x. The translation is not pulled left onto the formula.
 - A period that shares its text operator with a translated word (`∅. But if`) is drawn again, and the English word is blanked.
 - A short leftover English clause (`But if`) is removed from a Chinese sentence. Same-baseline formula ink that covers translated text is reported as an overlap.

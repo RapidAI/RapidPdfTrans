@@ -119,6 +119,10 @@ impl Translator for LlmTranslator {
         })
     }
 
+    fn segment_budget_armed(&self) -> bool {
+        SEGMENT_DEADLINE.with(|slot| slot.get().is_some())
+    }
+
     fn complete(&self, system: &str, user: &str) -> Result<String> {
         let key = (system.to_string(), user.to_string());
         if let Ok(guard) = self.cache.lock() {

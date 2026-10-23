@@ -81,6 +81,11 @@ pub trait Translator: Sync {
     fn segment_budget_expired(&self) -> bool {
         false
     }
+
+    /// A deadline is already set on this thread, expired or not.
+    fn segment_budget_armed(&self) -> bool {
+        false
+    }
 }
 
 /// How `rpt translate` reports work on stderr.
@@ -1223,7 +1228,10 @@ fn dispatch_batches(
         for batch in batches {
             let _watch = progress.watch(segments, batch);
             let before = *calls;
-            match translate_batch(segments, shielded, batch, opts, translator, calls) {
+            translator.arm_segment_budget(segment_retry_budget(opts));
+            let outcome = translate_batch(segments, shielded, batch, opts, translator, calls);
+            translator.clear_segment_budget();
+            match outcome {
                 Ok(part) => {
                     progress.finish_batch(
                         &batch_pages(segments, batch),
@@ -1255,14 +1263,21 @@ fn dispatch_batches(
                 }
                 let _watch = progress.watch(segments, &batches[index]);
                 let mut local_calls = 0usize;
-                match translate_batch(
+                // One budget for the batch, its splits, and the echo pass.
+                // A timeout used to start a fresh two-timeout chain on every
+                // half, so one stuck paragraph could sit in connect for many
+                // minutes.
+                translator.arm_segment_budget(segment_retry_budget(opts));
+                let outcome = translate_batch(
                     segments,
                     shielded,
                     &batches[index],
                     opts,
                     translator,
                     &mut local_calls,
-                ) {
+                );
+                translator.clear_segment_budget();
+                match outcome {
                     Ok(part) => {
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
                         progress.finish_batch(&batch_pages(segments, &batches[index]), local_calls);
@@ -1434,6 +1449,11 @@ fn translate_batch(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Result<Vec<(usize, String)>> {
+    // The caller armed one deadline for this batch. A split must not open
+    // another full retry chain after that deadline.
+    if translator.segment_budget_expired() {
+        return Err(Error::Translate("timeout: segment".into()));
+    }
     match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
         Ok(restored) => Ok(polish(lint_fix(
             segments,
@@ -1471,7 +1491,12 @@ fn translate_batch(
                     // time. Keeping the English source fails the whole PDF.
                     // This leaf is one segment: its sentence calls share one
                     // budget instead of each opening a fresh retry chain.
-                    translator.arm_segment_budget(segment_retry_budget(opts));
+                    // An outer batch deadline is kept; clearing it would let
+                    // the other half of a split start over.
+                    let owns_budget = !translator.segment_budget_armed();
+                    if owns_budget {
+                        translator.arm_segment_budget(segment_retry_budget(opts));
+                    }
                     let fallback = indexes
                         .iter()
                         .map(|&index| {
@@ -1496,7 +1521,9 @@ fn translate_batch(
                             (index, text)
                         })
                         .collect();
-                    translator.clear_segment_budget();
+                    if owns_budget {
+                        translator.clear_segment_budget();
+                    }
                     Ok(polish(fallback))
                 }
             }
@@ -1537,13 +1564,19 @@ fn echo_fix(
     }
     // A long paragraph is often copied whole when the neighboring lines are
     // still English. Ask again for each sentence, with that context removed.
-    // The fallback shares that segment's budget, so one stuck paragraph
-    // cannot keep connecting for many minutes.
+    // The fallback shares the batch deadline. Resetting it per paragraph
+    // stacked another two timeouts onto a split that had already stalled.
+    let owns_budget = !translator.segment_budget_armed();
+    if owns_budget {
+        translator.arm_segment_budget(segment_retry_budget(opts));
+    }
     for slot in &mut restored {
         if !needs_english_retry(&segments[slot.0].text, &slot.1) {
             continue;
         }
-        translator.arm_segment_budget(segment_retry_budget(opts));
+        if translator.segment_budget_expired() {
+            break;
+        }
         if let Some(joined) = translate_sentences(&segments[slot.0].text, opts, translator, calls) {
             slot.1 = joined;
         }
@@ -1556,7 +1589,9 @@ fn echo_fix(
             }
         }
     }
-    translator.clear_segment_budget();
+    if owns_budget {
+        translator.clear_segment_budget();
+    }
     restored
 }
 
@@ -6685,6 +6720,21 @@ mod tests {
             &mut calls,
         );
         assert!(out.is_none());
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn an_expired_budget_does_not_split_the_batch() {
+        let mut calls = 0usize;
+        let err = translate_batch(
+            &[],
+            &[],
+            &[0, 1],
+            &TranslateOptions::default(),
+            &ExpiredBudget,
+            &mut calls,
+        );
+        assert!(err.is_err());
         assert_eq!(calls, 0);
     }
 
