@@ -9,10 +9,11 @@
 //! The API key is read only from `RPT_LLM_API_KEY`. It is never taken from
 //! options JSON, and [`Debug`] prints it as `redacted`.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -103,6 +104,21 @@ impl Translator for LlmTranslator {
         }
     }
 
+    fn arm_segment_budget(&self, budget: Duration) {
+        SEGMENT_DEADLINE.with(|slot| slot.set(Some(Instant::now() + budget)));
+    }
+
+    fn clear_segment_budget(&self) {
+        SEGMENT_DEADLINE.with(|slot| slot.set(None));
+    }
+
+    fn segment_budget_expired(&self) -> bool {
+        SEGMENT_DEADLINE.with(|slot| {
+            slot.get()
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        })
+    }
+
     fn complete(&self, system: &str, user: &str) -> Result<String> {
         let key = (system.to_string(), user.to_string());
         if let Ok(guard) = self.cache.lock() {
@@ -110,11 +126,20 @@ impl Translator for LlmTranslator {
                 return Ok(hit.clone());
             }
         }
-        // Four attempts. A stalled socket is cut at `timeout` (default 60s),
-        // then retried with backoff. The job cannot sit on one idle connection.
-        let mut delay = std::time::Duration::from_secs(2);
+        // Four attempts, but one call stops after about two timeouts, and a
+        // segment budget stops the chain before the next attempt. A stalled
+        // segment used to stack those calls for many minutes.
+        let mut delay = Duration::from_secs(2);
         let mut last = None;
+        let started = Instant::now();
+        let call_limit = self.timeout.saturating_mul(2);
         for attempt in 0..4 {
+            if self.segment_budget_expired() {
+                return Err(Error::Translate("timeout: segment".into()));
+            }
+            if attempt > 0 && started.elapsed() >= call_limit {
+                return Err(last.unwrap_or_else(|| Error::Translate("timeout: segment".into())));
+            }
             match self.complete_once(system, user) {
                 Ok(text) => {
                     if let Ok(mut guard) = self.cache.lock() {
@@ -123,6 +148,9 @@ impl Translator for LlmTranslator {
                     return Ok(text);
                 }
                 Err(err) if request_retryable(&err) && attempt < 3 => {
+                    if self.segment_budget_expired() || started.elapsed() + delay >= call_limit {
+                        return Err(err);
+                    }
                     self.note_retry();
                     if let Ok(phase) = self.phase.lock() {
                         set_phase(Some(&phase), "retry");
@@ -136,6 +164,10 @@ impl Translator for LlmTranslator {
         }
         Err(last.unwrap_or_else(|| Error::Translate("LLM request failed".into())))
     }
+}
+
+thread_local! {
+    static SEGMENT_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 impl LlmTranslator {
@@ -331,6 +363,19 @@ mod tests {
         assert!(connection_dropped("io: Peer disconnected"));
         assert!(connection_dropped("io: unexpected end of file"));
         assert!(!connection_dropped("LLM HTTP status 401"));
+    }
+
+    #[test]
+    fn an_expired_segment_budget_skips_another_attempt() {
+        let translator =
+            LlmTranslator::with_key(&TranslateOptions::default(), "test-key").expect("translator");
+        translator.arm_segment_budget(Duration::from_secs(0));
+        let err = translator
+            .complete("system", "segment-budget-probe")
+            .expect_err("budget");
+        assert!(err.to_string().contains("timeout: segment"), "{err}");
+        translator.clear_segment_budget();
+        assert!(!translator.segment_budget_expired());
     }
 
     #[test]

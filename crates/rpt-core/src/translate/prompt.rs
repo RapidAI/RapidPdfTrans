@@ -45,6 +45,12 @@ Translate the document title. Do not leave a title in the source language, and d
         src = language_name(source_lang),
         dst = language_name(target_lang),
     );
+    prompt.push_str(
+        " Translate every prose sentence even when it contains a formula. \
+Do not return that sentence in the source language. Leave a pure equation as written. \
+Translate a table column header even when the header is a single word. \
+Do not echo the header in the source language.",
+    );
     if strict_placeholders {
         prompt.push_str(
             " The previous answer dropped or altered a ⟦N⟧ placeholder. \

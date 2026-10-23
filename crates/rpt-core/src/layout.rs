@@ -1011,7 +1011,11 @@ pub(crate) fn wrap_text_holes(
         }
     }
     snap_line_compounds(&mut lines, max_width, size, font, holes);
-    let lines = move_opening_brackets(lines);
+    let mut lines = move_opening_brackets(lines);
+    // A formula hole disables hanging punctuation, so `实现。` wraps as
+    // `实现` / `。` on the run-in path. The fit path already absorbs that
+    // tail; this wrap is the one `reflow_paragraph_chain` uses.
+    absorb_one_char_tail(&mut lines);
     Some(lines).filter(|lines| !lines.is_empty())
 }
 
@@ -3555,6 +3559,24 @@ mod tests {
         );
         let flat: String = lines.concat();
         assert_eq!(flat, text);
+    }
+
+    #[test]
+    fn wrap_text_holes_does_not_leave_a_period_on_its_own_line() {
+        let text = "00\u{3000}矩阵乘法代码实现。";
+        let font = uniform_font(text);
+        let mut holes = HashMap::new();
+        holes.insert(0, 20.0);
+        let lines = wrap_text_holes(text, 10.0, 100.0, 100.0, &font, &holes).expect("wrap");
+        assert!(
+            lines.iter().all(|line| {
+                let marks: Vec<char> = line.chars().filter(|ch| !ch.is_whitespace()).collect();
+                !(marks.len() == 1 && hanging_punct(marks[0]))
+            }),
+            "lone closing mark: {lines:?}"
+        );
+        assert!(lines.last().unwrap().ends_with('。'), "{lines:?}");
+        assert_eq!(lines.concat(), text);
     }
 
     #[test]

@@ -67,6 +67,20 @@ pub trait Translator: Sync {
 
     /// `connect`, `recv-body`, or `retry`. Progress prints this while the call runs.
     fn bind_phase(&self, _phase: Arc<Mutex<String>>) {}
+
+    /// Wall clock for one segment's connect and retry chain. A later call
+    /// resets it. Workers keep their own deadline.
+    fn arm_segment_budget(&self, _budget: std::time::Duration) {}
+
+    /// Drop the deadline so the next segment on this thread is not cut off
+    /// by the one that just finished.
+    fn clear_segment_budget(&self) {}
+
+    /// `true` once [`arm_segment_budget`](Translator::arm_segment_budget)
+    /// has elapsed. Unset is not expired.
+    fn segment_budget_expired(&self) -> bool {
+        false
+    }
 }
 
 /// How `rpt translate` reports work on stderr.
@@ -1356,12 +1370,14 @@ fn retry_english_leftovers(
         for index in pending {
             let _watch = progress.watch(segments, &[index]);
             let before = *calls;
+            translator.arm_segment_budget(segment_retry_budget(opts));
             if let Some(text) = translate_solo(&segments[index].text, opts, translator, calls) {
                 progress.add_calls((*calls).saturating_sub(before));
                 improved.push((index, text));
             } else {
                 progress.add_calls((*calls).saturating_sub(before));
             }
+            translator.clear_segment_budget();
         }
         improved
     } else {
@@ -1379,6 +1395,7 @@ fn retry_english_leftovers(
                     let index = pending[slot];
                     let _watch = progress.watch(segments, &[index]);
                     let mut local_calls = 0usize;
+                    translator.arm_segment_budget(segment_retry_budget(opts));
                     if let Some(text) =
                         translate_solo(&segments[index].text, opts, translator, &mut local_calls)
                     {
@@ -1391,6 +1408,7 @@ fn retry_english_leftovers(
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
                         progress.add_calls(local_calls);
                     }
+                    translator.clear_segment_budget();
                 });
             }
         });
@@ -1451,23 +1469,34 @@ fn translate_batch(
                     // A long paragraph can drop a few of many placeholders in
                     // one reply and still translate cleanly one sentence at a
                     // time. Keeping the English source fails the whole PDF.
+                    // This leaf is one segment: its sentence calls share one
+                    // budget instead of each opening a fresh retry chain.
+                    translator.arm_segment_budget(segment_retry_budget(opts));
                     let fallback = indexes
                         .iter()
                         .map(|&index| {
-                            let text =
+                            let text = if translator.segment_budget_expired() {
+                                None
+                            } else {
                                 translate_sentences(&segments[index].text, opts, translator, calls)
-                                    .or_else(|| {
-                                        translate_fallback(
-                                            &segments[index].text,
-                                            opts,
-                                            translator,
-                                            calls,
-                                        )
-                                    })
-                                    .unwrap_or_else(|| segments[index].text.clone());
+                            }
+                            .or_else(|| {
+                                if translator.segment_budget_expired() {
+                                    None
+                                } else {
+                                    translate_fallback(
+                                        &segments[index].text,
+                                        opts,
+                                        translator,
+                                        calls,
+                                    )
+                                }
+                            })
+                            .unwrap_or_else(|| segments[index].text.clone());
                             (index, text)
                         })
                         .collect();
+                    translator.clear_segment_budget();
                     Ok(polish(fallback))
                 }
             }
@@ -1508,25 +1537,33 @@ fn echo_fix(
     }
     // A long paragraph is often copied whole when the neighboring lines are
     // still English. Ask again for each sentence, with that context removed.
+    // The fallback shares that segment's budget, so one stuck paragraph
+    // cannot keep connecting for many minutes.
     for slot in &mut restored {
         if !needs_english_retry(&segments[slot.0].text, &slot.1) {
             continue;
         }
+        translator.arm_segment_budget(segment_retry_budget(opts));
         if let Some(joined) = translate_sentences(&segments[slot.0].text, opts, translator, calls) {
             slot.1 = joined;
         }
-    }
-    // The echo retry above reuses the same instructions. A segment that is
-    // still English gets one more call with a different prompt and no neighbors.
-    for slot in &mut restored {
-        if !needs_english_retry(&segments[slot.0].text, &slot.1) {
-            continue;
-        }
-        if let Some(text) = translate_fallback(&segments[slot.0].text, opts, translator, calls) {
-            slot.1 = text;
+        if needs_english_retry(&segments[slot.0].text, &slot.1)
+            && !translator.segment_budget_expired()
+        {
+            if let Some(text) = translate_fallback(&segments[slot.0].text, opts, translator, calls)
+            {
+                slot.1 = text;
+            }
         }
     }
+    translator.clear_segment_budget();
     restored
+}
+
+/// About two request timeouts. Fast connect failures still retry, but the
+/// chain stops instead of stacking for the rest of the job.
+fn segment_retry_budget(opts: &TranslateOptions) -> std::time::Duration {
+    std::time::Duration::from_secs(opts.timeout_secs.max(1).saturating_mul(2))
 }
 
 /// Split on sentence ends, keeping each piece's trailing space so the pieces
@@ -1713,6 +1750,9 @@ fn translate_sentences(
     let mut translated = Vec::with_capacity(pieces.len());
     let system = system_for(opts, false, true);
     for piece in &pieces {
+        if translator.segment_budget_expired() {
+            return None;
+        }
         if piece.trim().is_empty() {
             translated.push(piece.clone());
             continue;
@@ -1735,6 +1775,9 @@ fn translate_fallback(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Option<String> {
+    if translator.segment_budget_expired() {
+        return None;
+    }
     let system = append_system_extra(opts, fallback_prompt(&opts.target_lang));
     translate_piece(source, opts, translator, calls, &system)
 }
@@ -1748,6 +1791,9 @@ fn translate_solo(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Option<String> {
+    if translator.segment_budget_expired() {
+        return None;
+    }
     let system = append_system_extra(opts, solo_retry_prompt(&opts.target_lang));
     translate_piece(source, opts, translator, calls, &system)
 }
@@ -5084,7 +5130,57 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     if source_letters >= 8 && ellipsis_stub(translated) {
         return true;
     }
-    translated_body == source_body && prose_echo(&source_body)
+    translated_body == source_body && (prose_echo(&source_body) || column_header_echo(&source_body))
+}
+
+/// `Trigger`, `Optimization`, and `Verified (%)` are column titles. A
+/// one-word section title, an acronym, and a personal name are not.
+fn column_header_echo(source: &str) -> bool {
+    let source = source.trim();
+    // `Hello.` and `Go to https://example.com/a.` are sentences. A column
+    // title does not end on a stop.
+    if source.ends_with(['.', '?', '!', '。', '？', '！']) {
+        return false;
+    }
+    let words: Vec<&str> = source
+        .split_whitespace()
+        .filter(|word| !is_url_or_email_token(word))
+        .filter(|word| word.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .collect();
+    if !(1..=4).contains(&words.len()) {
+        return false;
+    }
+    let letters: usize = words.iter().copied().map(latin_letters).sum();
+    if !(4..=36).contains(&letters) {
+        return false;
+    }
+    if words.iter().all(|word| is_acronym_token(word)) {
+        return false;
+    }
+    if is_personal_name(source) || is_name_byline(source) {
+        return false;
+    }
+    if words.len() == 1 {
+        let word: String = words[0]
+            .trim_matches(|ch: char| !ch.is_ascii_alphabetic())
+            .to_ascii_lowercase();
+        if matches!(
+            word.as_str(),
+            "introduction"
+                | "abstract"
+                | "references"
+                | "appendix"
+                | "contents"
+                | "preface"
+                | "conclusion"
+                | "acknowledgements"
+                | "acknowledgment"
+                | "acknowledgments"
+        ) {
+            return false;
+        }
+    }
+    true
 }
 
 fn strip_leading_marker(text: &str) -> String {
@@ -5199,6 +5295,12 @@ fn formula_shard(
     glyphs: &[crate::glyph::Glyph],
     by_id: &HashMap<u32, usize>,
 ) -> bool {
+    // `the operator QK and the residual` is a sentence that happens to
+    // contain formulas. Counting only the non-math glyphs left it as a
+    // shard, so the paragraph stayed in English.
+    if prose_sentence_with_formula(&seg.text) {
+        return false;
+    }
     let mut math = 0usize;
     let mut letters = 0usize;
     let mut owned = Vec::new();
@@ -5223,6 +5325,31 @@ fn formula_shard(
         || (math >= 3 && letters < 8 && math > letters)
         || equation_number_only(&seg.text)
         || crate::segment::display_equation_glyphs(&owned)
+}
+
+/// At least 40 letters and two function words. A pure equation has neither.
+fn prose_sentence_with_formula(text: &str) -> bool {
+    let letters = text.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    if letters < 40 {
+        return false;
+    }
+    const FUNCTION: &[&str] = &[
+        "the", "and", "of", "to", "a", "in", "is", "for", "that", "with", "we", "as", "on", "by",
+        "or", "from", "are", "be", "this", "it",
+    ];
+    let mut found = 0usize;
+    for word in text.split_whitespace() {
+        let token: String = word
+            .trim_matches(|ch: char| !ch.is_ascii_alphabetic())
+            .to_ascii_lowercase();
+        if FUNCTION.contains(&token.as_str()) {
+            found += 1;
+            if found >= 2 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// `(1)` beside a display equation. It is not a sentence.
@@ -6385,6 +6512,11 @@ mod tests {
         assert!(!needs_english_retry("RAG", "RAG"));
         assert!(!needs_english_retry("Julie McNamee", "Julie McNamee"));
         assert!(!needs_english_retry("LLM API", "LLM API"));
+        assert!(needs_english_retry("Trigger", "Trigger"));
+        assert!(needs_english_retry("Optimization", "Optimization"));
+        assert!(needs_english_retry("Context", "Context"));
+        assert!(needs_english_retry("Verified (%)", "Verified (%)"));
+        assert!(!needs_english_retry("方法", "方法"));
         let mixed = format!("基于图的聚类方法在理论上很有吸引力。{body}");
         assert!(
             needs_english_retry(body, &mixed),
@@ -6396,6 +6528,63 @@ mod tests {
             "基于图的聚类方法，其中主要是 multicut，在理论上很有吸引力。"
         ));
         assert!(!residual_english_clause(body, &format!("译{body}")));
+    }
+
+    #[test]
+    fn a_body_sentence_with_formulas_is_not_kept_as_a_shard() {
+        let prose = "We show that the bound holds for the operator and the residual is compared with the source term in this section.";
+        let mut glyphs = Vec::new();
+        for id in 0..4u32 {
+            let mut mark = glyph(id, id as f32 * 8.0, 400.0, if id == 1 { "=" } else { "x" });
+            mark.font_name = "CMSY10".into();
+            glyphs.push(mark);
+        }
+        let by_id: HashMap<u32, usize> = (0..4).map(|id| (id, id as usize)).collect();
+        let sentence = Segment {
+            id: 0,
+            page_index: 0,
+            glyph_ids: vec![0, 1, 2, 3],
+            text: prose.into(),
+        };
+        assert!(
+            !formula_shard(&sentence, &glyphs, &by_id),
+            "a prose sentence was kept as a formula"
+        );
+        let equation = Segment {
+            id: 1,
+            page_index: 0,
+            glyph_ids: vec![0, 1, 2, 3],
+            text: "x = y + z".into(),
+        };
+        assert!(
+            formula_shard(&equation, &glyphs, &by_id),
+            "a pure equation was sent to the model"
+        );
+    }
+
+    struct ExpiredBudget;
+
+    impl Translator for ExpiredBudget {
+        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            Ok(r#"{"translations":[{"id":0,"text":"你好。"}]}"#.into())
+        }
+
+        fn segment_budget_expired(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn an_expired_segment_budget_does_not_replace_the_paragraph() {
+        let mut calls = 0usize;
+        let out = translate_sentences(
+            "Hello world. Next sentence follows here.",
+            &TranslateOptions::default(),
+            &ExpiredBudget,
+            &mut calls,
+        );
+        assert!(out.is_none());
+        assert_eq!(calls, 0);
     }
 
     #[test]

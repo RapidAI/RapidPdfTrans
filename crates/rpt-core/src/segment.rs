@@ -1547,6 +1547,18 @@ fn formula_line(text: &str) -> bool {
 fn math_formula_char(ch: char) -> bool {
     ch == 'µ'
         || ch == 'μ'
+        || ch == '×'
+        || ch == '÷'
+        // Angle brackets in ⟨x, y⟩ are math, not a scan misread. Treating
+        // them as junk dropped `A × B = {⟨x,y⟩ : x ∈ A and y ∈ B}` and the
+        // Let/Since line as OCR, so they never became a segment.
+        || ch == '⟨'
+        || ch == '⟩'
+        || ch == '⟦'
+        || ch == '⟧'
+        || ch == '〈'
+        || ch == '〉'
+        || ch == '\u{0338}'
         || ('\u{0370}'..='\u{03FF}').contains(&ch)
         || ('\u{2200}'..='\u{22FF}').contains(&ch)
         || ('\u{2070}'..='\u{209F}').contains(&ch)
@@ -13989,6 +14001,13 @@ mod tests {
                 && !ocr_line_low_quality("−d(x,y)")
                 && !ocr_line_low_quality("1≤i<···<i"),
             "a formula line was scored as OCR"
+        );
+        assert!(
+            !ocr_line_low_quality("A×B={⟨x,y⟩:x∈A and y∈B}.")
+                && !ocr_line_low_quality(
+                    "A×B.Let Bx={⟨x,y⟩:y∈B}.Since whenever x≠x2,⟨x1,y⟩≠⟨x2,y⟩,"
+                ),
+            "an angle-bracket formula was scored as OCR"
         );
         let seg = segment_placed(&glyphs, &SegmentFlags::default(), &regions, &pages);
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
