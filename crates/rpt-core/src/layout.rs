@@ -1255,7 +1255,68 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     mark_proper_names(chars, &mut sticky);
     mark_cjk_compounds(chars, &mut sticky);
     mark_reserved_gaps(chars, &mut sticky);
+    mark_angle_formulas(chars, &mut sticky);
     sticky
+}
+
+/// `⟨x, y, z⟩` and `<x, y, z>` stay on one line. A break after the comma
+/// painted `<x,` at the end of the line and `y,z>` on the next. `x < y`
+/// has no closing bracket of formula characters, so it still wraps.
+fn mark_angle_formulas(chars: &[char], sticky: &mut [bool]) {
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !is_angle_open(chars[index]) {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        let mut depth = 1i32;
+        let mut formula = true;
+        while end < chars.len() && end - index < 48 {
+            let ch = chars[end];
+            if is_angle_open(ch) {
+                depth += 1;
+            } else if is_angle_close(ch) {
+                depth -= 1;
+                end += 1;
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            } else if !angle_formula_char(ch) {
+                formula = false;
+                break;
+            }
+            end += 1;
+        }
+        if formula && depth == 0 && end > index + 2 {
+            for boundary in index..end.saturating_sub(1) {
+                if let Some(flag) = sticky.get_mut(boundary) {
+                    *flag = true;
+                }
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn is_angle_open(ch: char) -> bool {
+    matches!(ch, '⟨' | '〈' | '⟪' | '<')
+}
+
+fn is_angle_close(ch: char) -> bool {
+    matches!(ch, '⟩' | '〉' | '⟫' | '>')
+}
+
+fn angle_formula_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | '.' | ':' | ';' | '|' | '+' | '-' | '−' | '×' | '·' | '=' | '…'
+        )
 }
 
 /// A run of ideographic spaces stands in for a stacked formula. Splitting
@@ -2412,6 +2473,22 @@ mod tests {
         assert!(
             lines[1].starts_with('随'),
             "the next line should continue after the citation: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_angle_formula_is_not_split_at_the_comma() {
+        let text = "有序对：<x, y, z> 是下一句，后面还有很多汉字用来换行。";
+        let font = uniform_font(text);
+        let lines = wrap_text(text, 10.0, 90.0, 90.0, &font).expect("wrap");
+        for line in &lines {
+            if line.contains('<') {
+                assert!(line.contains('>'), "formula broke across lines: {lines:?}");
+            }
+        }
+        assert!(
+            lines.iter().any(|line| line.contains("<x, y, z>")),
+            "formula was dropped: {lines:?}"
         );
     }
 

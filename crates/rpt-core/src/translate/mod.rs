@@ -4259,12 +4259,20 @@ fn gloss_run_in_label(source: &str, text: &str) -> String {
         if rest.is_empty() {
             return text.to_string();
         }
+        // `定义 1.24（笛卡尔积）` is a numbered heading. A callout colon
+        // would paint `定义：1.24`.
+        if rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            return format!("{han} {rest}");
+        }
         return format!("{han}：{rest}");
     }
     if source_starts_with_label(trimmed, english) {
         let rest = trim_callout_punct(&trimmed[english.len()..]);
         if rest.is_empty() {
             return text.to_string();
+        }
+        if rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            return format!("{han} {rest}");
         }
         return format!("{han}：{rest}");
     }
@@ -7088,6 +7096,17 @@ mod tests {
             "定义检索增强生成（RAG）是一种设计模式。",
         );
         assert!(defined.starts_with("定义："), "{defined}");
+        let numbered = repair_body_translation(
+            "Definition 1.24 (Cartesian product).",
+            "定义 1.24（笛卡尔积）。",
+        );
+        assert_eq!(numbered, "定义 1.24（笛卡尔积）。");
+        assert!(!numbered.contains('：'), "{numbered}");
+        let colon = repair_body_translation(
+            "Definition 1.24 (Cartesian product).",
+            "定义：1.24（笛卡尔积）。",
+        );
+        assert_eq!(colon, "定义 1.24（笛卡尔积）。");
         let kept = repair_body_translation(
             "DEFINITION Embeddings are vector representations of words.",
             "DEFINITION 嵌入是词、标记或更大文本单元的向量表示。",
