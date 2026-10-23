@@ -1,6 +1,7 @@
 name: Release CLI
 
-# Linux rpt binaries. Artifacts only: this workflow does not create a GitHub Release.
+# Linux rpt binaries. Pushes to main upload artifacts only.
+# A tag v<Cargo.toml version> also attaches the tarballs to that GitHub Release.
 on:
   workflow_dispatch:
   push:
@@ -60,3 +61,22 @@ jobs:
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.tar.gz.sha256
           if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: rpt
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rpt-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Upload rpt binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh packaging/publish-release.sh dist SHA256SUMS-cli.txt

@@ -2,7 +2,7 @@
 
 ## 0.1.5 — 2026-10-22
 
-Not published. The tag `v0.1.5` is ready to push when the release is approved. This changelog is the release note.
+Tag `v0.1.5`. This changelog is the release note.
 
 ### Requests
 
@@ -26,7 +26,7 @@ Not published. The tag `v0.1.5` is ready to push when the release is approved. T
 
 ### Release binaries
 
-- `.github/workflows/release-cli.yml` builds `rpt` for Linux x86_64 and aarch64, glibc and musl. It uploads artifacts and does not publish a GitHub Release.
+- `.github/workflows/release-cli.yml` builds `rpt` for Linux x86_64 and aarch64, glibc and musl. A version tag attaches those tarballs to the GitHub Release.
 
 ## 0.1.4 — 2026-10-22
 
