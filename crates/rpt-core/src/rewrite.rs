@@ -7565,7 +7565,7 @@ fn place_segments(
         ) {
             Some(mut lines) => {
                 if text.contains('⟦') {
-                    match lift_stack_placeholders(&mut lines, &glyphs, font) {
+                    match lift_stack_placeholders(&mut lines, &glyphs, font, &text) {
                         Some(shifts) => {
                             let body = prose_body_size(&glyphs);
                             for mut shift in shifts {
@@ -7792,6 +7792,12 @@ fn coverage_fallbacks(ch: char) -> &'static [char] {
         // English and then redraw it without its word spaces.
         '\u{03F5}' => &['ε', 'e'],
         '\u{02C6}' => &['^'],
+        // Transpose tack in `(θ − θt)⊤Λ`. Noto Serif CJK has ⊥ (U+22A5) and
+        // not ⊤. One missing tack left the weight-space paragraph in English.
+        '\u{22A4}' => &['T'],
+        // `o_a ≺ o_b` in a prose sentence. The face has < and not ≺.
+        '\u{227A}' => &['<'],
+        '\u{227B}' => &['>'],
         // A footnote star extracted as a ring, and x-tilde in a formula.
         // One missing mark used to leave the whole paragraph in English.
         '\u{02DA}' => &['*', '\u{00B0}'],
@@ -8047,9 +8053,36 @@ fn substitute_covered(text: &str, font: &SubsetFont) -> String {
         if uncovered_format(ch) {
             continue;
         }
+        // A math mark with no ASCII stand-in. Dropping it keeps the
+        // paragraph; leaving it used to reject every glyph as a math block.
+        if uncovered_symbol(ch) {
+            continue;
+        }
         out.push(ch);
     }
     out
+}
+
+/// A symbol block the CJK face often lacks. Specific stand-ins run first.
+/// What remains is dropped so one unmapped operator does not keep the
+/// paragraph in English.
+fn uncovered_symbol(ch: char) -> bool {
+    // ⟦N⟧ is a formula hole. Dropping the brackets would paint the sentence
+    // with no place to seat the original glyphs.
+    if matches!(ch, '⟦' | '⟧') {
+        return false;
+    }
+    matches!(
+        ch as u32,
+        0x20D0..=0x20FF
+            | 0x2190..=0x21FF
+            | 0x2200..=0x22FF
+            | 0x2300..=0x23FF
+            | 0x25A0..=0x25FF
+            | 0x2900..=0x2AFF
+            | 0x2B00..=0x2BFF
+            | 0x1D400..=0x1D7FF
+    )
 }
 
 /// Invisible characters a translation may insert and a body face will not
@@ -8076,6 +8109,7 @@ fn uncovered_format(ch: char) -> bool {
             | '\u{2067}'
             | '\u{2068}'
             | '\u{2069}'
+            | '\u{FE00}'..='\u{FE0F}'
             | '\u{FEFF}'
     )
 }
@@ -11527,10 +11561,35 @@ fn identifier_connectors(ids: &[u32], glyphs: &[&Glyph], body: f32) -> Vec<u32> 
     extra
 }
 
+fn placeholder_indexes(text: &str) -> Vec<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut found = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '⟦' {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        while end < chars.len() && chars[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > index + 1 && end < chars.len() && chars[end] == '⟧' {
+            let number: String = chars[index + 1..end].iter().collect();
+            if let Ok(slot) = number.parse::<usize>() {
+                found.push(slot);
+            }
+        }
+        index = end;
+    }
+    found
+}
+
 fn lift_stack_placeholders(
     lines: &mut Vec<Drawn>,
     glyphs: &[&Glyph],
     font: &SubsetFont,
+    translated: &str,
 ) -> Option<Vec<ListingShift>> {
     let body = prose_body_size(glyphs);
     let stacks = placeholder_groups(glyphs, body);
@@ -11574,7 +11633,15 @@ fn lift_stack_placeholders(
             holes.push((line_index, start, cursor, index, duplicate));
         }
     }
-    if seen.iter().any(|flag| !*flag) {
+    // A paragraph can contain formula runs that were never a ⟦N⟧.
+    // Requiring every run to appear kept the prose in English (`Pure
+    // weight-space merging…` beside one inline norm). Only a placeholder
+    // the translation still contains has to be seated.
+    let required = placeholder_indexes(translated);
+    if required
+        .iter()
+        .any(|index| *index >= seen.len() || !seen[*index])
+    {
         return None;
     }
     // A radical and its subscript hang below the body. The next Chinese
@@ -25683,6 +25750,15 @@ mod tests {
         assert_eq!(coverage_fallbacks('\u{03D5}'), &['φ', 'f']);
         assert_eq!(coverage_fallbacks('\u{03F5}'), &['ε', 'e']);
         assert_eq!(coverage_fallbacks('\u{02C6}'), &['^']);
+        assert_eq!(coverage_fallbacks('\u{22A4}'), &['T']);
+        assert_eq!(coverage_fallbacks('\u{227A}'), &['<']);
+        assert_eq!(coverage_fallbacks('\u{227B}'), &['>']);
+        assert!(uncovered_format('\u{FE01}'));
+        assert!(uncovered_symbol('\u{22A4}'));
+        assert!(!uncovered_symbol('T'));
+        assert!(!uncovered_symbol('的'));
+        assert!(!uncovered_symbol('⟦'));
+        assert!(!uncovered_symbol('⟧'));
     }
 
     struct InkRow {
@@ -28054,7 +28130,7 @@ mod tests {
             sup_rise: 0.0,
         };
         let mut lines = vec![line];
-        let shifts = super::lift_stack_placeholders(&mut lines, &refs, &font).expect("lift");
+        let shifts = super::lift_stack_placeholders(&mut lines, &refs, &font, "").expect("lift");
         assert_eq!(shifts.len(), 2);
         let q = glyphs.iter().find(|glyph| glyph.unicode == "q").unwrap().id;
         let g = glyphs.iter().find(|glyph| glyph.unicode == "g").unwrap().id;
@@ -28241,7 +28317,7 @@ mod tests {
             CjkMeasure::resolve(0.0, 0.0),
         )
         .unwrap_or_else(|| panic!("page 4 paragraph did not fit"));
-        let shifts = lift_stack_placeholders(&mut drawn, &glyphs, &font)
+        let shifts = lift_stack_placeholders(&mut drawn, &glyphs, &font, "")
             .unwrap_or_else(|| panic!("a formula hole was missing"));
         struct Slice {
             y: f32,
@@ -28495,7 +28571,7 @@ mod tests {
             CjkMeasure::resolve(0.0, 0.0),
         )
         .unwrap_or_else(|| panic!("page 10 family paragraph did not fit"));
-        let shifts = lift_stack_placeholders(&mut drawn, &glyphs, &font)
+        let shifts = lift_stack_placeholders(&mut drawn, &glyphs, &font, "")
             .unwrap_or_else(|| panic!("a formula hole was missing"));
         assert!(
             shifts.iter().any(|shift| {
@@ -28599,7 +28675,7 @@ mod tests {
             CjkMeasure::resolve(0.0, 0.0),
         )
         .unwrap_or_else(|| panic!("lemma 4.2 did not fit: {}", lemma.text));
-        let lemma_shifts = lift_stack_placeholders(&mut lemma_drawn, &lemma_glyphs, &lemma_font)
+        let lemma_shifts = lift_stack_placeholders(&mut lemma_drawn, &lemma_glyphs, &lemma_font, "")
             .unwrap_or_else(|| panic!("lemma 4.2 dropped a hole"));
         assert!(
             lemma_shifts.iter().any(|shift| {
@@ -28736,7 +28812,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let let_shifts =
-            lift_stack_placeholders(&mut let_drawn, &let_glyphs, &let_font).expect("let holes");
+            lift_stack_placeholders(&mut let_drawn, &let_glyphs, &let_font, "").expect("let holes");
         let row_shift = let_shifts.iter().find(|shift| {
             shift.ids.iter().any(|id| {
                 extracted
@@ -28800,7 +28876,7 @@ mod tests {
             CjkMeasure::resolve(0.0, 0.0),
         )
         .expect("the update sentence did not fit");
-        let view_shifts = lift_stack_placeholders(&mut view_drawn, &view_glyphs, &view_font)
+        let view_shifts = lift_stack_placeholders(&mut view_drawn, &view_glyphs, &view_font, "")
             .expect("the update sentence dropped a hole");
         let q_lines: Vec<&Drawn> = view_drawn
             .iter()
@@ -28936,7 +29012,7 @@ mod tests {
             mixed_drawn.iter().all(|line| line.text != "出"),
             "the last character was stamped onto the formula"
         );
-        let mixed_shifts = lift_stack_placeholders(&mut mixed_drawn, &mixed_glyphs, &mixed_font)
+        let mixed_shifts = lift_stack_placeholders(&mut mixed_drawn, &mixed_glyphs, &mixed_font, "")
             .unwrap_or_else(|| panic!("mixed term dropped a hole"));
         let write = mixed_drawn
             .iter()
@@ -30587,7 +30663,7 @@ mod tests {
             sup_rise: 0.0,
         };
         let mut lines = vec![line];
-        let shifts = lift_stack_placeholders(&mut lines, &refs, &font).expect("lift");
+        let shifts = lift_stack_placeholders(&mut lines, &refs, &font, "").expect("lift");
         assert_eq!(shifts.len(), 3);
         let painted: String = lines.iter().map(|item| item.text.as_str()).collect();
         assert!(
