@@ -4901,10 +4901,7 @@ fn sibling_must_survive(glyph: &Glyph) -> bool {
     if glyph.invisible || is_math_font(&glyph.font_name) {
         return false;
     }
-    glyph
-        .unicode
-        .chars()
-        .any(|ch| ch.is_ascii_alphabetic())
+    glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
 fn blank_operators(doc: &mut Document, spans: &[Span]) -> std::result::Result<(), String> {
@@ -31587,7 +31584,8 @@ mod tests {
         let bytes = prose_pdf();
         let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
         let mut extraction = doc.extract();
-        let source = "This paragraph explains how agents plan work across tools and should become Chinese.";
+        let source =
+            "This paragraph explains how agents plan work across tools and should become Chinese.";
         let mixed = format!("基于图的聚类方法在理论上很有吸引力。{source}");
         let segments = crate::segment::segment_glyphs(&extraction.glyphs)
             .into_iter()
@@ -31613,7 +31611,11 @@ mod tests {
             calls: 0,
             cache_hits: 0,
         };
-        let codes: Vec<u32> = mixed.chars().map(|ch| ch as u32).chain(['甲' as u32]).collect();
+        let codes: Vec<u32> = mixed
+            .chars()
+            .map(|ch| ch as u32)
+            .chain(['甲' as u32])
+            .collect();
         doc.rewrite(
             &mut extraction,
             &report,

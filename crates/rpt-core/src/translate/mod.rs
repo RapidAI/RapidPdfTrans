@@ -612,7 +612,7 @@ pub fn translate_extraction(
     // Workers publish by segment index. A later echo must not replace a
     // translation that already landed on that paragraph.
     apply_rendered(&segments, &mut translated, &mut cache, rendered);
-        for batch in failed {
+    for batch in failed {
         let _watch = progress.watch(&segments, &batch);
         let before = calls;
         let pages = batch_pages(&segments, &batch);
@@ -4992,9 +4992,8 @@ pub(crate) fn residual_english_clause(source: &str, translated: &str) -> bool {
         let mut end = start;
         let mut buf = Vec::new();
         while end < words.len() && count < 24 {
-            let token = words[end].trim_matches(|ch: char| {
-                !ch.is_ascii_alphanumeric() && ch != '-' && ch != '\''
-            });
+            let token = words[end]
+                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '\'');
             if token.is_empty()
                 || is_url_or_email_token(token)
                 || token.chars().all(|ch| ch.is_ascii_digit())

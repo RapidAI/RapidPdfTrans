@@ -11,6 +11,9 @@
 //! API at RapidAI/MaClaw speaks that same chat-completions wire; this crate
 //! does not drive its instance/message agent loop.
 
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
+
 use crate::error::{Error, Result};
 use crate::translate::google::GoogleTranslator;
 use crate::translate::llm::LlmTranslator;
@@ -87,6 +90,20 @@ impl Translator for TranslatorBackend {
         match self {
             Self::OpenAi(client) => client.complete(system, user),
             Self::Google(client) => client.complete(system, user),
+        }
+    }
+
+    fn bind_retries(&self, counter: Arc<AtomicUsize>) {
+        match self {
+            Self::OpenAi(client) => client.bind_retries(counter),
+            Self::Google(client) => client.bind_retries(counter),
+        }
+    }
+
+    fn bind_phase(&self, phase: Arc<Mutex<String>>) {
+        match self {
+            Self::OpenAi(client) => client.bind_phase(phase),
+            Self::Google(_) => {}
         }
     }
 }
@@ -297,6 +314,25 @@ mod tests {
         assert_eq!(
             choose(Some("  "), false, false, false),
             BackendChoice::Probe
+        );
+    }
+
+    #[test]
+    fn the_cli_backend_shares_the_request_phase() {
+        let opts = TranslateOptions {
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            timeout_secs: 1,
+            ..TranslateOptions::default()
+        };
+        let client = LlmTranslator::with_key(&opts, "k").unwrap();
+        let backend = TranslatorBackend::OpenAi(client);
+        let phase = Arc::new(Mutex::new(String::new()));
+        backend.bind_phase(Arc::clone(&phase));
+        let err = backend.complete("sys", "user").unwrap_err();
+        let label = phase.lock().unwrap().clone();
+        assert!(
+            label == "connect" || label == "retry" || label == "recv-body",
+            "phase {label:?} error {err}"
         );
     }
 
