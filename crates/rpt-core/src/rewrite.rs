@@ -267,6 +267,26 @@ pub fn rewrite_translation(
             .iter()
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
             .collect();
+        // A display line inside a paragraph stays in the source glyphs. An
+        // inline formula the holes did not cover keeps that sentence too.
+        let display_ids = display_equation_line_ids(&segment_glyphs);
+        let unholed_ids = unholed_formula_line_ids(&segment_glyphs, &display_ids);
+        if !unholed_ids.is_empty() {
+            // Inline math the holes missed. Drawing the flattened sentence
+            // paints Chinese through the source glyphs. Keep the line.
+            for id in &segment.glyph_ids {
+                keep.entry(*id).or_insert_with(|| "math-block".into());
+            }
+            continue;
+        }
+        if !display_ids.is_empty() {
+            // The display stays in the source glyphs. The prose around it
+            // still translates. Keeping the whole segment left the proof in
+            // English.
+            for id in &display_ids {
+                keep.entry(*id).or_insert_with(|| "math-block".into());
+            }
+        }
         // `c_{ij} > 0` inside a sentence is still that sentence. A display
         // equation has more math glyphs than words and stays original.
         let prose_math = prose_carries_inline_math(&segment_glyphs);
@@ -282,67 +302,62 @@ pub fn rewrite_translation(
                 }
             }
         }
-        if !placing_stack
-            && segment.glyph_ids.iter().any(|id| {
-                extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
-                    if glyph.disposition.is_final() {
-                        if prose_math && detached_display_atom(glyph, &segment_glyphs) {
-                            return false;
-                        }
-                        let reason = match &glyph.disposition {
-                            Disposition::KeptOriginal { reason } => reason.as_str(),
-                            _ => "",
-                        };
-                        // Inline `α` is already final, so the sentence used to
-                        // stay in English. A sum on its own operator under
-                        // `where α is the temperature` is the same kind of hold.
-                        let inline_formula = reason == "formula"
-                            && (prose_math
-                                || crate::translate::is_inline_math_symbol(&glyph.unicode));
-                        let lone_mark = (reason == "formula" || reason == "unmapped")
-                            && prose_math
-                            && operator_holds_only(glyph, &owners);
-                        return !(inline_formula || lone_mark);
-                    }
-                    match keep.get(id).map(String::as_str) {
-                        // `$9.7\times$` is a prose line. Redraw the operator with
-                        // the body font instead of leaving the English in place.
-                        Some("formula")
-                            if prose_math
-                                || crate::translate::is_inline_math_symbol(&glyph.unicode) =>
-                        {
-                            false
-                        }
-                        // Held back so an `otherwise` clause can replace the
-                        // roman words without reflowing the formula.
-                        Some("math-block" | "formula-hole" | "formula-join" | "formula-stay") => {
-                            false
-                        }
-                        Some(_) => true,
-                        None => false,
-                    }
-                })
-            })
         {
-            let stamps = formula_connective_stamps(segment, extraction, &by_id);
-            let heading = formula_heading_stamp(segment, extraction, &by_id);
-            let stamped: HashSet<u32> = stamps
-                .iter()
-                .chain(heading.iter())
-                .flat_map(|stamp| stamp.glyph_ids.iter().copied())
-                .collect();
-            for id in &segment.glyph_ids {
-                if stamped.contains(id) {
-                    keep.remove(id);
-                    continue;
+            let blocked = !placing_stack
+                && segment.glyph_ids.iter().any(|id| {
+                    extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
+                        if glyph.disposition.is_final() {
+                            if prose_math && detached_display_atom(glyph, &segment_glyphs) {
+                                return false;
+                            }
+                            let reason = match &glyph.disposition {
+                                Disposition::KeptOriginal { reason } => reason.as_str(),
+                                _ => "",
+                            };
+                            let inline_formula = reason == "formula"
+                                && (prose_math
+                                    || crate::translate::is_inline_math_symbol(&glyph.unicode));
+                            let lone_mark = (reason == "formula" || reason == "unmapped")
+                                && prose_math
+                                && operator_holds_only(glyph, &owners);
+                            return !(inline_formula || lone_mark);
+                        }
+                        match keep.get(id).map(String::as_str) {
+                            Some("formula")
+                                if prose_math
+                                    || crate::translate::is_inline_math_symbol(&glyph.unicode) =>
+                            {
+                                false
+                            }
+                            Some(
+                                "math-block" | "formula-hole" | "formula-join" | "formula-stay",
+                            ) => false,
+                            Some(_) => true,
+                            None => false,
+                        }
+                    })
+                });
+            if blocked {
+                let stamps = formula_connective_stamps(segment, extraction, &by_id);
+                let heading = formula_heading_stamp(segment, extraction, &by_id);
+                let stamped: HashSet<u32> = stamps
+                    .iter()
+                    .chain(heading.iter())
+                    .flat_map(|stamp| stamp.glyph_ids.iter().copied())
+                    .collect();
+                for id in &segment.glyph_ids {
+                    if stamped.contains(id) {
+                        keep.remove(id);
+                        continue;
+                    }
+                    if !extraction.glyphs[by_id[id]].disposition.is_final() {
+                        keep.entry(*id).or_insert_with(|| "kept".into());
+                    }
                 }
-                if !extraction.glyphs[by_id[id]].disposition.is_final() {
-                    keep.entry(*id).or_insert_with(|| "kept".into());
-                }
+                connective_stamps.extend(stamps);
+                connective_stamps.extend(heading);
+                continue;
             }
-            connective_stamps.extend(stamps);
-            connective_stamps.extend(heading);
-            continue;
         }
         if segment.source.trim().is_empty() || segment.translated.trim().is_empty() {
             for id in &segment.glyph_ids {
@@ -390,6 +405,23 @@ pub fn rewrite_translation(
             translated
         };
         let translated = apply_formula_edits(&translated, formula_echoes.edits.get(&index));
+        let translated = if display_ids.is_empty() && unholed_ids.is_empty() {
+            translated
+        } else {
+            salvage_flattened_math(
+                &translated,
+                &display_echo_text(&segment_glyphs, &display_ids),
+                !unholed_ids.is_empty(),
+            )
+        };
+        if (!display_ids.is_empty() || !unholed_ids.is_empty())
+            && !translated.chars().any(is_han_char)
+        {
+            for id in &segment.glyph_ids {
+                keep.entry(*id).or_insert_with(|| "math-block".into());
+            }
+            continue;
+        }
         // The echo was the whole segment (`x = H(x`). The glyphs stay.
         if formula_echoes.edits.contains_key(&index)
             && translated
@@ -930,7 +962,7 @@ pub fn rewrite_translation(
     // `定义 1.24` collapsed onto one line and left the display equation a
     // full English wrap below. Lift it so the gap matches the source line
     // that sat under the sentence.
-    lift_display_formulas(&mut drawn, extraction, &mut stack_shifts);
+    lift_display_formulas(&mut drawn, extraction, &mut stack_shifts, &succeeded);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     // An unmapped `ℓ` never entered the line, so the translation was drawn
@@ -1718,16 +1750,21 @@ fn formula_line_stays(
     if segment.translated.contains('⟦') || segment.source.contains('⟦') {
         return false;
     }
-    // `令` / `因为每当` can be stamped onto the formula. `它们的积为` cannot.
-    if !connective_han_only(&segment.translated) {
-        return false;
-    }
     let glyphs: Vec<&Glyph> = segment
         .glyph_ids
         .iter()
         .filter_map(|id| extraction.glyphs.get(by_id[id]))
         .collect();
     if glyphs.is_empty() {
+        return false;
+    }
+    // A display equation is never redrawn. `+ 违和` used to replace the
+    // source glyphs. Connective glosses (`且`) are stamped from this path.
+    if glyphs_are_display(&glyphs) {
+        return true;
+    }
+    // `令` / `因为每当` can be stamped onto the formula. `它们的积为` cannot.
+    if !connective_han_only(&segment.translated) {
         return false;
     }
     let body = glyphs
@@ -4505,6 +4542,18 @@ fn is_math_font(name: &str) -> bool {
     .iter()
     .any(|needle| upper.contains(needle))
         || upper.contains("MATH")
+}
+
+/// Computer Modern plus newtx (`NewTXMI`, `txmiaX`, `txsys`, `txexs`).
+/// `is_math_font` stays the extraction list so a saved replay still matches.
+fn display_math_face(name: &str) -> bool {
+    if is_math_font(name) {
+        return true;
+    }
+    let upper = name.to_ascii_uppercase();
+    ["TXMI", "TXSY", "TXEX", "TXBM", "NEWTX"]
+        .iter()
+        .any(|needle| upper.contains(needle))
 }
 
 fn operator_owners(glyphs: &[Glyph]) -> HashMap<(u32, u16, usize, usize), Vec<u32>> {
@@ -8466,7 +8515,8 @@ fn take_leading_mark(line: &mut Drawn) -> Option<(char, f32, u16)> {
 }
 
 /// Glyphs that collide, a missing-glyph box, or a line that is only a stray
-/// mark. These are diagnostics: the page is still written.
+/// mark. Overlap fails the command. Tofu and a stray mark stay notes. The
+/// page is still written.
 fn audit_drawn(drawn: &[Drawn]) -> Vec<(Option<u32>, String)> {
     let mut notes = Vec::new();
     for index in 0..drawn.len() {
@@ -8521,7 +8571,12 @@ fn audit_drawn(drawn: &[Drawn]) -> Vec<(Option<u32>, String)> {
             }
             let (oleft, oright) = drawn_ink_span(other);
             let overlap = right.min(oright) - left.max(oleft);
-            if overlap > 1.0 {
+            // Adjacent letters of one word share a sidebearing of about two
+            // points. `且` covering `∈` is wider than that and still fails.
+            let hairline = line.text.trim().chars().count() == 1
+                && other.text.trim().chars().count() == 1
+                && overlap < 2.6;
+            if overlap > 1.0 && !hairline {
                 notes.push((
                     Some(line.page),
                     format!(
@@ -8535,9 +8590,10 @@ fn audit_drawn(drawn: &[Drawn]) -> Vec<(Option<u32>, String)> {
     notes
 }
 
-/// Overlap, tofu, and stray marks stay notes. A line that opens on
-/// punctuation, a translated figure label, a gap wider than 2em, or a
-/// broken QED box fails the command after the PDF is saved.
+/// Tofu and stray marks stay notes. A line that opens on punctuation, a
+/// translated figure label, a gap wider than 2em, a broken QED box, a glyph
+/// overlap, or a display equation whose glyphs were rewritten fails the
+/// command after the PDF is saved.
 fn audit_layout(
     drawn: &[Drawn],
     extraction: &Extraction,
@@ -8547,10 +8603,11 @@ fn audit_layout(
     notes.extend(audit_figure_labels(drawn, extraction));
     notes.extend(audit_line_gaps(drawn, extraction, shifts));
     notes.extend(audit_display_formulas(drawn, extraction, shifts));
+    notes.extend(audit_display_glyph_changes(drawn, extraction));
     notes
 }
 
-/// These four classes fail `rpt translate`. Tofu, overlap, and stray marks do not.
+/// These classes fail `rpt translate`. Tofu and stray marks do not.
 pub fn failing_layout_message(diagnostics: &[crate::glyph::Diagnostic]) -> Option<String> {
     let hits: Vec<&str> = diagnostics
         .iter()
@@ -8569,7 +8626,550 @@ pub fn layout_diagnostic_failure(message: &str) -> bool {
         || message.starts_with("figure text translated")
         || message.starts_with("gap inside a line")
         || message.starts_with("display formula")
+        || message.starts_with("display equation")
+        || message.starts_with("glyph overlap")
         || message.starts_with("QED")
+}
+
+/// A display equation's math glyphs stay in the source. A drawn line that
+/// owns one of them replaced the formula (`argmin … + 违和`, a flattened norm).
+fn audit_display_glyph_changes(
+    drawn: &[Drawn],
+    extraction: &Extraction,
+) -> Vec<(Option<u32>, String)> {
+    let mut notes = Vec::new();
+    let mut pages: Vec<u32> = extraction
+        .glyphs
+        .iter()
+        .map(|glyph| glyph.page_index)
+        .collect();
+    pages.sort_unstable();
+    pages.dedup();
+    for page in pages {
+        let glyphs: Vec<&Glyph> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.page_index == page && !glyph.invisible)
+            .collect();
+        let display = display_equation_line_ids(&glyphs);
+        if display.is_empty() {
+            continue;
+        }
+        let math: HashSet<u32> = display
+            .iter()
+            .filter_map(|id| glyphs.iter().copied().find(|glyph| glyph.id == *id))
+            .filter(|glyph| {
+                display_math_face(&glyph.font_name)
+                    || glyph
+                        .unicode
+                        .chars()
+                        .any(|ch| matches!(ch, '=' | '∥' | '∑' | '∏' | '∫' | '+' | '−' | '×'))
+            })
+            .map(|glyph| glyph.id)
+            .collect();
+        for line in drawn {
+            if line.page != page || line.text.trim().is_empty() {
+                continue;
+            }
+            let hits = line.glyph_ids.iter().filter(|id| math.contains(id)).count();
+            if hits == 0 {
+                continue;
+            }
+            // A sentence that seats one hole, or the example label beside it,
+            // is not the equation. The flattened equation is the line itself
+            // (`argmin … + 违和`).
+            let han = line.text.chars().filter(|ch| is_han_char(*ch)).count();
+            let share = hits as f32 / line.glyph_ids.len().max(1) as f32;
+            if han >= 8 && share < 0.5 {
+                continue;
+            }
+            if line.text.trim().chars().count() <= 16 && share < 0.34 {
+                continue;
+            }
+            notes.push((
+                Some(page),
+                format!(
+                    "display equation glyph changed in {:?} at ({:.1}, {:.1})",
+                    line.text, line.x, line.y
+                ),
+            ));
+        }
+    }
+    notes
+}
+
+/// A display equation: math-face glyphs (including newtx), an operator, and
+/// almost no prose words. `argmin … + 违和` is this. A sentence is not.
+fn glyphs_are_display(glyphs: &[&Glyph]) -> bool {
+    if glyphs.len() < 4 {
+        return false;
+    }
+    let mut math = 0usize;
+    let mut letters = 0usize;
+    let mut operators = 0usize;
+    for glyph in glyphs {
+        if display_math_face(&glyph.font_name) {
+            math += 1;
+        } else {
+            letters += glyph
+                .unicode
+                .chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .count();
+        }
+        if glyph.unicode.chars().any(|ch| {
+            matches!(
+                ch,
+                '=' | '+' | '-' | '−' | '×' | '∥' | '∑' | '∏' | '∫' | '≤' | '≥'
+            )
+        }) {
+            operators += 1;
+        }
+    }
+    if math < 3 || operators < 1 || letters >= 28 {
+        return false;
+    }
+    // `A × B` inside a sentence is not a display. A display has `=`, a norm,
+    // a big operator, or an opening fence.
+    let strong = glyphs.iter().any(|glyph| {
+        glyph
+            .unicode
+            .chars()
+            .any(|ch| matches!(ch, '=' | '∥' | '∑' | '∏' | '∫' | '{' | '⟨'))
+    });
+    if !strong {
+        return false;
+    }
+    let (function_words, content_words, content_names) = {
+        // Reuse the segmenter's word split by the same display test when the
+        // faces are Computer Modern. newtx fails that test, so count words here.
+        let mut words = 0usize;
+        let mut function = 0usize;
+        let mut word = String::new();
+        let flush = |word: &mut String,
+                     words: &mut usize,
+                     function: &mut usize,
+                     content: &mut Vec<String>| {
+            if word.len() >= 3 {
+                *words += 1;
+                if matches!(
+                    word.as_str(),
+                    "the" | "and" | "for" | "with" | "from" | "where" | "this" | "that"
+                ) {
+                    *function += 1;
+                } else {
+                    content.push(word.clone());
+                }
+            }
+            word.clear();
+        };
+        let mut content = Vec::new();
+        let mut ordered = glyphs.to_vec();
+        ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+        for glyph in ordered {
+            if display_math_face(&glyph.font_name) {
+                flush(&mut word, &mut words, &mut function, &mut content);
+                continue;
+            }
+            for ch in glyph.unicode.chars() {
+                if ch.is_ascii_alphabetic() {
+                    word.push(ch.to_ascii_lowercase());
+                } else {
+                    flush(&mut word, &mut words, &mut function, &mut content);
+                }
+            }
+        }
+        flush(&mut word, &mut words, &mut function, &mut content);
+        (function, words.saturating_sub(function), content)
+    };
+    // A display may say `and` (`x ∈ A and y ∈ B`) or one operator name
+    // (`argmin`). `empty:` and `those:` are the sentence wrapped onto the
+    // formula, not a display. Keeping them as one split the set braces.
+    if content_words > 1 || function_words > 1 {
+        return false;
+    }
+    content_names.iter().all(|word| display_operator_name(word))
+}
+
+/// `argmin` on its own line is the equation. `empty` and `those` are prose
+/// that wrapped onto the formula.
+fn display_operator_name(word: &str) -> bool {
+    matches!(
+        word,
+        "argmin"
+            | "argmax"
+            | "min"
+            | "max"
+            | "sup"
+            | "inf"
+            | "lim"
+            | "log"
+            | "exp"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "det"
+            | "dim"
+            | "tr"
+            | "diag"
+            | "cov"
+            | "span"
+            | "ker"
+            | "rank"
+            | "gcd"
+            | "lcm"
+            | "mod"
+    )
+}
+
+/// Baselines that are a display equation, plus the scripts and fences that
+/// sit on them. Prose around the equation is not included.
+fn display_equation_line_ids(glyphs: &[&Glyph]) -> HashSet<u32> {
+    if glyphs.len() < 4 {
+        return HashSet::new();
+    }
+    let body = prose_body_size(glyphs).max(1.0);
+    let mut ordered: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .collect();
+    ordered.sort_by(|left, right| {
+        right.matrix[5]
+            .total_cmp(&left.matrix[5])
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let mut lines: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in ordered {
+        if let Some(line) = lines.last_mut() {
+            let host = line[0];
+            let size = host.font_size.max(glyph.font_size).max(1.0);
+            if glyph.page_index == host.page_index
+                && (glyph.matrix[5] - host.matrix[5]).abs() <= size * 0.45
+            {
+                line.push(glyph);
+                continue;
+            }
+        }
+        lines.push(vec![glyph]);
+    }
+    let mut ids = HashSet::new();
+    for line in &lines {
+        if line.len() < 4 || !glyphs_are_display(line) {
+            continue;
+        }
+        let letters: usize = line
+            .iter()
+            .filter(|glyph| !display_math_face(&glyph.font_name))
+            .map(|glyph| {
+                glyph
+                    .unicode
+                    .chars()
+                    .filter(|ch| ch.is_ascii_alphabetic())
+                    .count()
+            })
+            .sum();
+        if letters >= 24 {
+            continue;
+        }
+        for glyph in line {
+            ids.insert(glyph.id);
+        }
+    }
+    if ids.is_empty() {
+        return ids;
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for glyph in glyphs {
+            if ids.contains(&glyph.id) || glyph.invisible || glyph.unicode.trim().is_empty() {
+                continue;
+            }
+            let letters = glyph
+                .unicode
+                .chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .count();
+            if letters >= 3 {
+                continue;
+            }
+            let script = glyph.font_size <= body * 0.84
+                || display_math_face(&glyph.font_name)
+                || glyph.unicode.trim().chars().all(|ch| {
+                    matches!(
+                        ch,
+                        '[' | ']' | '(' | ')' | '{' | '}' | '∥' | '.' | '+' | '−' | '-'
+                    )
+                });
+            if !script {
+                continue;
+            }
+            let near = glyphs.iter().any(|host| {
+                ids.contains(&host.id)
+                    && host.page_index == glyph.page_index
+                    && (host.matrix[5] - glyph.matrix[5]).abs() <= body * 1.15
+                    && glyph.matrix[4] >= host.matrix[4] - body * 1.4
+                    && glyph.matrix[4] <= glyph_paint_right(host) + body * 1.4
+            });
+            if near {
+                ids.insert(glyph.id);
+                grew = true;
+            }
+        }
+    }
+    ids
+}
+
+/// A prose baseline whose formula was not stored as ⟦N⟧. Drawing the flattened
+/// copy (`φ(X) = ν(X)`, `Cov…`) overlaps the source. The line stays original.
+fn unholed_formula_line_ids(glyphs: &[&Glyph], display: &HashSet<u32>) -> HashSet<u32> {
+    if glyphs.len() < 4 {
+        return HashSet::new();
+    }
+    let body = prose_body_size(glyphs).max(1.0);
+    let groups = placeholder_groups(glyphs, body);
+    let holed: HashSet<u32> = groups.iter().flatten().copied().collect();
+    let mut ordered: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .collect();
+    ordered.sort_by(|left, right| {
+        right.matrix[5]
+            .total_cmp(&left.matrix[5])
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let mut lines: Vec<Vec<&Glyph>> = Vec::new();
+    for glyph in ordered {
+        if let Some(line) = lines.last_mut() {
+            let host = line[0];
+            let size = host.font_size.max(glyph.font_size).max(1.0);
+            if glyph.page_index == host.page_index
+                && (glyph.matrix[5] - host.matrix[5]).abs() <= size * 0.45
+            {
+                line.push(glyph);
+                continue;
+            }
+        }
+        lines.push(vec![glyph]);
+    }
+    let mut ids = HashSet::new();
+    for line in &lines {
+        let loose: Vec<&Glyph> = line
+            .iter()
+            .copied()
+            .filter(|glyph| {
+                !display.contains(&glyph.id)
+                    && !holed.contains(&glyph.id)
+                    // Computer Modern is already a hole when it can be one.
+                    // newtx was copied into the sentence as plain text.
+                    && display_math_face(&glyph.font_name)
+                    && !is_math_font(&glyph.font_name)
+            })
+            .collect();
+        let equals = loose.iter().any(|glyph| glyph.unicode.contains('='))
+            || line.iter().any(|glyph| {
+                !display.contains(&glyph.id)
+                    && !holed.contains(&glyph.id)
+                    && glyph.unicode.contains('=')
+            });
+        let stray = formula_script_near_hole(line, glyphs, &groups, &holed, body);
+        if (equals && loose.len() >= 3) || stray {
+            for glyph in line {
+                if !display.contains(&glyph.id) {
+                    ids.insert(glyph.id);
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// A script hole that left `(m)` or `t,i` beside it. The base-plus-script
+/// cannot be seated, so the sentence keeps its source line.
+fn formula_script_near_hole(
+    line: &[&Glyph],
+    glyphs: &[&Glyph],
+    groups: &[Vec<u32>],
+    holed: &HashSet<u32>,
+    body: f32,
+) -> bool {
+    let body = body.max(1.0);
+    for glyph in line {
+        // Computer Modern scripts are seated with the hole. newtx left `(m)`
+        // and `t,i` as plain text beside it.
+        if holed.contains(&glyph.id)
+            || is_math_font(&glyph.font_name)
+            || !display_math_face(&glyph.font_name)
+            || !formula_script_mark(glyph, body)
+        {
+            continue;
+        }
+        let near = groups.iter().flatten().any(|id| {
+            glyphs.iter().any(|host| {
+                host.id == *id
+                    && host.page_index == glyph.page_index
+                    && (host.matrix[5] - glyph.matrix[5]).abs() <= body * 0.7
+                    && (glyph.matrix[4] - host.matrix[4]).abs() <= body * 1.6
+            })
+        });
+        if near {
+            return true;
+        }
+    }
+    false
+}
+
+fn formula_script_mark(glyph: &Glyph, body: f32) -> bool {
+    let text = glyph.unicode.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let mark = text.chars().all(|ch| {
+        ch.is_ascii_digit() || matches!(ch, '(' | ')' | ',' | '.' | '+' | '-' | '−' | '′' | '\'')
+    });
+    mark && (glyph.font_size <= body * 0.84 || display_math_face(&glyph.font_name))
+}
+
+fn display_echo_text(glyphs: &[&Glyph], display: &HashSet<u32>) -> String {
+    let mut ordered: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| display.contains(&glyph.id) && !glyph.unicode.trim().is_empty())
+        .collect();
+    ordered.sort_by(|left, right| {
+        right.matrix[5]
+            .total_cmp(&left.matrix[5])
+            .then(left.matrix[4].total_cmp(&right.matrix[4]))
+    });
+    let mut text = String::new();
+    for glyph in ordered {
+        text.push_str(glyph.unicode.trim());
+    }
+    text
+}
+
+/// Drop a display-equation echo the translation copied, and drop a sentence
+/// whose inline formula is still flattened. The source line of that sentence
+/// stays.
+fn salvage_flattened_math(text: &str, echo: &str, drop_holes: bool) -> String {
+    let stripped = strip_echo_spans(text, echo);
+    let chars: Vec<char> = stripped.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    let mut kept = String::new();
+    let mut start = 0usize;
+    for (index, ch) in chars.iter().enumerate() {
+        let boundary = matches!(ch, '。' | '！' | '？') || index + 1 == chars.len();
+        if !boundary {
+            continue;
+        }
+        let end = if matches!(ch, '。' | '！' | '？') {
+            index + 1
+        } else {
+            chars.len()
+        };
+        let sentence: String = chars[start..end].iter().collect();
+        let hole = drop_holes && sentence.contains('⟦');
+        if !hole && !broken_formula_sentence(&sentence) {
+            kept.push_str(&sentence);
+        }
+        start = end;
+    }
+    kept
+}
+
+fn strip_echo_spans(text: &str, echo: &str) -> String {
+    let echo_chars: HashSet<char> = echo
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !is_han_char(*ch))
+        .collect();
+    if echo_chars.len() < 4 {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut drop = vec![false; chars.len()];
+    let mut index = 0usize;
+    while index < chars.len() {
+        if is_han_char(chars[index]) || !echo_chars.contains(&chars[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut hits = 0usize;
+        while index < chars.len() && !is_han_char(chars[index]) {
+            if echo_chars.contains(&chars[index]) {
+                hits += 1;
+            }
+            index += 1;
+        }
+        if hits >= 4 {
+            for slot in &mut drop[start..index] {
+                *slot = true;
+            }
+        }
+    }
+    chars
+        .iter()
+        .enumerate()
+        .filter(|(slot, _)| !drop[*slot])
+        .map(|(_, ch)| *ch)
+        .collect()
+}
+
+fn broken_formula_sentence(text: &str) -> bool {
+    if text.contains("1/21/2") || text.contains("1/2 1/2") {
+        return true;
+    }
+    let mut bare = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '⟦' {
+            while index < chars.len() && chars[index] != '⟧' {
+                index += 1;
+            }
+            index = (index + 1).min(chars.len());
+            continue;
+        }
+        bare.push(chars[index]);
+        index += 1;
+    }
+    let mut exotic = 0usize;
+    let mut run = 0usize;
+    let mut max_run = 0usize;
+    let mut equals = false;
+    for ch in bare.chars() {
+        if formula_echo_char(ch) {
+            run += 1;
+            max_run = max_run.max(run);
+            if !ch.is_ascii() {
+                exotic += 1;
+            }
+            if matches!(ch, '=' | '∥') {
+                equals = true;
+            }
+        } else if is_han_char(ch) {
+            run = 0;
+        } else if ch.is_ascii_alphabetic() {
+            run = 0;
+        } else if !ch.is_whitespace() {
+            run = 0;
+        }
+    }
+    (equals && exotic >= 3) || (max_run >= 12 && exotic >= 4)
+}
+
+fn formula_echo_char(ch: char) -> bool {
+    if ch.is_whitespace() || is_han_char(ch) || ch.is_ascii_alphabetic() {
+        return false;
+    }
+    !matches!(
+        ch,
+        '，' | '。' | '、' | '；' | '：' | '！' | '？' | ',' | '.' | ';' | ':' | '!' | '?'
+    )
 }
 
 /// A display equation stays on one baseline, in source order. `A × B = {… and
@@ -15114,6 +15714,11 @@ fn layout_segment(
     } else {
         baselines_for(&ink, lines.len())
     };
+    // A kept display equation sits in a gap between these lines. Filling that
+    // gap paints the translation on the formula.
+    if baselines_hit_kept_formula(extraction, page, &ys, &ink, source_size) {
+        return None;
+    }
     // A prompt sample that wraps onto more lines than the source must not
     // stack those lines. Open the leading and let the column shift move
     // whatever sits underneath.
@@ -20991,6 +21596,7 @@ fn lift_display_formulas(
     drawn: &mut [Drawn],
     extraction: &Extraction,
     shifts: &mut Vec<ListingShift>,
+    succeeded: &HashSet<u32>,
 ) {
     let used: HashSet<u32> = drawn
         .iter()
@@ -20999,6 +21605,7 @@ fn lift_display_formulas(
     let mut pages: Vec<u32> = drawn.iter().map(|line| line.page).collect();
     pages.sort_unstable();
     pages.dedup();
+    let mut lifts: Vec<(u32, f32, f32, f32)> = Vec::new();
     for page in pages {
         let mut pool: Vec<&Glyph> = extraction
             .glyphs
@@ -21134,6 +21741,9 @@ fn lift_display_formulas(
             if dy < size * 0.45 || dy > size * 6.0 {
                 continue;
             }
+            // The formula rose toward the shorter Chinese sentence. The example
+            // under it stays: dragging that line leaves `A = {0, 1}` behind.
+            lifts.push((page, display_y, dy, size));
             // `and` splits the math cluster, so `× B = {…A` used to rise and
             // leave `A` plus `且 y ∈ B}.` on the source line. The whole
             // display, including the letters and the word in the middle,
@@ -21216,6 +21826,96 @@ fn lift_display_formulas(
             });
         }
     }
+    raise_content_below_lifts(drawn, extraction, shifts, &lifts, succeeded);
+}
+
+/// The block under a lifted display keeps the source gap. An equation that
+/// shares its baseline with a heading is inline, and the paragraph under it
+/// stays put. Rewritten prose is not shifted, or the English is painted again.
+fn raise_content_below_lifts(
+    drawn: &mut [Drawn],
+    extraction: &Extraction,
+    shifts: &mut Vec<ListingShift>,
+    lifts: &[(u32, f32, f32, f32)],
+    succeeded: &HashSet<u32>,
+) {
+    // Moving the block under the formula also moves the atoms seated on the
+    // example line by a different amount, and the display splits. Leave the
+    // source gap. The formula itself still lifts as one line.
+    let _ = (drawn, extraction, shifts, lifts, succeeded);
+}
+fn baselines_hit_kept_formula(
+    extraction: &Extraction,
+    page: u32,
+    ys: &[f32],
+    ink: &[InkLine<'_>],
+    size: f32,
+) -> bool {
+    if ys.is_empty() || ink.is_empty() {
+        return false;
+    }
+    let size = size.max(1.0);
+    let mut ink_ids = HashSet::new();
+    let mut top = f32::MIN;
+    let mut bottom = f32::MAX;
+    for line in ink {
+        top = top.max(line.y);
+        bottom = bottom.min(line.y);
+        for glyph in &line.glyphs {
+            ink_ids.insert(glyph.id);
+        }
+    }
+    for y in ys {
+        // The source baseline already holds this line. A symbol on it is
+        // inline (`Proof. ⟨x, y⟩`), not a display sitting in the gap.
+        if ink.iter().any(|line| (line.y - *y).abs() <= size * 0.45) {
+            continue;
+        }
+        let mut math = 0usize;
+        let mut strong = false;
+        for glyph in &extraction.glyphs {
+            if glyph.page_index != page || ink_ids.contains(&glyph.id) || glyph.invisible {
+                continue;
+            }
+            if glyph.unicode.trim().is_empty() {
+                continue;
+            }
+            // A subscript under a painted line is not a second baseline.
+            // A neighboring word (`Given` beside `Definition`) is not a formula.
+            let math_face = display_math_face(&glyph.font_name);
+            if glyph.font_size <= size * 0.84 && !math_face {
+                continue;
+            }
+            if (glyph.matrix[5] - *y).abs() > size * 0.32 {
+                continue;
+            }
+            // A symbol on the source line is inline. Only a formula that sits
+            // in the gap between the source baselines can block the wrap.
+            if ink
+                .iter()
+                .any(|line| (glyph.matrix[5] - line.y).abs() <= size * 0.55)
+            {
+                continue;
+            }
+            if glyph.matrix[5] > top + size * 0.2 || glyph.matrix[5] < bottom - size * 0.2 {
+                continue;
+            }
+            if math_face {
+                math += 1;
+            }
+            if glyph
+                .unicode
+                .chars()
+                .any(|ch| matches!(ch, '=' | '{' | '⟨' | '∥' | '∑' | '∏' | '∫'))
+            {
+                strong = true;
+            }
+        }
+        if strong && math >= 2 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Glyphs of one display equation, including `A` in front of `×` and
@@ -21288,36 +21988,61 @@ fn complete_display_line(
 
 fn snap_heading_to_formula(lines: &mut [Drawn], extraction: &Extraction, shifts: &[ListingShift]) {
     let by_id = glyph_index(&extraction.glyphs);
-    for line in lines.iter_mut() {
-        let trimmed = line.text.trim();
-        if trimmed.chars().count() > 24 || line.glyph_ids.is_empty() {
+    for index in 0..lines.len() {
+        let page = lines[index].page;
+        let x = lines[index].x;
+        let trimmed = lines[index].text.trim().to_string();
+        if trimmed.chars().count() > 24 || lines[index].glyph_ids.is_empty() {
             continue;
         }
         let head = trimmed.chars().next();
         if !matches!(head, Some('定' | '命' | '示' | '例' | '推' | '引' | '证')) {
             continue;
         }
-        let Some(source_y) = line.glyph_ids.iter().find_map(|id| {
-            by_id
-                .get(id)
-                .map(|index| extraction.glyphs[*index].matrix[5])
-        }) else {
+        let Some(source_y) = lines[index]
+            .glyph_ids
+            .iter()
+            .find_map(|id| by_id.get(id).map(|slot| extraction.glyphs[*slot].matrix[5]))
+        else {
             continue;
         };
-        let Some(formula) = extraction.glyphs.iter().find(|glyph| {
-            glyph.page_index == line.page
+        let Some(formula_id) = extraction.glyphs.iter().find_map(|glyph| {
+            (glyph.page_index == page
                 && is_math_font(&glyph.font_name)
                 && (glyph.matrix[5] - source_y).abs() <= 1.2
-                && glyph.matrix[4] > line.x + 4.0
+                && glyph.matrix[4] > x + 4.0)
+                .then_some(glyph.id)
         }) else {
             continue;
         };
         let dy = shifts
             .iter()
-            .find(|shift| shift.page == line.page && shift.ids.contains(&formula.id))
+            .find(|shift| shift.page == page && shift.ids.contains(&formula_id))
             .map(|shift| shift.dy)
             .unwrap_or(0.0);
-        line.y = source_y + dy;
+        // `例 1.6` shares its baseline with the sentence, and that sentence
+        // was pulled up. The inline `∅` is still recorded at the source y, so
+        // snapping the label there leaves `例 1.6` under `例 1.7`. Follow the
+        // sentence. A definition whose formula stayed (`定义 1.23` / `⟨a,b⟩`)
+        // has no long line owning that glyph, and still returns to the formula.
+        let sentence_y = lines.iter().find_map(|other| {
+            let owns = other.page == page
+                && other.text.chars().filter(|ch| is_han_char(*ch)).count() >= 8
+                && other.glyph_ids.contains(&formula_id)
+                && other.glyph_ids.iter().any(|id| {
+                    by_id.get(id).is_some_and(|slot| {
+                        (extraction.glyphs[*slot].matrix[5] - source_y).abs() <= 1.2
+                    })
+                });
+            owns.then_some(other.y)
+        });
+        if let Some(sentence_y) = sentence_y {
+            if (sentence_y - source_y).abs() > 1.5 || dy.abs() > 0.4 {
+                lines[index].y = sentence_y;
+                continue;
+            }
+        }
+        lines[index].y = source_y + dy;
     }
 }
 
@@ -34926,9 +35651,14 @@ mod tests {
         host.widths = vec![10.0; count];
         host.cids = vec![1; count];
         host.gaps = vec![0.0; count.saturating_sub(1)];
-        let mut drawn = vec![host];
+        let mut example = test_draw(72.0, 430.0, 10.0, "示例 1.25。", vec![]);
+        let example_count = example.text.chars().count();
+        example.widths = vec![10.0; example_count];
+        example.cids = vec![1; example_count];
+        example.gaps = vec![0.0; example_count.saturating_sub(1)];
+        let mut drawn = vec![host, example];
         let mut shifts = Vec::new();
-        lift_display_formulas(&mut drawn, &extraction, &mut shifts);
+        lift_display_formulas(&mut drawn, &extraction, &mut shifts, &HashSet::new());
         let dys: Vec<f32> = (2..=8)
             .map(|id| {
                 shifts
@@ -34941,6 +35671,15 @@ mod tests {
         assert!(
             dys.iter().all(|dy| (*dy - dys[0]).abs() < 0.1 && *dy > 5.0),
             "formula glyphs did not share one lift: {dys:?}"
+        );
+        let example_y = drawn
+            .iter()
+            .find(|line| line.text.contains("示例"))
+            .map(|line| line.y)
+            .unwrap_or(0.0);
+        assert!(
+            (example_y - 430.0).abs() < 0.1,
+            "dragging the example split the seated formula: y={example_y}"
         );
     }
 
@@ -35109,8 +35848,11 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         assert!(!layout_diagnostic_failure(
             "tofu in drawn text \"共□有\" at (1.0, 2.0)"
         ));
-        assert!(!layout_diagnostic_failure(
+        assert!(layout_diagnostic_failure(
             "glyph overlap 4.0pt between \"且\" and \"∈\" at y=1.0"
+        ));
+        assert!(layout_diagnostic_failure(
+            "display equation glyph changed in \"argmin + 违和\" at (1.0, 2.0)"
         ));
         assert!(!layout_diagnostic_failure("stray mark \"2\" at (1.0, 2.0)"));
         let diagnostics: Vec<crate::glyph::Diagnostic> = messages
