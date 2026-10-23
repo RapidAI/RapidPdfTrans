@@ -31,6 +31,11 @@ Translate each segment's \"text\" field into {dst}. \
 Copy every placeholder token of the form ⟦N⟧ exactly, including the brackets and the number. Do not translate, reorder, split, or drop placeholders. \
 Do not copy context_before or context_after into the output. \
 Preserve punctuation that belongs to the segment. \
+A section, list, or year label keeps its ASCII period (`3. 标题`, never `3。标题`). Do not glue a heading number to the title (`2 背景`, not `2背景`). \
+Do not invent a noun the segment does not contain: when the segment ends at `the following`, translate it as `以下` and leave the noun to the next segment. \
+Keep coined acronyms and model names such as GLUE, BERT, and Highway in Latin. \
+Translate conv as 卷积, stride as 步长, epoch as 轮, pool as 池化, and feature reuse as 特征重用. \
+A run-in heading ends its own sentence (`注释过程。我们从`); do not leave a space between the heading and the body. \
 Copy every number exactly as it appears, including decimals. Do not round, truncate, or alter digits. \
 When a segment is a comma-separated list of topics and names, translate descriptive topics into {dst} and keep product, project, language, and organization names in their original Latin spelling. \
 Every comma-separated item must appear in the output, in the same order. Do not drop or merge items. Copy parenthetical acronyms such as (RTC) and (SBOM) unchanged. \

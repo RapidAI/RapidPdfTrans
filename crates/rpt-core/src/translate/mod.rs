@@ -670,6 +670,48 @@ pub fn translate_extraction(
     )
 }
 
+/// Two saved renderings of one source. A short label that was also left in
+/// Latin (`Input-Input Layer5` versus `输入输入Layer5`) stays in Latin. A
+/// longer paragraph keeps the translation that is not an echo of the source.
+/// Two different Chinese renderings still disagree.
+fn choose_saved(source: &str, previous: &str, next: &str) -> Option<String> {
+    if previous == next {
+        return Some(previous.to_string());
+    }
+    let echo_prev = previous == source;
+    let echo_next = next == source;
+    let short_label = source.trim().chars().count() <= 48
+        && !source.contains(". ")
+        && source.split_whitespace().count() <= 6;
+    if short_label && (echo_prev || echo_next) {
+        return Some(source.to_string());
+    }
+    if echo_prev && !echo_next {
+        return Some(next.to_string());
+    }
+    if echo_next && !echo_prev {
+        return Some(previous.to_string());
+    }
+    None
+}
+
+fn remember_saved(map: &mut HashMap<String, String>, source: &str, translated: &str) -> Result<()> {
+    if let Some(previous) = map.get(source).cloned() {
+        if previous == translated {
+            return Ok(());
+        }
+        let Some(chosen) = choose_saved(source, &previous, translated) else {
+            return Err(Error::Translate(
+                "saved translations disagree for one source string".into(),
+            ));
+        };
+        map.insert(source.to_string(), chosen);
+        return Ok(());
+    }
+    map.insert(source.to_string(), translated.to_string());
+    Ok(())
+}
+
 /// Apply a previous translation to the current segmentation.
 ///
 /// Each segment is matched by its exact source string. No model is called.
@@ -682,15 +724,7 @@ pub fn replay_extraction(
 ) -> Result<TranslateReport> {
     let mut saved_map: HashMap<String, String> = HashMap::new();
     for item in saved {
-        if let Some(previous) = saved_map.get(&item.source) {
-            if previous != &item.translated {
-                return Err(Error::Translate(
-                    "saved translations disagree for one source string".into(),
-                ));
-            }
-        } else {
-            saved_map.insert(item.source.clone(), item.translated.clone());
-        }
+        remember_saved(&mut saved_map, &item.source, &item.translated)?;
     }
     let (segments, reference_ids) = prepare_segments(extraction, opts)?;
     let mut translated: Vec<Option<String>> = Vec::with_capacity(segments.len());
@@ -733,12 +767,14 @@ fn lookup_saved(source: &str, saved: &HashMap<String, String>) -> Option<String>
         return Some(hit.clone());
     }
     // Shield placeholders pick up a space when the run is built again.
-    // `⟦12⟧⟦11⟧ px` and `⟦12⟧⟦11⟧px` are the same sentence.
-    let needle: String = source.chars().filter(|ch| *ch != ' ').collect();
-    if let Some((_, value)) = saved
-        .iter()
-        .find(|(key, _)| key.chars().filter(|ch| *ch != ' ').eq(needle.chars()))
-    {
+    // `⟦12⟧⟦11⟧ px` and `⟦12⟧⟦11⟧px` are the same sentence. A line break
+    // and a space are the same sentence too.
+    let needle: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if let Some((_, value)) = saved.iter().find(|(key, _)| {
+        key.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .eq(needle.chars())
+    }) {
         return Some(value.clone());
     }
     let trimmed = source.trim();
@@ -2688,7 +2724,867 @@ pub(crate) fn repair_body_translation(source: &str, translated: &str) -> String 
             text = format!("{rest}{tail}");
         }
     }
+    // Proofreading rules. They rewrite the saved translation, so a replay
+    // paints the repaired Chinese without a new model call.
+    text = fix_numeric_label_period(source, &text);
+    text = fix_year_title_periods(source, &text);
+    text = separate_glued_section_index(source, &text);
+    text = repair_term_choices(source, &text);
+    text = drop_invented_following_noun(source, &text);
+    text = split_run_in_heading(source, &text);
+    text = drop_line_hyphen_stub(source, &text);
+    text = retain_coined_acronym(source, &text);
+    collapse_double_spaces(&text)
+}
+
+/// `3. DenseNets` came back as `3。密集网络`, and `2006. The PASCAL` as
+/// `2006。`. The period after a section, list, or year label is not a
+/// sentence stop. An ideographic full stop splits the heading in two.
+fn fix_numeric_label_period(source: &str, text: &str) -> String {
+    let Some(index) = leading_label_number(source, true) else {
+        return text.to_string();
+    };
+    let lead_len = text.len() - text.trim_start().len();
+    let rest = &text[lead_len..];
+    if !rest.starts_with(index.as_str()) {
+        return text.to_string();
+    }
+    let after = &rest[index.len()..];
+    let spaced = after.trim_start();
+    let Some(post) = spaced.strip_prefix('。') else {
+        return text.to_string();
+    };
+    let post = post.trim_start();
+    let mut out = text[..lead_len].to_string();
+    out.push_str(&index);
+    out.push('.');
+    if !post.is_empty() {
+        out.push(' ');
+        out.push_str(post);
+    }
+    out
+}
+
+/// `Csernai. 2016. First quora dataset` came back as `2016。第一个`.
+/// The period after the year opens the title. `k = 12. The next` is a
+/// sentence stop and keeps `。`.
+fn fix_year_title_periods(source: &str, text: &str) -> String {
+    let mut out = text.to_string();
+    for year in year_title_labels(source) {
+        let from = format!("{year}。");
+        if out.contains(&from) {
+            out = out.replace(&from, &format!("{year}. "));
+        }
+    }
+    out
+}
+
+fn year_title_labels(source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut years = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !chars[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index - start != 4 || index >= chars.len() || chars[index] != '.' {
+            continue;
+        }
+        let mut cursor = index + 1;
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= chars.len() || !chars[cursor].is_ascii_uppercase() {
+            continue;
+        }
+        let title_boundary = start == 0
+            || (start >= 2
+                && chars[start - 1].is_whitespace()
+                && matches!(chars[start - 2], '.' | '!' | '?'));
+        if title_boundary {
+            years.push(chars[start..index].iter().collect());
+        }
+    }
+    years
+}
+
+/// `2 Background` came back as `2背景`, and a footnote `4We` as `4我们`.
+/// The index stays a separate token from the title.
+fn separate_glued_section_index(source: &str, text: &str) -> String {
+    if leading_label_number(source, true).is_some() {
+        return text.to_string();
+    }
+    let heading = source.split_whitespace().count() <= 8;
+    if !heading && !footnote_number_glued(source) {
+        return text.to_string();
+    }
+    let Some(index) = leading_label_number(source, false) else {
+        return text.to_string();
+    };
+    let lead_len = text.len() - text.trim_start().len();
+    let rest = &text[lead_len..];
+    if !rest.starts_with(index.as_str()) {
+        return text.to_string();
+    }
+    let after = &rest[index.len()..];
+    let Some(next) = after.chars().next() else {
+        return text.to_string();
+    };
+    if next.is_whitespace() || matches!(next, '.' | '。' | '．' | '、' | '：' | ':') {
+        return text.to_string();
+    }
+    if !is_cjk_char(next) {
+        return text.to_string();
+    }
+    let mut out = text[..lead_len].to_string();
+    out.push_str(&index);
+    out.push(' ');
+    out.push_str(after);
+    out
+}
+
+/// Digits with optional `.digits` groups (`4`, `4.1`, `5.3`).
+/// `label_dot` requires the separator period of `3. Title` / `4.1. Datasets`.
+/// Without it, the number is a heading index before a space or a glued
+/// capital (`2 Background`, `4We`).
+fn leading_label_number(source: &str, label_dot: bool) -> Option<String> {
+    let source = source.trim_start();
+    let bytes = source.as_bytes();
+    if bytes.first().is_none_or(|byte| !byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut end = 0usize;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    while end + 1 < bytes.len() && bytes[end] == b'.' && bytes[end + 1].is_ascii_digit() {
+        end += 1;
+        let start = end;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == start {
+            return None;
+        }
+    }
+    if end == 0 || end > source.len() {
+        return None;
+    }
+    if label_dot {
+        if end >= bytes.len() || bytes[end] != b'.' {
+            return None;
+        }
+        let mut cursor = end + 1;
+        if cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            return None;
+        }
+        if cursor >= bytes.len() || !bytes[cursor].is_ascii_whitespace() {
+            return None;
+        }
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            return None;
+        }
+        return Some(source[..end].to_string());
+    }
+    if end >= bytes.len() {
+        return None;
+    }
+    let glued_capital = bytes[end].is_ascii_uppercase();
+    let spaced = bytes[end].is_ascii_whitespace();
+    if !glued_capital && !spaced {
+        return None;
+    }
+    if spaced {
+        let mut cursor = end;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            return None;
+        }
+    }
+    Some(source[..end].to_string())
+}
+
+/// `4We collected` is a footnote marker glued to the sentence.
+fn footnote_number_glued(source: &str) -> bool {
+    let source = source.trim_start();
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    index > 0 && index < bytes.len() && bytes[index].is_ascii_uppercase()
+}
+
+/// Terminology the model regularly misses when the English word is an
+/// abbreviation or a name. Each replacement is gated on the source word, so
+/// `转换` stays when the source says `transformation` and not `conv`.
+fn repair_term_choices(source: &str, text: &str) -> String {
+    let mut text = text.to_string();
+    if contains_word(source, "conv")
+        && !contains_word(source, "convert")
+        && !contains_word(source, "conversion")
+        && !contains_word(source, "conversation")
+    {
+        text = text.replace("转换", "卷积");
+    }
+    if contains_word(source, "stride") || contains_word(source, "strides") {
+        text = text.replace("跨度", "步长");
+    }
+    if contains_word(source, "pool") || contains_word(source, "pooling") {
+        text = expand_pool_word(&text, "平均池");
+        text = expand_pool_word(&text, "最大池");
+    }
+    if contains_word(source, "epoch") || contains_word(source, "epochs") {
+        text = text.replace("纪元", "轮");
+        text = text.replace("每个时期", "每一轮");
+        text = replace_numbered_period(&text);
+        text = replace_ascii_word(&text, "epochs", "轮");
+        text = replace_ascii_word(&text, "epoch", "轮");
+    }
+    text = repair_years_ago(source, &text);
+    text = repair_counted_times(source, &text);
+    if phrase_follows(source, "very right", |ch| ch != 'l') {
+        text = text.replace("非常正确", "最右侧");
+    }
+    if contains_word(source, "highway") {
+        text = text.replace("高速公路网络", "Highway网络");
+        text = text.replace("高速公路", "Highway");
+    }
+    if ascii_token(source, "GLUE") {
+        text = detach_latin_han(&text.replace("胶水", "GLUE"));
+    }
+    if (contains_word(source, "feature") || contains_word(source, "features"))
+        && !contains_word(source, "function")
+        && !contains_word(source, "functions")
+    {
+        text = text
+            .replace("功能重用", "特征重用")
+            .replace("功能复用", "特征复用");
+    }
     text
+}
+
+/// `平均池` and `最大池` are the pooling layer. `最大池化` already has the
+/// suffix and is left alone.
+fn expand_pool_word(text: &str, prefix: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(prefix) {
+        out.push_str(&rest[..at]);
+        out.push_str(prefix);
+        rest = &rest[at + prefix.len()..];
+        if !rest.starts_with('化') {
+            out.push('化');
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `40 时期` is an epoch count. A bare `时期` elsewhere in the sentence stays.
+fn replace_numbered_period(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index].is_ascii_digit() {
+            let start = index;
+            while index < chars.len() && chars[index].is_ascii_digit() {
+                index += 1;
+            }
+            let mut space = index;
+            while space < chars.len() && chars[space] == ' ' {
+                space += 1;
+            }
+            if chars.get(space) == Some(&'时') && chars.get(space + 1) == Some(&'期') {
+                for ch in &chars[start..index] {
+                    out.push(*ch);
+                }
+                out.push('轮');
+                index = space + 2;
+                continue;
+            }
+            for ch in &chars[start..index] {
+                out.push(*ch);
+            }
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn replace_ascii_word(text: &str, word: &str, replacement: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let needle: Vec<char> = word.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let end = index + needle.len();
+        let matched = end <= chars.len()
+            && chars_eq_ignore_ascii_case(&chars[index..end], &needle)
+            && (index == 0 || !chars[index - 1].is_ascii_alphabetic())
+            && (end == chars.len() || !chars[end].is_ascii_alphabetic());
+        if matched {
+            out.push_str(replacement);
+            index = end;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// `20 years ago` came back as `20 几年前的`. The `几` is not in the source.
+fn repair_years_ago(source: &str, text: &str) -> String {
+    let mut out = text.to_string();
+    for number in years_ago_numbers(source) {
+        for pattern in [
+            format!("{number} 几年前的"),
+            format!("{number}几年前的"),
+            format!("{number} 几年前"),
+            format!("{number}几年前"),
+        ] {
+            if out.contains(&pattern) {
+                out = out.replace(&pattern, &format!("{number}年前"));
+            }
+        }
+    }
+    out
+}
+
+fn years_ago_numbers(source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut numbers = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !chars[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index].is_ascii_digit() {
+            index += 1;
+        }
+        let mut cursor = index;
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        let year =
+            starts_with_word(&chars, cursor, "years") || starts_with_word(&chars, cursor, "year");
+        if !year {
+            continue;
+        }
+        cursor += if starts_with_word(&chars, cursor, "years") {
+            5
+        } else {
+            4
+        };
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if starts_with_word(&chars, cursor, "ago") {
+            numbers.push(chars[start..index].iter().collect());
+        }
+    }
+    numbers
+}
+
+/// `10 times` came back as `10 时间`.
+fn repair_counted_times(source: &str, text: &str) -> String {
+    let mut out = text.to_string();
+    for number in counted_times(source) {
+        for pattern in [format!("{number} 时间"), format!("{number}时间")] {
+            if out.contains(&pattern) {
+                out = out.replace(&pattern, &format!("{number}倍"));
+            }
+        }
+    }
+    out
+}
+
+fn counted_times(source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut numbers = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !chars[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index].is_ascii_digit() {
+            index += 1;
+        }
+        let mut cursor = index;
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if starts_with_word(&chars, cursor, "times") {
+            numbers.push(chars[start..index].iter().collect());
+        }
+    }
+    numbers
+}
+
+fn starts_with_word(chars: &[char], index: usize, word: &str) -> bool {
+    let needle: Vec<char> = word.chars().collect();
+    let end = index + needle.len();
+    end <= chars.len()
+        && chars_eq_ignore_ascii_case(&chars[index..end], &needle)
+        && (end == chars.len() || !chars[end].is_ascii_alphabetic())
+}
+
+fn chars_eq_ignore_ascii_case(left: &[char], right: &[char]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+}
+
+/// `very right` is the far side. `very rightly` is not that phrase.
+fn phrase_follows(source: &str, phrase: &str, next_ok: impl Fn(char) -> bool) -> bool {
+    let lower = source.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut start = 0usize;
+    while let Some(found) = lower[start..].find(phrase) {
+        let at = start + found;
+        let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphabetic();
+        let after = at + phrase.len();
+        let after_ok = after >= bytes.len() || !bytes[after].is_ascii_alphabetic();
+        if before_ok && after_ok {
+            let next = lower[after..].chars().find(|ch| !ch.is_whitespace());
+            if next.is_none_or(&next_ok) {
+                return true;
+            }
+        }
+        start = at + 1;
+    }
+    false
+}
+
+fn ascii_token(text: &str, token: &str) -> bool {
+    let bytes = text.as_bytes();
+    let needle = token.as_bytes();
+    let mut start = 0usize;
+    while start + needle.len() <= bytes.len() {
+        if let Some(found) = text[start..].find(token) {
+            let at = start + found;
+            let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+            let after = at + needle.len();
+            let after_ok = after >= bytes.len() || !bytes[after].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+            start = at + 1;
+            continue;
+        }
+        break;
+    }
+    false
+}
+
+/// `GLUE结果` keeps a space between the name and the Chinese word.
+fn detach_latin_han(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if index > 0 {
+            let prev = chars[index - 1];
+            let boundary = (prev.is_ascii_alphabetic() && is_cjk_char(ch))
+                || (is_cjk_char(prev) && ch.is_ascii_alphabetic());
+            if boundary {
+                out.push(' ');
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// `the following` was one segment and `layer transition` the next. The
+/// model finished the fragment as `以下结果`, then the join read `结果层过渡`.
+/// Drop the invented noun when the source never names it.
+fn drop_invented_following_noun(source: &str, text: &str) -> String {
+    let lower = source.to_ascii_lowercase();
+    if !lower.contains("the following") {
+        return text.to_string();
+    }
+    const FILLERS: &[(&str, &[&str])] = &[
+        ("结果", &["result", "results", "outcome", "outcomes"]),
+        ("内容", &["content", "contents"]),
+        ("情况", &["situation", "situations"]),
+        ("事项", &["item", "items", "matter", "matters"]),
+    ];
+    let mut out = text.to_string();
+    for (han, words) in FILLERS {
+        if words.iter().any(|word| contains_word(&lower, word)) {
+            continue;
+        }
+        let needle = format!("以下{han}");
+        if out.contains(&needle) {
+            out = out.replace(&needle, "以下");
+        }
+    }
+    out
+}
+
+/// `Annotation Process We begin` is a heading and then a sentence. The
+/// translation either leaves a space (`注释过程 我们`) or glues them
+/// (`评估由于`, `结果我们`).
+fn split_run_in_heading(source: &str, text: &str) -> String {
+    let Some(opener) = run_in_opener(source) else {
+        return text.to_string();
+    };
+    let head: String = text.chars().take(8).collect();
+    if head.contains('：') || head.contains(':') || head.contains('。') {
+        return text.to_string();
+    }
+    if let Some(spaced) = period_at_han_space(text) {
+        return spaced;
+    }
+    insert_opener_period(text, opener).unwrap_or_else(|| text.to_string())
+}
+
+fn run_in_opener(source: &str) -> Option<String> {
+    let source = source.trim_start();
+    if !source
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let tokens: Vec<&str> = source.split_whitespace().take(8).collect();
+    if tokens.len() < 2 {
+        return None;
+    }
+    for index in 1..tokens.len().min(7) {
+        if tokens[..index]
+            .iter()
+            .any(|token| token.ends_with(['.', '!', '?', '。', '：', ':']))
+        {
+            return None;
+        }
+        if sentence_opener(tokens[index]) || repeated_heading_word(&tokens, index) {
+            return Some(opener_key(tokens[index]));
+        }
+    }
+    None
+}
+
+fn repeated_heading_word(tokens: &[&str], index: usize) -> bool {
+    index > 0
+        && tokens[index].eq_ignore_ascii_case(tokens[index - 1])
+        && tokens[index]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn opener_key(token: &str) -> String {
+    token
+        .trim_matches(|ch: char| matches!(ch, ',' | '.' | ';' | ':' | '(' | ')'))
+        .to_string()
+}
+
+fn sentence_opener(token: &str) -> bool {
+    matches!(
+        opener_key(token).as_str(),
+        "We" | "Our"
+            | "They"
+            | "Since"
+            | "Most"
+            | "Overall"
+            | "When"
+            | "While"
+            | "Although"
+            | "However"
+            | "Both"
+            | "Each"
+            | "All"
+            | "Two"
+            | "Three"
+            | "Four"
+            | "One"
+            | "Table"
+            | "Figure"
+            | "In"
+            | "On"
+            | "For"
+            | "By"
+            | "With"
+            | "To"
+            | "From"
+            | "After"
+            | "Before"
+            | "Using"
+            | "Given"
+            | "Unlike"
+            | "There"
+            | "Because"
+            | "During"
+            | "If"
+    )
+}
+
+/// The first Han space in a short heading (`注释过程 我们`) is the missing stop.
+fn period_at_han_space(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut han = 0usize;
+    let mut index = 0usize;
+    while index < chars.len() {
+        if is_cjk_char(chars[index]) {
+            han += 1;
+            if han > 16 {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        if chars[index] == ' ' && index > 0 && is_cjk_char(chars[index - 1]) && han >= 2 {
+            let mut end = index;
+            while end < chars.len() && chars[end] == ' ' {
+                end += 1;
+            }
+            if end < chars.len() && is_cjk_char(chars[end]) {
+                let mut out: String = chars[..index].iter().collect();
+                out.push('。');
+                out.extend(chars[end..].iter());
+                return Some(out);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn insert_opener_period(text: &str, opener: String) -> Option<String> {
+    let cues: &[&str] = match opener.as_str() {
+        "We" | "Our" => &["我们"],
+        "They" => &["他们"],
+        "Since" => &["由于", "自从"],
+        "Most" => &["大多数", "多数"],
+        "Overall" => &["总体", "整体", "所有"],
+        "Two" => &["两", "二"],
+        "Three" => &["三"],
+        "Table" => &["表"],
+        "Figure" => &["图"],
+        "However" => &["然而"],
+        "Although" | "While" => &["虽然", "尽管"],
+        "When" => &["当"],
+        "Because" => &["因为"],
+        "In" | "On" | "At" => &["在"],
+        "For" => &["对于", "为了"],
+        _ => &[],
+    };
+    if cues.is_empty() {
+        return None;
+    }
+    let window: String = text.chars().take(18).collect();
+    let mut found: Option<usize> = None;
+    for cue in cues {
+        if let Some(at) = window.find(cue) {
+            if at == 0 {
+                continue;
+            }
+            if opener == "Table" || opener == "Figure" {
+                let after = &window[at + cue.len()..];
+                let ok = after.starts_with(|ch: char| ch.is_ascii_digit() || ch.is_whitespace());
+                if !ok {
+                    continue;
+                }
+            }
+            found = Some(match found {
+                Some(prev) => prev.min(at),
+                None => at,
+            });
+        }
+    }
+    let at = found?;
+    let prev = window[..at].chars().last()?;
+    if !is_cjk_char(prev) || matches!(prev, '。' | '：' | '，' | '、') {
+        return None;
+    }
+    let mut out = window[..at].to_string();
+    out.push('。');
+    out.push_str(&text[at..]);
+    Some(out)
+}
+
+/// `encodes the av-` is a line-break hyphen. The stub is not a word, and it
+/// must not stay in the Chinese line.
+fn drop_line_hyphen_stub(source: &str, text: &str) -> String {
+    if !text.chars().any(is_cjk_char) {
+        return text.to_string();
+    }
+    let stubs: Vec<String> = source
+        .split_whitespace()
+        .filter(|token| {
+            let chars: Vec<char> = token.chars().collect();
+            (3..=9).contains(&chars.len())
+                && chars.last() == Some(&'-')
+                && chars[..chars.len() - 1]
+                    .iter()
+                    .all(|ch| ch.is_ascii_lowercase())
+        })
+        .map(|token| token.to_string())
+        .collect();
+    if stubs.is_empty() {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for stub in stubs {
+        out = remove_bounded_stub(&out, &stub);
+    }
+    out
+}
+
+fn remove_bounded_stub(text: &str, stub: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let needle: Vec<char> = stub.chars().collect();
+    let mut drop = vec![false; chars.len()];
+    let mut index = 0usize;
+    while index + needle.len() <= chars.len() {
+        if chars[index..index + needle.len()] != needle[..] {
+            index += 1;
+            continue;
+        }
+        let before = index > 0 && chars[index - 1].is_ascii_alphabetic();
+        let after =
+            index + needle.len() < chars.len() && chars[index + needle.len()].is_ascii_alphabetic();
+        if !before && !after {
+            for slot in &mut drop[index..index + needle.len()] {
+                *slot = true;
+            }
+            if index > 0 && chars[index - 1] == ' ' {
+                drop[index - 1] = true;
+            }
+            index += needle.len();
+            continue;
+        }
+        index += 1;
+    }
+    if !drop.iter().any(|flag| *flag) {
+        return text.to_string();
+    }
+    chars
+        .iter()
+        .enumerate()
+        .filter(|(slot, _)| !drop[*slot])
+        .map(|(_, ch)| *ch)
+        .collect()
+}
+
+/// `BERT` came back as `伯特`, and `BERTLARGE` as `伯特·拉格`. A coined
+/// all-caps token stays in Latin. A document label (`ABSTRACT` → `摘要`)
+/// is a real word and keeps its translation.
+fn retain_coined_acronym(source: &str, text: &str) -> String {
+    let token = source.trim();
+    if token.len() < 2
+        || token.len() > 16
+        || token.chars().any(|ch| ch.is_whitespace())
+        || !token
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        || !token.chars().any(|ch| ch.is_ascii_uppercase())
+        || document_label_word(token)
+        || !text.chars().any(is_cjk_char)
+        || ascii_token(text, token)
+    {
+        return text.to_string();
+    }
+    token.to_string()
+}
+
+fn document_label_word(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "abstract"
+            | "references"
+            | "appendix"
+            | "introduction"
+            | "conclusion"
+            | "figure"
+            | "table"
+            | "acknowledgements"
+            | "acknowledgments"
+            | "contents"
+            | "definition"
+            | "note"
+            | "warning"
+            | "tip"
+            | "proof"
+            | "theorem"
+            | "lemma"
+            | "overview"
+            | "discussion"
+            | "method"
+            | "methods"
+            | "results"
+            | "related"
+            | "background"
+            | "experiments"
+            | "experiment"
+            | "approach"
+            | "training"
+            | "dataset"
+            | "datasets"
+            | "implementation"
+            | "analysis"
+            | "model"
+            | "models"
+            | "algorithm"
+            | "algorithms"
+            | "preface"
+            | "summary"
+            | "notation"
+            | "preliminaries"
+            | "supplementary"
+    )
+}
+
+/// Two ASCII spaces between words. Indentation at the start of the string stays.
+fn collapse_double_spaces(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != ' ' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index] == ' ' {
+            index += 1;
+        }
+        let between = start > 0
+            && index < chars.len()
+            && !chars[start - 1].is_whitespace()
+            && !chars[index].is_whitespace();
+        if between && index - start >= 2 {
+            out.push(' ');
+        } else {
+            for _ in start..index {
+                out.push(' ');
+            }
+        }
+    }
+    out
 }
 
 /// `<Tone>` / `</OutputFormat>` stay one token. The source is only tags, so
@@ -5714,6 +6610,176 @@ mod tests {
     }
 
     #[test]
+    fn proofread_repairs_broken_chinese_phrasing() {
+        assert_eq!(
+            repair_body_translation("3. DenseNets", "3。密集网络"),
+            "3. 密集网络"
+        );
+        assert_eq!(
+            repair_body_translation("4.1. Datasets", "4.1。数据集"),
+            "4.1. 数据集"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "1. All layers spread their weights over many inputs within",
+                "1。所有层将其权重分散到内部的许多输入上"
+            ),
+            "1. 所有层将其权重分散到内部的许多输入上"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "2006. The PASCAL recognising textual entailment challenge.",
+                "2006。 PASCAL 识别文本蕴涵挑战。"
+            ),
+            "2006. PASCAL 识别文本蕴涵挑战。"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "We set k = 12. The next block follows.",
+                "我们将 k 设为 12。下一个块随之而来。"
+            ),
+            "我们将 k 设为 12。下一个块随之而来。"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "Kornl Csernai. 2016. First quora dataset release: Question pairs.",
+                "Kornl Csernai。 2016。第一个 quora 数据集发布：问题对。"
+            ),
+            "Kornl Csernai。 2016. 第一个 quora 数据集发布：问题对。"
+        );
+        assert_eq!(repair_body_translation("2 Background", "2背景"), "2 背景");
+        assert_eq!(
+            repair_body_translation("5.3 Optimizer", "5.3优化器"),
+            "5.3 优化器"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "4We use news-please to collect the corpus.",
+                "4我们使用新闻收集语料。"
+            ),
+            "4 我们使用新闻收集语料。"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "layer [16], which gives rise to the following",
+                "[16] 层，这会产生以下结果"
+            ),
+            "[16] 层，这会产生以下"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "layer [16], which gives rise to the following layer transition:",
+                "[16] 层，这会产生以下结果层过渡："
+            ),
+            "[16] 层，这会产生以下层过渡："
+        );
+        assert_eq!(
+            repair_body_translation(
+                "the following results are reported in the table.",
+                "以下结果列于表中。"
+            ),
+            "以下结果列于表中。"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "very right, also uses weights across the entire dense block",
+                "非常正确，也使用整个密集块的权重"
+            ),
+            "最右侧，也使用整个密集块的权重"
+        );
+        assert_eq!(
+            repair_body_translation("only last year Highway", "仅去年的高速公路"),
+            "仅去年的Highway"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "Highway Networks with hundreds of layers can be optimized",
+                "可以优化数百层的高速公路网络"
+            ),
+            "可以优化数百层的Highway网络"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "20 years ago [18], improvements in computer hardware",
+                "20 几年前的 [18]，计算机硬件的改进"
+            ),
+            "20年前 [18]，计算机硬件的改进"
+        );
+        assert_eq!(
+            repair_body_translation("7 × 7 conv, stride 2", "7 × 7 转换，跨度 2"),
+            "7 × 7 卷积，步长 2"
+        );
+        assert_eq!(
+            repair_body_translation("3 × 3 max pool, stride 2", "3 × 3 最大池，步幅 2"),
+            "3 × 3 最大池化，步幅 2"
+        );
+        assert_eq!(
+            repair_body_translation("7 × 7 global average pool", "7 × 7 全局平均池"),
+            "7 × 7 全局平均池化"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "10 times at epoch 30 and 60. The learning rate drops.",
+                "30 和 60 纪元的 10 时间。学习率下降，并在训练epoch总数处更新。"
+            ),
+            "30 和 60 轮的 10倍。学习率下降，并在训练轮总数处更新。"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "trained for 300 and 40 epochs",
+                "进行 300 和 40 时期的训练，每个时期使用相同的掩码"
+            ),
+            "进行 300 和 40轮的训练，每一轮使用相同的掩码"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "Feature Reuse. By design, layers share maps.",
+                "功能重用。根据设计，各层共享特征图。"
+            ),
+            "特征重用。根据设计，各层共享特征图。"
+        );
+        assert_eq!(
+            repair_body_translation("5.1 GLUE Results", "5.1 胶水结果"),
+            "5.1 GLUE 结果"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "transforms the sequence without a convolutional encoder",
+                "不使用序列对齐的转换模型"
+            ),
+            "不使用序列对齐的转换模型"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "Evaluation Since the class distribution is skewed.",
+                "评估由于诊断集中的类别分布不平衡。"
+            ),
+            "评估。由于诊断集中的类别分布不平衡。"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "Results We present our results in Table 4.",
+                "结果我们在表 4 中展示了我们的结果。"
+            ),
+            "结果。我们在表 4 中展示了我们的结果。"
+        );
+        assert_eq!(
+            repair_body_translation(
+                "Annotation Process We begin with a target set.",
+                "注释过程 我们从一组目标现象开始。"
+            ),
+            "注释过程。我们从一组目标现象开始。"
+        );
+        assert_eq!(
+            repair_body_translation(") encodes the av-", ") 编码 av-"),
+            ") 编码"
+        );
+        assert_eq!(repair_body_translation("BERT", "伯特"), "BERT");
+        assert_eq!(repair_body_translation("ABSTRACT", "摘要"), "摘要");
+        assert_eq!(repair_body_translation("m − m .", "米  米 。"), "米 米 。");
+    }
+
+    #[test]
     fn an_omitted_id_splits_the_batch() {
         let mut ex = extraction_from_lines(&["Alpha one", "Beta two"]);
         let report =
@@ -6580,6 +7646,38 @@ mod tests {
     }
 
     #[test]
+    fn replay_keeps_a_short_label_that_was_also_echoed() {
+        let opts = TranslateOptions::default();
+        let saved = vec![
+            TranslatedSegment {
+                id: 1,
+                page_index: 0,
+                glyph_ids: Vec::new(),
+                source: "Input-Input Layer5".into(),
+                translated: "输入输入Layer5".into(),
+            },
+            TranslatedSegment {
+                id: 2,
+                page_index: 0,
+                glyph_ids: Vec::new(),
+                source: "Input-Input Layer5".into(),
+                translated: "Input-Input Layer5".into(),
+            },
+        ];
+        let mut doc = extraction_from_lines(&["Input-Input Layer5"]);
+        let report = replay_extraction(&mut doc, &opts, &saved).expect("replay");
+        assert_eq!(report.segments[0].translated, "Input-Input Layer5");
+        assert!(choose_saved(
+            "This sentence is long enough to be body prose rather than a label.",
+            "This sentence is long enough to be body prose rather than a label.",
+            "这句话足够长，属于正文而不是标签。",
+        )
+        .unwrap()
+        .contains('句'));
+        assert!(choose_saved("same source", "甲", "乙").is_none());
+    }
+
+    #[test]
     fn replay_matches_each_source_and_rejects_a_missing_segment() {
         let opts = TranslateOptions::default();
         let mut live_doc = extraction_from_lines(&["Hello world.", "Second sentence stays."]);
@@ -6612,6 +7710,8 @@ mod tests {
         saved.insert("a ⟦12⟧⟦11⟧px b".to_string(), "译文".to_string());
         let hit = lookup_saved("a ⟦12⟧⟦11⟧ px b", &saved).expect("space-only match");
         assert_eq!(hit, "译文");
+        let wrapped = lookup_saved("a ⟦12⟧⟦11⟧\npx b", &saved).expect("newline match");
+        assert_eq!(wrapped, "译文");
     }
 
     #[test]
