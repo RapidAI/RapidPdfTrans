@@ -4,7 +4,7 @@
 
 它打开 PDF，把内容流解释到单个字形，并检查每个字形都还在。翻译器给这些字形标上译文。不加 `--output` 的 `rpt translate` 只报告译文，不写文件。加上 `--output` 会把字形重写进 PDF，并删掉已经改写的那些字形原来的文本绘制指令。
 
-英文说明在 [README.md](README.md)。
+英文说明在 [README.md](README.md)。与 BabelDOC 的墙钟时间、峰值 RSS 和输出大小见 [与 BabelDOC 0.6.4 的实测](#与-babeldoc-064-的实测)。
 
 ## 用法
 
@@ -330,6 +330,26 @@ python3 corpus/bench/prod_bench.py \
 ```
 
 rpt 使用 `--jobs 4`、默认批大小 8、替换模式。BabelDOC 使用 `--qps 4 --pool-max-workers 4 --ignore-cache --no-dual --no-auto-extract-glossary --watermark-output-mode no_watermark --primary-font-family serif`。脚本把 `table.md` 和 `results.jsonl` 写到 `--work`。密钥只留在环境变量里。
+
+### 同一份 30 页文件：中文与左右对照
+
+把同一份已保存的译文分别送进两个二进制（`--replay`），所以计时只含重写。源文件 `large-30p` 是 43,418,334 字节。峰值 RSS 来自 `/usr/bin/time -v`。
+
+| 模式 | 引擎 | 耗时 | 峰值 RSS | PDF | 标准输出 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 替换（中文） | rpt 0.1.4 | 88.5s | 1,659.4 MB | 44,181,722 | 239,123,335 |
+| 替换（中文） | rpt 0.1.5 | 83.4s | 262.2 MB | 44,181,722 | 2,105,440 |
+| 左右对照 | rpt 0.1.4 | 91.4s | 1,703.3 MB | 88,550,395 | 239,123,335 |
+| 左右对照 | rpt 0.1.5 | 86.9s | 263.4 MB | 44,392,754 | 2,105,440 |
+
+左右对照从 88.6 MB、峰值 1,703 MB 降到 44.4 MB、峰值 263 MB。中文 PDF 两个版本都是 44,181,722 字节。标准输出从 239 MB 的逐字形 JSON 变成 2.1 MB 的摘要。
+
+```bash
+# 0.1.5。0.1.4 去掉 --progress 即可。
+/usr/bin/time -v -- target/release/rpt translate large-30p.pdf \
+  --replay translations.json --from en --to zh --jobs 4 --progress off \
+  --mode side-by-side --output large-bi.pdf
+```
 
 `corpus/manifest.json` 记录真实论文和可再分发图书的直接下载 URL、来源、许可证、sha256、大小和特征标签。`python3 corpus/fetch.py` 把它们下载到被 git 忽略的缓存，这些文件不进仓库。例外是 `corpus/ci/`：九篇 CC BY 4.0 论文，每篇不到 700 KB，URL 和许可证写在 `corpus/ci/manifest.json`，CI 直接用它们。`testdata/hello.pdf` 由 `cargo run -p rpt-core --example hello_pdf` 生成，只用于单元测试，不是语料。`rpt-qa` 对每份文件做抽取和字形覆盖率检查，用 Poppler 对文字，并对一份逐字节相同的副本做渲染对比（整页 SSIM，以及去掉字形框之后的非文字区域 SSIM）。lopdf 另存是另一次结构往返，会改写文件，报告里单独列出。CI 只跑标记了 `ci: true` 的小子集。全量语料在夜间的 `Corpus fidelity` 工作流。说明见 `corpus/README.md`。
 

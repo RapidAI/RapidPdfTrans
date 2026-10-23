@@ -4,7 +4,7 @@ Format-preserving PDF translation. The goal is to replace [BabelDOC](https://git
 
 It opens a PDF, interprets content streams down to individual glyphs, and checks that every glyph is still accounted for. A pluggable translator marks those glyphs as translated. `rpt translate` without `--output` reports that translation and does not write a file. `rpt translate --output` rewrites the glyphs into a PDF and removes the original text-showing operators for the glyphs it rewrote.
 
-The Chinese page is [README.zh.md](README.zh.md).
+The Chinese page is [README.zh.md](README.zh.md). Wall time, peak RSS, and output size against BabelDOC are in [Live run against BabelDOC 0.6.4](#live-run-against-babeldoc-064).
 
 ## Usage
 
@@ -343,6 +343,26 @@ python3 corpus/bench/prod_bench.py \
 ```
 
 rpt is `--jobs 4`, default batch size 8, replace mode. BabelDOC is `--qps 4 --pool-max-workers 4 --ignore-cache --no-dual --no-auto-extract-glossary --watermark-output-mode no_watermark --primary-font-family serif`. The script writes `table.md` and `results.jsonl` under `--work`. The API key stays in the environment.
+
+### Same 30-page file, Chinese and side-by-side
+
+Replay of one saved translation through both binaries, so the clock is rewrite time. Source `large-30p` is 43,418,334 bytes. Peak RSS is `/usr/bin/time -v`.
+
+| mode | engine | wall | peak RSS | PDF | stdout |
+| --- | --- | ---: | ---: | ---: | ---: |
+| replace (Chinese) | rpt 0.1.4 | 88.5s | 1,659.4 MB | 44,181,722 | 239,123,335 |
+| replace (Chinese) | rpt 0.1.5 | 83.4s | 262.2 MB | 44,181,722 | 2,105,440 |
+| side-by-side | rpt 0.1.4 | 91.4s | 1,703.3 MB | 88,550,395 | 239,123,335 |
+| side-by-side | rpt 0.1.5 | 86.9s | 263.4 MB | 44,392,754 | 2,105,440 |
+
+Side-by-side goes from 88.6 MB and 1,703 MB RSS to 44.4 MB and 263 MB. The Chinese PDF is the same 44,181,722 bytes in both versions. Stdout goes from 239 MB of per-glyph JSON to a 2.1 MB summary.
+
+```bash
+# 0.1.5. 0.1.4 is the same command without --progress.
+/usr/bin/time -v -- target/release/rpt translate large-30p.pdf \
+  --replay translations.json --from en --to zh --jobs 4 --progress off \
+  --mode side-by-side --output large-bi.pdf
+```
 
 ## Roadmap
 
