@@ -56,7 +56,9 @@ pub use geom::{Matrix, Rect};
 pub use glyph::{Diagnostic, Disposition, Glyph, GlyphSource, PageInfo, SourceKind};
 pub use layout::{fit_paragraph, CjkMeasure, FittedParagraph};
 pub use overlap::{find_alignment_drift, find_overlaps, BlockAlign, OverlapHit};
-pub use rewrite::{rewrite_translation, RewriteOptions};
+pub use rewrite::{
+    failing_layout_message, layout_diagnostic_failure, rewrite_translation, RewriteOptions,
+};
 pub use segment::{segment_glyphs, segment_with, Segment, SegmentFlags, Segmentation};
 pub use translate::{
     citation_end, identical_reference_operators, parse_glossary_csv, reference_glyph_ids,

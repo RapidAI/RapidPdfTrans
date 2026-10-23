@@ -9,9 +9,9 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use rpt_core::{
-    parse_font_spec, parse_glossary_csv, replay_extraction, translate_extraction, CjkStyle,
-    ExtractOptions, OpenOptions, OutputMode, PdfDocument, ProgressMode, RewriteOptions,
-    TranslateOptions, TranslatedSegment, TranslatorBackend,
+    failing_layout_message, parse_font_spec, parse_glossary_csv, replay_extraction,
+    translate_extraction, CjkStyle, ExtractOptions, OpenOptions, OutputMode, PdfDocument,
+    ProgressMode, RewriteOptions, TranslateOptions, TranslatedSegment, TranslatorBackend,
 };
 
 #[derive(Parser)]
@@ -334,6 +334,7 @@ fn run_translate(
             client.endpoint().to_string(),
         )
     };
+    let mut layout_failure: Option<String> = None;
     if let Some(output) = output.as_ref() {
         let _pulse = PhasePulse::start(opts.progress, "replace");
         if let Err(err) = doc.rewrite(
@@ -352,6 +353,7 @@ fn run_translate(
             eprintln!("rpt: warning: {warning}");
         }
         warn_cjk_font(&extraction);
+        layout_failure = failing_layout_message(&extraction.diagnostics);
     }
     // The translated document is no longer needed. Drop it before the
     // bilingual pass opens the source again.
@@ -385,6 +387,12 @@ fn run_translate(
             eprintln!("rpt: warning: {warning}");
         }
         warn_cjk_font(&bilingual_extraction);
+        if let Some(message) = failing_layout_message(&bilingual_extraction.diagnostics) {
+            layout_failure = Some(match layout_failure {
+                Some(have) => format!("{have}; {message}"),
+                None => message,
+            });
+        }
     }
     let translator = serde_json::json!({
         "model": model,
@@ -431,8 +439,14 @@ fn run_translate(
             }
         }
         if glyphs {
+            if let Some(message) = layout_failure {
+                return fail(message);
+            }
             return emit(&full, compact);
         }
+    }
+    if let Some(message) = layout_failure {
+        return fail(message);
     }
     emit(&summary, compact)
 }

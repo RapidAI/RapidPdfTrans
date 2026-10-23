@@ -4639,6 +4639,10 @@ pub(crate) fn intentional_keep_kind(source: &str) -> Option<&'static str> {
     if is_author_list(source) || is_institution_line(source) {
         return Some("name");
     }
+    // `SWE-PolyBench` is a benchmark. The model glossed it as 软件工程多基准.
+    if is_benchmark_or_product_name(source) {
+        return Some("name");
+    }
     if looks_like_code(source) {
         return Some("code");
     }
@@ -4649,6 +4653,25 @@ pub(crate) fn intentional_keep_kind(source: &str) -> Option<&'static str> {
         return Some("formula");
     }
     None
+}
+
+/// `SWE-PolyBench` and `SWE-bench`. A hyphenated token whose part is an
+/// acronym or has an internal capital. `Method`, `full-history`, and a
+/// contents title (`PromptTemplate`) are ordinary words.
+pub(crate) fn is_benchmark_or_product_name(text: &str) -> bool {
+    let text = text.trim().trim_end_matches(['.', ',', ';', ':']);
+    if text.is_empty() || text.chars().any(|ch| ch.is_whitespace()) || !text.contains('-') {
+        return false;
+    }
+    let marked = |part: &str| {
+        let letters: Vec<char> = part.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+        if letters.len() < 2 {
+            return false;
+        }
+        letters.iter().all(|ch| ch.is_ascii_uppercase())
+            || letters.iter().skip(1).any(|ch| ch.is_ascii_uppercase())
+    };
+    text.split('-').filter(|part| !part.is_empty()).any(marked)
 }
 
 fn looks_like_code(source: &str) -> bool {
@@ -4731,6 +4754,12 @@ fn gloss_echoed_formula_words(source: &str, translated: &str) -> String {
 /// A credit line whose personal name was translated. Role words stay in
 /// Chinese; the name is the original Latin (`Copy editor: Julie McNamee`).
 pub(crate) fn restore_credit_names(source: &str, translated: &str) -> String {
+    // A benchmark or product token stays in Latin (`SWE-PolyBench`).
+    // A table header (`Method`) and a group label (`Full-history baseline`)
+    // are phrases, so they still translate.
+    if is_benchmark_or_product_name(source) {
+        return source.trim().to_string();
+    }
     // A paper affiliation stays in Latin (`Google AI Language`,
     // `Microsoft Research`). The model otherwise turns it into Chinese.
     if is_institution_line(source) {
@@ -6033,6 +6062,23 @@ mod tests {
         assert!(!is_name_byline(
             "The transformer architecture replaces recurrence with self attention over the input."
         ));
+    }
+
+    #[test]
+    fn a_benchmark_token_stays_latin_and_a_header_does_not() {
+        assert!(is_benchmark_or_product_name("SWE-PolyBench"));
+        assert!(is_benchmark_or_product_name("SWE-bench"));
+        assert!(!is_benchmark_or_product_name("SelfCompact"));
+        assert!(!is_benchmark_or_product_name("PromptTemplate"));
+        assert!(!is_benchmark_or_product_name("Method"));
+        assert!(!is_benchmark_or_product_name("Full-history baseline"));
+        assert!(!is_benchmark_or_product_name("full-history"));
+        assert_eq!(
+            restore_credit_names("SWE-PolyBench", "软件工程多基准"),
+            "SWE-PolyBench"
+        );
+        assert_eq!(intentional_keep_kind("SWE-PolyBench"), Some("name"));
+        assert_eq!(intentional_keep_kind("Method"), None);
     }
 
     #[test]

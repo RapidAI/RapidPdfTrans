@@ -2782,7 +2782,7 @@ fn release_body_wraps(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
             kept.iter()
                 .any(|(id, reason)| *id == glyph.id && reason == "figure")
         });
-        if !figure {
+        if !figure || is_panel_label(&lower.text) {
             continue;
         }
         for upper in lines {
@@ -3042,7 +3042,7 @@ fn line_in_figure(line: &VisualLine<'_>, unions: &[Rect], _body_font: &str) -> b
         || is_footer_line(&line.text)
         || is_page_folio_text(&line.text)
         || is_display_heading(line)
-        || is_body_shape(line)
+        || (is_body_shape(line) && !is_panel_label(&line.text))
         || starts_run_in(&line.text)
     {
         return false;
@@ -3070,15 +3070,51 @@ fn line_in_figure(line: &VisualLine<'_>, unions: &[Rect], _body_font: &str) -> b
             && line.y <= rect.y1 + line.size * 2.4
             && line.left >= rect.x0 - 8.0
             && line.right <= rect.x1 + 24.0;
-        if inside * 2 <= total && !above {
+        // `(d) Following vs. ignoring summaries` sits just under panel (d),
+        // outside the stroked box. It is still the figure's own label.
+        let below = !tiny
+            && line.y < rect.y0
+            && rect.y0 - line.y <= line.size * 2.4
+            && line.left >= rect.x0 - 8.0
+            && line.right <= rect.x1 + 24.0;
+        let panel = is_panel_label(&line.text)
+            && line.y >= rect.y0 - line.size * 2.4
+            && line.y <= rect.y1 + line.size * 2.4
+            && line.left >= rect.x0 - 12.0
+            && line.left <= rect.x1 + 8.0
+            && line.right <= rect.x1 + 36.0;
+        if inside * 2 <= total && !above && !below && !panel {
             continue;
         }
         let width = line.right - line.left;
-        if above || width <= rect.width() + 24.0 {
+        if above || below || panel || width <= rect.width() + 24.0 {
             return true;
         }
     }
     false
+}
+
+/// `(d) Following vs. ignoring summaries`. A figure panel's own title.
+/// `Figure 3:` is a caption, not this label.
+pub(crate) fn is_panel_label(text: &str) -> bool {
+    let text = text.trim();
+    let Some(rest) = text.strip_prefix('(') else {
+        return false;
+    };
+    let Some(close) = rest.find(')') else {
+        return false;
+    };
+    if !(1..=3).contains(&close) {
+        return false;
+    }
+    let index = &rest[..close];
+    if !index.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let label = rest[close + 1..].trim();
+    !label.is_empty()
+        && label.chars().count() <= 48
+        && label.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
 fn caption_kind(text: &str) -> Option<&'static str> {
@@ -3925,6 +3961,11 @@ fn release_table_headers(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>
         }
         for row in &block[start..end] {
             for index in row {
+                // A panel title under the drawing is not a column header,
+                // even when a table on the same page kept the other panel.
+                if is_panel_label(&lines[*index].text) {
+                    continue;
+                }
                 for glyph in &lines[*index].glyphs {
                     if table_ids.contains(&glyph.id) || figure_ids.contains(&glyph.id) {
                         release.insert(glyph.id);
@@ -3947,6 +3988,11 @@ fn release_table_headers(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>
 fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     let mut release = std::collections::HashSet::new();
     for line in lines {
+        // `(d) Following vs. ignoring summaries` is bold and sits under the
+        // table caption on the same page. It is the figure's own title.
+        if is_panel_label(&line.text) {
+            continue;
+        }
         if !line.sole_on_baseline || !under_table_caption(line, lines) {
             continue;
         }
@@ -6875,6 +6921,47 @@ mod tests {
         assert!(
             kept.iter().any(|(id, _)| *id == 3),
             "method cell was released: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn a_panel_title_under_a_table_caption_stays_in_the_figure() {
+        let mut caption = glyph(
+            1,
+            108.0,
+            700.0,
+            "Table 1: Pass rate versus inference budget.",
+            false,
+        );
+        caption.font_name = "NimbusRomNo9L-Regu".into();
+        let mut title = glyph(
+            2,
+            328.0,
+            500.0,
+            "(d) Following vs. ignoring summaries",
+            false,
+        );
+        title.font_name = "InterTight-SemiBold".into();
+        let glyphs = vec![caption, title];
+        let line = |index: usize, y: f32, right: f32| VisualLine {
+            glyphs: vec![&glyphs[index]],
+            text: glyphs[index].unicode.clone(),
+            page: 0,
+            y,
+            left: glyphs[index].matrix[4],
+            right,
+            size: 9.0,
+            font: glyphs[index].font_name.clone(),
+            toc: false,
+            sole_on_baseline: true,
+        };
+        let lines = vec![line(0, 700.0, 400.0), line(1, 500.0, 451.0)];
+        let mut kept = vec![(2, "figure".into())];
+        release_table_group_labels(&lines, &mut kept);
+        assert!(
+            kept.iter()
+                .any(|(id, reason)| *id == 2 && reason == "figure"),
+            "panel title was translated with the group labels: {kept:?}"
         );
     }
 
@@ -11760,6 +11847,48 @@ mod tests {
         assert!(
             line_in_figure(&line, &[drawing], "Nimbus"),
             "a short label above a real drawing was translated"
+        );
+    }
+
+    #[test]
+    fn a_panel_title_just_under_the_frame_stays_in_the_figure() {
+        let title = wide(
+            0,
+            328.0,
+            376.0,
+            "(d) Following vs. ignoring summaries",
+            123.0,
+            7.5,
+        );
+        let caption = wide(
+            1,
+            108.0,
+            250.0,
+            "Figure 3: Pass rate versus inference budget.",
+            360.0,
+            9.0,
+        );
+        let regions = [
+            box_region(108.0, 272.0, 504.0, 502.0),
+            box_region(328.0, 300.0, 474.0, 371.0),
+            box_region(330.0, 302.0, 472.0, 369.0),
+        ];
+        let seg = segment_placed(&[title, caption], &SegmentFlags::default(), &regions, &[]);
+        assert!(
+            seg.kept
+                .iter()
+                .any(|(id, reason)| *id == 0 && reason == "figure"),
+            "panel title was translated: {:?}",
+            seg.kept
+        );
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Figure 3")),
+            "the caption was kept with the panel: {texts:?}"
+        );
+        assert!(
+            texts.iter().all(|text| !text.contains("Following")),
+            "figure text was segmented: {texts:?}"
         );
     }
 
