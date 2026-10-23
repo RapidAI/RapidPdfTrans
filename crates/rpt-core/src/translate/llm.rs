@@ -32,6 +32,9 @@ pub struct LlmTranslator {
     /// Retries of a timed-out or dropped call. The job binds this so stderr
     /// progress can show that the process is retrying rather than idle.
     retries: Mutex<Arc<AtomicUsize>>,
+    /// `connect` while the socket, TLS handshake, and response headers are in
+    /// flight; `recv-body` while the body is read. The job binds this.
+    phase: Mutex<Arc<Mutex<String>>>,
     /// Successful `(system, user)` replies. Errors are not stored.
     cache: Mutex<HashMap<(String, String), String>>,
 }
@@ -64,10 +67,6 @@ impl LlmTranslator {
     pub fn with_key(opts: &TranslateOptions, api_key: impl Into<String>) -> Result<Self> {
         let api_key = api_key.into();
         let timeout = Duration::from_secs(opts.timeout_secs.max(1));
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .proxy(None)
-            .build();
         Ok(Self {
             base_url: opts.resolved_base_url(),
             model: opts.resolved_model(),
@@ -75,8 +74,9 @@ impl LlmTranslator {
             temperature: opts.temperature,
             max_tokens: opts.max_tokens,
             timeout,
-            agent: config.into(),
+            agent: deadline_agent(timeout),
             retries: Mutex::new(Arc::new(AtomicUsize::new(0))),
+            phase: Mutex::new(Arc::new(Mutex::new(String::new()))),
             cache: Mutex::new(HashMap::new()),
         })
     }
@@ -94,6 +94,12 @@ impl Translator for LlmTranslator {
     fn bind_retries(&self, counter: Arc<AtomicUsize>) {
         if let Ok(mut slot) = self.retries.lock() {
             *slot = counter;
+        }
+    }
+
+    fn bind_phase(&self, phase: Arc<Mutex<String>>) {
+        if let Ok(mut slot) = self.phase.lock() {
+            *slot = phase;
         }
     }
 
@@ -118,6 +124,9 @@ impl Translator for LlmTranslator {
                 }
                 Err(err) if request_retryable(&err) && attempt < 3 => {
                     self.note_retry();
+                    if let Ok(phase) = self.phase.lock() {
+                        set_phase(Some(&phase), "retry");
+                    }
                     std::thread::sleep(delay);
                     delay *= 2;
                     last = Some(err);
@@ -149,15 +158,33 @@ impl LlmTranslator {
         // a stalled call holds only the socket it already checked out.
         let api_key = self.api_key.clone();
         let timeout = self.timeout;
+        // Cloning the agent is an Arc clone. The request itself runs on the
+        // worker so a blocked DNS lookup or a pool wait is still inside the
+        // deadline, not on the caller before `recv_timeout`.
         let agent = self.agent.clone();
+        let phase = self.phase.lock().ok().map(|slot| Arc::clone(&slot));
+        set_phase(phase.as_deref(), "connect");
+        let phase_for_thread = phase.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(post_chat(&agent, &url, &api_key, body));
+            let _ = tx.send(post_chat(
+                &agent,
+                &url,
+                &api_key,
+                body,
+                phase_for_thread.as_deref(),
+            ));
         });
         match rx.recv_timeout(timeout) {
             Ok(result) => result,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                Err(Error::Translate("timeout: global".into()))
+                let label = phase
+                    .as_ref()
+                    .and_then(|slot| slot.lock().ok())
+                    .map(|guard| guard.clone())
+                    .filter(|label| !label.is_empty())
+                    .unwrap_or_else(|| "global".to_string());
+                Err(Error::Translate(format!("timeout: {label}")))
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 Err(Error::Translate("LLM request failed".into()))
@@ -166,13 +193,47 @@ impl LlmTranslator {
     }
 }
 
-fn post_chat(agent: &ureq::Agent, url: &str, api_key: &str, body: Value) -> Result<String> {
+/// One budget for the whole call and for each phase. `timeout_global` alone
+/// does not start the resolver watchdog, and a body that trickles can outlive
+/// a header timeout. Connect covers the TCP socket and the TLS handshake.
+pub(crate) fn deadline_agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .timeout_resolve(Some(timeout))
+        .timeout_connect(Some(timeout))
+        .timeout_send_request(Some(timeout))
+        .timeout_send_body(Some(timeout))
+        .timeout_recv_response(Some(timeout))
+        .timeout_recv_body(Some(timeout))
+        .proxy(None)
+        .build()
+        .into()
+}
+
+fn set_phase(phase: Option<&Mutex<String>>, label: &str) {
+    if let Some(phase) = phase {
+        if let Ok(mut slot) = phase.lock() {
+            *slot = label.to_string();
+        }
+    }
+}
+
+fn post_chat(
+    agent: &ureq::Agent,
+    url: &str,
+    api_key: &str,
+    body: Value,
+    phase: Option<&Mutex<String>>,
+) -> Result<String> {
+    // DNS, TCP, TLS, request bytes, and response headers share this label.
+    set_phase(phase, "connect");
     let response = agent
         .post(url)
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
         .send_json(&body)
         .map_err(|err| http_error(err, api_key))?;
+    set_phase(phase, "recv-body");
     let parsed: Value = response
         .into_body()
         .read_json()
@@ -438,5 +499,74 @@ mod tests {
         assert_eq!(client.complete("sys", "same").unwrap(), "cached-reply");
         let captured = mock.body.lock().unwrap().clone();
         assert_eq!(captured.matches("chat/completions").count(), 1);
+    }
+
+    /// Accept every retry. One mode never writes a response. The other writes
+    /// headers and trickles the body. A client that gives up must not close
+    /// the listener, or the next attempt fails with connection refused
+    /// instead of the deadline.
+    fn stall_server(trickle: bool) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            loop {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let _ = read_request(&mut stream);
+                    if !trickle {
+                        loop {
+                            thread::sleep(std::time::Duration::from_secs(30));
+                        }
+                    }
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n",
+                    );
+                    loop {
+                        thread::sleep(std::time::Duration::from_millis(200));
+                        if stream.write_all(b" ").is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    fn assert_deadline(trickle: bool) {
+        let base = stall_server(trickle);
+        let opts = TranslateOptions {
+            base_url: Some(base),
+            timeout_secs: 1,
+            ..TranslateOptions::default()
+        };
+        let client = LlmTranslator::with_key(&opts, "k").unwrap();
+        let started = std::time::Instant::now();
+        let err = client.complete("sys", "user").unwrap_err();
+        let elapsed = started.elapsed();
+        let msg = err.to_string();
+        assert!(
+            msg.to_ascii_lowercase().contains("timeout"),
+            "stall should be a timeout, got {msg}"
+        );
+        // Four attempts at 1s, plus backoff 2+4+8. A missing deadline sits here
+        // until the test harness kills it.
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "deadline missed: {elapsed:?} ({msg})"
+        );
+    }
+
+    #[test]
+    fn a_server_that_accepts_and_never_responds_hits_the_deadline() {
+        assert_deadline(false);
+    }
+
+    #[test]
+    fn a_server_that_trickles_the_body_hits_the_deadline() {
+        assert_deadline(true);
     }
 }

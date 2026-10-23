@@ -114,8 +114,8 @@ Flags that exist on `rpt translate`:
 | `--model`, `--base-url` | Override `RPT_LLM_MODEL` and `RPT_LLM_BASE_URL` for this run. |
 | `--glossary source=target` | Repeat for more than one term. A path to a CSV file (`src,tgt` or `source,target`, header optional) is read instead. Applied locally before the call. |
 | `--system-prompt TEXT` | Extra instructions appended to the system prompt. A path to an existing file is read; `@path` always reads a file. |
-| `--timeout-secs N` | Per-request deadline. Default `60`. A stalled call is retried with backoff (four attempts). |
-| `--progress text` | Stderr progress: `text` (default), `json` (one object per line), or `off`. A `waiting Ns` line is a stall; a rising segment count is work. Rewrite prints `rewriting` every five seconds, then `wrote`. |
+| `--timeout-secs N` | Hard per-request deadline for DNS, connect, TLS, and the response body. Default `60`. A stalled call is abandoned and retried with backoff (four attempts). |
+| `--progress text` | Stderr progress: `text` (default), `json` (one object per line), or `off`. Lines name the phase (`connect`, `recv-body`, `retry`) and the segment. A `waiting Ns` line is a stall. A `watchdog: aborting segment …` line names a batch that passed the deadline. Rewrite prints `rewriting` every five seconds, then `wrote`. |
 | `--translate-references` | Translate the bibliography. Default is to keep it. |
 | `--translate-figures` | Translate text inside figures. Default is the caption only. |
 | `--translate-tables` | Translate table cells and headers. Default is the caption only. |
@@ -234,7 +234,7 @@ go test ./...
 
 ## Prebuilt packages
 
-`.github/workflows/sdk.yml` archives the headers, the shared library, and the static library for each platform, with a CMake config and a Unix pkg-config file. `.github/workflows/wheels.yml` builds CPython 3.10+ abi3 wheels with cibuildwheel (one wheel per platform loads on CPython 3.10 and newer). Both workflows run on pull requests, `workflow_dispatch`, and tags `v*`. Pull requests upload build artifacts only. A tag whose name matches `workspace.package.version` in `Cargo.toml` (`v0.1.5` for version `0.1.5`) attaches the archives, wheels, and sdist to a GitHub Release and publishes the wheels and sdist to PyPI.
+`.github/workflows/sdk.yml` archives the headers, the shared library, and the static library for each platform, with a CMake config and a Unix pkg-config file. `.github/workflows/wheels.yml` builds CPython 3.10+ abi3 wheels with cibuildwheel (one wheel per platform loads on CPython 3.10 and newer). Both workflows run on pull requests, `workflow_dispatch`, and tags `v*`. Pull requests upload build artifacts only. A tag whose name matches `workspace.package.version` in `Cargo.toml` (`v0.1.6` for version `0.1.6`) attaches the archives, wheels, and sdist to a GitHub Release and publishes the wheels and sdist to PyPI.
 
 `.github/workflows/release-cli.yml` builds the `rpt` binary for Linux x86_64 and aarch64, glibc and musl, on `main`, on tags `v*`, and on `workflow_dispatch`. A tag whose name matches `workspace.package.version` attaches those tarballs to the GitHub Release. Pushes to `main` only upload artifacts.
 

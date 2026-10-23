@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.6 — 2026-10-23
+
+Tag `v0.1.6`. This changelog is the release note.
+
+### Requests
+
+- `--timeout-secs` is a hard deadline for the whole call: DNS, TCP, the TLS handshake, response headers, and the body. A server that accepts and then stays silent, or that trickles the body, is cut off and retried. The same budgets apply to Google and to the CJK font download.
+- Progress names the phase (`connect`, `recv-body`, `retry`) and the segment in flight. A batch that is still running when the deadline passes prints `watchdog: aborting segment … page … stuck in …`.
+
+### Coverage
+
+- A reply that is mostly Chinese but still contains a source sentence (at least six words and 40 letters) is sent again. If that sentence is still there, those glyphs are `english-body` and the document is incomplete.
+- Blanking a text operator no longer deletes a Latin sibling that was not redrawn. If the face cannot draw that sibling, the operator stays and the paragraph is `untranslated`.
+- Bilingual output clones form XObjects before rewrite, so text that lives in a form remains on the source pane after the form is edited.
+
 ## 0.1.5 — 2026-10-22
 
 Tag `v0.1.5`. This changelog is the release note.

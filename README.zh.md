@@ -114,8 +114,8 @@ export RPT_LLM_API_KEY=...
 | `--model`、`--base-url` | 覆盖这一次的 `RPT_LLM_MODEL` 和 `RPT_LLM_BASE_URL`。 |
 | `--glossary source=target` | 可重复。也可以是 CSV 文件（`src,tgt` 或 `source,target`，表头可省略）。调用前在本地替换。 |
 | `--system-prompt TEXT` | 追加到系统提示词。已存在的文件路径会读取文件；`@路径` 一定按文件读。 |
-| `--timeout-secs N` | 单次请求超时，默认 `60` 秒。卡住的连接会按退避重试，最多四次。 |
-| `--progress text` | 进度写到标准错误：`text`（默认）、`json`（每行一个对象）或 `off`。`waiting Ns` 是停住；段数在涨就是在干活。重写阶段每五秒打一行 `rewriting`，写完打 `wrote`。 |
+| `--timeout-secs N` | 单次请求的硬截止时间，覆盖 DNS、连接、TLS 和响应体。默认 `60` 秒。卡住的调用会被放弃并按退避重试，最多四次。 |
+| `--progress text` | 进度写到标准错误：`text`（默认）、`json`（每行一个对象）或 `off`。每行带阶段（`connect`、`recv-body`、`retry`）和段落。`waiting Ns` 是停住。`watchdog: aborting segment …` 点名已经超过截止时间的那一批。重写阶段每五秒打一行 `rewriting`，写完打 `wrote`。 |
 | `--translate-references` | 翻译参考文献。默认保留原文。 |
 | `--translate-figures` | 翻译图内文字。默认只翻译图注。 |
 | `--translate-tables` | 翻译单元格和表头。默认只翻译表注。 |
@@ -225,7 +225,7 @@ go test ./...
 
 ## 预编译包
 
-`.github/workflows/sdk.yml` 为每个平台打包头文件、共享库和静态库，并带上 CMake 配置和 Unix pkg-config。`.github/workflows/wheels.yml` 用 cibuildwheel 构建 CPython 3.10+ 的 abi3 wheel（每个平台一个 wheel，可在 3.10 及更新的 CPython 上加载）。两个工作流在 pull request、`workflow_dispatch` 和 `v*` tag 上运行。pull request 只上传构建产物。tag 名必须与 `Cargo.toml` 里的 `workspace.package.version` 一致（版本 `0.1.5` 对应 tag `v0.1.5`），才会把压缩包、wheel 和 sdist 挂到 GitHub Release，并把 wheel 和 sdist 发布到 PyPI。
+`.github/workflows/sdk.yml` 为每个平台打包头文件、共享库和静态库，并带上 CMake 配置和 Unix pkg-config。`.github/workflows/wheels.yml` 用 cibuildwheel 构建 CPython 3.10+ 的 abi3 wheel（每个平台一个 wheel，可在 3.10 及更新的 CPython 上加载）。两个工作流在 pull request、`workflow_dispatch` 和 `v*` tag 上运行。pull request 只上传构建产物。tag 名必须与 `Cargo.toml` 里的 `workspace.package.version` 一致（版本 `0.1.6` 对应 tag `v0.1.6`），才会把压缩包、wheel 和 sdist 挂到 GitHub Release，并把 wheel 和 sdist 发布到 PyPI。
 
 `.github/workflows/release-cli.yml` 在 `main`、`v*` tag 和 `workflow_dispatch` 上构建 Linux x86_64 与 aarch64 的 `rpt`（glibc 和 musl）。与 `workspace.package.version` 同名的 tag 会把这些压缩包挂到 GitHub Release。推送到 `main` 只上传构建产物。
 

@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
-use crate::translate::llm::scrub_secrets;
+use crate::translate::llm::{deadline_agent, scrub_secrets};
 use crate::translate::Translator;
 
 const V2_DEFAULT_BASE: &str = "https://translation.googleapis.com";
@@ -259,11 +259,7 @@ impl GoogleTranslator {
     }
 
     pub(crate) fn with_timeout(mut self, timeout: Duration) -> Self {
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .proxy(None)
-            .build();
-        self.agent = config.into();
+        self.agent = deadline_agent(timeout);
         self
     }
 
@@ -290,12 +286,8 @@ impl GoogleTranslator {
         account: Option<ServiceAccount>,
         base_url: String,
     ) -> Self {
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(UNOFFICIAL_TIMEOUT))
-            .proxy(None)
-            .build();
         Self {
-            agent: config.into(),
+            agent: deadline_agent(UNOFFICIAL_TIMEOUT),
             api,
             source,
             target,

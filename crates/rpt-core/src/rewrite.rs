@@ -854,6 +854,18 @@ pub fn rewrite_translation(
     // A contents title can move up to close a hole. An inline page number
     // that was redrawn on the old baseline would otherwise sit alone.
     seat_inline_page_numbers(&mut drawn, extraction, &by_id);
+    // Blanking an operator deletes every glyph in it. A label that shares
+    // that operator and was not redrawn used to vanish from both the Chinese
+    // file and the bilingual source pane.
+    preserve_unpainted_siblings(
+        &owners,
+        &mut succeeded,
+        &mut keep,
+        &mut drawn,
+        extraction,
+        &by_id,
+        &embedded,
+    );
     let mut spans = Vec::new();
     if !overlay {
         for id in &succeeded {
@@ -929,9 +941,17 @@ pub fn rewrite_translation(
             .iter()
             .any(|id| draw_ids.contains(id) && !keep_contains(&extraction.glyphs[by_id[id]]))
         {
+            // The model left a source sentence in the reply. The paint stays
+            // so the Chinese is not thrown away, and coverage names the miss.
+            let residual = job_translates
+                && crate::translate::residual_english_clause(&segment.source, &segment.translated);
             for id in &segment.glyph_ids {
                 if !extraction.glyphs[by_id[id]].disposition.is_final() {
-                    extraction.mark_rewritten(*id, segment.translated.clone())?;
+                    if residual {
+                        extraction.mark_kept(*id, "english-body")?;
+                    } else {
+                        extraction.mark_rewritten(*id, segment.translated.clone())?;
+                    }
                 }
             }
         }
@@ -1011,11 +1031,85 @@ fn record_unfitted_line_warnings(extraction: &mut Extraction) {
     }
 }
 
-fn snapshot_pages(doc: &Document) -> Vec<PageSnap> {
-    doc.get_pages()
-        .into_values()
-        .map(|id| snap_page(doc, id))
+fn snapshot_pages(doc: &mut Document) -> Vec<PageSnap> {
+    let ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    let mut cloned_forms = HashMap::new();
+    ids.into_iter()
+        .map(|id| {
+            let mut snap = snap_page(doc, id);
+            // Page bytes are a copy. Form XObjects are not: rewrite edits those
+            // streams in place, and both bilingual panes would then show the
+            // edited form. Clone the forms so the source pane keeps its text.
+            snap.resources = detach_form_resources(doc, snap.resources, &mut cloned_forms);
+            snap
+        })
         .collect()
+}
+
+fn detach_form_resources(
+    doc: &mut Document,
+    mut resources: Dictionary,
+    cloned: &mut HashMap<ObjectId, ObjectId>,
+) -> Dictionary {
+    let Some(xobjects) = resources
+        .get(b"XObject")
+        .ok()
+        .and_then(|obj| dict_of(doc, obj))
+        .cloned()
+    else {
+        return resources;
+    };
+    let mut owned = Dictionary::new();
+    for (key, value) in xobjects.iter() {
+        let Some(id) = value.as_reference().ok() else {
+            owned.set(key.clone(), value.clone());
+            continue;
+        };
+        owned.set(key.clone(), Object::Reference(clone_form(doc, id, cloned)));
+    }
+    resources.set("XObject", owned);
+    resources
+}
+
+fn clone_form(
+    doc: &mut Document,
+    id: ObjectId,
+    cloned: &mut HashMap<ObjectId, ObjectId>,
+) -> ObjectId {
+    if let Some(&hit) = cloned.get(&id) {
+        return hit;
+    }
+    let stream = match doc.get_object(id).ok().and_then(|obj| obj.as_stream().ok()) {
+        Some(stream) => stream.clone(),
+        None => return id,
+    };
+    let is_form = stream
+        .dict
+        .get(b"Subtype")
+        .and_then(|obj| obj.as_name())
+        .ok()
+        == Some(b"Form".as_slice());
+    if !is_form {
+        cloned.insert(id, id);
+        return id;
+    }
+    // A form that references itself must not recurse forever. The clone
+    // still points at the original until this function returns the new id.
+    cloned.insert(id, id);
+    let mut copied = stream;
+    if let Some(inner) = copied
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|obj| dict_of(doc, obj))
+        .cloned()
+    {
+        let detached = detach_form_resources(doc, inner, cloned);
+        copied.dict.set("Resources", detached);
+    }
+    let new_id = doc.add_object(copied);
+    cloned.insert(id, new_id);
+    new_id
 }
 
 /// Place each original page beside, or just before, its translated page.
@@ -4735,6 +4829,82 @@ fn span_of(source: &GlyphSource) -> Option<Span> {
         start: source.byte_start,
         end: source.byte_end,
     })
+}
+
+/// Glyphs that share a text operator with a translation but were not drawn.
+/// Redraw the ones the CJK face covers. If a Latin letter would still be
+/// deleted, leave that operator alone and report the paragraph.
+fn preserve_unpainted_siblings(
+    owners: &HashMap<(u32, u16, usize, usize), Vec<u32>>,
+    succeeded: &mut HashSet<u32>,
+    keep: &mut HashMap<u32, String>,
+    drawn: &mut Vec<Drawn>,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+) {
+    let drawn_ids: HashSet<u32> = drawn
+        .iter()
+        .flat_map(|item| item.glyph_ids.iter().copied())
+        .collect();
+    let mut rescue = HashSet::new();
+    let mut groups: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+    for ids in owners.values() {
+        let live: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|id| succeeded.contains(id) && !keep.contains_key(id))
+            .collect();
+        if live.is_empty() {
+            continue;
+        }
+        let missing: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|id| !live.contains(id) && !drawn_ids.contains(id))
+            .filter(|id| {
+                extraction
+                    .glyphs
+                    .get(by_id[id])
+                    .is_some_and(sibling_must_survive)
+            })
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        rescue.extend(missing.iter().copied());
+        groups.push((live, missing));
+    }
+    if rescue.is_empty() {
+        return;
+    }
+    let added = draw_original_glyphs(&rescue, extraction, by_id, embedded);
+    let rescued: HashSet<u32> = added
+        .iter()
+        .flat_map(|item| item.glyph_ids.iter().copied())
+        .collect();
+    drawn.extend(added);
+    for (live, missing) in groups {
+        if missing.iter().all(|id| rescued.contains(id)) {
+            continue;
+        }
+        let live_set: HashSet<u32> = live.iter().copied().collect();
+        drawn.retain(|item| !item.glyph_ids.iter().any(|id| live_set.contains(id)));
+        for id in live {
+            succeeded.remove(&id);
+            keep.insert(id, "untranslated".into());
+        }
+    }
+}
+
+fn sibling_must_survive(glyph: &Glyph) -> bool {
+    if glyph.invisible || is_math_font(&glyph.font_name) {
+        return false;
+    }
+    glyph
+        .unicode
+        .chars()
+        .any(|ch| ch.is_ascii_alphabetic())
 }
 
 fn blank_operators(doc: &mut Document, spans: &[Span]) -> std::result::Result<(), String> {
@@ -31413,6 +31583,60 @@ mod tests {
     }
 
     #[test]
+    fn a_leftover_english_clause_is_reported_as_english_body() {
+        let bytes = prose_pdf();
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let source = "This paragraph explains how agents plan work across tools and should become Chinese.";
+        let mixed = format!("基于图的聚类方法在理论上很有吸引力。{source}");
+        let segments = crate::segment::segment_glyphs(&extraction.glyphs)
+            .into_iter()
+            .map(|seg| {
+                let translated = if seg.text.contains("paragraph") {
+                    mixed.clone()
+                } else if seg.text.contains("Hello") {
+                    "甲".into()
+                } else {
+                    seg.text.clone()
+                };
+                TranslatedSegment {
+                    id: seg.id,
+                    page_index: seg.page_index,
+                    glyph_ids: seg.glyph_ids,
+                    source: seg.text,
+                    translated,
+                }
+            })
+            .collect();
+        let report = TranslateReport {
+            segments,
+            calls: 0,
+            cache_hits: 0,
+        };
+        let codes: Vec<u32> = mixed.chars().map(|ch| ch as u32).chain(['甲' as u32]).collect();
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&codes)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let coverage = extraction.coverage_report();
+        assert!(!coverage.complete, "{coverage:?}");
+        assert!(coverage.english_body > 0, "{coverage:?}");
+        let flagged = extraction.glyphs.iter().any(|glyph| {
+            glyph.unicode == "T"
+                && matches!(
+                    &glyph.disposition,
+                    Disposition::KeptOriginal { reason } if reason == "english-body"
+                )
+        });
+        assert!(flagged, "the leftover sentence should be a real miss");
+    }
+
+    #[test]
     fn an_identity_echo_of_english_prose_stays_complete() {
         let bytes = prose_pdf();
         let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
@@ -39306,6 +39530,77 @@ ET",
             .into_iter()
             .map(|line| line.iter().map(|glyph| glyph.unicode.as_str()).collect())
             .collect()
+    }
+
+    #[test]
+    fn source_snapshot_keeps_text_that_lives_in_a_form() {
+        let mut doc = Document::with_version("1.4");
+        doc.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let form_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 120.into(), 20.into()],
+            },
+            b"BT (KEEPME) Tj ET".to_vec(),
+        ));
+        let mut xobjects = lopdf::Dictionary::new();
+        xobjects.set("Fm", form_id);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("XObject", xobjects);
+        let content_id = doc.add_object(Stream::new(
+            dictionary! {},
+            b"q /Fm Do Q BT (BODY) Tj ET".to_vec(),
+        ));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        doc.set_object(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page.into()],
+                "Count" => 1,
+            },
+        );
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog);
+        let snaps = snapshot_pages(&mut doc);
+        assert!(
+            snaps[0].content.windows(4).any(|w| w == b"BODY"),
+            "page text is part of the snapshot"
+        );
+        let object = doc.get_object_mut(form_id).unwrap();
+        object
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT (XXXXXX) Tj ET".to_vec());
+        let mut kept = false;
+        let mut edited = false;
+        for object in doc.objects.values() {
+            let Ok(stream) = object.as_stream() else {
+                continue;
+            };
+            let bytes = stream
+                .decompressed_content()
+                .unwrap_or_else(|_| stream.content.clone());
+            if bytes.windows(6).any(|w| w == b"KEEPME") {
+                kept = true;
+            }
+            if bytes.windows(6).any(|w| w == b"XXXXXX") {
+                edited = true;
+            }
+        }
+        assert!(edited, "the live form was rewritten");
+        assert!(kept, "the bilingual source clone still has the form text");
     }
 
     fn toc_column_pdf() -> Vec<u8> {

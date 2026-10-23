@@ -24,7 +24,7 @@ mod references;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,6 +64,9 @@ pub trait Translator: Sync {
 
     /// Share the job's retry counter so a stalled call shows up as a retry.
     fn bind_retries(&self, _counter: Arc<AtomicUsize>) {}
+
+    /// `connect`, `recv-body`, or `retry`. Progress prints this while the call runs.
+    fn bind_phase(&self, _phase: Arc<Mutex<String>>) {}
 }
 
 /// How `rpt translate` reports work on stderr.
@@ -108,8 +111,8 @@ pub struct TranslateOptions {
     /// calling thread either way.
     pub jobs: usize,
     pub temperature: f32,
-    /// Per-request deadline. A stalled socket is abandoned and retried.
-    /// `0` is raised to 1. The default is 60.
+    /// Hard per-request deadline for DNS, connect, TLS, and the body.
+    /// A stalled call is abandoned and retried. `0` is raised to 1. Default 60.
     pub timeout_secs: u64,
     /// Extra instructions appended to the built-in system prompt.
     pub system_prompt: Option<String>,
@@ -593,8 +596,10 @@ pub fn translate_extraction(
         opts.progress,
         &segments,
         &translated.iter().map(Option::is_some).collect::<Vec<_>>(),
+        opts.timeout_secs,
     );
     translator.bind_retries(progress.retries_handle());
+    translator.bind_phase(progress.phase_handle());
     let _heartbeat = progress.spawn();
     // One owner per distinct source string. A repeated paragraph is filled
     // from that owner after the workers join, so two jobs never translate it.
@@ -607,7 +612,8 @@ pub fn translate_extraction(
     // Workers publish by segment index. A later echo must not replace a
     // translation that already landed on that paragraph.
     apply_rendered(&segments, &mut translated, &mut cache, rendered);
-    for batch in failed {
+        for batch in failed {
+        let _watch = progress.watch(&segments, &batch);
         let before = calls;
         let pages = batch_pages(&segments, &batch);
         match translate_batch(&segments, &shielded, &batch, opts, translator, &mut calls) {
@@ -1201,6 +1207,7 @@ fn dispatch_batches(
         let mut rendered = Vec::new();
         let mut failed = Vec::new();
         for batch in batches {
+            let _watch = progress.watch(segments, batch);
             let before = *calls;
             match translate_batch(segments, shielded, batch, opts, translator, calls) {
                 Ok(part) => {
@@ -1232,6 +1239,7 @@ fn dispatch_batches(
                 if index >= batches.len() {
                     break;
                 }
+                let _watch = progress.watch(segments, &batches[index]);
                 let mut local_calls = 0usize;
                 match translate_batch(
                     segments,
@@ -1346,6 +1354,7 @@ fn retry_english_leftovers(
     let improved = if jobs <= 1 || pending.len() == 1 {
         let mut improved = Vec::new();
         for index in pending {
+            let _watch = progress.watch(segments, &[index]);
             let before = *calls;
             if let Some(text) = translate_solo(&segments[index].text, opts, translator, calls) {
                 progress.add_calls((*calls).saturating_sub(before));
@@ -1368,6 +1377,7 @@ fn retry_english_leftovers(
                         break;
                     }
                     let index = pending[slot];
+                    let _watch = progress.watch(segments, &[index]);
                     let mut local_calls = 0usize;
                     if let Some(text) =
                         translate_solo(&segments[index].text, opts, translator, &mut local_calls)
@@ -4913,6 +4923,12 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     if is_author_list(source) || is_institution_line(source) || url_or_email_only(source) {
         return false;
     }
+    // A reply that is mostly Chinese can still carry a whole English sentence.
+    // One CJK character used to accept that reply, so the clause was painted
+    // and coverage stayed complete.
+    if residual_english_clause(source, translated) {
+        return true;
+    }
     // The source sentence is still there, and the reply only added a short
     // Chinese subtitle (`性能基准测试`). A translation that keeps the source
     // words inside a Chinese sentence is not this case.
@@ -4951,6 +4967,64 @@ fn strip_leading_marker(text: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// A verbatim run of the source (at least six words and 40 letters) still
+/// sitting in a reply that already has Chinese. Names, code, and math lines
+/// are not clauses. A one-character prefix on the full English is not one
+/// either: that reply has almost no Chinese.
+pub(crate) fn residual_english_clause(source: &str, translated: &str) -> bool {
+    if is_author_list(source) || is_institution_line(source) || url_or_email_only(source) {
+        return false;
+    }
+    if intentional_keep_kind(source).is_some() {
+        return false;
+    }
+    if cjk_count(translated) < 8 {
+        return false;
+    }
+    let flat = squeeze_words(translated);
+    let words: Vec<&str> = source.split_whitespace().collect();
+    let mut start = 0;
+    while start < words.len() {
+        let mut letters = 0usize;
+        let mut count = 0usize;
+        let mut end = start;
+        let mut buf = Vec::new();
+        while end < words.len() && count < 24 {
+            let token = words[end].trim_matches(|ch: char| {
+                !ch.is_ascii_alphanumeric() && ch != '-' && ch != '\''
+            });
+            if token.is_empty()
+                || is_url_or_email_token(token)
+                || token.chars().all(|ch| ch.is_ascii_digit())
+            {
+                break;
+            }
+            let word_letters = latin_letters(token);
+            if word_letters == 0 {
+                break;
+            }
+            letters += word_letters;
+            count += 1;
+            buf.push(words[end]);
+            end += 1;
+            if count >= 6 && letters >= 40 {
+                let clause = squeeze_words(&buf.join(" "));
+                if clause.chars().filter(|ch| ch.is_ascii_alphabetic()).count() >= 40
+                    && flat.contains(&clause)
+                {
+                    return true;
+                }
+            }
+        }
+        start += 1;
+    }
+    false
+}
+
+fn squeeze_words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn ellipsis_stub(text: &str) -> bool {
@@ -6180,6 +6254,17 @@ mod tests {
         assert!(!needs_english_retry("RAG", "RAG"));
         assert!(!needs_english_retry("Julie McNamee", "Julie McNamee"));
         assert!(!needs_english_retry("LLM API", "LLM API"));
+        let mixed = format!("基于图的聚类方法在理论上很有吸引力。{body}");
+        assert!(
+            needs_english_retry(body, &mixed),
+            "a leftover English sentence must be retried"
+        );
+        assert!(residual_english_clause(body, &mixed));
+        assert!(!needs_english_retry(
+            body,
+            "基于图的聚类方法，其中主要是 multicut，在理论上很有吸引力。"
+        ));
+        assert!(!residual_english_clause(body, &format!("译{body}")));
     }
 
     #[test]

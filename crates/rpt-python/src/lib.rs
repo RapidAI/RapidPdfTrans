@@ -13,7 +13,7 @@ fn py_err(err: impl ToString) -> PyErr {
 
 #[pyfunction]
 fn version() -> &'static str {
-    "0.1.5"
+    "0.1.6"
 }
 
 /// Extract glyphs as a JSON string. `options_json` is an optional JSON object.

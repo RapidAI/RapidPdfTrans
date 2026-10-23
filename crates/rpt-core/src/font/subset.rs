@@ -620,21 +620,40 @@ fn ensure_noto(family: CjkStyle, bold: bool) -> Option<std::path::PathBuf> {
 }
 
 fn download_font(url: &str) -> Option<Vec<u8>> {
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(180)))
-        .build();
-    let agent: ureq::Agent = config.into();
-    let mut response = agent
-        .get(url)
-        .header("User-Agent", "rapidpdftrans")
-        .call()
-        .ok()?;
-    response
-        .body_mut()
-        .with_config()
-        .limit(40 * 1024 * 1024)
-        .read_to_vec()
-        .ok()
+    // `timeout_global` does not start the resolver watchdog, and a trickled
+    // body resets a per-read timer. The same budget bounds DNS, TCP, TLS,
+    // and the whole body, and a thread deadline returns if the socket call
+    // still does not.
+    let timeout = std::time::Duration::from_secs(180);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .timeout_resolve(Some(timeout))
+        .timeout_connect(Some(timeout))
+        .timeout_send_request(Some(timeout))
+        .timeout_send_body(Some(timeout))
+        .timeout_recv_response(Some(timeout))
+        .timeout_recv_body(Some(timeout))
+        .build()
+        .into();
+    let url = url.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = (|| {
+            let mut response = agent
+                .get(&url)
+                .header("User-Agent", "rapidpdftrans")
+                .call()
+                .ok()?;
+            response
+                .body_mut()
+                .with_config()
+                .limit(40 * 1024 * 1024)
+                .read_to_vec()
+                .ok()
+        })();
+        let _ = tx.send(fetched);
+    });
+    rx.recv_timeout(timeout).ok().flatten()
 }
 
 fn file_sha256_matches(path: &std::path::Path, expect: &str) -> bool {
