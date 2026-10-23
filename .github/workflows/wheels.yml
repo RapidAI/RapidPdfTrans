@@ -24,8 +24,11 @@
 # Pull requests and workflow_dispatch upload wheels and an sdist as artifacts.
 # A tag v<Cargo.toml version> uploads them to a GitHub Release and publishes
 # the same files to PyPI with the PYPI_APIKEY repository secret (a PyPI API
-# token). Attestations stay off: PEP 740 signing in this action only works
-# with trusted publishing.
+# token). workflow_dispatch input `tag` checks out that existing tag (it is
+# not moved) and publishes the same way. The align step rewrites only
+# workspace versions in Cargo.lock so a tag whose lock still names the
+# previous version can build with --locked. Attestations stay off: PEP 740
+# signing in this action only works with trusted publishing.
 
 name: Python wheels
 
@@ -34,6 +37,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish, such as v0.1.4. Leave empty to build this ref without publishing.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -144,6 +152,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Align Cargo.lock workspace versions
+        shell: bash
+        run: |
+          if [ -f packaging/align_lock_versions.py ]; then
+            python packaging/align_lock_versions.py
+          else
+            git fetch --depth 1 origin "$GITHUB_SHA"
+            git show FETCH_HEAD:packaging/align_lock_versions.py | python -
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         if: runner.os != 'Linux' && matrix.rust-targets == ''
@@ -190,10 +214,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Align Cargo.lock workspace versions
+        shell: bash
+        run: |
+          if [ -f packaging/align_lock_versions.py ]; then
+            python packaging/align_lock_versions.py
+          else
+            git fetch --depth 1 origin "$GITHUB_SHA"
+            git show FETCH_HEAD:packaging/align_lock_versions.py | python -
+          fi
       - name: Build the source distribution
         run: |
           python -m pip install "build>=1.2" "maturin>=1.9.4,<2"
@@ -225,13 +260,17 @@ jobs:
 
   release:
     name: GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.tag, 'v'))
     needs: [build, sdist]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      GITHUB_REF_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
@@ -248,11 +287,15 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.tag, 'v'))
     needs: [build, sdist]
     runs-on: ubuntu-24.04
+    env:
+      GITHUB_REF_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
