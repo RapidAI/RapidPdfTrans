@@ -508,30 +508,28 @@ mod tests {
     fn stall_server(trickle: bool) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        thread::spawn(move || {
-            loop {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                thread::spawn(move || {
-                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-                    let _ = read_request(&mut stream);
-                    if !trickle {
-                        loop {
-                            thread::sleep(std::time::Duration::from_secs(30));
-                        }
+        thread::spawn(move || loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let _ = read_request(&mut stream);
+                if !trickle {
+                    loop {
+                        thread::sleep(std::time::Duration::from_secs(30));
                     }
-                    let _ = stream.write_all(
+                }
+                let _ = stream.write_all(
                         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n",
                     );
-                    loop {
-                        thread::sleep(std::time::Duration::from_millis(200));
-                        if stream.write_all(b" ").is_err() {
-                            break;
-                        }
+                loop {
+                    thread::sleep(std::time::Duration::from_millis(200));
+                    if stream.write_all(b" ").is_err() {
+                        break;
                     }
-                });
-            }
+                }
+            });
         });
         format!("http://127.0.0.1:{port}/v1")
     }

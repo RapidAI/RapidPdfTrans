@@ -216,7 +216,10 @@ impl Progress {
     }
 
     pub fn watchdog_messages(&self) -> Vec<String> {
-        self.watchdog.lock().map(|guard| guard.clone()).unwrap_or_default()
+        self.watchdog
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     pub fn spawn(self: &Arc<Self>) -> Heartbeat {
