@@ -2714,6 +2714,13 @@ fn is_function_word(word: &str) -> bool {
             | "quantitative"
             | "biology"
             | "finance"
+            // Column titles, not bylines. `Trigger Optimization Context`
+            // is title case, the same shape as a person's name.
+            | "trigger"
+            | "optimization"
+            | "context"
+            | "method"
+            | "verified"
     )
 }
 
@@ -4651,7 +4658,31 @@ pub(crate) fn is_author_list(text: &str) -> bool {
 
 fn settle_translation(source: &str, translated: &str) -> String {
     let translated = strip_spurious_subtitle(source, translated);
+    let translated = gloss_echoed_formula_words(source, &translated);
     restore_credit_names(source, &translated)
+}
+
+/// A display formula the model copied, changing only the final stop.
+/// `A × B = {⟨x, y⟩ : x ∈ A and y ∈ B}.` becomes `… A 且 y ∈ B`.
+/// A sentence that is already Chinese is left as the model wrote it.
+fn gloss_echoed_formula_words(source: &str, translated: &str) -> String {
+    if !prose_sentence_with_formula(source) || !same_latin_letters(source, translated) {
+        return translated.to_string();
+    }
+    const WORDS: &[(&str, &str)] = &[
+        ("whenever", "每当"),
+        ("where", "其中"),
+        ("since", "由于"),
+        ("then", "则"),
+        ("and", "且"),
+        ("let", "令"),
+        ("if", "如果"),
+    ];
+    let mut out = translated.to_string();
+    for (word, gloss) in WORDS {
+        out = replace_ascii_word(&out, word, gloss);
+    }
+    out
 }
 
 /// A credit line whose personal name was translated. Role words stay in
@@ -5098,7 +5129,20 @@ fn url_char_mask(chars: &[char]) -> Vec<bool> {
 fn needs_english_retry(source: &str, translated: &str) -> bool {
     let source = source.trim();
     let translated = translated.trim();
-    if is_author_list(source) || is_institution_line(source) || url_or_email_only(source) {
+    // `Trigger Optimization Context` is title case, so it matches a byline.
+    // Those words are column titles, and an echo is sent again.
+    let headerish = source.split_whitespace().any(|word| {
+        let token: String = word
+            .trim_matches(|ch: char| !ch.is_ascii_alphabetic())
+            .to_ascii_lowercase();
+        matches!(
+            token.as_str(),
+            "trigger" | "optimization" | "context" | "method" | "verified"
+        )
+    });
+    if !headerish
+        && (is_author_list(source) || is_institution_line(source) || url_or_email_only(source))
+    {
         return false;
     }
     // A reply that is mostly Chinese can still carry a whole English sentence.
@@ -5130,7 +5174,22 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     if source_letters >= 8 && ellipsis_stub(translated) {
         return true;
     }
-    translated_body == source_body && (prose_echo(&source_body) || column_header_echo(&source_body))
+    // Deleting the spaces (`Trigger Optimization Context` →
+    // `TriggerOptimizationContext`) is still the English header.
+    same_latin_letters(&source_body, &translated_body)
+        && (prose_echo(&source_body) || column_header_echo(&source_body))
+}
+
+fn same_latin_letters(left: &str, right: &str) -> bool {
+    let fold = |text: &str| {
+        text.chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .flat_map(|ch| ch.to_lowercase())
+            .collect::<String>()
+    };
+    let left = fold(left);
+    let right = fold(right);
+    !left.is_empty() && left == right
 }
 
 /// `Trigger`, `Optimization`, and `Verified (%)` are column titles. A
@@ -5327,29 +5386,36 @@ fn formula_shard(
         || crate::segment::display_equation_glyphs(&owned)
 }
 
-/// At least 40 letters and two function words. A pure equation has neither.
+/// A body sentence that also contains formulas. A pure equation has neither
+/// two function words nor a lead-in such as `Let` / `Since` / `and`.
 fn prose_sentence_with_formula(text: &str) -> bool {
     let letters = text.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    if letters < 40 {
-        return false;
-    }
     const FUNCTION: &[&str] = &[
         "the", "and", "of", "to", "a", "in", "is", "for", "that", "with", "we", "as", "on", "by",
-        "or", "from", "are", "be", "this", "it",
+        "or", "from", "are", "be", "this", "it", "let", "since", "whenever", "then", "where", "if",
+        "when",
     ];
     let mut found = 0usize;
+    let mut lead = false;
     for word in text.split_whitespace() {
         let token: String = word
             .trim_matches(|ch: char| !ch.is_ascii_alphabetic())
             .to_ascii_lowercase();
         if FUNCTION.contains(&token.as_str()) {
             found += 1;
-            if found >= 2 {
-                return true;
-            }
+        }
+        if matches!(
+            token.as_str(),
+            "let" | "since" | "whenever" | "and" | "where" | "then" | "if"
+        ) {
+            lead = true;
         }
     }
-    false
+    // `A × B = {⟨x,y⟩ : x ∈ A and y ∈ B}` and the Let/Since line are sentences.
+    // `x = y + z` has no lead-in and stays a formula.
+    (found >= 2 && letters >= 12)
+        || (lead && found >= 1 && letters >= 8)
+        || (letters >= 40 && found >= 2)
 }
 
 /// `(1)` beside a display equation. It is not a sentence.
@@ -6516,6 +6582,27 @@ mod tests {
         assert!(needs_english_retry("Optimization", "Optimization"));
         assert!(needs_english_retry("Context", "Context"));
         assert!(needs_english_retry("Verified (%)", "Verified (%)"));
+        assert!(needs_english_retry(
+            "Trigger Optimization Context",
+            "TriggerOptimizationContext"
+        ));
+        assert!(!is_author_list("Trigger Optimization Context"));
+        assert!(!is_name_byline("Trigger Optimization Context"));
+        assert_eq!(
+            restore_credit_names("Trigger Optimization Context", "触发 优化 上下文"),
+            "触发 优化 上下文"
+        );
+        assert_eq!(
+            gloss_echoed_formula_words(
+                "A × B = {⟨x, y⟩ : x ∈ A and y ∈ B}.",
+                "A × B = {⟨x, y⟩ : x ∈ A and y ∈ B}。"
+            ),
+            "A × B = {⟨x, y⟩ : x ∈ A 且 y ∈ B}。"
+        );
+        assert_eq!(
+            gloss_echoed_formula_words("Let x and y be sets.", "令 x 与 y 为集合。"),
+            "令 x 与 y 为集合。"
+        );
         assert!(!needs_english_retry("方法", "方法"));
         let mixed = format!("基于图的聚类方法在理论上很有吸引力。{body}");
         assert!(
@@ -6560,6 +6647,20 @@ mod tests {
             formula_shard(&equation, &glyphs, &by_id),
             "a pure equation was sent to the model"
         );
+        let definition = "A × B = {⟨x, y⟩ : x ∈ A and y ∈ B}.";
+        let let_line = "A × B. Let Bx = {⟨x, y⟩ : y ∈ B}. Since whenever x ≠ x2,";
+        for text in [definition, let_line] {
+            let seg = Segment {
+                id: 2,
+                page_index: 0,
+                glyph_ids: vec![0, 1, 2, 3],
+                text: text.into(),
+            };
+            assert!(
+                !formula_shard(&seg, &glyphs, &by_id),
+                "left in the source: {text}"
+            );
+        }
     }
 
     struct ExpiredBudget;

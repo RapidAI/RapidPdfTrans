@@ -8,8 +8,9 @@
 - Angle brackets in an ordered pair are part of the formula, so a definition and a Let/Since line are translated instead of left as a scan misread.
 - A wrap that starts in the middle of a word stays on the paragraph edge. A closing `。` after a formula hole stays with the last ideographs.
 - A formula that cuts through an atom such as `Bx1` moves past the whole atom, and a subscript left below its base is raised back under the letter.
-- A table column header the model echoed in English is sent again. A one-word section title, an acronym, and a personal name are not.
-- A body sentence that contains formulas is translated. A pure equation stays in the source.
+- A table column header the model echoed in English is sent again, including an echo that only deleted the spaces. Title-case headers (`Trigger Optimization Context`) are not treated as an author byline. A one-word section title, an acronym, and a personal name are not retried.
+- An ordered pair whose letters are in the text face stays in one formula hole, so `x,y⟩,z⟩` is not wrapped onto the next line.
+- A body sentence that contains formulas is translated, including a definition line (`and`) and a Let/Since line. A pure equation stays in the source. When the model copies the definition and only changes the stop, `and` is still written as `且` in place of that word.
 - One segment's connect and retry budget is about two request timeouts, so a stuck segment cannot keep retrying for many minutes.
 - A line that starts after a formula on the same baseline keeps that x. The translation is not pulled left onto the formula.
 - A period that shares its text operator with a translated word (`∅. But if`) is drawn again, and the English word is blanked.
