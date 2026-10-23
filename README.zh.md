@@ -4,7 +4,7 @@
 
 它打开 PDF，把内容流解释到单个字形，并检查每个字形都还在。翻译器给这些字形标上译文。不加 `--output` 的 `rpt translate` 只报告译文，不写文件。加上 `--output` 会把字形重写进 PDF，并删掉已经改写的那些字形原来的文本绘制指令。
 
-英文说明在 [README.md](README.md)。与 BabelDOC 的墙钟时间、峰值 RSS 和输出大小见 [与 BabelDOC 0.6.4 的实测](#与-babeldoc-064-的实测)。
+英文说明在 [README.md](README.md)。与 BabelDOC 的墙钟时间、峰值 RSS 和输出大小见 [与 BabelDOC 0.6.4 的实测](#与-babeldoc-064-的实测)。对照页见 [对照页](#对照页)。
 
 ## 用法
 
@@ -349,6 +349,101 @@ rpt 使用 `--jobs 4`、默认批大小 8、替换模式。BabelDOC 使用 `--qp
 /usr/bin/time -v -- target/release/rpt translate large-30p.pdf \
   --replay translations.json --from en --to zh --jobs 4 --progress off \
   --mode side-by-side --output large-bi.pdf
+```
+
+### 对照页
+
+网关和模型与上面的实测相同（`https://hub.mypapers.top/api/llm/v1`，模型 `auto`，并发 4）。每一张图从左到右是原文、rpt 0.1.5、BabelDOC 0.6.4，大约 110 dpi，由 `corpus/bench/compare_pages.py` 生成。先跑 pngquant；仍然超过 300 KB 的改成 WebP。下面每个文件都小于 300 KB。
+
+两篇论文的图就是上面那次实测写出的 PDF。书是同两个引擎对第 1–35 页另计的一次。峰值 RSS 来自 `/usr/bin/time -v`。书的两份输出仍是完整的 1016 页：只翻译了第 1–35 页，第 36–1016 页还是原来的英文。rpt 的进度行一直停在 2/35，但后面的页已经译了；写出的 PDF 里中文一直到第 35 页。这次 rpt 报告覆盖不完整：漏了 225 个字形，19,379 个字形是有意保留。
+
+| 文档 | 引擎 | 耗时 | 峰值 RSS | 输出 |
+| --- | --- | ---: | ---: | ---: |
+| Open Logic Text，1016 页中的第 1–35 页，源文件 4,063,129 字节 | rpt 0.1.5 | 793.1s | 230.9 MB | 6,397,502 |
+| Open Logic Text，1016 页中的第 1–35 页，源文件 4,063,129 字节 | BabelDOC 0.6.4 | 902.5s | 2,241.0 MB | 6,762,851 |
+| arXiv 2610.02163，11 页，285,600 字节 | rpt 0.1.5 | 328.6s | 189.5 MB | 1,084,324 |
+| arXiv 2610.02163，11 页，285,600 字节 | BabelDOC 0.6.4 | 431.2s | 2,126.2 MB | 829,495 |
+| arXiv 2610.03665，16 页，607,541 字节 | rpt 0.1.5 | 676.2s | 203.0 MB | 1,707,061 |
+| arXiv 2610.03665，16 页，607,541 字节 | BabelDOC 0.6.4 | 620.9s | 1,984.7 MB | 1,308,117 |
+
+这两篇论文的 0.1.4 一行在上面的实测表里，不是这组图用的 PDF。
+
+**图中各页的许可证。** The Open Logic Text 完整构建，修订 9620cc7（2026-07-12），CC BY 4.0。PDF 第 1 页印着 “Creative Commons Attribution 4.0 International.” 来源 `https://builds.openlogicproject.org/open-logic-complete.pdf`，sha256 `e17ac6f54723999b727b56b60f864a969f2b7c883be5ce7149f13472a0ee14ae`。arXiv:2610.02163（*AutoCompact*）和 arXiv:2610.03665（*Pivot-SD*）都是 CC BY 4.0。摘要页（`https://arxiv.org/abs/2610.02163`、`https://arxiv.org/abs/2610.03665`）上的 CC BY 4.0 徽章指向 `http://creativecommons.org/licenses/by/4.0/`。两份 PDF 正文都没有印这条许可。2610.03665 第 16 页上的 MIT 和 Apache-2.0 是所引模型的许可，不是这篇论文的。论文文件是 `corpus/ci/arxiv-2610.02163.pdf` 和 `corpus/ci/arxiv-2610.03665.pdf`。
+
+**Open Logic 第 2 页（关于本书）。** 正文。两边都译了段落，并保住了换行。
+
+![Open Logic 第 2 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/open-logic-p02.png)
+
+**Open Logic 第 3 页（目录）。** rpt 在大多数引导线旁放上了中文标题。第 1.5 节仍是英文（`Pairs, Tuples, Cartesian Products`）。BabelDOC 在这一页更差：好几个标题叠在同一行，页码粘在标题上（`集合25`），许多行只剩下点线。
+
+![Open Logic 第 3 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/open-logic-p03.png)
+
+**Open Logic 第 33 页（有序对和一则证明）。** 两边都把 Definition 1.23 留成英文，旁边是 `⟨a, b⟩ = {{a}, {a, b}}`，也都将递归式拆成 `A1` / `= A` 和 `Ak+1 Ak` / `= × A`。rpt 译了后面的段落和证明的开头；嵌套元组的括号丢了（`⟨x, y, z⟩` 被拆开），例 1.25 里原来放集合括号的地方是空白。BabelDOC 把 Definition 1.23 后面那段和证明留成英文，并把 `A`、`A × B` 和花括号从中文句子里拽出来，元组那一行同样是断的。BabelDOC 保住了更多原来的公式墨迹。rpt 译了更多散文，也把它们弄坏了。
+
+![Open Logic 第 33 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/open-logic-p33.png)
+
+**arXiv 2610.02163 第 1 页（标题和摘要）。** rpt 标题仍是英文，作者姓名和大学名称保持拉丁字母，摘要译成了中文，包括 9.2% / SWE-PolyBench 那句。BabelDOC 把标题译了，这是 rpt 没做的；但摘要正文没了：`摘要` 后面就是 arXiv 邮戳，这一页找不到 `9.2`。单位被挤进作者行（`Dong31新加坡管理大学`）。
+
+![arXiv 2610.02163 第 1 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/arxiv-2610.02163-p01.webp)
+
+**arXiv 2610.02163 第 6 页（表和图）。** rpt 把表 1 和图上的标签留成英文（默认不译表），标题和下面的段落译了，方法名还在。BabelDOC 译了单元格，表更好读；同时留下英文表题，把金额标签拆成 `4.00美` / `元`，并把下面段落里的名字弄丢了（`SWE-Compressor` 和 `AutoCompact` 变成空档）。
+
+![arXiv 2610.02163 第 6 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/arxiv-2610.02163-p06.webp)
+
+**arXiv 2610.02163 第 8 页（摘要卡片）。** rpt 两张卡片仍是英文，图题和正文译了。BabelDOC 译了卡片。下面那张是坏的：`Recorded state` 和 `Proposed next action` 仍是英文，一致性那一行写成 `C一致`，结尾是 `ion.`。
+
+![arXiv 2610.02163 第 8 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/arxiv-2610.02163-p08.webp)
+
+**arXiv 2610.03665 第 1 页（双栏）。** 两边都把两栏混在一起。rpt 译了标题和摘要，但引言穿进了摘要栏，作者上标缠在一起（`Chen-Hao 1,2,*‡ Chao`）。BabelDOC 译了标题，作者块更整齐，摘要仍是英文，并把中文引言画在这段英文摘要上。作者块 BabelDOC 更好。摘要真正译出来的只有 rpt。
+
+![arXiv 2610.03665 第 1 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/arxiv-2610.03665-p01.webp)
+
+**arXiv 2610.03665 第 5 页（公式和算法 1）。** 展示公式 (9)–(12) 两边都还在。BabelDOC 的 `g(t)` 出现四次，和原文一致；rpt 的文本里只有一次。BabelDOC 留下一整段英文和几行算法（`Select the top-K`、`foreach`）。rpt 译了更多散文和算法，算法步骤插在段落中间。公式块 BabelDOC 更好。rpt 覆盖的词更多，顺序乱了。
+
+![arXiv 2610.03665 第 5 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/arxiv-2610.03665-p05.webp)
+
+**arXiv 2610.03665 第 6 页（两张表）。** BabelDOC 译了表 1 的标题和行标签，也译了表 2 的各行，但表 2 的英文标题还在。rpt 两张表都留成英文，后面一节也有一块英文（从 `learn from failed trajectories` 到训练数据那段）。这一页 BabelDOC 更好。
+
+![arXiv 2610.03665 第 6 页：原文、rpt 0.1.5、BabelDOC 0.6.4](docs/compare/arxiv-2610.03665-p06.webp)
+
+```bash
+# 书。论文的数字和 PDF 来自上面的 corpus/bench/prod_bench.py。
+# 需要 /usr/bin/time、pymupdf、pngquant 和 cwebp。密钥只留在环境变量里。
+/usr/bin/time -v -- target/release/rpt translate open-logic-complete.pdf \
+  --from en --to zh --output open-logic-rpt.pdf \
+  --jobs 4 --max-pages 35 --progress off \
+  --base-url "$RPT_LLM_BASE_URL" --model "$RPT_LLM_MODEL"
+
+/usr/bin/time -v -- .venv/bin/babeldoc --openai \
+  --openai-model "$RPT_LLM_MODEL" \
+  --openai-base-url "$RPT_LLM_BASE_URL" \
+  --openai-api-key "$RPT_LLM_API_KEY" \
+  --lang-in en --lang-out zh \
+  --no-dual --no-auto-extract-glossary --ignore-cache \
+  --watermark-output-mode no_watermark \
+  --primary-font-family serif \
+  --qps 4 --pool-max-workers 4 \
+  --pages 1-35 \
+  --output open-logic-babel --working-dir open-logic-babel/work \
+  --files open-logic-complete.pdf
+
+python3 corpus/bench/compare_pages.py \
+  --source open-logic-complete.pdf \
+  --rpt open-logic-rpt.pdf \
+  --babel open-logic-babel/open-logic-complete.no_watermark.zh.mono.pdf \
+  --pages 2,3,33 --out-dir docs/compare --prefix open-logic
+
+python3 corpus/bench/compare_pages.py \
+  --source corpus/ci/arxiv-2610.02163.pdf \
+  --rpt arxiv-2610.02163-rpt.pdf \
+  --babel arxiv-2610.02163.no_watermark.zh.mono.pdf \
+  --pages 1,6,8 --out-dir docs/compare --prefix arxiv-2610.02163
+
+python3 corpus/bench/compare_pages.py \
+  --source corpus/ci/arxiv-2610.03665.pdf \
+  --rpt arxiv-2610.03665-rpt.pdf \
+  --babel arxiv-2610.03665.no_watermark.zh.mono.pdf \
+  --pages 1,5,6 --out-dir docs/compare --prefix arxiv-2610.03665
 ```
 
 `corpus/manifest.json` 记录真实论文和可再分发图书的直接下载 URL、来源、许可证、sha256、大小和特征标签。`python3 corpus/fetch.py` 把它们下载到被 git 忽略的缓存，这些文件不进仓库。例外是 `corpus/ci/`：九篇 CC BY 4.0 论文，每篇不到 700 KB，URL 和许可证写在 `corpus/ci/manifest.json`，CI 直接用它们。`testdata/hello.pdf` 由 `cargo run -p rpt-core --example hello_pdf` 生成，只用于单元测试，不是语料。`rpt-qa` 对每份文件做抽取和字形覆盖率检查，用 Poppler 对文字，并对一份逐字节相同的副本做渲染对比（整页 SSIM，以及去掉字形框之后的非文字区域 SSIM）。lopdf 另存是另一次结构往返，会改写文件，报告里单独列出。CI 只跑标记了 `ci: true` 的小子集。全量语料在夜间的 `Corpus fidelity` 工作流。说明见 `corpus/README.md`。

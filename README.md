@@ -4,7 +4,7 @@ Format-preserving PDF translation. The goal is to replace [BabelDOC](https://git
 
 It opens a PDF, interprets content streams down to individual glyphs, and checks that every glyph is still accounted for. A pluggable translator marks those glyphs as translated. `rpt translate` without `--output` reports that translation and does not write a file. `rpt translate --output` rewrites the glyphs into a PDF and removes the original text-showing operators for the glyphs it rewrote.
 
-The Chinese page is [README.zh.md](README.zh.md). Wall time, peak RSS, and output size against BabelDOC are in [Live run against BabelDOC 0.6.4](#live-run-against-babeldoc-064).
+The Chinese page is [README.zh.md](README.zh.md). Wall time, peak RSS, and output size against BabelDOC are in [Live run against BabelDOC 0.6.4](#live-run-against-babeldoc-064). Page images are in [Visual comparison](#visual-comparison).
 
 ## Usage
 
@@ -362,6 +362,101 @@ Side-by-side goes from 88.6 MB and 1,703 MB RSS to 44.4 MB and 263 MB. The Chine
 /usr/bin/time -v -- target/release/rpt translate large-30p.pdf \
   --replay translations.json --from en --to zh --jobs 4 --progress off \
   --mode side-by-side --output large-bi.pdf
+```
+
+### Visual comparison
+
+Same gateway and model as the live run (`https://hub.mypapers.top/api/llm/v1`, model `auto`, concurrency 4). Each strip is source, rpt 0.1.5, BabelDOC 0.6.4, rendered at about 110 dpi by `corpus/bench/compare_pages.py`. pngquant runs first; a strip that is still over 300 KB is WebP. Every file below is under 300 KB.
+
+The paper strips are the PDFs from the live run above. The book strips are a separate timed run of those two engines on pages 1–35. Peak RSS is `/usr/bin/time -v`. Both book outputs are still the full 1016-page file: only pages 1–35 were translated, and pages 36–1016 are the original English. rpt's progress line stayed at 2/35 while later pages were translated; the saved PDF has Chinese through page 35. On that run rpt reported coverage incomplete, 225 glyphs missed, 19,379 kept on purpose.
+
+| Document | engine | wall | peak RSS | output |
+| --- | --- | ---: | ---: | ---: |
+| Open Logic Text, pages 1–35 of 1016, source 4,063,129 bytes | rpt 0.1.5 | 793.1s | 230.9 MB | 6,397,502 |
+| Open Logic Text, pages 1–35 of 1016, source 4,063,129 bytes | BabelDOC 0.6.4 | 902.5s | 2,241.0 MB | 6,762,851 |
+| arXiv 2610.02163, 11 pages, 285,600 bytes | rpt 0.1.5 | 328.6s | 189.5 MB | 1,084,324 |
+| arXiv 2610.02163, 11 pages, 285,600 bytes | BabelDOC 0.6.4 | 431.2s | 2,126.2 MB | 829,495 |
+| arXiv 2610.03665, 16 pages, 607,541 bytes | rpt 0.1.5 | 676.2s | 203.0 MB | 1,707,061 |
+| arXiv 2610.03665, 16 pages, 607,541 bytes | BabelDOC 0.6.4 | 620.9s | 1,984.7 MB | 1,308,117 |
+
+The 0.1.4 rows for the two papers are in the live-run table above. They are not the PDFs in these images.
+
+**Licenses of the pages shown.** The Open Logic Text, complete build, revision 9620cc7 (2026-07-12), is CC BY 4.0. Page 1 of the PDF prints “Creative Commons Attribution 4.0 International.” Source `https://builds.openlogicproject.org/open-logic-complete.pdf`, sha256 `e17ac6f54723999b727b56b60f864a969f2b7c883be5ce7149f13472a0ee14ae`. arXiv:2610.02163 (*AutoCompact*) and arXiv:2610.03665 (*Pivot-SD*) are CC BY 4.0. Each abstract page (`https://arxiv.org/abs/2610.02163`, `https://arxiv.org/abs/2610.03665`) shows the CC BY 4.0 badge linking to `http://creativecommons.org/licenses/by/4.0/`. Neither PDF prints that license. The MIT and Apache-2.0 lines on page 16 of 2610.03665 belong to cited models, not to the paper. The paper files are `corpus/ci/arxiv-2610.02163.pdf` and `corpus/ci/arxiv-2610.03665.pdf`.
+
+**Open Logic, page 2 (about the project).** Body text. Both translate the paragraphs and keep the line breaks.
+
+![Open Logic page 2: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/open-logic-p02.png)
+
+**Open Logic, page 3 (contents).** rpt puts a Chinese title on most leader lines. Section 1.5 stays in English (`Pairs, Tuples, Cartesian Products`). BabelDOC is worse here: several titles land on the same row, page numbers stick to the title (`集合25`), and many rows are only the dot leaders.
+
+![Open Logic page 3: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/open-logic-p03.png)
+
+**Open Logic, page 33 (ordered pairs and a proof).** Both leave Definition 1.23 in English beside `⟨a, b⟩ = {{a}, {a, b}}`, and both split the recursive display into `A1` / `= A` and `Ak+1 Ak` / `= × A`. rpt translates the following paragraphs and the start of the proof; nested tuples lose brackets (`⟨x, y, z⟩` comes out broken), and Example 1.25 has blank holes where the set braces were. BabelDOC leaves the paragraph after Definition 1.23 and the proof in English, pulls `A`, `A × B`, and the braces out of the Chinese sentences, and also breaks the tuple line. BabelDOC keeps more of the original formula ink. rpt translates more of the prose and damages it.
+
+![Open Logic page 33: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/open-logic-p33.png)
+
+**arXiv 2610.02163, page 1 (title and abstract).** rpt leaves the title in English, keeps the author names and the university lines in Latin, and translates the abstract, including the 9.2% / SWE-PolyBench sentence. BabelDOC translates the title, which rpt does not, but the abstract body is gone: after `摘要` the next text is the arXiv stamp, and `9.2` does not occur on the page. The affiliations are crushed into the author line (`Dong31新加坡管理大学`).
+
+![arXiv 2610.02163 page 1: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/arxiv-2610.02163-p01.webp)
+
+**arXiv 2610.02163, page 6 (table and charts).** rpt leaves Table 1 and the chart labels in English (tables are skipped by default) and translates the caption and the paragraphs, including the method names. BabelDOC translates the table cells, which reads better, and also leaves the English caption, splits a currency label (`4.00美` / `元`), and drops names out of the paragraph below (`SWE-Compressor` and `AutoCompact` become gaps).
+
+![arXiv 2610.02163 page 6: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/arxiv-2610.02163-p06.webp)
+
+**arXiv 2610.02163, page 8 (summary cards).** rpt leaves both cards in English and translates the caption and the body. BabelDOC translates the cards. The lower card is garbled: `Recorded state` and `Proposed next action` stay in English, and the consistency line reads `C一致` and ends in `ion.`
+
+![arXiv 2610.02163 page 8: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/arxiv-2610.02163-p08.webp)
+
+**arXiv 2610.03665, page 1 (two columns).** Both mix the columns. rpt translates the title and the abstract, but the introduction runs through the abstract column and the author superscripts tangle (`Chen-Hao 1,2,*‡ Chao`). BabelDOC translates the title, keeps a cleaner author block, leaves the abstract in English, and paints the Chinese introduction through that English abstract. The author block is better in BabelDOC. The abstract is actually translated only by rpt.
+
+![arXiv 2610.03665 page 1: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/arxiv-2610.03665-p01.webp)
+
+**arXiv 2610.03665, page 5 (formulas and Algorithm 1).** Displayed equations (9)–(12) survive in both. BabelDOC keeps `g(t)` four times, matching the source; rpt's text has it once. BabelDOC leaves one English paragraph and some algorithm lines (`Select the top-K`, `foreach`). rpt translates more of the prose and the algorithm, and the algorithm steps sit in between the paragraphs. BabelDOC is better on the formula blocks. rpt covers more words and scrambles the order.
+
+![arXiv 2610.03665 page 5: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/arxiv-2610.03665-p05.webp)
+
+**arXiv 2610.03665, page 6 (two tables).** BabelDOC translates Table 1's caption and the row labels, and translates Table 2's rows, while Table 2's English caption is still on the page. rpt leaves both tables in English and also leaves a block of the following section in English (`learn from failed trajectories` through the training-data paragraph). BabelDOC is better on this page.
+
+![arXiv 2610.03665 page 6: source, rpt 0.1.5, BabelDOC 0.6.4](docs/compare/arxiv-2610.03665-p06.webp)
+
+```bash
+# Book. The paper numbers and PDFs come from corpus/bench/prod_bench.py, above.
+# Needs /usr/bin/time, pymupdf, pngquant, and cwebp. The key stays in the environment.
+/usr/bin/time -v -- target/release/rpt translate open-logic-complete.pdf \
+  --from en --to zh --output open-logic-rpt.pdf \
+  --jobs 4 --max-pages 35 --progress off \
+  --base-url "$RPT_LLM_BASE_URL" --model "$RPT_LLM_MODEL"
+
+/usr/bin/time -v -- .venv/bin/babeldoc --openai \
+  --openai-model "$RPT_LLM_MODEL" \
+  --openai-base-url "$RPT_LLM_BASE_URL" \
+  --openai-api-key "$RPT_LLM_API_KEY" \
+  --lang-in en --lang-out zh \
+  --no-dual --no-auto-extract-glossary --ignore-cache \
+  --watermark-output-mode no_watermark \
+  --primary-font-family serif \
+  --qps 4 --pool-max-workers 4 \
+  --pages 1-35 \
+  --output open-logic-babel --working-dir open-logic-babel/work \
+  --files open-logic-complete.pdf
+
+python3 corpus/bench/compare_pages.py \
+  --source open-logic-complete.pdf \
+  --rpt open-logic-rpt.pdf \
+  --babel open-logic-babel/open-logic-complete.no_watermark.zh.mono.pdf \
+  --pages 2,3,33 --out-dir docs/compare --prefix open-logic
+
+python3 corpus/bench/compare_pages.py \
+  --source corpus/ci/arxiv-2610.02163.pdf \
+  --rpt arxiv-2610.02163-rpt.pdf \
+  --babel arxiv-2610.02163.no_watermark.zh.mono.pdf \
+  --pages 1,6,8 --out-dir docs/compare --prefix arxiv-2610.02163
+
+python3 corpus/bench/compare_pages.py \
+  --source corpus/ci/arxiv-2610.03665.pdf \
+  --rpt arxiv-2610.03665-rpt.pdf \
+  --babel arxiv-2610.03665.no_watermark.zh.mono.pdf \
+  --pages 1,5,6 --out-dir docs/compare --prefix arxiv-2610.03665
 ```
 
 ## Roadmap
