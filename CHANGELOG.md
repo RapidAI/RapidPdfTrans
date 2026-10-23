@@ -17,6 +17,13 @@
 - A line that starts after a formula on the same baseline keeps that x. The translation is not pulled left onto the formula.
 - A period that shares its text operator with a translated word (`∅. But if`) is drawn again, and the English word is blanked.
 - A short leftover English clause (`But if`) is removed from a Chinese sentence. Same-baseline formula ink that covers translated text is reported as an overlap.
+- Blanking a word inside a formula (`and` → `且`) keeps that operator's cursor advance, so the following glyph stays on its source x instead of sliding onto the replacement.
+- `Definition 1.24` stays one heading (`定义 1.24（笛卡尔积）`). A numbered definition that shares its line with a formula is drawn in Chinese and the formula stays in the source glyphs.
+- A column gap that was already empty (a running header, a caption above its grid) is not pulled closed. A gap is closed only when a drawn line absorbed the ink that used to fill it.
+- An English word is not broken at a capital (`SelfCompact`, `FewShotPromptTemplate`).
+- Title-case column headers with a wide word gap (`Trigger`, `Optimization`, `Context`) are separate segments. A medium group label under the caption (`Full-history baseline`) is translated; a method cell on a numbered row stays in the source language.
+- A line that opens on `。` or `，` moves that mark onto the previous line of the same paragraph.
+- Drawn text is checked for a same-baseline overlap, a tofu box, and a stray one-character line. The notes are diagnostics.
 
 ## 0.1.6 — 2026-10-23
 

@@ -328,6 +328,7 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
     let largest = ranked.first().copied().unwrap_or(0.0);
     let second = ranked.get(1).copied().unwrap_or(0.0);
     let span = piece_width(&line);
+    let header_labels = title_case_header_line(&line);
     let mut parts = Vec::new();
     let mut current = vec![line[0]];
     for (index, glyph) in line.iter().copied().enumerate().skip(1) {
@@ -455,6 +456,20 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
                         .chars()
                         .all(|ch| matches!(ch, '{' | '}' | '[' | ']' | '(' | ')'))
             });
+        // `Trigger Optimization Context` sits in one header row. The gutters
+        // are about an em, under the 24pt column split, so the three words
+        // used to become one string `触发器优化上下文`.
+        let header_word = header_labels
+            && gap >= size * 0.55
+            && glyph
+                .unicode
+                .trim()
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+            && current
+                .iter()
+                .any(|item| item.unicode.chars().any(|ch| ch.is_ascii_alphabetic()));
         if (column_gap
             || tight_column
             || table_cell
@@ -462,7 +477,8 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             || two_column_tail
             || lone_mark
             || gutter_digit
-            || stray_column_fragment)
+            || stray_column_fragment
+            || header_word)
             && !current.is_empty()
             && !crumb
         {
@@ -474,6 +490,57 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         parts.push(current);
     }
     parts
+}
+
+/// `Trigger Optimization Context`: two to six title-case words, no sentence
+/// punctuation. A prose title (`Full-history baseline`) has a lowercase word
+/// and stays one segment.
+fn title_case_header_line(line: &[&Glyph]) -> bool {
+    if line.len() < 4 || line.len() > 48 {
+        return false;
+    }
+    let text: String = line.iter().map(|glyph| glyph.unicode.as_str()).collect();
+    if text
+        .chars()
+        .any(|ch| matches!(ch, ',' | '.' | ':' | ';' | '。' | '，' | '?' | '!'))
+    {
+        return false;
+    }
+    let size = representative_size(line).max(1.0);
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for (index, glyph) in line.iter().enumerate() {
+        let spaced = glyph.unicode.chars().all(|ch| ch.is_whitespace());
+        let gap = if index == 0 {
+            0.0
+        } else {
+            let right = line[index - 1].bbox[0].max(line[index - 1].bbox[2]);
+            let left = glyph.bbox[0].min(glyph.bbox[2]);
+            left - right
+        };
+        if index > 0 && (spaced || gap >= size * 0.55) {
+            let word = current.trim().to_string();
+            if !word.is_empty() {
+                words.push(word);
+            }
+            current.clear();
+        }
+        if !spaced {
+            current.push_str(&glyph.unicode);
+        }
+    }
+    let word = current.trim().to_string();
+    if !word.is_empty() {
+        words.push(word);
+    }
+    if !(2..=6).contains(&words.len()) {
+        return false;
+    }
+    words.iter().all(|word| {
+        word.chars()
+            .find(|ch| ch.is_ascii_alphabetic())
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+    })
 }
 
 /// The next body-sized glyph is another column, or nothing follows.
@@ -1764,6 +1831,7 @@ fn assemble(
     // Column headers are the same kind of label as the caption. Numeric
     // cells stay in the source language.
     release_table_headers(&lines, &mut kept);
+    release_table_group_labels(&lines, &mut kept);
     kept.extend(margin_stamps(&lines));
     release_hyphen_continuations(&lines, &mut kept);
     // A theorem frame is a box, so a short wrap (`version. We write…`,
@@ -3863,6 +3931,44 @@ fn release_table_headers(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>
                     }
                 }
             }
+        }
+    }
+    if release.is_empty() {
+        return;
+    }
+    kept.retain(|(id, reason)| {
+        !(release.contains(id) && (reason == "table" || reason == "figure"))
+    });
+}
+
+/// A medium row that is the only text on its baseline under a table caption
+/// (`Full-history baseline`). Method cells share the baseline with numbers
+/// and stay in the source language.
+fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
+    let mut release = std::collections::HashSet::new();
+    for line in lines {
+        if !line.sole_on_baseline || !under_table_caption(line, lines) {
+            continue;
+        }
+        let letters = line
+            .text
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .count();
+        let digits = line.text.chars().filter(|ch| ch.is_ascii_digit()).count();
+        let words = line.text.split_whitespace().count();
+        if digits != 0 || letters < 12 || !(1..=8).contains(&words) {
+            continue;
+        }
+        let emphasized = line.glyphs.iter().any(|glyph| {
+            let style = crate::font::face_style(&glyph.font_name);
+            style.bold || crate::font::medium_weight(&glyph.font_name)
+        });
+        if !emphasized {
+            continue;
+        }
+        for glyph in &line.glyphs {
+            release.insert(glyph.id);
         }
     }
     if release.is_empty() {
@@ -6707,6 +6813,69 @@ mod tests {
         let segs = segment_glyphs(&glyphs);
         let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
         assert_eq!(texts, ["Left", "Right"]);
+    }
+
+    #[test]
+    fn a_title_case_header_row_splits_on_each_word() {
+        let words = ["Trigger", "Optimization", "Context"];
+        let mut glyphs = Vec::new();
+        let mut id = 1u32;
+        let mut x = 100.0f32;
+        for word in words {
+            for ch in word.chars() {
+                glyphs.push(glyph(id, x, 500.0, &ch.to_string(), false));
+                id += 1;
+                x += 6.0;
+            }
+            x += 10.0;
+        }
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|segment| segment.text.as_str()).collect();
+        assert_eq!(texts, ["Trigger", "Optimization", "Context"]);
+    }
+
+    #[test]
+    fn a_table_group_label_leaves_the_grid_and_a_method_cell_stays() {
+        let mut caption = glyph(1, 72.0, 700.0, "Table 1. Scores.", false);
+        caption.font_name = "NimbusRomNo9L-Regu".into();
+        let mut label = glyph(2, 72.0, 640.0, "Full-history baseline", false);
+        label.font_name = "NimbusRomNo9L-Medi".into();
+        let mut method = glyph(3, 72.0, 620.0, "Fixed Compaction", false);
+        method.font_name = "NimbusRomNo9L-Medi".into();
+        let score = glyph(4, 280.0, 620.0, "42.0", false);
+        let glyphs = vec![caption, label, method, score];
+        let line = |index: usize, y: f32, sole: bool| VisualLine {
+            glyphs: vec![&glyphs[index]],
+            text: glyphs[index].unicode.clone(),
+            page: 0,
+            y,
+            left: glyphs[index].matrix[4],
+            right: glyphs[index].matrix[4] + 180.0,
+            size: 12.0,
+            font: glyphs[index].font_name.clone(),
+            toc: false,
+            sole_on_baseline: sole,
+        };
+        let lines = vec![
+            line(0, 700.0, true),
+            line(1, 640.0, true),
+            line(2, 620.0, false),
+            line(3, 620.0, false),
+        ];
+        let mut kept = vec![
+            (2, "table".into()),
+            (3, "table".into()),
+            (4, "table".into()),
+        ];
+        release_table_group_labels(&lines, &mut kept);
+        assert!(
+            !kept.iter().any(|(id, _)| *id == 2),
+            "group label stayed in the table: {kept:?}"
+        );
+        assert!(
+            kept.iter().any(|(id, _)| *id == 3),
+            "method cell was released: {kept:?}"
+        );
     }
 
     #[test]

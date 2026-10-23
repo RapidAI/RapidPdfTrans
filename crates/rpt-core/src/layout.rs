@@ -970,6 +970,13 @@ pub(crate) fn wrap_text_holes(
                     while end > start + 1 && !can_break(chars[end - 1], chars[end]) {
                         end -= 1;
                     }
+                    // Still one letter: the token has no legal break and is
+                    // wider than the measure. Keep it whole (`F` / `ewShot…`).
+                    if end == start + 1 {
+                        while end < chars.len() && !can_break(chars[end - 1], chars[end]) {
+                            end += 1;
+                        }
+                    }
                 }
             }
             // A formula hole that does not fit moves as a whole. Splitting
@@ -1684,25 +1691,6 @@ fn can_break(prev: char, next: char) -> bool {
     break_after(prev) && break_before(next)
 }
 
-/// `Few|Shot`, `Prompt|Template`, and `HTML|Parser`. A run of capitals stays
-/// together until the last capital that introduces a lowercase tail.
-fn camel_boundary(chars: &[char], index: usize) -> bool {
-    if index == 0 || index >= chars.len() {
-        return false;
-    }
-    let prev = chars[index - 1];
-    let next = chars[index];
-    if !prev.is_ascii_alphabetic() || !next.is_ascii_uppercase() {
-        return false;
-    }
-    if prev.is_ascii_lowercase() {
-        return true;
-    }
-    chars
-        .get(index + 1)
-        .is_some_and(|ch| ch.is_ascii_lowercase())
-}
-
 fn cjk_pair_count(text: &str) -> usize {
     let chars: Vec<char> = text.chars().collect();
     chars
@@ -1711,9 +1699,9 @@ fn cjk_pair_count(text: &str) -> usize {
         .count()
 }
 
-/// The legal break left the line short of what [`MAX_JUSTIFY_EM`] can close,
-/// and the next token is a long camelCase word. Take the longest prefix that
-/// still fits. Sticky spans (a URL, a citation) are not entered.
+/// English tokens stay whole, including camelCase (`SelfCompact`,
+/// `FewShotPromptTemplate`). A break at the capital paints `Self` at the end
+/// of one line and `Compact` at the start of the next.
 fn pull_latin_prefix(
     chars: &[char],
     advances: &[f32],
@@ -1724,48 +1712,8 @@ fn pull_latin_prefix(
     limit: f32,
     size: f32,
 ) -> usize {
-    if end <= start || end >= chars.len() || fitted <= end {
-        return end;
-    }
-    // A URL or a citation is sticky. A camelCase identifier is not: the
-    // boundary inside `Jupyter|Notebook` is the break that fills the line.
-    // Entering a URL would cut `https://Ex.com/AbCd` at `Ab|Cd`.
-    let head: String = chars[start..end].iter().collect();
-    let measured = |from: usize, to: usize| advances[from..to].iter().sum::<f32>();
-    let slack = limit - measured(start, end);
-    let cap = cjk_pair_count(&head) as f32 * size * MAX_JUSTIFY_EM;
-    if slack <= cap + 0.4 {
-        return end;
-    }
-    let room = fitted.min(chars.len());
-    let mut best = end;
-    let mut width = measured(start, end);
-    let mut index = end;
-    while index < room {
-        if index > end && sticky.get(index - 1).copied().unwrap_or(false) {
-            break;
-        }
-        if index > end && camel_boundary(chars, index) && width <= limit + 0.4 {
-            best = index;
-        }
-        let advance = advances[index];
-        if width + advance > limit + 0.4 {
-            break;
-        }
-        width += advance;
-        index += 1;
-    }
-    // `Jupyter|Notebook` can fill the measure on the boundary itself. The
-    // loop stops at `fitted`, so that break is not seen from inside.
-    if index > end
-        && index < chars.len()
-        && camel_boundary(chars, index)
-        && !sticky.get(index - 1).copied().unwrap_or(false)
-        && width <= limit + 0.4
-    {
-        best = index;
-    }
-    best
+    let _ = (chars, advances, sticky, start, fitted, limit, size);
+    end
 }
 
 fn break_before(ch: char) -> bool {
@@ -3307,36 +3255,29 @@ mod tests {
     }
 
     #[test]
-    fn a_long_camel_case_token_breaks_so_the_line_can_fill() {
+    fn an_english_token_is_not_split_at_a_capital() {
         let text = "的一系列提示工程工具包括FewShotPromptTemplate并且继续写完这一句说明。";
         let font = uniform_font(text);
-        // `包括FewShot` fits in 200pt. The whole identifier does not, and the
-        // line must not stop before `Few` just to keep the token intact.
         let lines = wrap_text(text, 10.0, 200.0, 200.0, &font).unwrap();
         assert!(
-            lines[0].contains("FewShot") && !lines[0].contains("PromptTemplate"),
-            "{lines:?}"
+            lines
+                .iter()
+                .any(|line| line.contains("FewShotPromptTemplate")),
+            "FewShotPromptTemplate was split: {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("PromptTemplate")),
+            lines.iter().all(|line| {
+                !line.contains("FewShot") || line.contains("FewShotPromptTemplate")
+            }),
             "{lines:?}"
-        );
-        let slack = 200.0 - measure(&lines[0], 10.0, &font);
-        let cap = cjk_pair_count(&lines[0]) as f32 * 10.0 * 0.15 + 0.5;
-        assert!(
-            slack <= cap,
-            "line still short by {slack:.1}pt after the camelCase break: {}",
-            lines[0]
         );
         let url = "说明见https://Ex.com/AbCd获取更多";
-        // The URL is 190pt at 1em. A 180pt measure cannot hold it, so the
-        // line would have to cut the token. A wider measure must keep it whole.
         let url_lines = wrap_text(url, 10.0, 250.0, 250.0, &uniform_font(url)).unwrap();
         assert!(
             url_lines
                 .iter()
                 .any(|line| line.contains("https://Ex.com/AbCd")),
-            "a URL was cut at camelCase: {url_lines:?}"
+            "a URL was cut: {url_lines:?}"
         );
     }
 
