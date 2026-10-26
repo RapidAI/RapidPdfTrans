@@ -646,6 +646,11 @@ pub fn translate_extraction(
                         continue;
                     }
                     translated[index] = Some(segments[index].text.clone());
+                    // Copies of this source were never sent. They read the
+                    // owner's result from the cache, so record the kept source.
+                    cache
+                        .entry(segments[index].text.clone())
+                        .or_insert_with(|| segments[index].text.clone());
                     let preview: String = segments[index].text.chars().take(80).collect();
                     extraction.diagnostics.push(Diagnostic {
                         page_index: Some(segments[index].page_index),
@@ -662,11 +667,25 @@ pub fn translate_extraction(
         if translated[i].is_some() {
             continue;
         }
-        let text = cache.get(&segments[i].text).cloned().ok_or_else(|| {
-            Error::Translate(format!("no translation for segment {}", segments[i].id))
-        })?;
-        cache_hits += 1;
-        translated[i] = Some(text);
+        match cache.get(&segments[i].text).cloned() {
+            Some(text) => {
+                cache_hits += 1;
+                translated[i] = Some(text);
+            }
+            None => {
+                // No owner result reached this copy. Keep the source so the PDF
+                // is still written, instead of failing the whole job.
+                translated[i] = Some(segments[i].text.clone());
+                let preview: String = segments[i].text.chars().take(80).collect();
+                extraction.diagnostics.push(Diagnostic {
+                    page_index: Some(segments[i].page_index),
+                    message: format!(
+                        "left a paragraph unchanged because no translation reached segment {}: {preview}",
+                        segments[i].id
+                    ),
+                });
+            }
+        }
     }
     // A paragraph that was sent to the model and is still English is asked
     // once more, alone. References, URLs, and formulas were filled in earlier
@@ -8115,6 +8134,38 @@ mod tests {
                 })
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_repeated_paragraph_whose_owner_batch_failed_keeps_the_source() {
+        // The owner of a repeated source is the only copy sent. When its batch
+        // fails for good, the copies used to find no cache entry and the whole
+        // job failed with `no translation for segment N`.
+        for jobs in [1, 4] {
+            let opts = TranslateOptions {
+                batch_size: 1,
+                jobs,
+                context_window: 0,
+                ..TranslateOptions::default()
+            };
+            let mut doc = extraction_from_lines(&["Alpha one", "Beta two", "Alpha one"]);
+            let report = translate_extraction(&mut doc, &opts, &FailAlpha).unwrap();
+            let alphas: Vec<_> = report
+                .segments
+                .iter()
+                .filter(|seg| seg.source == "Alpha one")
+                .collect();
+            assert_eq!(alphas.len(), 2, "jobs={jobs}");
+            assert!(alphas.iter().all(|seg| seg.translated == "Alpha one"));
+            assert!(report
+                .segments
+                .iter()
+                .any(|seg| seg.translated.contains("译Beta")));
+            assert!(doc
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("left a paragraph unchanged")));
         }
     }
 
