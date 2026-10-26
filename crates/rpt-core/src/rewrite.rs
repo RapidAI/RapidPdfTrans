@@ -931,7 +931,7 @@ pub fn rewrite_translation(
     clear_seated_formula_overlaps(&mut drawn, &mut stack_shifts, extraction);
     // `Bx1 ∪···∪ Bxn`: clearing the atom left a gap wider than the source
     // word space. Pull the union back until one space remains.
-    tighten_formula_after_atom(&mut drawn, &mut stack_shifts, extraction);
+    tighten_formula_after_atom(&drawn, &mut stack_shifts, extraction);
     // Tightening slid `∪···∪` left and left the gap it had opened in front of
     // `Bxn`. The word after the formula keeps one space.
     close_gap_after_formula(&mut drawn, &stack_shifts, extraction);
@@ -8554,8 +8554,7 @@ fn audit_drawn(drawn: &[Drawn]) -> Vec<(Option<u32>, String)> {
             ));
         }
         let (left, right) = drawn_ink_span(line);
-        for other_index in index + 1..drawn.len() {
-            let other = &drawn[other_index];
+        for other in drawn.iter().skip(index + 1) {
             if other.page != line.page || other.text.trim().is_empty() {
                 continue;
             }
@@ -9151,11 +9150,8 @@ fn broken_formula_sentence(text: &str) -> bool {
             if matches!(ch, '=' | '∥') {
                 equals = true;
             }
-        } else if is_han_char(ch) {
-            run = 0;
-        } else if ch.is_ascii_alphabetic() {
-            run = 0;
         } else if !ch.is_whitespace() {
+            // Han, Latin, and any other mark end the run.
             run = 0;
         }
     }
@@ -25994,6 +25990,7 @@ fn reseat_orphan_subscripts(lines: &mut [Drawn]) {
         let y = lines[index].y;
         let size = lines[index].size.max(0.5);
         let ids = lines[index].glyph_ids.clone();
+        #[allow(clippy::type_complexity)]
         let mut best: Option<(f32, f32, f32, f32, (usize, i32))> = None;
         for (host_index, host) in lines.iter().enumerate() {
             if host_index == index || host.page != page || host.size < size * 1.2 {
@@ -35233,7 +35230,7 @@ mod tests {
 
     #[test]
     fn a_numbered_definition_is_not_a_callout() {
-        let heading = vec![
+        let heading = [
             ink_glyph(1, 72.0, 400.0, 10.0, "Definition"),
             ink_glyph(2, 160.0, 400.0, 10.0, "1.24"),
         ];
@@ -35242,7 +35239,7 @@ mod tests {
             callout_lead(&refs).is_none(),
             "Definition 1.24 was split into a callout"
         );
-        let callout = vec![
+        let callout = [
             ink_glyph(1, 72.0, 400.0, 10.0, "DEFINITION"),
             ink_glyph(2, 170.0, 400.0, 10.0, "Retrieval"),
         ];
@@ -35837,11 +35834,12 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             "display formula reordered \"A\" before \"×\" at (200.0, 460.0)"
         ));
 
-        let mut messages = Vec::new();
-        messages.push(opened[0].1.clone());
-        messages.push(gaps[0].1.clone());
-        messages.push(figure[0].1.clone());
-        messages.push(qed);
+        let messages = vec![
+            opened[0].1.clone(),
+            gaps[0].1.clone(),
+            figure[0].1.clone(),
+            qed,
+        ];
         for message in &messages {
             assert!(layout_diagnostic_failure(message), "{message}");
         }

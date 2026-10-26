@@ -6889,7 +6889,7 @@ mod tests {
         let mut method = glyph(3, 72.0, 620.0, "Fixed Compaction", false);
         method.font_name = "NimbusRomNo9L-Medi".into();
         let score = glyph(4, 280.0, 620.0, "42.0", false);
-        let glyphs = vec![caption, label, method, score];
+        let glyphs = [caption, label, method, score];
         let line = |index: usize, y: f32, sole: bool| VisualLine {
             glyphs: vec![&glyphs[index]],
             text: glyphs[index].unicode.clone(),
@@ -6942,7 +6942,7 @@ mod tests {
             false,
         );
         title.font_name = "InterTight-SemiBold".into();
-        let glyphs = vec![caption, title];
+        let glyphs = [caption, title];
         let line = |index: usize, y: f32, right: f32| VisualLine {
             glyphs: vec![&glyphs[index]],
             text: glyphs[index].unicode.clone(),
