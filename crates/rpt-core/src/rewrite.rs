@@ -299,6 +299,19 @@ fn rewrite_translation_once(
         if segment.glyph_ids.is_empty() {
             continue;
         }
+        // A bibliography entry is already kept in its source glyphs. Its
+        // italic venue must not be read as a formula line, which redrew the
+        // entry as `W Ding Q Lu 且 G Durrett` without its punctuation.
+        if segment.glyph_ids.iter().all(|id| {
+            by_id.get(id).is_some_and(|&at| {
+                matches!(
+                    &extraction.glyphs[at].disposition,
+                    Disposition::KeptOriginal { reason } if reason == "references"
+                )
+            })
+        }) {
+            continue;
+        }
         let formula_line = formula_line_stays(segment, extraction, &by_id);
         if (math_blocks.contains(&index) || formula_line) && !segment.translated.contains('⟦') {
             let clause = formula_clause_text(&segment.source, &segment.translated);
