@@ -19,6 +19,10 @@ pub struct CoverageReport {
     /// math, and names are [`CoverageReport::intentional`].
     #[serde(default)]
     pub english_body: usize,
+    /// `english_body` glyphs per page (0-based page index), so a leftover
+    /// can be found without scanning every glyph.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub english_body_pages: std::collections::BTreeMap<u32, usize>,
     /// Glyphs kept on purpose. They do not make the document incomplete.
     #[serde(default)]
     pub intentional: usize,
@@ -36,6 +40,7 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
     let mut kept = 0;
     let mut non_text = 0;
     let mut english_body = 0;
+    let mut english_body_pages = std::collections::BTreeMap::new();
     let mut intentional = 0;
     let mut unresolved_ids = Vec::new();
     for g in glyphs {
@@ -54,6 +59,7 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
                 if real_miss_reason(reason) && glyph_is_latin_letter(g) {
                     if reason == "english-body" {
                         english_body += 1;
+                        *english_body_pages.entry(g.page_index).or_insert(0) += 1;
                     }
                     unresolved_ids.push(g.id);
                 } else if intentional_reason(reason) {
@@ -72,6 +78,7 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
         kept_original: kept,
         non_text,
         english_body,
+        english_body_pages,
         intentional,
         real_misses: unresolved_ids.len(),
         unresolved_ids,
@@ -243,6 +250,18 @@ mod tests {
         assert!(!failed_report.complete);
         assert_eq!(failed_report.real_misses, 1);
         assert_eq!(failed_report.english_body, 0);
+        assert!(failed_report.english_body_pages.is_empty());
+        let mut echoed = vec![glyph(7), glyph(8)];
+        for g in &mut echoed {
+            g.unicode = "a".into();
+            g.page_index = 3;
+            g.disposition = Disposition::KeptOriginal {
+                reason: "english-body".into(),
+            };
+        }
+        let echoed_report = report(&echoed);
+        assert_eq!(echoed_report.english_body, 2);
+        assert_eq!(echoed_report.english_body_pages.get(&3), Some(&2));
         assert!(assert_complete(&failed).is_err());
         let mut kept_on_purpose = vec![glyph(3), glyph(4), glyph(5), glyph(6)];
         for (glyph, reason) in

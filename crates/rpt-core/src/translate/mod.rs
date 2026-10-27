@@ -5476,6 +5476,11 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     {
         return false;
     }
+    // A footnote URL, a reference entry, or a code line stays in its source
+    // glyphs. Asking again only spent three rounds on it.
+    if kept_as_is_source(source) {
+        return false;
+    }
     // A reply that is mostly Chinese can still carry a whole English sentence.
     // One CJK character used to accept that reply, so the clause was painted
     // and coverage stayed complete.
@@ -5797,6 +5802,92 @@ fn formula_glyph(glyph: &crate::glyph::Glyph) -> bool {
         glyph.unicode.trim(),
         "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
     )
+}
+
+/// Text that is printed as-is, not prose the model failed to translate:
+/// a footnote URL (`3https://github.com/…/tree/ main/src`), a reference
+/// entry (`Shen, X., Chen, Z., … (2024).`), a letter-spaced code line
+/// (`- s o l v e r ( a g e n t …`), or a formula shard (`+ 𝜎p2roc +`).
+pub(crate) fn kept_as_is_source(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() {
+        return false;
+    }
+    if intentional_keep_kind(source).is_some() {
+        return true;
+    }
+    let words: Vec<&str> = source.split_whitespace().collect();
+    let url_letters: usize = words
+        .iter()
+        .filter(|word| {
+            word.contains("://")
+                || word.starts_with("www.")
+                || word.contains('/')
+                || word.contains('_')
+                || file_name_token(word)
+        })
+        .map(|word| latin_letters(word))
+        .sum();
+    if source.contains("://") && latin_letters(source).saturating_sub(url_letters) < 12 {
+        return true;
+    }
+    if reference_author_run(source) {
+        return true;
+    }
+    let singles = words
+        .iter()
+        .filter(|word| word.chars().count() == 1)
+        .count();
+    if words.len() >= 8 && singles * 10 >= words.len() * 7 {
+        return true;
+    }
+    let math = source
+        .chars()
+        .any(|ch| ('\u{1D400}'..='\u{1D7FF}').contains(&ch));
+    math && latin_letters(source) < 12
+}
+
+/// `notes.txt`, `config.yaml`: a name, a dot, and a short lowercase
+/// extension. `e.g.` and `Fig.` are not file names.
+fn file_name_token(word: &str) -> bool {
+    let word = word.trim_matches(|ch: char| matches!(ch, '(' | ')' | ',' | ';' | ':'));
+    let Some((stem, ext)) = word.rsplit_once('.') else {
+        return false;
+    };
+    stem.chars().filter(|ch| ch.is_ascii_alphanumeric()).count() >= 2
+        && (2..=4).contains(&ext.len())
+        && ext
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+}
+
+/// `Shen, X., Chen, Z., Backes, M., & Zhang, Y. (2024).` Two or more
+/// `Surname, X.` pairs and a year in parentheses.
+fn reference_author_run(source: &str) -> bool {
+    let has_year = source
+        .as_bytes()
+        .windows(6)
+        .any(|w| w[0] == b'(' && w[5] == b')' && w[1..5].iter().all(u8::is_ascii_digit))
+        || source.as_bytes().windows(6).any(|w| {
+            w[0] == b'(' && w[1..5].iter().all(u8::is_ascii_digit) && w[5].is_ascii_lowercase()
+        });
+    if !has_year {
+        return false;
+    }
+    let chars: Vec<char> = source.chars().collect();
+    let mut pairs = 0;
+    for index in 0..chars.len().saturating_sub(3) {
+        if chars[index] == ','
+            && chars[index + 1] == ' '
+            && chars[index + 2].is_ascii_uppercase()
+            && chars[index + 3] == '.'
+            && index > 0
+            && chars[index - 1].is_alphabetic()
+        {
+            pairs += 1;
+        }
+    }
+    pairs >= 2
 }
 
 fn url_or_email_only(source: &str) -> bool {
@@ -7460,6 +7551,27 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
         }
+    }
+
+    #[test]
+    fn urls_references_and_code_are_not_retried() {
+        for source in [
+            "3https://github.com/modelcontextprotocol/servers/tree/ main/src/filesystem",
+            "Shen, X., Chen, Z., Backes, M., Shen, Y., & Zhang, Y. (2024).",
+            "- s o l v e r ( a g e n t _ i n s t a n c e , t a s k _ i n p u t : s t r ) :",
+            "+ \u{1D70E}p2roc +",
+            "4https://github.com/modelcontextprotocol/servers/tree/ main/src/fetch rhino_photos_notes.txt",
+        ] {
+            assert!(kept_as_is_source(source), "{source}");
+            assert!(!needs_english_retry(source, source), "{source}");
+        }
+        let prose =
+            "The framework implements a flexible termination mechanism that balances autonomy.";
+        assert!(!kept_as_is_source(prose));
+        assert!(needs_english_retry(prose, prose));
+        assert!(!kept_as_is_source(
+            "See https://example.com for the full protocol that every participant followed."
+        ));
     }
 
     /// The batch echoes, the first retry round fails, the second answers.

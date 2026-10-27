@@ -4738,6 +4738,7 @@ fn stitch_page_continuations<'a>(
             .then(right[0].y.total_cmp(&left[0].y))
     });
     let floor = page_body_floor(&paragraphs);
+    let heads = column_heads(&paragraphs);
     let mut used = vec![false; paragraphs.len()];
     let mut stitched = Vec::new();
     for index in 0..paragraphs.len() {
@@ -4748,7 +4749,9 @@ fn stitch_page_continuations<'a>(
         let mut current = std::mem::take(&mut paragraphs[index]);
         let mut joins = 0;
         while joins < 4 {
-            let Some(next) = find_reading_continuation(&current, &paragraphs, &used, &floor) else {
+            let Some(next) =
+                find_reading_continuation(&current, &paragraphs, &used, &floor, &heads)
+            else {
                 break;
             };
             // `Baselines. Qwen3.5-2B …` opens with a bold run-in heading. It
@@ -4784,8 +4787,9 @@ fn find_reading_continuation(
     paragraphs: &[Vec<VisualLine<'_>>],
     used: &[bool],
     floor: &std::collections::HashMap<u32, f32>,
+    heads: &[ColumnHead],
 ) -> Option<usize> {
-    if let Some(next) = find_column_continuation(current, paragraphs, used) {
+    if let Some(next) = find_column_continuation(current, paragraphs, used, heads) {
         return Some(next);
     }
     if closes_the_page(current, paragraphs, used, floor) {
@@ -4820,8 +4824,9 @@ fn find_column_continuation(
     current: &[VisualLine<'_>],
     paragraphs: &[Vec<VisualLine<'_>>],
     used: &[bool],
+    heads: &[ColumnHead],
 ) -> Option<usize> {
-    if !closes_the_column(current, paragraphs, used) {
+    if !closes_the_column(current, heads) {
         return None;
     }
     let upper = current.last()?;
@@ -4862,33 +4867,45 @@ fn find_column_continuation(
     column_continuation(current, &paragraphs[index]).then_some(index)
 }
 
-fn closes_the_column(
-    current: &[VisualLine<'_>],
-    paragraphs: &[Vec<VisualLine<'_>>],
-    used: &[bool],
-) -> bool {
+/// First line of every paragraph before any stitching. Paragraphs are
+/// consumed in left-edge order, so a heading at 53.8pt is taken before the
+/// indented paragraph at 63.8pt above it. Asking the live list whether the
+/// column still has body text below then said no, and `bloated context:`
+/// jumped to the middle of the right column (`Throwback. …`).
+#[derive(Clone, Copy)]
+struct ColumnHead {
+    page: u32,
+    left: f32,
+    y: f32,
+    body: bool,
+}
+
+fn column_heads(paragraphs: &[Vec<VisualLine<'_>>]) -> Vec<ColumnHead> {
+    paragraphs
+        .iter()
+        .filter(|para| !para.is_empty() && !is_page_bridge(para))
+        .map(|para| ColumnHead {
+            page: para[0].page,
+            left: para[0].left,
+            y: para[0].y,
+            body: substantial_paragraph(para) && !marked_footnote(para),
+        })
+        .collect()
+}
+
+fn closes_the_column(current: &[VisualLine<'_>], heads: &[ColumnHead]) -> bool {
     let Some(upper) = current.last() else {
         return false;
     };
-    for (index, para) in paragraphs.iter().enumerate() {
-        if used[index] || para.is_empty() || is_page_bridge(para) {
-            continue;
-        }
-        let lower = &para[0];
-        if lower.page != upper.page || (lower.left - upper.left).abs() > 36.0 {
-            continue;
-        }
-        if lower.y >= upper.y - 0.5 {
-            continue;
-        }
-        // `˚Work partially done…` sits under the column. It is not the
-        // next sentence, and it must not keep the paragraph from continuing
-        // on the next page.
-        if substantial_paragraph(para) && !marked_footnote(para) {
-            return false;
-        }
-    }
-    true
+    // `˚Work partially done…` sits under the column. It is not the next
+    // sentence, and it must not keep the paragraph from continuing on the
+    // next page.
+    !heads.iter().any(|head| {
+        head.body
+            && head.page == upper.page
+            && (head.left - upper.left).abs() <= 36.0
+            && head.y < upper.y - 0.5
+    })
 }
 
 fn find_page_continuation(
@@ -13100,6 +13117,66 @@ mod tests {
         assert_eq!(texts.len(), 2, "{texts:?}");
         assert!(texts.iter().any(|text| text.ends_with("finished.")));
         assert!(texts.iter().any(|text| text.starts_with("The next column")));
+    }
+
+    #[test]
+    fn a_colon_above_a_heading_does_not_jump_to_the_middle_of_the_next_column() {
+        let lines = [
+            (
+                63.8,
+                400.0,
+                "Faster convergence comes from informed search. The guidance should enable",
+            ),
+            (
+                53.8,
+                389.0,
+                "more efficient exploration compared to search with polluted observations and",
+            ),
+            (53.8, 378.0, "bloated context:"),
+            (53.8, 320.0, "4.4 Empirical Support and Scope"),
+            (
+                53.8,
+                308.0,
+                "Our experimental results in the next section are consistent with these",
+            ),
+            (
+                53.8,
+                297.0,
+                "predictions, and the accuracy patterns across tasks match the expectation.",
+            ),
+            (
+                318.0,
+                700.0,
+                "in sequence, while slow thinking enforces careful step by step planning for",
+            ),
+            (
+                318.0,
+                689.0,
+                "operations that are expensive. The details can be found in Appendix A.",
+            ),
+            (
+                327.9,
+                611.0,
+                "Throwback. The throwback mechanism represents a crucial innovation in the",
+            ),
+            (
+                318.0,
+                600.0,
+                "evolution control, extending beyond simple temporal rollback functionality.",
+            ),
+        ];
+        let glyphs: Vec<Glyph> = lines
+            .iter()
+            .enumerate()
+            .map(|(id, (x, y, text))| glyph(id as u32, *x, *y, text, false))
+            .collect();
+        let segs = segment_glyphs(&glyphs);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        let colon = texts
+            .iter()
+            .find(|text| text.contains("bloated context:"))
+            .expect("colon paragraph");
+        assert!(!colon.contains("Throwback"), "{texts:?}");
     }
 
     #[test]

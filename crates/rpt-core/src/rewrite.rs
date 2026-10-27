@@ -1121,6 +1121,9 @@ fn rewrite_translation_once(
     // full English wrap below. Lift it so the gap matches the source line
     // that sat under the sentence.
     lift_display_formulas(&mut drawn, extraction, &mut stack_shifts, &succeeded);
+    // A full-width `•` from the CJK face is wider than the Latin bullet's
+    // slot and ran into `计算方法`. Move it left so it ends before the words.
+    clear_wide_bullets(&mut drawn);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     // An unmapped `ℓ` never entered the line, so the translation was drawn
@@ -4499,7 +4502,16 @@ fn merge_spans_chain(left: &MergeSpan, right: &MergeSpan) -> bool {
     let same_band = gap <= size * 0.35;
     // The words after a binomial (`matrix Q, where`) start an em past the
     // stack. That is the same line, not a first-line indent.
-    if !same_band && !below.stacked && !above.stacked {
+    // The stack only vouches for the words on its own line. A paragraph
+    // under it that opens on an indent (`Faster Convergence through …`) is
+    // the next paragraph, even when the stack ends the one above.
+    // `from 𝛿proc` labels an underbrace in the display above. It starts
+    // several ems right of the paragraph margin, so it is not that
+    // paragraph's previous line.
+    if !same_band && !above.stacked && above.margin_left > below.margin_left + size * 4.0 {
+        return false;
+    }
+    if !same_band && !below.stacked {
         let indent = below.head_left - above.margin_left;
         if indent > size * 0.55 && indent < size * 3.0 {
             return false;
@@ -9036,17 +9048,21 @@ fn pull_opening_punctuation(lines: &mut [Drawn]) {
         moves.push((index, above));
     }
     for (from, to) in moves {
-        let Some((ch, width, cid)) = take_leading_mark(&mut lines[from]) else {
-            continue;
-        };
-        if !lines[to].widths.is_empty() {
-            lines[to].gaps.push(0.0);
-        }
-        lines[to].text.push(ch);
-        lines[to].widths.push(width);
-        lines[to].cids.push(cid);
-        if !lines[to].supers.is_empty() {
-            lines[to].supers.push(false);
+        // `”。因此` wrapped both closers. Taking only `”` left `。` opening
+        // the line, so carry the whole run of closers.
+        for _ in 0..3 {
+            let Some((ch, width, cid)) = take_leading_mark(&mut lines[from]) else {
+                break;
+            };
+            if !lines[to].widths.is_empty() {
+                lines[to].gaps.push(0.0);
+            }
+            lines[to].text.push(ch);
+            lines[to].widths.push(width);
+            lines[to].cids.push(cid);
+            if !lines[to].supers.is_empty() {
+                lines[to].supers.push(false);
+            }
         }
     }
 }
@@ -16949,6 +16965,38 @@ fn is_graphic_bullet(ch: char) -> bool {
 fn lone_bullet_mark(text: &str) -> bool {
     let mut chars = text.chars();
     chars.next().is_some_and(is_graphic_bullet) && chars.next().is_none()
+}
+
+/// Shift a lone bullet whose advance reaches the words on its baseline so it
+/// ends a hair before them. Its center stays within the source slot.
+fn clear_wide_bullets(lines: &mut [Drawn]) {
+    for index in 0..lines.len() {
+        if !lone_bullet_mark(lines[index].text.trim()) {
+            continue;
+        }
+        let (left, right) = drawn_ink_span(&lines[index]);
+        let size = lines[index].size.max(1.0);
+        let next = lines
+            .iter()
+            .enumerate()
+            .filter(|(other, line)| {
+                *other != index
+                    && line.page == lines[index].page
+                    && !line.text.trim().is_empty()
+                    && (line.y - lines[index].y).abs() <= size * 0.3
+                    && line.x > left
+                    && line.x < right
+            })
+            .map(|(_, line)| line.x)
+            .min_by(|a, b| a.total_cmp(b));
+        let Some(next) = next else {
+            continue;
+        };
+        let shift = right - (next - size * 0.05);
+        if shift > 0.0 && shift <= size * 0.8 {
+            lines[index].x -= shift;
+        }
+    }
 }
 
 fn split_styled_line(
@@ -29433,6 +29481,10 @@ fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
     if job_translates && english_body_source(source) {
         if let Some(kind) = crate::translate::intentional_keep_kind(source) {
             kind
+        } else if crate::translate::kept_as_is_source(source) {
+            // A footnote URL or a file name printed as-is is not prose the
+            // model left in English.
+            "url"
         } else {
             "english-body"
         }
@@ -36684,6 +36736,44 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_and_period_both_leave_the_line_start() {
+        let mut above = test_draw(326.0, 238.0, 10.0, "批准通过“全部允许", vec![1]);
+        let n = above.text.chars().count();
+        above.widths = vec![10.0; n];
+        above.cids = vec![1; n];
+        above.gaps = vec![0.0; n - 1];
+        let mut below = test_draw(326.0, 226.0, 10.0, "”。因此，权限能防御", vec![1]);
+        let m = below.text.chars().count();
+        below.widths = vec![10.0; m];
+        below.cids = vec![1; m];
+        below.gaps = vec![0.0; m - 1];
+        let mut lines = vec![above, below];
+        pull_opening_punctuation(&mut lines);
+        assert!(lines[0].text.ends_with("允许”。"), "{}", lines[0].text);
+        assert!(lines[1].text.starts_with('因'), "{}", lines[1].text);
+    }
+
+    #[test]
+    fn a_full_width_bullet_does_not_run_into_the_words() {
+        let mut bullet = test_draw(53.8, 400.0, 8.97, "•", vec![1]);
+        bullet.widths = vec![8.97];
+        bullet.cids = vec![1];
+        bullet.gaps.clear();
+        let mut body = test_draw(59.4, 400.0, 8.97, "计算方法", vec![2]);
+        body.widths = vec![8.07; 4];
+        body.cids = vec![1; 4];
+        body.gaps = vec![0.0; 3];
+        let mut lines = vec![bullet, body];
+        clear_wide_bullets(&mut lines);
+        let (_, right) = drawn_ink_span(&lines[0]);
+        assert!(right <= 59.4, "{right}");
+        assert!(lines[0].x > 49.0, "{}", lines[0].x);
+        assert!(audit_drawn(&lines)
+            .iter()
+            .all(|(_, n)| !n.contains("overlap")));
+    }
+
+    #[test]
     fn a_comma_after_a_bare_formula_joins_that_ink() {
         let mut tail = test_draw(470.0, 400.0, 10.0, "，依此类推。", vec![2]);
         let count = tail.text.chars().count();
@@ -37754,6 +37844,49 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             calls: 0,
             cache_hits: 0,
         }
+    }
+
+    #[test]
+    fn a_stack_does_not_chain_the_next_indented_paragraph_or_a_brace_label() {
+        let span =
+            |left: f32, right: f32, bottom: f32, top: f32, head: f32, stacked: bool| MergeSpan {
+                page: 3,
+                top,
+                bottom,
+                left,
+                right,
+                columns: None,
+                size: 9.0,
+                stacked,
+                head_left: head,
+                margin_left: left,
+            };
+        let stacked = span(53.5, 296.0, 411.0, 438.0, 53.5, true);
+        let next_paragraph = span(53.8, 296.0, 367.0, 400.0, 63.8, false);
+        assert!(!merge_spans_chain(&stacked, &next_paragraph));
+        let wrap = span(53.8, 296.0, 367.0, 400.0, 53.8, false);
+        assert!(merge_spans_chain(&stacked, &wrap));
+        let brace_label = span(154.0, 182.0, 497.0, 498.0, 154.0, false);
+        let paragraph = span(53.8, 296.0, 460.0, 484.0, 63.8, false);
+        assert!(!merge_spans_chain(&brace_label, &paragraph));
+    }
+
+    #[test]
+    fn a_footnote_url_left_in_latin_is_not_an_english_body() {
+        assert_eq!(
+            kept_source_reason(
+                "3https://github.com/modelcontextprotocol/servers/tree/ main/src/filesystem",
+                true
+            ),
+            "url"
+        );
+        assert_eq!(
+            kept_source_reason(
+                "The framework implements a flexible termination mechanism that balances autonomy.",
+                true
+            ),
+            "english-body"
+        );
     }
 
     #[test]

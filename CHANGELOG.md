@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- URLs, file names, reference author runs, letter-spaced code and math alphanumerics are kept as-is and no longer retried; coverage counts them as intentional (`url`).
+- Coverage records the page of each leftover English body (`english_body_pages`).
+- Column stitching checks a snapshot of column heads, so a paragraph ending in a colon no longer jumps into the middle of the next column (guide paper p4 mega-segment hid 2600 English glyphs as math).
+- A math stack no longer chains a brace label or the next indented paragraph.
+- A line opening on `”。` carries both closers to the line above, not just the quote.
+- A full-width CJK bullet is moved left so it no longer overlaps the list text.
 - Retry rounds are logged (`rpt: retry round N: X still English, Y fixed, left: ids`) with progress on or `RPT_RETRY_LOG=1`; the log also names request failures, unparsable replies and lost placeholders.
 - A reply cut short because the reasoning model spent its token cap thinking is retried once with four times the cap instead of being treated as a failure (29747 title stayed English).
 - Each gateway call inside a retry budget gets a longer timeout (half the budget, at least the base), and the failed-batch pass uses the first leftover-round budget.
