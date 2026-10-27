@@ -4844,12 +4844,31 @@ pub(crate) fn is_author_list(text: &str) -> bool {
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect();
+    let named = |part: &str| {
+        let part =
+            part.trim_matches(|ch: char| matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆'));
+        // `Rujun Han1`: the affiliation mark is not part of the surname.
+        let bare =
+            part.trim_end_matches(|ch: char| ch.is_ascii_digit() || matches!(ch, '*' | '∗' | '†'));
+        is_personal_name(part)
+            || is_name_byline(part)
+            || (bare.len() < part.len() && (is_personal_name(bare) || is_name_byline(bare)))
+    };
+    // `…, Chengsong Huang4, Han` wraps the next author's surname onto the
+    // following line. The given name left at the end is still a name.
+    let wrapped_given = |part: &str| {
+        !part.contains(char::is_whitespace)
+            && is_name_token(part)
+            && !is_org_token(part)
+            && !is_function_word(part)
+    };
     parts.len() >= 2
-        && parts.iter().all(|part| {
-            let part =
-                part.trim_matches(|ch: char| matches!(ch, '*' | '∗' | '†' | '‡' | '§' | '¶' | '⋆'));
-            is_personal_name(part) || is_name_byline(part)
-        })
+        && match parts.split_last() {
+            Some((last, head)) if head.len() >= 3 => {
+                head.iter().all(|part| named(part)) && (named(last) || wrapped_given(last))
+            }
+            _ => parts.iter().all(|part| named(part)),
+        }
 }
 
 fn settle_translation(source: &str, translated: &str) -> String {
@@ -6259,6 +6278,12 @@ mod tests {
             "SWE-PolyBench"
         );
         assert_eq!(intentional_keep_kind("SWE-PolyBench"), Some("name"));
+        let wrapped = ", Rujun Han1, Zifeng Wang1, Yanfei Chen1, Yufan Zhuang1, Yoonho Lee3, Chengsong Huang4, Han";
+        assert_eq!(intentional_keep_kind(wrapped), Some("name"));
+        assert_ne!(
+            intentional_keep_kind("the model, the data, the results, and more"),
+            Some("name")
+        );
         assert_eq!(intentional_keep_kind("Method"), None);
     }
 

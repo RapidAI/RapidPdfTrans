@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- An author line with affiliation digits whose last author wraps (`…, Chengsong Huang4, Han`) is kept as names instead of counted as an English body paragraph (RRSI p1).
+- A signed or fractional number written with math-font operators (`−6/`, `= −1.377`) is one inline hole: prose digits between or right after the operators join the placeholder instead of leaking into the sentence (SpatialBrain p14).
+- A formula seated at a hole that reflow trimmed to the end of a slice lands one space after the last character, and a standing glyph left of the seat no longer counts as formula tail ink, which pushed `的` past `−6/` (SpatialBrain p14).
+- A numbered list item is always left-aligned on its hanging indent; two source lines that happened to look centered drew the words over the number (SpatialBrain p21 `3.`).
 - A slice after an inline formula is measured against the source paragraph's right edge, so a two-line paragraph no longer parks `= 1。那些可采纳` at the start of the next line under the next formula (RRSI p20).
 - A formula's tail no longer chains through italic letters or the sentence's own commas, which pushed the translated `、` of `w_s、w_c、w_n` past the last formula (RRSI p22).
 - A booktabs table of words (three or more equal rules, cells two em apart) is kept glyph-identical even without numbers; wrapped caption lines are left out (SpatialBrain p14 Table A1).

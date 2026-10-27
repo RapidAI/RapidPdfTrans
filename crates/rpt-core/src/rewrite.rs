@@ -2905,11 +2905,90 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     absorb_math_accents(glyphs, body, &mut groups);
     fuse_script_groups(glyphs, body, &mut groups);
     union_shared_members(&mut groups);
+    absorb_interposed_digits(glyphs, body, &mut groups);
     // Every caller sees the same holes. The unholed-math check used to see
     // `g_t(` without its `ℓ)` and kept the sentence in English.
     let mut groups = close_open_brackets(glyphs, groups, body);
     sort_placeholder_groups(glyphs, body, &mut groups);
     groups
+}
+
+/// `−6/ + 12`: `−` and `/` are math glyphs and `6` is a prose digit set
+/// between them. A hole of only `−…/` drew the `/` before the `6` and the
+/// `6` lost its sign. Digits on the hole's baseline between two members
+/// belong to the hole.
+fn absorb_interposed_digits(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) {
+    let by_id = glyph_index_refs(glyphs);
+    let members: HashSet<u32> = groups.iter().flatten().copied().collect();
+    for group in groups.iter_mut() {
+        let mut items: Vec<&Glyph> = group
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|index| glyphs[*index]))
+            .collect();
+        if items.len() < 2 {
+            continue;
+        }
+        let y = items[0].matrix[5];
+        if !items
+            .iter()
+            .all(|glyph| (glyph.matrix[5] - y).abs() < body * 0.1)
+        {
+            continue;
+        }
+        items.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+        let mut add = Vec::new();
+        for pair in items.windows(2) {
+            let (left, right) = (glyph_ink_right(pair[0]), pair[1].matrix[4]);
+            let between: Vec<&Glyph> = glyphs
+                .iter()
+                .copied()
+                .filter(|glyph| {
+                    !members.contains(&glyph.id)
+                        && !glyph.unicode.trim().is_empty()
+                        && (glyph.matrix[5] - y).abs() < body * 0.1
+                        && glyph.matrix[4] >= left - 0.3
+                        && glyph_ink_right(glyph) <= right + 0.3
+                })
+                .collect();
+            let digits = !between.is_empty()
+                && between.iter().all(|glyph| {
+                    glyph
+                        .unicode
+                        .trim()
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit() || ch == '.')
+                })
+                && between
+                    .iter()
+                    .any(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_digit()));
+            if digits {
+                add.extend(between.iter().map(|glyph| glyph.id));
+            }
+        }
+        // `−1.377`: the decimal point is the last member. The digits that
+        // touch it finish the number.
+        let last = items[items.len() - 1];
+        if matches!(last.unicode.trim(), "." | "," | "−" | "+" | "/") {
+            let mut edge = glyph_ink_right(last);
+            loop {
+                let next = glyphs.iter().copied().find(|glyph| {
+                    !members.contains(&glyph.id)
+                        && !add.contains(&glyph.id)
+                        && (glyph.matrix[5] - y).abs() < body * 0.1
+                        && glyph.matrix[4] >= edge - 0.5
+                        && glyph.matrix[4] <= edge + body * 0.15
+                        && glyph.unicode.trim().chars().count() == 1
+                        && glyph.unicode.trim().chars().all(|ch| ch.is_ascii_digit())
+                });
+                let Some(next) = next else {
+                    break;
+                };
+                edge = glyph_ink_right(next);
+                add.push(next.id);
+            }
+        }
+        group.extend(add);
+    }
 }
 
 /// A superscript that formed its own hole (`W` then `Q`) is drawn beside the
@@ -7916,10 +7995,16 @@ fn clear_seated_formula_overlaps(
             continue;
         };
         let body = lines[line_index].size.max(member_size).max(1.0);
-        if let Some(hole_x) = nearest_hole_origin(&lines[line_index], ink_left, body) {
+        let hole = nearest_hole_origin(&lines[line_index], ink_left, body)
+            .or_else(|| trailing_hole_origin(&lines[line_index], ink_left, ink_right, body));
+        if let Some(hole_x) = hole {
             let key = (shifts[index].page, (hole_x * 4.0).round() as i32);
             if claimed.insert(key) {
-                let original_left = ink_left - shifts[index].dx;
+                // Seat the formula's own ink. A tail picked up beside it
+                // must not drag the snap off the hole.
+                let seated_left =
+                    seated_ink_span(&shifts[index], extraction).map_or(ink_left, |(left, _)| left);
+                let original_left = seated_left - shifts[index].dx;
                 let new_dx = hole_x - original_left;
                 if (new_dx - shifts[index].dx).abs() > 0.5 {
                     shifts[index].dx = new_dx;
@@ -10189,6 +10274,28 @@ fn text_runs_through_ink(line: &Drawn, ink_left: f32, ink_right: f32) -> bool {
     false
 }
 
+/// `对上的 −6/`: the hole sat at the end of the slice and reflow left only
+/// the word space. The formula belongs one space after the last character,
+/// not on top of it.
+fn trailing_hole_origin(line: &Drawn, ink_left: f32, ink_right: f32, body: f32) -> Option<f32> {
+    let chars: Vec<char> = line.text.chars().collect();
+    if line.widths.len() != chars.len() || !chars.last().is_some_and(|c| c.is_whitespace()) {
+        return None;
+    }
+    let last = chars.iter().rposition(|c| !c.is_whitespace())?;
+    if !is_han_char(chars[last]) {
+        return None;
+    }
+    let mut end = line.x;
+    for index in 0..=last {
+        end += line.widths[index];
+        if index < last {
+            end += line.gaps.get(index).copied().unwrap_or(0.0);
+        }
+    }
+    (end > ink_left && end < ink_right && end - ink_left <= body * 3.0).then_some(end + body * 0.25)
+}
+
 fn nearest_hole_origin(line: &Drawn, ink_left: f32, body: f32) -> Option<f32> {
     let chars: Vec<char> = line.text.chars().collect();
     if line.widths.len() != chars.len() {
@@ -10415,6 +10522,11 @@ fn extend_ink_across_tail_except(
                 continue;
             }
             if left < origin_left - cap || right > origin_right + cap {
+                continue;
+            }
+            // A tail trails the formula (`1},`). A standing glyph left of
+            // the seated ink is the sentence it was seated after.
+            if right < ink_left + 0.2 {
                 continue;
             }
             let next_left = ink_left.min(left);
@@ -16342,7 +16454,9 @@ fn layout_segment(
     // A justified body column also shares a right edge. Sliding a short body
     // line onto it (`“来自一线的 LLM…` at x=270) opens a hole the column
     // closer cannot cross, because the line no longer shares a left edge.
-    let align = if bilingual {
+    // A numbered item hangs its words on one left edge. `3. The mural … and`
+    // over `north = … northwest.` can look centered by coincidence.
+    let align = if bilingual || numbered.is_some() {
         crate::overlap::BlockAlign::Start
     } else {
         source_block_align(&ink, media, extraction)
@@ -37800,6 +37914,63 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         assert!(right < 99.0, "{right}");
         let (_, kept) = extend_ink_across_formula_tail(90.0, 98.0, &shift, &extraction);
         assert!((101.0..104.0).contains(&kept), "{kept}");
+    }
+
+    #[test]
+    fn digits_between_math_operators_join_the_placeholder() {
+        // `−6/`: the minus and slash are math font, the 6 is prose digits.
+        let mut minus = ink_glyph(1, 100.0, 400.0, 10.0, "−");
+        minus.font_name = "CMSY10".into();
+        let six = ink_glyph(2, 105.0, 400.0, 10.0, "6");
+        let mut slash = ink_glyph(3, 110.0, 400.0, 10.0, "/");
+        slash.font_name = "CMMI10".into();
+        let one = ink_glyph(4, 115.0, 400.0, 10.0, "1");
+        let far = ink_glyph(5, 140.0, 400.0, 10.0, "2");
+        let glyphs = [minus, six, slash, one, far];
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let mut groups = vec![vec![1, 3]];
+        absorb_interposed_digits(&refs, 10.0, &mut groups);
+        let mut group = groups[0].clone();
+        group.sort_unstable();
+        assert_eq!(group, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_standing_glyph_left_of_the_seat_is_not_formula_tail() {
+        let mut minus = ink_glyph(1, 200.0, 400.0, 10.0, "−");
+        minus.font_name = "CMSY10".into();
+        minus.bbox = [200.0, 398.0, 208.0, 406.0];
+        let mut left = ink_glyph(2, 190.0, 400.0, 10.0, ")");
+        left.unmapped = true;
+        left.bbox = [190.0, 398.0, 199.5, 406.0];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![minus, left],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let shift = ListingShift {
+            page: 0,
+            ids: vec![1],
+            dx: 0.0,
+            dy: 0.0,
+            host_y: 400.0,
+        };
+        let (ink_left, _) = extend_ink_across_formula_tail(200.0, 208.0, &shift, &extraction);
+        assert!((ink_left - 200.0).abs() < 0.01, "{ink_left}");
+    }
+
+    #[test]
+    fn a_hole_trimmed_at_the_slice_end_seats_after_the_last_character() {
+        let mut line = han_line(100.0, 400.0, "对上的 ");
+        line.widths[3] = 2.5;
+        // The seated ink starts on top of 的 (120..130).
+        let hole = trailing_hole_origin(&line, 124.0, 150.0, 10.0).unwrap();
+        assert!((hole - 132.5).abs() < 0.01, "{hole}");
+        assert!(
+            trailing_hole_origin(&han_line(100.0, 400.0, "对上的"), 124.0, 150.0, 10.0).is_none()
+        );
     }
 
     #[test]
