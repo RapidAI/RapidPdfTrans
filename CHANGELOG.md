@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Affiliation lines led by a raised marker (`ᵃChair …`, `ᵇKASTEL …`) stay separate paragraphs, so their longer translations no longer run into each other.
 - A sentence that continues after a superscript hole (`{0,1}^{|E_t|}, with z = 1 when edit j`) stays one line instead of lending its superscript to the line above.
 - Email contact lists (`Email addresses: a@x.de (A. Name), …`) stay original instead of being reflowed into each other.
 - Spaced contents leaders (`A.1 Terminal-Bench . . . . .`) stay original even when the page number sits on its own line; only the title is translated.

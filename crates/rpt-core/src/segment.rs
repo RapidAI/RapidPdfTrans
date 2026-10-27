@@ -5263,6 +5263,12 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     if footnote_line(&lower.text) {
         return false;
     }
+    // `ᵃChair …, Germany` / `ᵇKASTEL …, Germany`: a line led by a raised
+    // marker is its own affiliation or note. Joining them reflows the
+    // block and the longer Chinese runs into the next affiliation.
+    if table_note_marker(lower) {
+        return false;
+    }
     // `Figure 2 | … segmentation` / `and reading order prediction.` The wrap
     // is centered, so it does not share the caption's left edge.
     if caption_kind(&upper.text).is_some() && caption_line_wrap(upper, lower) {
@@ -8321,6 +8327,26 @@ mod tests {
                 .count(),
             2,
             "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn affiliations_led_by_raised_markers_stay_apart() {
+        let glyphs = vec![
+            wide(0, 95.5, 676.7, "a", 3.0, 6.0),
+            wide(1, 99.0, 673.8, "Chair for Cybersecurity, Institute of Computer Science, University of Augsburg, Universitätsstr. 2, 86159 Augsburg, Germany", 397.0, 8.0),
+            wide(2, 107.3, 667.2, "b", 3.0, 6.0),
+            wide(3, 110.8, 664.3, "KASTEL Security Research Labs, Karlsruhe Institute of Technology, Am Fasanengarten 5, 76131 Karlsruhe, Germany", 374.0, 8.0),
+            wide(4, 94.7, 657.7, "c", 3.0, 6.0),
+            wide(5, 97.8, 654.8, "Fraunhofer Institute for Communication, Information Processing and Ergonomics FKIE, Zanderstr. 5, 53177, Bonn, Germany", 399.0, 8.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .all(|text| !(text.contains("Chair") && text.contains("KASTEL"))),
+            "two affiliations joined: {texts:?}"
         );
     }
 
