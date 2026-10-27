@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A footnote at the foot of one column no longer continues into the next column's body when the type size differs; the email footnote used to swallow the first paragraph of the right column.
+
 - Only a theorem-style label (定义, 例, 证明 …) snaps to the formula on its baseline. A wrapped line that merely starts with 证 or 例 (`证器将其评分记为`, `例如`) used to be lifted onto the line above.
 
 - A tail parked on a next line that is already split around a formula now pushes that line's first slice, so the tail no longer paints over it.

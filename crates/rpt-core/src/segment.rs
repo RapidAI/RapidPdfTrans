@@ -4989,6 +4989,12 @@ fn column_continuation(prev: &[VisualLine<'_>], next: &[VisualLine<'_>]) -> bool
     if lower.left <= upper.left + 36.0 || lower.left >= upper.left + 360.0 {
         return false;
     }
+    // An 8pt footnote (`jan.gruber@kit.edu (Jan Gruber),`) at the foot of
+    // the left column does not run into the 10pt body of the right column.
+    // A sentence that changes column keeps its type size.
+    if (upper.size - lower.size).abs() > upper.size.max(lower.size) * 0.15 {
+        return false;
+    }
     // A full-width line already covers the other column (`For SQuAD …` running
     // into `by the LM perplexity`). Its continuation is the next line under
     // it, or the next page, not that column's top.
@@ -12367,6 +12373,27 @@ mod tests {
             "{texts:?}"
         );
         assert!(texts.iter().any(|text| text.contains("[s]")), "{texts:?}");
+    }
+
+    #[test]
+    fn a_footnote_does_not_run_into_the_next_column_body() {
+        let mut note = glyph(0, 37.0, 90.0, "jan.gruber@kit.edu (Jan Gruber), and", false);
+        note.font_size = 8.0;
+        let right = glyph(
+            1,
+            316.0,
+            700.0,
+            "this paper makes three contributions to the field of forensics.",
+            false,
+        );
+        let segs = segment_glyphs(&[note, right]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("Gruber") && text.contains("contributions")),
+            "{texts:?}"
+        );
     }
 
     #[test]
