@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Table column headers and group labels stay glyph for glyph with the rest of the grid. A translated header row no longer misaligns with its cells.
+- A table's own notes (`ᵃ Visible if …`, `† …`) stay original with the grid. The paragraph interrupted by the table now continues past the notes instead of ending at them.
+
+- Table column headers stay glyph for glyph with the rest of the grid. A translated header row no longer misaligns with its cells.
 
 - A footnote at the foot of one column no longer continues into the next column's body when the type size differs; the email footnote used to swallow the first paragraph of the right column.
 

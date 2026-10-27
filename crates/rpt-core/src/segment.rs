@@ -1831,6 +1831,10 @@ fn assemble(
     // A table is kept glyph for glyph, column headers included: a header
     // row redrawn in another script no longer lines up with its cells.
     release_table_group_labels(&lines, &mut kept);
+    // `ᵃ Visible if EXIF …` under the grid is the table's own note. It keeps
+    // its marker's script, so it stays glyph for glyph with the table.
+    let notes = table_note_glyphs(&lines, &kept);
+    kept.extend(notes);
     kept.extend(margin_stamps(&lines));
     release_hyphen_continuations(&lines, &mut kept);
     // A theorem frame is a box, so a short wrap (`version. We write…`,
@@ -3827,6 +3831,71 @@ fn release_toc_titles(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     }
     kept.retain(|(id, reason)| !(titles.contains(id) && (reason == "table" || reason == "figure")));
 }
+/// Notes under a kept table: each starts with a raised one-letter marker
+/// (`a`, `b`, `*`, `†`) and sits directly below the grid or the note above.
+/// A wrapped note line in the same type continues its note.
+fn table_note_glyphs(lines: &[VisualLine<'_>], kept: &[(u32, String)]) -> Vec<(u32, String)> {
+    let table: std::collections::HashSet<u32> = kept
+        .iter()
+        .filter(|(_, reason)| reason == "table")
+        .map(|(id, _)| *id)
+        .collect();
+    if table.is_empty() {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..lines.len()).collect();
+    order.sort_by(|&a, &b| {
+        lines[a]
+            .page
+            .cmp(&lines[b].page)
+            .then(lines[b].y.total_cmp(&lines[a].y))
+    });
+    let mut out = Vec::new();
+    // Table rows and note lines seen so far: page, y, left, right, size, note.
+    let mut anchors: Vec<(u32, f32, f32, f32, f32, bool)> = Vec::new();
+    for &index in &order {
+        let line = &lines[index];
+        if line.glyphs.iter().any(|g| table.contains(&g.id)) {
+            anchors.push((line.page, line.y, line.left, line.right, line.size, false));
+            continue;
+        }
+        let below = anchors
+            .iter()
+            .rev()
+            .find(|(page, y, left, right, size, _)| {
+                *page == line.page
+                    && line.y < *y
+                    && *y - line.y <= 3.0 * size.max(line.size)
+                    && line.left < *right
+                    && line.right > *left
+            });
+        let Some(&(_, _, _, _, anchor_size, after_note)) = below else {
+            continue;
+        };
+        let wrap = after_note && (line.size - anchor_size).abs() <= anchor_size * 0.1;
+        if !table_note_marker(line) && !wrap {
+            continue;
+        }
+        out.extend(line.glyphs.iter().map(|g| (g.id, "table".to_string())));
+        anchors.push((line.page, line.y, line.left, line.right, line.size, true));
+    }
+    out
+}
+
+fn table_note_marker(line: &VisualLine<'_>) -> bool {
+    let mut ink = line.glyphs.iter().filter(|g| !g.unicode.trim().is_empty());
+    let (Some(first), Some(second)) = (ink.next(), ink.next()) else {
+        return false;
+    };
+    let mut chars = first.unicode.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    let symbol = ch.is_ascii_lowercase() || matches!(ch, '*' | '†' | '‡' | '§' | '¶');
+    let raised = first.matrix[5] - second.matrix[5] > line.size * 0.15;
+    symbol && raised && second.matrix[4] > first.matrix[4]
+}
+
 fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     let mut release = std::collections::HashSet::new();
     for line in lines {
@@ -8011,6 +8080,54 @@ mod tests {
             !kept.contains(&0),
             "header must not be figure interior: {:?}",
             seg.kept
+        );
+    }
+
+    #[test]
+    fn a_table_note_under_the_grid_stays_original() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let mut header = wide(1, 72.0, 600.0, "Method", 50.0, 10.0);
+        header.font_name = "NimbusRomNo9L-Regu".into();
+        let mut score = wide(2, 220.0, 600.0, "Score", 40.0, 10.0);
+        score.font_name = "NimbusRomNo9L-Regu".into();
+        let glyphs = vec![
+            wide(0, 72.0, 700.0, body, 360.0, 10.0),
+            wide(
+                3,
+                72.0,
+                640.0,
+                "Table 1: Pass rates for each method on the benchmark.",
+                360.0,
+                10.0,
+            ),
+            header,
+            score,
+            wide(5, 72.0, 580.0, "30.4", 28.0, 10.0),
+            wide(6, 72.0, 573.0, "a", 3.0, 6.0),
+            wide(
+                7,
+                76.0,
+                570.0,
+                "Visible if the metadata is extracted as plain text; unreachable if the pipeline passes only image data.",
+                356.0,
+                8.0,
+            ),
+            wide(4, 72.0, 500.0, body, 360.0, 10.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.iter().all(|text| !text.contains("Visible")),
+            "the table note left the grid: {texts:?}"
+        );
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.contains("ordinary body"))
+                .count(),
+            2,
+            "{texts:?}"
         );
     }
 
