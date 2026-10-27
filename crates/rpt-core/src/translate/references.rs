@@ -732,6 +732,9 @@ fn is_toc_page_label(text: &str) -> bool {
 }
 
 fn is_end_heading(text: &str) -> bool {
+    if appendix_label_start(text) {
+        return true;
+    }
     if text.trim().chars().count() > 48 {
         return false;
     }
@@ -739,6 +742,30 @@ fn is_end_heading(text: &str) -> bool {
     END_HEADINGS
         .iter()
         .any(|heading| heading_match(&norm, heading))
+}
+
+/// `Appendix A.2.2. File written The write it issued was:` is a heading run
+/// into its first sentence. The `Appendix <label>` opening ends the
+/// bibliography however long the line is.
+fn appendix_label_start(text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    if !matches!(first, "Appendix" | "APPENDIX" | "Appendices") {
+        return false;
+    }
+    let Some(label) = words.next() else {
+        return false;
+    };
+    let label = label.trim_end_matches(['.', ':']);
+    let mut chars = label.chars();
+    let lead_ok = chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit());
+    lead_ok
+        && label.len() <= 10
+        && chars.all(|ch| ch.is_ascii_digit() || ch == '.' || ch.is_ascii_uppercase())
 }
 
 fn heading_match(norm: &str, heading: &str) -> bool {
@@ -749,6 +776,9 @@ fn heading_match(norm: &str, heading: &str) -> bool {
 }
 
 fn is_section_break(text: &str) -> bool {
+    if appendix_label_start(text) {
+        return true;
+    }
     if is_reference_heading(text) || is_reference_entry(text) {
         return false;
     }
@@ -2068,5 +2098,14 @@ mod tests {
         let kept = text_of(&glyphs, &ids);
         assert!(!kept.contains("introduction"), "{kept}");
         assert!(kept.contains("Smith"), "{kept}");
+    }
+    #[test]
+    fn an_appendix_label_run_into_its_sentence_ends_the_bibliography() {
+        assert!(is_section_break(
+            "Appendix A.2.2. File written The write it issued was:"
+        ));
+        assert!(!appendix_label_start(
+            "Appendix material is cited in Smith (2020)."
+        ));
     }
 }

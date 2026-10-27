@@ -1160,7 +1160,23 @@ fn rewrite_translation_once(
         drawn.retain(|line| {
             line.glyph_ids.is_empty() || !line.glyph_ids.iter().all(|id| symbol_shards.contains(id))
         });
+        // A shard a line drew together with the rest of its formula moved
+        // with that formula. Keeping its source copy too left a ghost `′ ˆ`
+        // where the display used to be.
+        let carried: HashSet<u32> = drawn
+            .iter()
+            .flat_map(|line| line.glyph_ids.iter().copied())
+            .chain(
+                stack_shifts
+                    .iter()
+                    .chain(listing_shifts.iter())
+                    .flat_map(|shift| shift.ids.iter().copied()),
+            )
+            .collect();
         for id in &symbol_shards {
+            if carried.contains(id) && succeeded.contains(id) {
+                continue;
+            }
             succeeded.remove(id);
             keep.insert(*id, "formula".into());
         }
@@ -25264,8 +25280,11 @@ fn shift_formula_rules(
         }
         // The bar starts a point before the radical and ends a point past
         // the subscript. A footnote rule is far wider than this pad.
+        // A fraction bar overhangs its widest row by the closing paren's
+        // side bearing too (`Ĉ(H′) − Ĉ(Hₜ)` ends 3.2pt short of the bar).
         let pad = 3.0;
-        let ink = (x0 - pad, y0 - pad, x1 + pad, y1 + pad, shift.dx, shift.dy);
+        let side = 4.5;
+        let ink = (x0 - side, y0 - pad, x1 + side, y1 + pad, shift.dx, shift.dy);
         for id in streams {
             pending.entry(id).or_default().push(ink);
         }
@@ -25606,6 +25625,13 @@ fn path_operator(name: &[u8]) -> Option<&'static str> {
     })
 }
 
+/// A wide fraction bar (`Ĉ(H′) − Ĉ(Hₜ)` over `Ĉ(Hₜ)`, 65pt) is set inside a
+/// display line, right of `ΔC =`. A footnote rule starts at the left edge of
+/// the note it sits on, so it is never inside that box.
+fn wide_bar_inside(left: f32, ink: &FormulaBox) -> bool {
+    left > ink.0 + 8.0
+}
+
 fn note_hairline(
     x0: f32,
     y0: f32,
@@ -25621,17 +25647,20 @@ fn note_hairline(
         return;
     }
     let width = (x0 - x1).abs();
-    // A footnote rule is ~140pt. A fraction bar is under 40pt.
-    if !(2.0..=40.0).contains(&width) {
+    // A footnote rule is ~140pt. A fraction bar is usually under 40pt.
+    if !(2.0..=160.0).contains(&width) {
         return;
     }
     let left = x0.min(x1);
     let right = x0.max(x1);
     let y = (y0 + y1) * 0.5;
-    let Some(hit) = boxes
-        .iter()
-        .find(|ink| left >= ink.0 - 0.4 && right <= ink.2 + 0.4 && y >= ink.1 && y <= ink.3)
-    else {
+    let Some(hit) = boxes.iter().find(|ink| {
+        left >= ink.0 - 0.4
+            && right <= ink.2 + 0.4
+            && y >= ink.1
+            && y <= ink.3
+            && (width <= 40.0 || wide_bar_inside(left, ink))
+    }) else {
         return;
     };
     let dx = hit.4;
@@ -39730,6 +39759,19 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
                 )
         });
         assert!(flagged, "the leftover sentence should be a real miss");
+    }
+
+    #[test]
+    fn a_wide_fraction_bar_moves_with_its_display_line() {
+        let mut bytes =
+            b"q\n1 0 0 1 333.743 562.957 cm\n[]0 d 0 J 0.611 w 0 0 m 64.977 0 l S\nQ\n".to_vec();
+        let boxes = [(187.9, 545.0, 538.3, 580.9, 0.0, 39.0)];
+        assert!(shift_hairlines(&mut bytes, &boxes, &[]));
+        assert!(String::from_utf8_lossy(&bytes).contains("601.957"));
+        // A footnote rule at the left edge of its note stays put.
+        let mut rule = b"q\n1 0 0 1 72.000 100.000 cm\n0 0 m 140.000 0 l S\nQ\n".to_vec();
+        let note = [(70.0, 90.0, 540.0, 110.0, 0.0, 12.0)];
+        assert!(!shift_hairlines(&mut rule, &note, &[]));
     }
 
     #[test]
