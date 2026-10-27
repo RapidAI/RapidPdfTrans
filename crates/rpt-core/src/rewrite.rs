@@ -40129,7 +40129,7 @@ doc[0].render(scale=3).to_pil().save(sys.argv[2])
         let content = b"BT /F1 17 Tf \
 1 0 0 1 72 640 Tm [(Attention) -250 (Is) -250 (All) -250 (You) -250 (Need)] TJ \
 /F1 10 Tf \
-1 0 0 1 72 610 Tm [(avaswani@google.com) -800 (noam@google.com)] TJ \
+1 0 0 1 72 610 Tm [(avaswani@google.com) -800 (Google) -250 (Brain)] TJ \
 1 0 0 1 72 580 Tm (llion@google.com) Tj 180 0 Td (aidan@cs.toronto.edu) Tj \
 /F1 12 Tf \
 1 0 0 1 72 550 Tm [(Aidan) -280 (N.) -280 (Gomez)] TJ \
@@ -40174,14 +40174,8 @@ ET";
         let text = again.plain_text();
         assert!(text.contains("Attention Is All You Need"), "{text}");
         assert!(!text.contains("AttentionIsAllYouNeed"), "{text}");
-        assert!(
-            text.contains("avaswani@google.com noam@google.com"),
-            "{text}"
-        );
-        assert!(
-            !text.contains("avaswani@google.comnoam@google.com"),
-            "{text}"
-        );
+        assert!(text.contains("avaswani@google.com Google Brain"), "{text}");
+        assert!(!text.contains("avaswani@google.comGoogle"), "{text}");
         assert!(
             text.contains("llion@google.com aidan@cs.toronto.edu"),
             "{text}"

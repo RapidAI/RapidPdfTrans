@@ -1943,10 +1943,58 @@ fn assemble(
         }
         flush(&mut segments, &mut buf_ids, &mut buf);
     }
+    // `Email addresses: a@x.de (A. Name), b@y.uk (B. Name)` is a contact
+    // list. Addresses are not translated, and a translated list reflows
+    // the addresses into each other.
+    segments.retain(|seg| {
+        if !contact_list(&seg.text) {
+            return true;
+        }
+        kept.extend(seg.glyph_ids.iter().map(|id| (*id, "contact".to_string())));
+        false
+    });
     for (id, seg) in segments.iter_mut().enumerate() {
         seg.id = id as u32;
     }
     Segmentation { segments, kept }
+}
+
+/// Two or more email addresses with only names in parentheses and a short
+/// label (`Email addresses:`) around them.
+fn contact_list(text: &str) -> bool {
+    let is_email = |word: &str| {
+        let word = word.trim_matches(|ch: char| matches!(ch, ',' | ';' | '.' | '(' | ')'));
+        word.split_once('@').is_some_and(|(user, host)| {
+            !user.is_empty() && host.contains('.') && !host.starts_with('.')
+        })
+    };
+    let emails = text
+        .split_whitespace()
+        .filter(|word| is_email(word))
+        .count();
+    if emails < 2 {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut outside = String::new();
+    for ch in text.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => outside.push(ch),
+            _ => {}
+        }
+    }
+    let rest: String = outside
+        .split_whitespace()
+        .filter(|word| !is_email(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let label_end = rest
+        .find(':')
+        .filter(|end| rest[..*end].split_whitespace().count() <= 3);
+    let rest = label_end.map_or(rest.as_str(), |end| &rest[end + 1..]);
+    rest.chars().filter(|ch| ch.is_alphabetic()).count() <= 12
 }
 
 /// A line set entirely in a monospace face is a listing. A dingbat or an
@@ -13508,6 +13556,20 @@ mod tests {
             "the sentence after the script split off: {}",
             lines[3].text
         );
+    }
+
+    #[test]
+    fn a_contact_list_stays_original() {
+        assert!(contact_list(
+            "Email addresses: frank.b@uni-a.de (Frank Breitinger), jan.gruber@kit.edu (Jan Gruber), c.h@cs.ox.ac.uk (Christopher Hargreaves)"
+        ));
+        assert!(contact_list(
+            "{alice, bob}@lab.org carol@lab.org dave@lab.org"
+        ));
+        assert!(!contact_list(
+            "Write to alice@lab.org or bob@lab.org if the released code does not build on your machine."
+        ));
+        assert!(!contact_list("Correspondence: alice@lab.org"));
     }
 
     #[test]
