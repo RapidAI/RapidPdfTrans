@@ -699,7 +699,13 @@ pub fn translate_extraction(
     // A gateway that stalls on connect fails a whole batch and then its solo
     // retries, so the run kept whole pages in English. A second round asks
     // what is still English; it stops when the first round had nothing to send.
-    for _ in 0..2 {
+    // Each round waits longer before it starts, gives every paragraph a
+    // longer budget, and asks differently: alone, then with the stricter
+    // fallback prompt, then sentence by sentence.
+    for round in 0..LEFTOVER_ROUNDS {
+        if round > 0 {
+            std::thread::sleep(leftover_backoff(round));
+        }
         let before = calls;
         let improved = retry_english_leftovers(
             &segments,
@@ -711,6 +717,7 @@ pub fn translate_extraction(
             jobs,
             &mut calls,
             &progress,
+            round,
         );
         if improved == 0 && calls == before {
             break;
@@ -1453,7 +1460,9 @@ fn retry_english_leftovers(
     jobs: usize,
     calls: &mut usize,
     progress: &progress::Progress,
+    round: usize,
 ) -> usize {
+    let budget = leftover_budget(opts, round);
     let pending: Vec<usize> = translated
         .iter()
         .enumerate()
@@ -1473,8 +1482,10 @@ fn retry_english_leftovers(
         for index in pending {
             let _watch = progress.watch(segments, &[index]);
             let before = *calls;
-            translator.arm_segment_budget(segment_retry_budget(opts));
-            if let Some(text) = translate_solo(&segments[index].text, opts, translator, calls) {
+            translator.arm_segment_budget(budget);
+            if let Some(text) =
+                translate_leftover(&segments[index].text, opts, translator, calls, round)
+            {
                 progress.add_calls((*calls).saturating_sub(before));
                 improved.push((index, text));
             } else {
@@ -1498,10 +1509,14 @@ fn retry_english_leftovers(
                     let index = pending[slot];
                     let _watch = progress.watch(segments, &[index]);
                     let mut local_calls = 0usize;
-                    translator.arm_segment_budget(segment_retry_budget(opts));
-                    if let Some(text) =
-                        translate_solo(&segments[index].text, opts, translator, &mut local_calls)
-                    {
+                    translator.arm_segment_budget(budget);
+                    if let Some(text) = translate_leftover(
+                        &segments[index].text,
+                        opts,
+                        translator,
+                        &mut local_calls,
+                        round,
+                    ) {
                         call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
                         progress.add_calls(local_calls);
                         if let Ok(mut guard) = improved.lock() {
@@ -1723,6 +1738,43 @@ fn echo_fix(
         translator.clear_segment_budget();
     }
     restored
+}
+
+/// Rounds asked for paragraphs that are still English after the batches.
+const LEFTOVER_ROUNDS: usize = 3;
+
+/// A stalled gateway gets time to recover before the next round.
+/// `RPT_RETRY_BACKOFF_SECS` sets the first wait; it doubles each round.
+fn leftover_backoff(round: usize) -> std::time::Duration {
+    let base = std::env::var("RPT_RETRY_BACKOFF_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(if cfg!(test) { 0 } else { 5 });
+    std::time::Duration::from_secs(base.saturating_mul(1 << round.saturating_sub(1).min(4)))
+}
+
+/// A later round outlasts a slow connect that failed the round before.
+fn leftover_budget(opts: &TranslateOptions, round: usize) -> std::time::Duration {
+    segment_retry_budget(opts).saturating_mul(round as u32 + 1)
+}
+
+/// Round 0 asks alone, round 1 with the stricter fallback prompt, and the
+/// last round tries both and then each sentence on its own.
+fn translate_leftover(
+    source: &str,
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+    round: usize,
+) -> Option<String> {
+    let accept = |text: Option<String>| text.filter(|text| !needs_english_retry(source, text));
+    match round {
+        0 => accept(translate_solo(source, opts, translator, calls)),
+        1 => accept(translate_fallback(source, opts, translator, calls)),
+        _ => accept(translate_solo(source, opts, translator, calls))
+            .or_else(|| accept(translate_fallback(source, opts, translator, calls)))
+            .or_else(|| accept(translate_sentences(source, opts, translator, calls))),
+    }
 }
 
 /// About two request timeouts. Fast connect failures still retry, but the
@@ -8617,6 +8669,48 @@ mod tests {
         assert!(warning.contains("English body"), "{warning}");
         assert_eq!(ex.diagnostics.len(), 1);
         assert!(!ex.glyphs.is_empty());
+    }
+
+    /// Echoes the English unless the stricter fallback prompt is used, or the
+    /// text is a single sentence.
+    struct StubbornTranslator;
+
+    impl Translator for StubbornTranslator {
+        fn complete(&self, system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = seg["text"].as_str().unwrap();
+                    let single = text.trim_end().matches(". ").count() == 0;
+                    let out = if system.contains("independent translator") && !single {
+                        "这是第一句话。这是第二句话。".to_string()
+                    } else if single && !system.contains("separate attempt") {
+                        "这是一句被单独翻译的话。".to_string()
+                    } else {
+                        text.to_string()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": out})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_leftover_round_changes_how_it_asks() {
+        let opts = TranslateOptions::default();
+        let source =
+            "The model copied this sentence back unchanged. It did the same for this second one.";
+        let mut calls = 0;
+        assert!(translate_leftover(source, &opts, &StubbornTranslator, &mut calls, 0).is_none());
+        let strict = translate_leftover(source, &opts, &StubbornTranslator, &mut calls, 1).unwrap();
+        assert!(strict.contains("第一句"), "{strict}");
+        let last = translate_leftover(source, &opts, &StubbornTranslator, &mut calls, 2).unwrap();
+        assert!(last.contains("第一句"), "{last}");
+        assert!(leftover_budget(&opts, 2) > leftover_budget(&opts, 0));
+        assert_eq!(leftover_backoff(1), std::time::Duration::ZERO);
     }
 
     struct IsolatedTranslator {

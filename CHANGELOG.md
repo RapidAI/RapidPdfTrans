@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Segments still in English after the batch passes get up to three retry rounds with growing backoff and budget: solo, then the stricter fallback prompt, then solo, fallback and sentence by sentence. Echoed replies are never accepted.
+- A bold run-in label (`Ablation Analysis.`) stays on its paragraph's baseline instead of being pulled up alone when column holes close.
+- When a run-in label's paragraph continues on the next page, its first line now starts one space after the translated label instead of leaving a wide gap.
 - An author line with affiliation digits whose last author wraps (`…, Chengsong Huang4, Han`) is kept as names instead of counted as an English body paragraph (RRSI p1).
 - A signed or fractional number written with math-font operators (`−6/`, `= −1.377`) is one inline hole: prose digits between or right after the operators join the placeholder instead of leaking into the sentence (SpatialBrain p14).
 - A formula seated at a hole that reflow trimmed to the end of a slice lands one space after the last character, and a standing glyph left of the seat no longer counts as formula tail ink, which pushed `的` past `−6/` (SpatialBrain p14).

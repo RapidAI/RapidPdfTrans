@@ -1021,6 +1021,9 @@ fn rewrite_translation_once(
     // English heading's narrow box paints 相关问题。 on top of the paragraph.
     // The heading and the body are one line: bold label, then the sentence.
     reflow_bold_run_ins(&mut drawn, extraction, &by_id, &embedded, &mut stack_shifts);
+    // The same run-in over a paragraph that continues on the next page is
+    // not rewrapped. Its first line still starts one space after the label.
+    slide_run_in_bodies(&mut drawn, extraction, &by_id, &mut stack_shifts);
     // `where` / `indexes` and `output of the` / `layer as input to the` are
     // one paragraph split by an inline formula. Each piece was fitted to its
     // own English box, so a line opens on `，`, `其中` sits alone, and the
@@ -18236,6 +18239,72 @@ fn reflow_bold_run_ins(
     *drawn = kept;
 }
 
+fn slide_run_in_bodies(
+    drawn: &mut [Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    shifts: &mut [ListingShift],
+) {
+    let mut moves: Vec<(usize, f32)> = Vec::new();
+    for (head_index, head) in drawn.iter().enumerate() {
+        if head.text.trim().is_empty() {
+            continue;
+        }
+        let glyphs = ids_glyphs(&head.glyph_ids, extraction, by_id);
+        if !bold_run_in_glyphs(&glyphs) {
+            continue;
+        }
+        // The label is one drawn line.
+        if drawn
+            .iter()
+            .enumerate()
+            .any(|(other, line)| other != head_index && line.glyph_ids == head.glyph_ids)
+        {
+            continue;
+        }
+        let gap = head.size.max(1.0) * 0.4;
+        let head_right = line_ink_right(head);
+        let body = drawn.iter().enumerate().find(|(_, line)| {
+            line.page == head.page
+                && line.glyph_ids != head.glyph_ids
+                && (line.y - head.y).abs() <= 1.0
+                && line.x > head_right + gap * 1.5
+                && line.x - head.x < head.size.max(1.0) * 16.0
+                && line.text.chars().any(is_han_char)
+        });
+        let Some((body_index, line)) = body else {
+            continue;
+        };
+        // The paragraph's first drawn line, not a slice further right.
+        let first = drawn
+            .iter()
+            .filter(|other| other.glyph_ids == line.glyph_ids && other.page == line.page)
+            .all(|other| other.y < line.y + 0.5 && (other.y < line.y - 0.5 || other.x >= line.x));
+        if first {
+            moves.push((body_index, head_right + gap - line.x));
+        }
+    }
+    for (index, dx) in moves {
+        let (page, y, ids) = {
+            let line = &drawn[index];
+            (line.page, line.y, line.glyph_ids.clone())
+        };
+        for line in drawn.iter_mut() {
+            if line.page == page && (line.y - y).abs() <= 0.5 && line.glyph_ids == ids {
+                line.x += dx;
+            }
+        }
+        for shift in shifts.iter_mut() {
+            if shift.page == page
+                && (shift.host_y - y).abs() <= 0.8
+                && shift.ids.iter().any(|id| ids.contains(id))
+            {
+                shift.dx += dx;
+            }
+        }
+    }
+}
+
 fn compose_bold_run_in(
     head_key: &[u32],
     groups: &HashMap<Vec<u32>, Vec<usize>>,
@@ -23144,7 +23213,44 @@ fn is_inline_label_block(
     }
     let text = block_source_text(block, drawn, extraction, by_id);
     let trimmed = text.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= 24 && crate::segment::is_run_in_label(trimmed)
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.chars().count() <= 24 && crate::segment::is_run_in_label(trimmed) {
+        return true;
+    }
+    // `Ablation Analysis.` is a bold run-in heading on the paragraph's first
+    // baseline. Pulled up alone, it left the paragraph a blank line below.
+    bold_run_in_heading(block, drawn, extraction, by_id, trimmed)
+}
+
+fn bold_run_in_heading(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    text: &str,
+) -> bool {
+    if text.chars().count() > 48 || !text.ends_with(['.', ':']) {
+        return false;
+    }
+    let glyphs: Vec<&Glyph> = block
+        .indices
+        .iter()
+        .flat_map(|index| drawn[*index].glyph_ids.iter())
+        .filter_map(|id| by_id.get(id).and_then(|slot| extraction.glyphs.get(*slot)))
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    !glyphs.is_empty()
+        && glyphs.iter().all(|glyph| bold_face(&glyph.font_name))
+        && glyphs
+            .iter()
+            .any(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
+}
+
+fn bold_face(font: &str) -> bool {
+    let face = font.rsplit('+').next().unwrap_or(font).to_ascii_lowercase();
+    face.contains("bold") || face.contains("-bd") || face.ends_with(".b") || face.contains("cmbx")
 }
 
 fn block_source_text(
@@ -37764,6 +37870,29 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         assert!(
             !drawn.iter().any(|line| line.page == 0 && line.y > 400.5),
             "a line was painted above the heading on the first page"
+        );
+        // Kept where the source paragraph started, the first line stood far
+        // right of the translated label. It starts one space after it.
+        for line in drawn.iter_mut() {
+            if line.page == 0 && line.resource == "REG" && (line.y - 400.0).abs() < 0.5 {
+                line.x = 200.0;
+            }
+        }
+        slide_run_in_bodies(&mut drawn, &extraction, &by_id, &mut Vec::new());
+        let head = drawn
+            .iter()
+            .find(|line| line.resource == "BOLD")
+            .expect("heading");
+        let body = drawn
+            .iter()
+            .find(|line| line.page == 0 && line.resource == "REG" && (line.y - 400.0).abs() < 0.5)
+            .expect("first body line");
+        let head_right = line_ink_right(head);
+        assert!(
+            (body.x - head_right - 4.0).abs() < 0.6,
+            "first line at {:.1}, label ends at {:.1}",
+            body.x,
+            head_right
         );
     }
 
