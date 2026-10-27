@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A tail parked on a next line that is already split around a formula now pushes that line's first slice, so the tail no longer paints over it.
+
 - Several slices of one line that run past the column are parked on the next line in reading order instead of on top of each other, and the rest of that line moves after them.
 
 - A bold run-in label no longer pulls a paragraph that continues on the next page onto its own page; the continuation used to be painted over the top of the label's page.

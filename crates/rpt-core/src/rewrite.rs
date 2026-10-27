@@ -8230,25 +8230,36 @@ fn drop_overflow_tail(lines: &mut Vec<Drawn>) {
         cursors.insert(next, x + width + size * 0.35);
         moved.insert(index);
     }
+    // The next baseline can already be split around a formula. Its first
+    // slice, not the one picked as `next`, is what has to clear the parked
+    // tail.
     for (next, follow) in cursors {
-        let delta = follow - lines[next].x;
+        let page = lines[next].page;
+        let y = lines[next].y;
+        let ids = lines[next].glyph_ids.clone();
+        let size = lines[next].size.max(1.0);
+        let on_baseline: Vec<usize> = (0..lines.len())
+            .filter(|slot| {
+                let line = &lines[*slot];
+                !moved.contains(slot)
+                    && line.page == page
+                    && (line.y - y).abs() <= size * 0.2
+                    && paragraph_ids(&line.glyph_ids, &ids)
+            })
+            .collect();
+        let from = on_baseline
+            .iter()
+            .map(|slot| lines[*slot].x)
+            .fold(f32::MAX, f32::min);
+        if !from.is_finite() {
+            continue;
+        }
+        let delta = follow - from;
         if delta.abs() <= 0.4 {
             continue;
         }
-        let page = lines[next].page;
-        let y = lines[next].y;
-        let from = lines[next].x;
-        let ids = lines[next].glyph_ids.clone();
-        let size = lines[next].size.max(1.0);
-        for (slot, line) in lines.iter_mut().enumerate() {
-            if !moved.contains(&slot)
-                && line.page == page
-                && (line.y - y).abs() <= size * 0.2
-                && line.x >= from - 0.4
-                && paragraph_ids(&line.glyph_ids, &ids)
-            {
-                line.x += delta;
-            }
+        for slot in on_baseline {
+            lines[slot].x += delta;
         }
     }
     lines.extend(parked);
@@ -35549,7 +35560,8 @@ mod tests {
             mk(160.0, 400.0, "也需要有序序列", 20.0),
             mk(470.0, 400.0, "是编辑历史，", 10.0),
             mk(540.0, 400.0, "包含探索指令，", 10.0),
-            mk(160.0, 386.0, "一般而言，我们", 10.0),
+            mk(160.0, 386.0, "一般而言，", 10.0),
+            mk(260.0, 386.0, " 是更新后的", 10.0),
         ];
         drop_overflow_tail(&mut lines);
         let mut on_next: Vec<(f32, f32)> = lines
@@ -35558,7 +35570,7 @@ mod tests {
             .map(|line| (line.x, line.x + line.widths.iter().sum::<f32>()))
             .collect();
         on_next.sort_by(|left, right| left.0.total_cmp(&right.0));
-        assert_eq!(on_next.len(), 3, "{on_next:?}");
+        assert_eq!(on_next.len(), 4, "{on_next:?}");
         for pair in on_next.windows(2) {
             assert!(
                 pair[1].0 >= pair[0].1 - 0.5,
