@@ -4844,7 +4844,13 @@ fn settle_translation(source: &str, translated: &str) -> String {
 /// `A × B = {⟨x, y⟩ : x ∈ A and y ∈ B}.` becomes `… A 且 y ∈ B`.
 /// A sentence that is already Chinese is left as the model wrote it.
 fn gloss_echoed_formula_words(source: &str, translated: &str) -> String {
-    if !prose_sentence_with_formula(source) || !same_latin_letters(source, translated) {
+    // A paragraph of English prose around a formula is an echo, not a copied
+    // formula. Glossing its `and`/`if` made it look Chinese, so it was never
+    // sent again and was painted as English with 且 and 如果 in it.
+    if !prose_sentence_with_formula(source)
+        || !same_latin_letters(source, translated)
+        || latin_letters(source) >= 40
+    {
         return translated.to_string();
     }
     const WORDS: &[(&str, &str)] = &[
@@ -5340,6 +5346,20 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     // words inside a Chinese sentence is not this case.
     let stripped = strip_spurious_subtitle(source, translated);
     if stripped.trim() != translated.trim() && echoes_full_source(source, &stripped) {
+        return true;
+    }
+    // `After the stability 且 cost checks, …` is the English paragraph with
+    // a few glossed connectives. A cached reply like that is still an echo.
+    if cjk_count(source) == 0
+        && latin_letters(source) >= 40
+        && cjk_count(translated) <= 8
+        && cjk_count(translated) > 0
+        && translated
+            .chars()
+            .filter(|ch| cjk_count(&ch.to_string()) > 0)
+            .all(|ch| "每当其中由于则且令如果".contains(ch))
+        && latin_letters(translated) * 10 >= latin_letters(source) * 9
+    {
         return true;
     }
     if cjk_count(source) > 0 || cjk_count(translated) > 0 {
@@ -6781,6 +6801,18 @@ mod tests {
         let mut saved = HashMap::new();
         saved.insert(source.to_string(), saved_text.to_string());
         assert_eq!(lookup_saved(source, &saved).as_deref(), Some(saved_text));
+    }
+
+    #[test]
+    fn a_glossed_echo_of_a_paragraph_is_retried() {
+        let source = "After the stability and cost checks, the implementation applies a guard g(H) in {0,1} if it is needed.";
+        let glossed = "After the stability 且 cost checks, the implementation applies a guard g(H) in {0,1} 如果 it is needed.";
+        assert!(needs_english_retry(source, glossed));
+        assert_eq!(gloss_echoed_formula_words(source, source), source);
+        assert!(!needs_english_retry(
+            source,
+            "在稳定性和成本检查之后，实现会按需应用防护 g(H) ∈ {0,1}。"
+        ));
     }
 
     #[test]

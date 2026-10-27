@@ -152,29 +152,62 @@ pub fn rewrite_translation(
     Ok(())
 }
 
-/// Segments that own a glyph of a colliding drawn line. A segment whose
-/// translation equals its source is already original and is skipped.
-fn fallback_segments(report: &TranslateReport, colliding: &HashSet<u32>) -> Vec<usize> {
-    if colliding.is_empty() {
-        return Vec::new();
+/// Two drawn lines that overlap: the source glyph ids of each.
+type Collision = (Vec<u32>, Vec<u32>);
+
+/// Segments to put back in their source glyphs. A segment whose translation
+/// equals its source is already original and is skipped. When one side of a
+/// collision is much smaller (a run-in heading against its paragraph), only
+/// that side falls back. Dropping the paragraph left a page of English for a
+/// two-word label. The next round falls back the other side if the overlap
+/// remains.
+fn fallback_segments(report: &TranslateReport, colliding: &[Collision]) -> Vec<usize> {
+    let owners = |ids: &[u32]| -> Vec<usize> {
+        let ids: HashSet<u32> = ids.iter().copied().collect();
+        report
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| {
+                segment.translated != segment.source
+                    && segment.glyph_ids.iter().any(|id| ids.contains(id))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    };
+    let weight = |indexes: &[usize]| -> usize {
+        indexes
+            .iter()
+            .map(|index| report.segments[*index].glyph_ids.len())
+            .sum()
+    };
+    let mut out: Vec<usize> = Vec::new();
+    for (left, right) in colliding {
+        let a = owners(left);
+        let b = owners(right);
+        let shared = a.iter().any(|index| b.contains(index));
+        let (wa, wb) = (weight(&a), weight(&b));
+        let pick: Vec<usize> = if shared || a.is_empty() || b.is_empty() {
+            a.into_iter().chain(b).collect()
+        } else if wa * 2 <= wb {
+            a
+        } else if wb * 2 <= wa {
+            b
+        } else {
+            a.into_iter().chain(b).collect()
+        };
+        out.extend(pick);
     }
-    report
-        .segments
-        .iter()
-        .enumerate()
-        .filter(|(_, segment)| {
-            segment.translated != segment.source
-                && segment.glyph_ids.iter().any(|id| colliding.contains(id))
-        })
-        .map(|(index, _)| index)
-        .collect()
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
-/// Source glyph ids of drawn lines that overlap another drawn line by more
-/// than kerning slop. Single-character pairs (`且` over `∈`) are left to the
-/// audit, which reports them.
-fn colliding_drawn_ids(drawn: &[Drawn]) -> HashSet<u32> {
-    let mut ids = HashSet::new();
+/// Pairs of drawn lines that overlap by more than kerning slop.
+/// Single-character pairs (`且` over `∈`) are left to the audit, which
+/// reports them.
+fn colliding_drawn_ids(drawn: &[Drawn]) -> Vec<Collision> {
+    let mut pairs = Vec::new();
     for (index, line) in drawn.iter().enumerate() {
         if line.text.trim().chars().count() < 2 {
             continue;
@@ -196,12 +229,11 @@ fn colliding_drawn_ids(drawn: &[Drawn]) -> HashSet<u32> {
                         line.page, line.x, line.y, line.text, other.x, other.y, other.text
                     );
                 }
-                ids.extend(line.glyph_ids.iter().copied());
-                ids.extend(other.glyph_ids.iter().copied());
+                pairs.push((line.glyph_ids.clone(), other.glyph_ids.clone()));
             }
         }
     }
-    ids
+    pairs
 }
 
 fn rewrite_translation_once(
@@ -209,7 +241,7 @@ fn rewrite_translation_once(
     extraction: &mut Extraction,
     report: &TranslateReport,
     opts: &RewriteOptions,
-) -> Result<HashSet<u32>> {
+) -> Result<Vec<Collision>> {
     let cjk_family = CjkStyle::resolve(opts.cjk_style.as_deref()).map_err(Error::Options)?;
     let compose = match opts.mode {
         OutputMode::Bilingual(
@@ -14260,7 +14292,10 @@ fn run_in_label_indent(
     }
     side.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
     let text: String = side.iter().map(|glyph| glyph.unicode.as_str()).collect();
-    if !crate::segment::is_run_in_label(text.trim()) {
+    // A bold `Harness evolution.` is a run-in heading too. Its own segment
+    // is drawn there, so a two-em indent put the body on top of it.
+    let bold_heading = text.trim().ends_with(['.', ':']) && bold_run_in_glyphs(&side);
+    if !crate::segment::is_run_in_label(text.trim()) && !bold_heading {
         return None;
     }
     let indent = body_x - column_left;
@@ -26698,6 +26733,20 @@ fn layout_across_pages(
         indent_ems = 0.0;
         Some((lead.text_x - left).max(0.0))
     });
+    // A run-in heading (`Harness evolution.`) is its own segment, drawn
+    // where it was. The body's first line starts beside it, as on one page.
+    let fixed_indent = fixed_indent.or_else(|| {
+        let (page, ink, left, _) = ink_pages.first()?;
+        let first = ink.first()?;
+        let x = line_span(first, source_size).0;
+        if x <= left + source_size * 0.6 {
+            return None;
+        }
+        let indent =
+            run_in_label_indent(extraction, glyphs, *page, first.y, *left, x, source_size)?;
+        indent_ems = 0.0;
+        Some(indent)
+    });
     let scale = scale_for_heading(level, source_size, metrics);
     let start = (source_size * scale).max(1.0);
     let floor = (start * 0.78).max(source_size * 0.62).min(start);
@@ -29600,7 +29649,7 @@ mod tests {
             fallback_line(0, 40.0, 240.0, "下一行", vec![5]),
         ];
         let colliding = colliding_drawn_ids(&drawn);
-        assert_eq!(colliding, HashSet::from([1, 2, 3]));
+        assert_eq!(colliding, vec![(vec![1, 2], vec![3])]);
         let segment = |id: u32, ids: Vec<u32>, translated: &str| TranslatedSegment {
             id,
             page_index: 0,
@@ -29611,15 +29660,20 @@ mod tests {
         let report = TranslateReport {
             segments: vec![
                 segment(0, vec![1, 2], "中文"),
-                segment(1, vec![3], "中文"),
+                segment(1, vec![3, 6], "中文"),
                 segment(2, vec![4, 5], "中文"),
                 segment(3, vec![9], "source 3"),
             ],
             calls: 0,
             cache_hits: 0,
         };
+        // Comparable paragraphs both fall back.
         assert_eq!(fallback_segments(&report, &colliding), vec![0, 1]);
-        assert!(fallback_segments(&report, &HashSet::new()).is_empty());
+        assert!(fallback_segments(&report, &[]).is_empty());
+        // A short run-in label against a long paragraph: only the label.
+        let mut report = report;
+        report.segments[0].glyph_ids = (1..=2).chain(100..140).collect();
+        assert_eq!(fallback_segments(&report, &colliding), vec![1]);
     }
 
     #[test]
@@ -45360,6 +45414,106 @@ ET",
         assert!(bbox_overlap_area(quote, answer) < 0.1);
         let wide = [102.0, 116.0, 124.0, 138.6];
         assert!(bbox_overlap_area(wide, answer) > 1.0);
+    }
+
+    #[test]
+    fn a_cross_page_body_starts_beside_its_bold_run_in_heading() {
+        // `Harness evolution.` is its own segment. The body runs onto the next
+        // page, so it is laid out by `layout_across_pages`. A two-em indent
+        // put its first line on the heading and the paragraph fell back.
+        let mut heading = Vec::new();
+        let mut x = 62.0f32;
+        for (id, ch) in (0u32..).zip("Harness evolution.".chars()) {
+            let mut glyph = ink_glyph(id, x, 400.0, 10.0, &ch.to_string());
+            glyph.font_name = "XCharter-Bold".into();
+            glyph.bbox = [x, 392.0, x + 5.0, 408.0];
+            heading.push(glyph);
+            x += 5.0;
+        }
+        let mut body = Vec::new();
+        let mut id = 100u32;
+        let mut line = |text: &str, x0: f32, y: f32, page: u32, body: &mut Vec<Glyph>| {
+            for (index, ch) in text.chars().enumerate() {
+                let x = x0 + index as f32 * 5.0;
+                let mut glyph = ink_glyph(id, x, y, 10.0, &ch.to_string());
+                glyph.page_index = page;
+                glyph.bbox = [x, y - 8.0, x + 4.6, y + 8.0];
+                body.push(glyph);
+                id += 1;
+            }
+        };
+        line(
+            "The closest line of work automates the loop",
+            160.0,
+            400.0,
+            0,
+            &mut body,
+        );
+        line(
+            "an LLM proposer rewrites the harness and keeps",
+            62.0,
+            386.0,
+            0,
+            &mut body,
+        );
+        line(
+            "the edit when the score improves on the benchmark",
+            62.0,
+            700.0,
+            1,
+            &mut body,
+        );
+        line(
+            "and this inherits both the mechanisms and risks",
+            62.0,
+            686.0,
+            1,
+            &mut body,
+        );
+        let text = "最接近的工作方向是将这一循环自动化：由提议者重写运行框架，若编辑提高了基准分数就保留，这继承了其机制与风险，并在下一页继续写完这一段。";
+        let mut cmap = std::collections::HashMap::new();
+        for (cid, ch) in (1u16..).zip(text.chars()) {
+            cmap.insert(ch as u32, (cid, 1000));
+        }
+        let font = crate::font::SubsetFont {
+            bytes: Vec::new(),
+            units_per_em: 1000,
+            glyphs: cmap,
+
+            fallback: None,
+            notice: None,
+        };
+        let mut all = heading.clone();
+        all.extend(body.iter().cloned());
+        let extraction = Extraction {
+            coordinate_space: "pdf",
+            pages: Vec::new(),
+            glyphs: all,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let refs: Vec<&Glyph> = body.iter().collect();
+        let drawn = layout_across_pages(
+            &refs,
+            text,
+            &font,
+            &extraction,
+            "F",
+            0.0,
+            CjkMeasure::resolve(0.90, 1.60),
+            &HashMap::new(),
+        )
+        .expect("body crosses the page");
+        let first = drawn
+            .iter()
+            .filter(|line| line.page == 0)
+            .max_by(|left, right| left.y.total_cmp(&right.y))
+            .expect("a first-page line");
+        assert!(
+            first.x >= 152.0,
+            "first line x={} starts on the heading (ends at 152)",
+            first.x
+        );
     }
 
     #[test]

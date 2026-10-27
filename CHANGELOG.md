@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A paragraph that continues on the next page starts beside its bold run-in heading (`Harness evolution.`) instead of under it, and an overlap between a short label and a long paragraph now keeps only the label in English, not the whole paragraph.
+- An echoed English paragraph whose `and`/`if` were glossed as 且/如果 is sent to the model again instead of being painted as mixed English.
 - Long articles rewrite much faster: glyph lookups by id, reference mates and several layout passes no longer rescan every glyph in the document (the 1702.05747 Elsevier replay spent over 18 minutes in coverage marking and figure-label audits; the whole replay now finishes in under 2 minutes instead of about 19).
 - A closing bracket, quote, colon, or `！`/`？` that wraps to the start of a Chinese line hangs on the line above, like `。` and `，` already did.
 - Affiliation lines led by a raised marker (`ᵃChair …`, `ᵇKASTEL …`) stay separate paragraphs, so their longer translations no longer run into each other.
