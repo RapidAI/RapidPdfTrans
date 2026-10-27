@@ -4633,6 +4633,12 @@ fn stitch_page_continuations<'a>(
             let Some(next) = find_reading_continuation(&current, &paragraphs, &used, &floor) else {
                 break;
             };
+            // `Baselines. Qwen3.5-2B …` opens with a bold run-in heading. It
+            // starts its own paragraph, even after a sentence that ends in a
+            // colon above a list.
+            if styled_run_in(&paragraphs[next][0]).is_some() {
+                break;
+            }
             used[next] = true;
             current.extend(std::mem::take(&mut paragraphs[next]));
             joins += 1;
