@@ -17715,7 +17715,10 @@ fn compose_bold_run_in(
             continue;
         }
         let glyphs = ids_glyphs(key, extraction, by_id);
-        if glyphs.is_empty() || glyphs[0].page_index != page {
+        // A paragraph that runs onto the next page would be rewrapped onto
+        // the label's page, so its continuation was painted at the top of
+        // the wrong page. Only a body that stays on the label's page joins.
+        if glyphs.is_empty() || glyphs.iter().any(|glyph| glyph.page_index != page) {
             continue;
         }
         let letters = glyphs
@@ -36797,6 +36800,155 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             head.x,
             head_advance,
             body.x
+        );
+    }
+
+    #[test]
+    fn a_run_in_body_that_continues_on_the_next_page_stays_on_its_pages() {
+        let mut glyphs = Vec::new();
+        let mut x = 72.0f32;
+        for (index, ch) in "Related problems.".chars().enumerate() {
+            let mut glyph = ink_glyph(index as u32, x, 400.0, 10.0, &ch.to_string());
+            glyph.font_name = "CMBX10".into();
+            glyph.bbox = [x, 392.0, x + 5.5, 408.0];
+            glyphs.push(glyph);
+            x += 5.5;
+        }
+        let head_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+        let body_at = glyphs.len() as u32;
+        x += 12.0;
+        for (index, ch) in "The k-server problem is closely related to paging."
+            .chars()
+            .enumerate()
+        {
+            let mut glyph = ink_glyph(body_at + index as u32, x, 400.0, 10.0, &ch.to_string());
+            glyph.bbox = [x, 392.0, x + 4.5, 408.0];
+            glyphs.push(glyph);
+            x += 4.5;
+        }
+        if let Some(last) = glyphs.last_mut() {
+            last.bbox[2] = 540.0;
+        }
+        let tail_at = glyphs.len() as u32;
+        for (index, ch) in "Paging is the uniform metric case of it."
+            .chars()
+            .enumerate()
+        {
+            let mut glyph = ink_glyph(
+                tail_at + index as u32,
+                200.0 + index as f32 * 4.5,
+                740.0,
+                10.0,
+                &ch.to_string(),
+            );
+            glyph.page_index = 1;
+            glyphs.push(glyph);
+        }
+        let body_ids: Vec<u32> = glyphs
+            .iter()
+            .skip(head_ids.len())
+            .map(|glyph| glyph.id)
+            .collect();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![
+                crate::glyph::PageInfo {
+                    index: 0,
+                    object_id: "1 0".into(),
+                    media_box: [0.0, 0.0, 612.0, 792.0],
+                    rotate: 0,
+                },
+                crate::glyph::PageInfo {
+                    index: 1,
+                    object_id: "2 0".into(),
+                    media_box: [0.0, 0.0, 612.0, 792.0],
+                    rotate: 0,
+                },
+            ],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let head_text = "相关问题。";
+        let body_text =
+            "k-服务器问题与许多其他在线问题密切相关，例如分页问题对应于度量空间的特殊情况。";
+        let font_for = |text: &str| {
+            let mut map = HashMap::new();
+            for (id, ch) in (1u16..).zip(text.chars()) {
+                map.insert(ch as u32, (id, 1000));
+            }
+            map.entry(' ' as u32).or_insert((400, 400));
+            SubsetFont {
+                bytes: Vec::new(),
+                units_per_em: 1000,
+                glyphs: map,
+
+                fallback: None,
+                notice: None,
+            }
+        };
+        let head_font = font_for(head_text);
+        let body_font = font_for(body_text);
+        let mut drawn = vec![
+            drawn_line(
+                0,
+                72.0,
+                400.0,
+                10.0,
+                Color::black(),
+                head_text,
+                &head_font,
+                "BOLD",
+                0.0,
+                &head_ids,
+                false,
+                90.0,
+            ),
+            drawn_line(
+                0,
+                72.0,
+                400.0,
+                10.0,
+                Color::black(),
+                body_text,
+                &body_font,
+                "REG",
+                0.0,
+                &body_ids,
+                false,
+                460.0,
+            ),
+            drawn_line(
+                1,
+                72.0,
+                740.0,
+                10.0,
+                Color::black(),
+                "分页问题对应于度量空间。",
+                &body_font,
+                "REG",
+                0.0,
+                &body_ids,
+                false,
+                460.0,
+            ),
+        ];
+        let embedded = vec![("BOLD".into(), head_font), ("REG".into(), body_font)];
+        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded, &mut Vec::new());
+        assert!(
+            drawn
+                .iter()
+                .any(|line| line.page == 1 && (line.y - 740.0).abs() < 0.5),
+            "the next-page continuation was moved off its page: {:?}",
+            drawn
+                .iter()
+                .map(|line| (line.page, line.y, line.text.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !drawn.iter().any(|line| line.page == 0 && line.y > 400.5),
+            "a line was painted above the heading on the first page"
         );
     }
 

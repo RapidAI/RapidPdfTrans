@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A bold run-in label no longer pulls a paragraph that continues on the next page onto its own page; the continuation used to be painted over the top of the label's page.
+
 - A bibliography whose entries put initials first (`T. Chen, S. Lu, K. Zhao, …`) or start with an organisation (`Anthropic. Introducing claude opus 4.8, 2026a. URL …`) is kept in the source again. Neither form was recognised as an entry, so the `References` heading of arXiv 2609.24972 was followed by a translated, scrambled bibliography.
 - A kept bibliography entry is no longer redrawn as a formula line. Its italic venue made the rewrite stamp `and` as `且` and drop the commas (`W Ding Q Lu 且 G Durrett`); the entry now stays in its source glyphs.
 - A paragraph whose Chinese would be painted over another drawn line is put back in its source glyphs, and the page is laid out again (up to three rounds). Each such paragraph gets an `overlap fallback: kept the source of …` diagnostic. On arXiv 2610.29747 page 1 the merged email footnote and the right-column paragraph no longer overprint each other.
