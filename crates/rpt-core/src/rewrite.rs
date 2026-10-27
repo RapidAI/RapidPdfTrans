@@ -1285,7 +1285,10 @@ fn rewrite_translation_once(
     embed_base14_fonts(doc);
     let mut placed_shifts = stack_shifts.clone();
     placed_shifts.extend(listing_shifts.iter().cloned());
-    for note in audit_layout(&drawn, extraction, &placed_shifts) {
+    let audit = audit_layout(&drawn, extraction, &placed_shifts);
+    let mut colliding = colliding_drawn_ids(&drawn);
+    colliding.extend(qa_failures(&drawn, &audit));
+    for note in audit {
         extraction.diagnostics.push(crate::glyph::Diagnostic {
             page_index: note.0,
             message: note.1,
@@ -1298,7 +1301,55 @@ fn rewrite_translation_once(
         });
     }
     record_unfitted_line_warnings(extraction);
-    Ok(colliding_drawn_ids(&drawn))
+    Ok(colliding)
+}
+
+/// The QA pass after layout. A failing audit note (`line opens on
+/// punctuation … at (x, y)`, a translated figure label, a rewritten display
+/// equation) names the drawn line it found. That line's paragraph goes back
+/// to its source glyphs in the next round, like an overlap.
+fn qa_failures(drawn: &[Drawn], notes: &[(Option<u32>, String)]) -> Vec<Collision> {
+    let mut out = Vec::new();
+    for (page, message) in notes {
+        let Some(page) = *page else {
+            continue;
+        };
+        // A gap or a line-start comma is a layout nit. Dropping the whole
+        // paragraph to English for one costs more than it fixes. A translated
+        // figure label or a rewritten equation breaks a preserved region.
+        if !region_failure(message) {
+            continue;
+        }
+        let Some((x, y)) = note_position(message) else {
+            continue;
+        };
+        for line in drawn {
+            if line.page == page
+                && !line.glyph_ids.is_empty()
+                && (line.x - x).abs() <= 0.051
+                && (line.y - y).abs() <= 0.051
+            {
+                if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+                    eprintln!("qa fallback p{page} {message}");
+                }
+                out.push((line.glyph_ids.clone(), Vec::new()));
+            }
+        }
+    }
+    out
+}
+
+fn region_failure(message: &str) -> bool {
+    message.starts_with("figure text translated")
+        || message.starts_with("display equation glyph changed")
+}
+
+/// The `(x, y)` at the end of an audit note.
+fn note_position(message: &str) -> Option<(f32, f32)> {
+    let start = message.rfind(" at (")? + 5;
+    let rest = message[start..].strip_suffix(')')?;
+    let (x, y) = rest.split_once(", ")?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
 /// A short line whose translation did not fit is kept as printed. The rest of
@@ -39337,6 +39388,29 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             drawn.iter().map(|line| &line.text).collect::<Vec<_>>()
         );
         assert!(keep.contains_key(&1));
+    }
+
+    #[test]
+    fn a_failing_audit_note_falls_its_line_back() {
+        let line = test_draw(120.0, 400.0, 10.0, "，然后继续", vec![7, 8]);
+        let other = test_draw(120.0, 386.0, 10.0, "另一行文字", vec![9]);
+        let notes = vec![
+            (
+                Some(0),
+                "figure text translated \"图\" from \"(a)\" at (120.0, 400.0)".to_string(),
+            ),
+            (
+                Some(0),
+                "line opens on punctuation \"，\" at (120.0, 386.0)".to_string(),
+            ),
+            (Some(0), "tofu in \"x\" at (120.0, 386.0)".to_string()),
+        ];
+        let culprits = qa_failures(&[line, other], &notes);
+        assert_eq!(culprits, vec![(vec![7, 8], Vec::new())]);
+        assert_eq!(
+            note_position("gap inside a line 3.0pt in \"a\" at (1.5, -2.0)"),
+            Some((1.5, -2.0))
+        );
     }
 
     #[test]
