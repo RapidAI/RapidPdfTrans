@@ -333,8 +333,26 @@ fn rewrite_translation_once(
         }
         keep.insert(*id, reason.clone());
     }
+    let mut symbol_shards: HashSet<u32> = HashSet::new();
     for (index, segment) in report.segments.iter().enumerate() {
         if segment.glyph_ids.is_empty() {
+            continue;
+        }
+        // `′ ˆ` is the prime and hat of a display formula, split from it by
+        // the extractor. With no word to translate the glyphs stay where the
+        // formula put them; repainting moved the prime out of `Ĉ(H′)`.
+        if segment.translated == segment.source
+            // `ˆ` (U+02C6) is a modifier letter, not a word.
+            && !segment
+                .source
+                .chars()
+                .any(|ch| ch.is_alphanumeric() && !('\u{2B0}'..='\u{2FF}').contains(&ch))
+            && segment.source.chars().any(|ch| !ch.is_whitespace())
+        {
+            for id in &segment.glyph_ids {
+                keep.entry(*id).or_insert_with(|| "formula".into());
+                symbol_shards.insert(*id);
+            }
             continue;
         }
         // A bibliography entry is already kept in its source glyphs. Its
@@ -574,6 +592,8 @@ fn rewrite_translation_once(
             && !translated.chars().any(is_han_char)
             && comma_list_english(&segment.source)
             && !crate::translate::is_name_byline(&segment.source)
+            && !crate::translate::is_author_list(&segment.source)
+            && !crate::translate::is_postal_address(&segment.source)
             && !crate::translate::is_institution_line(&segment.source)
         {
             let reason =
@@ -1096,7 +1116,7 @@ fn rewrite_translation_once(
     // `我们` wrapped as `我` / `们谈论…` and the continuation was centered
     // in the column (x ≈ 262) instead of the paragraph edge. Pull that
     // mid-word wrap back to the column.
-    pull_midword_wrap(&mut drawn);
+    pull_midword_wrap(&mut drawn, extraction, &stack_shifts);
     // `定义 1.24` collapsed onto one line and left the display equation a
     // full English wrap below. Lift it so the gap matches the source line
     // that sat under the sentence.
@@ -1131,6 +1151,17 @@ fn rewrite_translation_once(
     // A contents title can move up to close a hole. An inline page number
     // that was redrawn on the old baseline would otherwise sit alone.
     seat_inline_page_numbers(&mut drawn, extraction, &by_id);
+    // A later pass may have pulled a formula's split-off prime into a line.
+    // It stays in the formula.
+    if !symbol_shards.is_empty() {
+        drawn.retain(|line| {
+            line.glyph_ids.is_empty() || !line.glyph_ids.iter().all(|id| symbol_shards.contains(id))
+        });
+        for id in &symbol_shards {
+            succeeded.remove(id);
+            keep.insert(*id, "formula".into());
+        }
+    }
     // Blanking an operator deletes every glyph in it. A label that shares
     // that operator and was not redrawn used to vanish from both the Chinese
     // file and the bilingual source pane.
@@ -1228,7 +1259,10 @@ fn rewrite_translation_once(
         {
             // The model left a source sentence in the reply. The paint stays
             // so the Chinese is not thrown away, and coverage names the miss.
+            // A byline or an affiliation keeps its names and street in Latin.
+            // That is not a sentence the model forgot.
             let residual = job_translates
+                && !crate::translate::short_part_list(&segment.source)
                 && crate::translate::residual_english_clause(&segment.source, &segment.translated);
             for id in &segment.glyph_ids {
                 if !extraction.glyphs[by_id[id]].disposition.is_final() {
@@ -8841,7 +8875,7 @@ fn peel_leading_closer(line: &mut Drawn) -> Option<Drawn> {
 /// `我们` wrapped as `我` / `们谈论…` and the continuation was centered in
 /// the column. A line that starts with Han, whose predecessor in the same
 /// segment ends mid-word, belongs at that paragraph's left edge.
-fn pull_midword_wrap(lines: &mut [Drawn]) {
+fn pull_midword_wrap(lines: &mut [Drawn], extraction: &Extraction, shifts: &[ListingShift]) {
     let candidates: Vec<usize> = (0..lines.len())
         .filter(|&index| line_starts_with_han(&lines[index]) && !lines[index].glyph_ids.is_empty())
         .collect();
@@ -8887,7 +8921,27 @@ fn pull_midword_wrap(lines: &mut [Drawn]) {
             })
             .map(|line| line.x)
             .fold(f32::MAX, f32::min);
-        if column.is_finite() && lines[index].x > column + size * 2.0 {
+        if !column.is_finite() || lines[index].x <= column + size * 2.0 {
+            continue;
+        }
+        // `最后，(𝛽0, 𝛽1) 编码…`: the line opens after a seated formula.
+        // Pulling the words to the edge paints them on that formula.
+        let (y, x) = (lines[index].y, lines[index].x);
+        let formula_ahead = extraction.glyphs.iter().any(|glyph| {
+            if glyph.page_index != page || glyph.invisible || glyph.unicode.trim().is_empty() {
+                return false;
+            }
+            let seated = shifts
+                .iter()
+                .any(|shift| shift.page == page && shift.ids.contains(&glyph.id));
+            if !seated {
+                return false;
+            }
+            let (dx, dy) = glyph_shift(glyph, shifts);
+            let gx = glyph.matrix[4] + dx;
+            (glyph.matrix[5] + dy - y).abs() <= size * 0.55 && gx >= column - 0.5 && gx < x
+        });
+        if !formula_ahead {
             lines[index].x = column;
         }
     }
@@ -10027,6 +10081,11 @@ fn audit_line_gaps(
                 continue;
             }
             if (other.y - line.y).abs() > em * 0.35 || other.x <= ink_right + em * 0.3 {
+                continue;
+            }
+            // The next column's paragraph is not text after this line. In a
+            // narrow two-column page the gutter is only about two em.
+            if in_next_column(drawn, line, other) {
                 continue;
             }
             if other.x < next_x {
@@ -18239,6 +18298,38 @@ fn reflow_bold_run_ins(
     *drawn = kept;
 }
 
+/// `other` belongs to a paragraph that lies wholly right of `line`'s
+/// paragraph, with at least two lines starting at its left edge.
+fn in_next_column(drawn: &[Drawn], line: &Drawn, other: &Drawn) -> bool {
+    if other.glyph_ids.is_empty() || other.glyph_ids == line.glyph_ids {
+        return false;
+    }
+    let own_right = drawn
+        .iter()
+        .filter(|item| item.page == line.page && item.glyph_ids == line.glyph_ids)
+        .map(|item| drawn_ink_span(item).1)
+        .fold(drawn_ink_span(line).1, f32::max);
+    let theirs: Vec<&Drawn> = drawn
+        .iter()
+        .filter(|item| item.page == other.page && item.glyph_ids == other.glyph_ids)
+        .collect();
+    let left = theirs.iter().map(|item| item.x).fold(f32::MAX, f32::min);
+    let at_left = theirs
+        .iter()
+        .filter(|item| (item.x - left).abs() <= 1.0)
+        .count();
+    if left < own_right - 0.5 || (other.x - left).abs() > other.size.max(1.0) * 2.5 {
+        return false;
+    }
+    // A one-line paragraph or a heading in that column starts where the
+    // column's other lines start.
+    let column_lines = drawn
+        .iter()
+        .filter(|item| item.page == other.page && (item.x - left).abs() <= 1.0)
+        .count();
+    at_left >= 2 || column_lines >= 3
+}
+
 fn slide_run_in_bodies(
     drawn: &mut [Drawn],
     extraction: &Extraction,
@@ -18392,7 +18483,11 @@ fn compose_bold_run_in(
     body_lines.sort_by(|left, right| right.y.total_cmp(&left.y));
     let head_font = embedded_font(&head_lines[0].resource, embedded)?;
     let body_font = embedded_font(&body_lines[0].resource, embedded)?;
+    let (head_lines, fragments) = split_row_fragments(head_lines, size);
     let mut head_text = join_wrapped_lines(&head_lines, head_font);
+    for fragment in fragments {
+        head_text = seat_fragment(&head_text, &head_lines, fragment);
+    }
     let body_text = join_wrapped_lines(&body_lines, body_font);
     // `随机化k-服务器` dropped the source full stop. The body then reads as
     // one word with the heading.
@@ -18641,6 +18736,69 @@ fn embedded_font<'a>(
         .iter()
         .find(|(name, _)| name == resource)
         .map(|(_, font)| font)
+}
+
+/// `Ridge/𝐿2` seats its subscript as a line of its own a little below the
+/// label row. Such a piece starts inside a longer line of its row.
+fn split_row_fragments(lines: Vec<&Drawn>, size: f32) -> (Vec<&Drawn>, Vec<&Drawn>) {
+    let mut hosts = Vec::new();
+    let mut fragments = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let inside = lines.iter().enumerate().any(|(other_index, other)| {
+            other_index != index
+                && (other.y - line.y).abs() < size * 0.6
+                && other.text.chars().count() > line.text.chars().count()
+                && other.x < line.x
+                && line.x < other.x + other.widths.iter().sum::<f32>()
+        });
+        if inside {
+            fragments.push(*line);
+        } else {
+            hosts.push(*line);
+        }
+    }
+    (hosts, fragments)
+}
+
+/// Puts a row fragment back at the point of its host line it was drawn
+/// over, taking the blank the host kept for it.
+fn seat_fragment(text: &str, hosts: &[&Drawn], fragment: &Drawn) -> String {
+    let Some(host) = hosts
+        .iter()
+        .find(|host| (host.y - fragment.y).abs() < host.size.max(1.0) * 0.6)
+    else {
+        return format!("{text}{}", fragment.text.trim());
+    };
+    let Some(start) = text.find(host.text.trim()) else {
+        return format!("{text}{}", fragment.text.trim());
+    };
+    let piece = host.text.trim();
+    let lead = host.text.len() - host.text.trim_start().len();
+    let lead_chars = host.text[..lead].chars().count();
+    let mut cut = piece.len();
+    let mut pen = host.x;
+    for (index, (offset, _)) in piece.char_indices().enumerate() {
+        if pen >= fragment.x - 0.5 {
+            cut = offset;
+            break;
+        }
+        let at = index + lead_chars;
+        pen +=
+            host.widths.get(at).copied().unwrap_or(0.0) + host.gaps.get(at).copied().unwrap_or(0.0);
+    }
+    let mut out = String::new();
+    out.push_str(&text[..start]);
+    let head = piece[..cut].trim_end();
+    out.push_str(head);
+    out.push_str(fragment.text.trim());
+    let rest = &piece[cut..];
+    out.push_str(if head.len() < piece[..cut].len() {
+        rest
+    } else {
+        rest.strip_prefix(' ').unwrap_or(rest)
+    });
+    out.push_str(&text[start + piece.len()..]);
+    out
 }
 
 fn join_wrapped_lines(lines: &[&Drawn], font: &SubsetFont) -> String {
@@ -21508,7 +21666,9 @@ fn carry_formula_with_line(drawn: &[Drawn], y_before: &[f32], shifts: &mut [List
         }
         let mut best: Option<(usize, f32)> = None;
         for (index, line) in drawn.iter().enumerate() {
-            if line.page != shift.page {
+            // `令 ⟦4⟧ = ⟦5⟧ : ⟦6⟧` leaves a blank slice between holes. The
+            // column pull skips it, so it is not the line the formula rides on.
+            if line.page != shift.page || line.text.trim().is_empty() {
                 continue;
             }
             // A formula-hole's glyphs were kept out of the layout, so the
@@ -29264,7 +29424,8 @@ fn version_token(chars: &[char], start: usize) -> bool {
 fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
     // An affiliation (`Google AI Language`) stays in the original embedded
     // face. `unchanged` would blank it and redraw with the CJK subset.
-    if crate::translate::is_institution_line(source) {
+    if crate::translate::is_institution_line(source) || crate::translate::is_postal_address(source)
+    {
         return "name";
     }
     // A long byline (`Jacob Devlin Ming-Wei Chang …`, 49 letters) is not body
@@ -35559,10 +35720,29 @@ mod tests {
             dy: 12.0,
             host_y: 367.0,
         }];
+        let line_copy = line.clone();
         carry_formula_with_line(&[line], &[367.0], &mut shifts);
         assert!(
             (shifts[0].dy - 24.0).abs() < 0.1,
             "the hole moved with the line, dy {}",
+            shifts[0].dy
+        );
+        // A blank slice between two holes stayed on the old baseline. The
+        // formula still rides on the line that moved.
+        let mut blank = line_copy.clone();
+        blank.text = " ".into();
+        blank.y = 367.0;
+        let mut shifts = vec![ListingShift {
+            page: 0,
+            ids: vec![99],
+            dx: -50.0,
+            dy: 12.0,
+            host_y: 367.0,
+        }];
+        carry_formula_with_line(&[blank, line_copy], &[367.0, 367.0], &mut shifts);
+        assert!(
+            (shifts[0].dy - 24.0).abs() < 0.1,
+            "a blank slice kept the hole, dy {}",
             shifts[0].dy
         );
     }
@@ -38324,6 +38504,37 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
     }
 
     #[test]
+    fn a_wrap_that_opens_after_a_seated_formula_stays_clear_of_it() {
+        let mut head = han_line(62.0, 400.0, "剪枝窗口决定多少近期证据。最后，");
+        head.glyph_ids = vec![7, 8];
+        let mut tail = han_line(96.0, 386.0, "编码实测增益");
+        tail.glyph_ids = vec![8, 7];
+        let mut beta = ink_glyph(1, 62.0, 386.0, 10.0, "𝛽");
+        beta.font_name = "XCharterMathMI".into();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![beta],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let shift = ListingShift {
+            page: 0,
+            ids: vec![1],
+            dx: 0.0,
+            dy: 0.0,
+            host_y: 386.0,
+        };
+        let mut lines = vec![head, tail];
+        pull_midword_wrap(&mut lines, &extraction, &[shift]);
+        assert!(
+            (lines[1].x - 96.0).abs() < 0.5,
+            "the words were pulled onto the formula at {:.1}",
+            lines[1].x
+        );
+    }
+
+    #[test]
     fn a_midword_wrap_returns_to_the_paragraph_edge() {
         let mut head = han_line(162.0, 400.0, "一般来说，我");
         head.glyph_ids = vec![7, 8];
@@ -38332,7 +38543,17 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let mut other = han_line(262.0, 386.0, "们谈论有序");
         other.glyph_ids = vec![9];
         let mut lines = vec![head, tail, other];
-        pull_midword_wrap(&mut lines);
+        pull_midword_wrap(
+            &mut lines,
+            &Extraction {
+                coordinate_space: "user",
+                pages: Vec::new(),
+                glyphs: Vec::new(),
+                regions: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            &[],
+        );
         assert!(
             (lines[1].x - 162.0).abs() < 0.5,
             "wrap stayed at {:.1}",
@@ -38354,7 +38575,17 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let mut beside = han_line(300.0, 384.2, "对四元组");
         beside.glyph_ids = vec![8, 7];
         let mut lines = vec![head, tail, beside];
-        pull_midword_wrap(&mut lines);
+        pull_midword_wrap(
+            &mut lines,
+            &Extraction {
+                coordinate_space: "user",
+                pages: Vec::new(),
+                glyphs: Vec::new(),
+                regions: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            &[],
+        );
         assert!(
             (lines[1].x - 184.0).abs() < 0.5,
             "continuation stayed at {:.1}",

@@ -106,10 +106,12 @@ impl Translator for LlmTranslator {
 
     fn arm_segment_budget(&self, budget: Duration) {
         SEGMENT_DEADLINE.with(|slot| slot.set(Some(Instant::now() + budget)));
+        CALL_TIMEOUT.with(|slot| slot.set(Some(call_timeout_for(self.timeout, budget))));
     }
 
     fn clear_segment_budget(&self) {
         SEGMENT_DEADLINE.with(|slot| slot.set(None));
+        CALL_TIMEOUT.with(|slot| slot.set(None));
     }
 
     fn segment_budget_expired(&self) -> bool {
@@ -136,7 +138,7 @@ impl Translator for LlmTranslator {
         let mut delay = Duration::from_secs(2);
         let mut last = None;
         let started = Instant::now();
-        let call_limit = self.timeout.saturating_mul(2);
+        let call_limit = self.call_timeout().saturating_mul(2);
         for attempt in 0..4 {
             if self.segment_budget_expired() {
                 return Err(Error::Translate("timeout: segment".into()));
@@ -172,10 +174,36 @@ impl Translator for LlmTranslator {
 
 thread_local! {
     static SEGMENT_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static CALL_TIMEOUT: Cell<Option<Duration>> = const { Cell::new(None) };
+}
+
+/// A retry round arms a longer segment budget. Each call in it may wait half
+/// that budget, so a gateway that is slow to accept a connection gets more
+/// time on the later rounds instead of the same 60 s that already failed.
+pub(crate) fn call_timeout_for(base: Duration, budget: Duration) -> Duration {
+    (budget / 2).max(base)
 }
 
 impl LlmTranslator {
+    fn call_timeout(&self) -> Duration {
+        CALL_TIMEOUT
+            .with(|slot| slot.get())
+            .unwrap_or(self.timeout)
+            .max(self.timeout)
+    }
+
     fn complete_once(&self, system: &str, user: &str) -> Result<String> {
+        match self.complete_capped(system, user, 1) {
+            // Ask again with room for the thinking. The cap still bounds a
+            // reply that runs away after it.
+            Err(err) if err.to_string().contains(THINKING_CAP) => {
+                self.complete_capped(system, user, 4)
+            }
+            other => other,
+        }
+    }
+
+    fn complete_capped(&self, system: &str, user: &str, scale: u32) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut body = json!({
             "model": self.model,
@@ -187,18 +215,27 @@ impl LlmTranslator {
         });
         // A reply far longer than its source is a runaway (the model acting on
         // prompt-like text). The cap stops it early; the batch then splits.
-        let max_tokens = self.max_tokens.unwrap_or_else(|| reply_token_cap(user));
+        let max_tokens = self
+            .max_tokens
+            .unwrap_or_else(|| reply_token_cap(user))
+            .saturating_mul(scale);
         body["max_tokens"] = json!(max_tokens);
         // ureq's socket timeout does not always interrupt a stalled TLS read.
         // A thread deadline makes `timeout: global` real so a batch can split.
         // The worker clones the shared agent: idle connections are reused, and
         // a stalled call holds only the socket it already checked out.
         let api_key = self.api_key.clone();
-        let timeout = self.timeout;
         // Cloning the agent is an Arc clone. The request itself runs on the
         // worker so a blocked DNS lookup or a pool wait is still inside the
         // deadline, not on the caller before `recv_timeout`.
-        let agent = self.agent.clone();
+        let timeout = self.call_timeout();
+        // A longer call opens fresh connections. A pooled socket that stalled
+        // the first attempt is not reused.
+        let agent = if timeout > self.timeout {
+            deadline_agent(timeout)
+        } else {
+            self.agent.clone()
+        };
         let phase = self.phase.lock().ok().map(|slot| Arc::clone(&slot));
         set_phase(phase.as_deref(), "connect");
         let phase_for_thread = phase.clone();
@@ -280,6 +317,11 @@ fn post_chat(
         .and_then(|v| v.as_str())
         == Some("length")
     {
+        if reasoning_spent_cap(&parsed) {
+            return Err(Error::Translate(format!(
+                "{THINKING_CAP} (finish_reason length)"
+            )));
+        }
         return Err(Error::Translate(
             "LLM reply too long for its source (finish_reason length)".into(),
         ));
@@ -300,6 +342,23 @@ fn post_chat(
 /// Output tokens allowed for one request: about three times the user
 /// message's token count (a translation is roughly as long as its source),
 /// never below 512 and never above 4096.
+const THINKING_CAP: &str = "LLM reasoning used the reply budget";
+
+/// A reasoning model can spend most of a short title's 512-token cap on
+/// thinking and stop before it writes the JSON. That is not a runaway reply.
+fn reasoning_spent_cap(parsed: &Value) -> bool {
+    let completion = parsed
+        .pointer("/usage/completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reasoning = parsed
+        .pointer("/usage/completion_tokens_details/reasoning_tokens")
+        .or_else(|| parsed.pointer("/usage/completion_thinking_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    completion > 0 && reasoning * 2 >= completion
+}
+
 pub(crate) fn reply_token_cap(user: &str) -> u32 {
     let source_tokens = user.chars().count() / 4;
     (source_tokens * 3).clamp(512, 4096) as u32
@@ -653,5 +712,31 @@ mod tests {
     #[test]
     fn a_server_that_trickles_the_body_hits_the_deadline() {
         assert_deadline(true);
+    }
+}
+
+#[cfg(test)]
+mod call_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_cut_short_by_thinking_is_not_a_runaway() {
+        let thinking = serde_json::json!({"usage": {"completion_tokens": 503,
+            "completion_tokens_details": {"reasoning_tokens": 475}}});
+        let runaway = serde_json::json!({"usage": {"completion_tokens": 512,
+            "completion_tokens_details": {"reasoning_tokens": 0}}});
+        assert!(reasoning_spent_cap(&thinking));
+        assert!(!reasoning_spent_cap(&runaway));
+    }
+
+    #[test]
+    fn a_longer_retry_budget_lengthens_each_call() {
+        let base = Duration::from_secs(60);
+        assert_eq!(call_timeout_for(base, Duration::from_secs(120)), base);
+        assert_eq!(
+            call_timeout_for(base, Duration::from_secs(360)),
+            Duration::from_secs(180)
+        );
+        assert_eq!(call_timeout_for(base, Duration::from_secs(10)), base);
     }
 }

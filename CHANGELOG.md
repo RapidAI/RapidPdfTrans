@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- Retry rounds are logged (`rpt: retry round N: X still English, Y fixed, left: ids`) with progress on or `RPT_RETRY_LOG=1`; the log also names request failures, unparsable replies and lost placeholders.
+- A reply cut short because the reasoning model spent its token cap thinking is retried once with four times the cap instead of being treated as a failure (29747 title stayed English).
+- Each gateway call inside a retry budget gets a longer timeout (half the budget, at least the base), and the failed-batch pass uses the first leftover-round budget.
+- Accented Latin names (`Gaëtan`) count as names, and a postal address (`Am Fasanengarten 5, 76131 Karlsruhe, Germany`) or a short comma list is no longer counted as an English body paragraph (29747 p1: 173 → 0).
+- The in-line gap check skips a neighbour that belongs to the next column; narrow two-column pages reported the gutter as a gap (29747: 116 → 5 warnings).
+- A segment made only of split-off primes and accents (`′ ˆ`) stays with its formula instead of being redrawn or blanked (RRSI eq. 6 `Ĉ(H′)`).
+- A run-in label with inline math (`Ridge/𝐿2-Style …`) keeps its subscript in place instead of moving it after the full stop.
+- A wrap that opens with the symbol the sentence names (`… the current harness` / `𝐻𝑡, let`) stays in the sentence (RRSI p6).
+- A line that opens after a seated formula (`最后，(𝛽0, 𝛽1) 编码…`) is no longer pulled to the paragraph edge over that formula, which also left a wide gap later in the line (RRSI p22 34.5pt).
+- A formula hole follows its line when column holes close even if a blank slice between holes stayed behind; `ℬ_b`, `𝒟_b` and `d_i : i ∈ ℬ_b` were painted off the page area (SpatialBrain p5).
 - Segments still in English after the batch passes get up to three retry rounds with growing backoff and budget: solo, then the stricter fallback prompt, then solo, fallback and sentence by sentence. Echoed replies are never accepted.
 - A bold run-in label (`Ablation Analysis.`) stays on its paragraph's baseline instead of being pulled up alone when column holes close.
 - When a run-in label's paragraph continues on the next page, its first line now starts one space after the translated label instead of leaving a wide gap.

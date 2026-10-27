@@ -637,7 +637,8 @@ pub fn translate_extraction(
         let pages = batch_pages(&segments, &batch);
         // The second pass gets one segment budget too. Without it a batch
         // that already stalled could open a fresh retry chain on every split.
-        translator.arm_segment_budget(segment_retry_budget(opts));
+        // It also waits longer per call: the first try already timed out.
+        translator.arm_segment_budget(leftover_budget(opts, 1));
         let outcome = translate_batch(&segments, &shielded, &batch, opts, translator, &mut calls);
         translator.clear_segment_budget();
         match outcome {
@@ -1477,6 +1478,7 @@ fn retry_english_leftovers(
     if pending.is_empty() {
         return 0;
     }
+    let pending_ids = pending.clone();
     let improved = if jobs <= 1 || pending.len() == 1 {
         let mut improved = Vec::new();
         for index in pending {
@@ -1534,6 +1536,25 @@ fn retry_english_leftovers(
         improved.into_inner().unwrap_or_default()
     };
     let count = improved.len();
+    if opts.progress != ProgressMode::Off || std::env::var_os("RPT_RETRY_LOG").is_some() {
+        let fixed: HashSet<usize> = improved.iter().map(|(index, _)| *index).collect();
+        let still: Vec<String> = pending_ids
+            .iter()
+            .filter(|index| !fixed.contains(index))
+            .map(|index| segments[*index].id.to_string())
+            .collect();
+        eprintln!(
+            "rpt: retry round {}: {} still English, {} fixed{}",
+            round + 1,
+            pending_ids.len(),
+            count,
+            if still.is_empty() {
+                String::new()
+            } else {
+                format!(", left: {}", still.join(","))
+            }
+        );
+    }
     for (index, text) in improved {
         let source = segments[index].text.clone();
         for (slot, segment) in translated.iter_mut().zip(segments.iter()) {
@@ -1921,10 +1942,15 @@ fn complete_shielded(
         return PieceReply::DroppedPlaceholder;
     };
     *calls += 1;
-    let Some(raw) = translator.complete(system, &user).ok() else {
-        return PieceReply::DroppedPlaceholder;
+    let raw = match translator.complete(system, &user) {
+        Ok(raw) => raw,
+        Err(err) => {
+            retry_note(source, &format!("request failed: {err}"));
+            return PieceReply::DroppedPlaceholder;
+        }
     };
     let Some(parsed) = parse_translations(&raw).ok() else {
+        retry_note(source, &format!("unparsable reply: {}", preview(&raw)));
         return PieceReply::DroppedPlaceholder;
     };
     let Some(text) = parsed
@@ -1938,12 +1964,30 @@ fn complete_shielded(
     match restore_expanded(&text, &shielded.slots) {
         Ok(restored) => {
             if needs_english_retry(source, &restored) {
+                retry_note(source, &format!("still English: {}", preview(&restored)));
                 PieceReply::Echo
             } else {
                 PieceReply::Done(restored)
             }
         }
-        Err(_) => PieceReply::DroppedPlaceholder,
+        Err(err) => {
+            retry_note(
+                source,
+                &format!("placeholder lost ({err}): {}", preview(&text)),
+            );
+            PieceReply::DroppedPlaceholder
+        }
+    }
+}
+
+fn preview(text: &str) -> String {
+    text.chars().take(100).collect()
+}
+
+/// `RPT_RETRY_LOG=1` prints why a retried paragraph was not accepted.
+fn retry_note(source: &str, reason: &str) {
+    if std::env::var_os("RPT_RETRY_LOG").is_some() {
+        eprintln!("rpt: retry: {:?}: {reason}", preview(source));
     }
 }
 
@@ -5240,14 +5284,22 @@ fn is_name_token(token: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
-    if !first.is_ascii_uppercase() {
+    // `Gaëtan` and `Émile` are names too.
+    if !(first.is_ascii_uppercase() || (accented_latin(first) && first.is_uppercase())) {
         return false;
     }
     if token.chars().count() == 1 {
         return true;
     }
-    chars.all(|ch| ch.is_ascii_alphabetic() || ch == '-' || ch == '\'')
-        && token.chars().any(|ch| ch.is_ascii_lowercase())
+    chars.all(|ch| ch.is_ascii_alphabetic() || accented_latin(ch) || ch == '-' || ch == '\'')
+        && token
+            .chars()
+            .any(|ch| ch.is_ascii_lowercase() || (accented_latin(ch) && ch.is_lowercase()))
+}
+
+/// A Latin-1 or Latin Extended-A/B letter (`ë`, `ł`, `Ž`), not `×` or `÷`.
+fn accented_latin(ch: char) -> bool {
+    ('\u{C0}'..='\u{24F}').contains(&ch) && ch.is_alphabetic()
 }
 
 /// A contents heading the model left as `PART 4 高级 RAG`. The word is a
@@ -8949,5 +9001,64 @@ mod tests {
         let mut loose = extraction_from_lines(&["alpha like this to separate it."]);
         let report = replay_extraction(&mut loose, &opts, &spaced).expect("squashed replay");
         assert_eq!(report.segments[0].translated, "甲像这样以便分开。");
+    }
+}
+
+/// `Frank Breitinger , Jan Gruber , …` or `KASTEL Labs, Karlsruhe Institute
+/// of Technology, Am Fasanengarten 5, 76131 Karlsruhe, Germany`: short comma
+/// parts with no sentence. Names and streets kept in Latin there are not a
+/// clause the model left untranslated.
+pub(crate) fn short_part_list(text: &str) -> bool {
+    let parts: Vec<&str> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.len() >= 3
+        && !text.trim_end().ends_with(['.', '?', '!'])
+        && parts
+            .iter()
+            .all(|part| part.split_whitespace().count() <= 6)
+}
+
+/// `…, Am Fasanengarten 5, 76131 Karlsruhe, Germany`: a postal address.
+/// Kept in Latin it is an affiliation, not an English body paragraph.
+pub(crate) fn is_postal_address(text: &str) -> bool {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    short_part_list(text)
+        && parts.iter().any(|part| {
+            part.split_whitespace().any(|word| {
+                let digits = word.chars().filter(char::is_ascii_digit).count();
+                digits >= 4 && digits == word.chars().count()
+            })
+        })
+        && parts.last().is_some_and(|last| {
+            last.split_whitespace().count() <= 2
+                && last.chars().next().is_some_and(char::is_uppercase)
+        })
+}
+
+#[cfg(test)]
+mod short_part_list_tests {
+    #[test]
+    fn a_byline_or_an_address_is_a_short_part_list() {
+        assert!(super::short_part_list(
+            "Frank Breitinger , Jan Gruber , Christopher Hargreaves , Mark Scanlon"
+        ));
+        assert!(super::short_part_list(
+            "bKASTEL Security Research Labs, Karlsruhe Institute of Technology, Am Fasanengarten 5, 76131 Karlsruhe, Germany"
+        ));
+        assert!(super::is_author_list(
+            "Frank Breitinger , Jan Gruber , Christopher Hargreaves , Jan-Niclas Hilgert , Gaëtan Michelet , Mark Scanlon"
+        ));
+        assert!(super::is_postal_address(
+            "bKASTEL Security Research Labs, Karlsruhe Institute of Technology, Am Fasanengarten 5, 76131 Karlsruhe, Germany"
+        ));
+        assert!(!super::is_postal_address(
+            "prompt injection, anti-forensics, LLM agents"
+        ));
+        assert!(!super::short_part_list(
+            "We ablate the two groups of regularizers, one at a time, and report the change on every split."
+        ));
     }
 }

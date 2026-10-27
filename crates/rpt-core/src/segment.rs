@@ -5651,7 +5651,11 @@ fn continues_paragraph(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     let lower_starts_lower = lower
         .text
         .trim_start()
-        .starts_with(|ch: char| ch.is_ascii_lowercase());
+        .starts_with(|ch: char| ch.is_ascii_lowercase())
+        // `relative to the current harness` / `𝐻𝑡, let` continues with an
+        // inline symbol, which is not a capital.
+        || (lower.text.trim_start().starts_with(is_math_alphanumeric)
+            && !sentence_end(upper.text.trim_end()));
     if lower_w < upper_w * 0.5
         && lower.text.chars().count() < 32
         && !lower.text.trim_end().ends_with('.')
@@ -5683,6 +5687,10 @@ fn mark_sole_baselines(columns: &mut [Vec<VisualLine<'_>>]) {
             columns[*ci][*li].sole_on_baseline = false;
         }
     }
+}
+
+fn is_math_alphanumeric(ch: char) -> bool {
+    ('\u{1D400}'..='\u{1D7FF}').contains(&ch)
 }
 
 /// `engines` under `Summarization and Q&A` continues that title. The next
@@ -5902,6 +5910,20 @@ fn prose_formula_tail(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
         return false;
     }
     let next = lower.text.trim_start();
+    // `For a candidate 𝐻′ relative to the current harness` / `𝐻𝑡, let`: the
+    // wrap opens with the symbol the sentence was naming and goes on in words.
+    if next.starts_with(is_math_alphanumeric) {
+        let rest = next.trim_start_matches(|ch: char| {
+            is_math_alphanumeric(ch) || matches!(ch, '′' | '\'' | ',' | ' ' | '(' | ')')
+        });
+        let operator = next
+            .chars()
+            .any(|ch| matches!(ch, '=' | '<' | '>' | '+' | '≤' | '≥' | '∈'));
+        return !operator
+            && rest.split_whitespace().next().is_some_and(|word| {
+                word.len() >= 2 && word.chars().all(|ch| ch.is_ascii_lowercase())
+            });
+    }
     if !next.starts_with(|ch: char| ch.is_ascii_lowercase()) {
         return false;
     }
@@ -10595,6 +10617,28 @@ mod tests {
         assert!(texts.iter().any(|text| text.contains("a+b=c")), "{texts:?}");
         assert!(
             texts.iter().any(|text| text.starts_with("The next")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_wrap_that_opens_with_the_named_symbol_stays_in_the_sentence() {
+        let mut id = 0u32;
+        let mut glyphs = paint_word(
+            &mut id,
+            72.0,
+            500.0,
+            "For a candidate relative to the current harness",
+            "CMR10",
+        );
+        glyphs.extend(paint_word(&mut id, 72.0, 488.0, "𝐻𝑡", "CMMI10"));
+        glyphs.extend(paint_word(&mut id, 84.0, 488.0, ", let", "CMR10"));
+        let seg = segment_glyphs(&glyphs);
+        let texts: Vec<_> = seg.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("harness") && text.contains("let")),
             "{texts:?}"
         );
     }
