@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Long articles rewrite much faster: glyph lookups by id, reference mates and several layout passes no longer rescan every glyph in the document (the 1702.05747 Elsevier replay spent over 18 minutes in coverage marking and figure-label audits).
 - A closing bracket, quote, colon, or `！`/`？` that wraps to the start of a Chinese line hangs on the line above, like `。` and `，` already did.
 - Affiliation lines led by a raised marker (`ᵃChair …`, `ᵇKASTEL …`) stay separate paragraphs, so their longer translations no longer run into each other.
 - A sentence that continues after a superscript hole (`{0,1}^{|E_t|}, with z = 1 when edit j`) stays one line instead of lending its superscript to the line above.

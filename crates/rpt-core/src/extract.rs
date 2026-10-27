@@ -208,6 +208,15 @@ pub struct Extraction {
 }
 
 impl Extraction {
+    /// The glyph with this id. Extraction numbers glyphs by position, so the
+    /// id is usually the index; a search covers reordered extractions.
+    pub fn glyph(&self, id: u32) -> Option<&Glyph> {
+        match self.glyphs.get(id as usize) {
+            Some(glyph) if glyph.id == id => Some(glyph),
+            _ => self.glyphs.iter().find(|glyph| glyph.id == id),
+        }
+    }
+
     pub fn coverage_report(&self) -> CoverageReport {
         coverage::report(&self.glyphs)
     }

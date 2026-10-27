@@ -4630,21 +4630,20 @@ fn is_footnote_symbol(text: &str) -> bool {
 const AUTHOR_MARK_CHARS: &str = "*∗†‡§¶";
 
 fn is_math_font(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
+    // Called for many glyph pairs, so match without allocating.
     [
-        "CMMI",
-        "CMSY",
-        "CMEX",
-        "MSAM",
-        "MSBM",
-        "STIX",
-        "CAMBRIAMATH",
-        "LATINMODERNMATH",
-        "SYMBOL",
+        "CMMI", "CMSY", "CMEX", "MSAM", "MSBM", "STIX", "SYMBOL", "MATH",
     ]
     .iter()
-    .any(|needle| upper.contains(needle))
-        || upper.contains("MATH")
+    .any(|needle| contains_ascii_upper(name, needle))
+}
+
+/// `name` contains the upper-case ASCII `needle`, ignoring ASCII case.
+fn contains_ascii_upper(name: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    name.as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Computer Modern plus newtx (`NewTXMI`, `txmiaX`, `txsys`, `txexs`).
@@ -7622,10 +7621,7 @@ fn script_shift_misplaced(
     body: f32,
 ) -> bool {
     let body = body.max(1.0);
-    let members: Vec<&Glyph> = ids
-        .iter()
-        .filter_map(|id| extraction.glyphs.iter().find(|glyph| glyph.id == *id))
-        .collect();
+    let members: Vec<&Glyph> = ids.iter().filter_map(|id| extraction.glyph(*id)).collect();
     if members.is_empty()
         || members
             .iter()
@@ -7660,7 +7656,7 @@ fn absorb_formula_neighbors(
         let members: Vec<&Glyph> = shift
             .ids
             .iter()
-            .filter_map(|id| extraction.glyphs.iter().find(|glyph| glyph.id == *id))
+            .filter_map(|id| extraction.glyph(*id))
             .collect();
         let mut extra = Vec::new();
         for glyph in &extraction.glyphs {
@@ -8810,9 +8806,10 @@ fn audit_display_glyph_changes(
         if display.is_empty() {
             continue;
         }
+        let on_page: HashMap<u32, &Glyph> = glyphs.iter().map(|glyph| (glyph.id, *glyph)).collect();
         let math: HashSet<u32> = display
             .iter()
-            .filter_map(|id| glyphs.iter().copied().find(|glyph| glyph.id == *id))
+            .filter_map(|id| on_page.get(id).copied())
             .filter(|glyph| {
                 display_math_face(&glyph.font_name)
                     || glyph
@@ -9564,6 +9561,13 @@ fn display_run_note(
 
 fn audit_figure_labels(drawn: &[Drawn], extraction: &Extraction) -> Vec<(Option<u32>, String)> {
     let mut notes = Vec::new();
+    // A drawn line carries its segment's glyph ids. Searching every glyph
+    // for each id made this audit take minutes on a long article.
+    let by_id: HashMap<u32, &Glyph> = extraction
+        .glyphs
+        .iter()
+        .map(|glyph| (glyph.id, glyph))
+        .collect();
     for line in drawn {
         if !line.text.chars().any(is_han_char) || line.glyph_ids.is_empty() {
             continue;
@@ -9571,7 +9575,7 @@ fn audit_figure_labels(drawn: &[Drawn], extraction: &Extraction) -> Vec<(Option<
         let mut glyphs: Vec<&Glyph> = line
             .glyph_ids
             .iter()
-            .filter_map(|id| extraction.glyphs.iter().find(|glyph| glyph.id == *id))
+            .filter_map(|id| by_id.get(id).copied())
             .collect();
         if glyphs.is_empty() {
             continue;
@@ -10241,16 +10245,25 @@ fn seat_formula_holes(
 
 /// A subscript or `th` that already sits on an equation letter. Seating it
 /// on the Chinese line paints the script into the sentence.
+#[cfg(test)]
 fn script_sits_on_formula(glyph: &Glyph, extraction: &Extraction) -> bool {
+    let bases: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|base| base.page_index == glyph.page_index && formula_base(base))
+        .collect();
+    script_sits_on_base(glyph, &bases)
+}
+
+fn formula_base(base: &Glyph) -> bool {
+    is_math_font(&base.font_name) || contains_ascii_upper(&base.font_name, "CMBX")
+}
+
+/// `bases` are the page's equation letters ([`formula_base`]).
+fn script_sits_on_base(glyph: &Glyph, bases: &[&Glyph]) -> bool {
     let body = (glyph.font_size / 0.65).max(6.0);
-    extraction.glyphs.iter().any(|base| {
+    bases.iter().any(|base| {
         if base.id == glyph.id || base.page_index != glyph.page_index {
-            return false;
-        }
-        let math = is_math_font(&base.font_name)
-            || base.font_name.to_ascii_uppercase().contains("CMBX")
-            || (base.unmapped && is_math_font(&base.font_name));
-        if !math {
             return false;
         }
         let dx = glyph.matrix[4] - base.matrix[4];
@@ -12582,7 +12595,7 @@ fn number_follows_leaders(ids: &[u32], extraction: &Extraction, size: f32) -> bo
     let Some(first_id) = ids.first() else {
         return false;
     };
-    let Some(first) = extraction.glyphs.iter().find(|glyph| glyph.id == *first_id) else {
+    let Some(first) = extraction.glyph(*first_id) else {
         return false;
     };
     let left = glyph_ink_left(first);
@@ -16549,8 +16562,8 @@ fn block_is_contents_row(
     drawn: &[Drawn],
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
+    toc: &PageToc,
 ) -> bool {
-    let page = drawn[block.indices[0]].page;
     let size = block.size.max(1.0);
     let mut ids = Vec::new();
     for index in &block.indices {
@@ -16563,18 +16576,18 @@ fn block_is_contents_row(
     }) {
         return true;
     }
-    if extraction.glyphs.iter().any(|glyph| {
-        glyph.page_index == page
-            && (glyph.matrix[5] - block.source_top).abs() <= size * 0.8
-            && matches!(&glyph.disposition, Disposition::KeptOriginal { reason } if reason == "toc")
-    }) {
+    if toc
+        .ys
+        .iter()
+        .any(|y| (y - block.source_top).abs() <= size * 0.8)
+    {
         return true;
     }
     // `12.3 Handling…` and `Productionizing…` have no page number on the
     // first line (it sits on the wrap). A toc glyph within 0.8em of
     // `source_top` misses them, and hole-closing then pulls the heading
     // by a second leading on top of `apply_subentry_shifts`.
-    let Some((low, high)) = toc_vertical_span(extraction, page) else {
+    let Some((low, high)) = toc.span else {
         return false;
     };
     let pad = size * 3.2;
@@ -16602,6 +16615,32 @@ fn contents_page_indexes(extraction: &Extraction) -> Vec<u32> {
         .collect();
     pages.sort_unstable();
     pages
+}
+
+/// One page's kept contents glyphs, gathered once per page for
+/// [`block_is_contents_row`] instead of rescanning the document per block.
+struct PageToc {
+    /// Baselines of every glyph kept with reason `toc`.
+    ys: Vec<f32>,
+    span: Option<(f32, f32)>,
+}
+
+impl PageToc {
+    fn new(extraction: &Extraction, page: u32) -> Self {
+        let ys = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.page_index == page
+                    && matches!(&glyph.disposition, Disposition::KeptOriginal { reason } if reason == "toc")
+            })
+            .map(|glyph| glyph.matrix[5])
+            .collect();
+        Self {
+            ys,
+            span: toc_vertical_span(extraction, page),
+        }
+    }
 }
 
 fn toc_vertical_span(extraction: &Extraction, page: u32) -> Option<(f32, f32)> {
@@ -20180,7 +20219,7 @@ fn shift_anchor<'a>(shift: &ListingShift, extraction: &'a Extraction) -> Option<
     shift
         .ids
         .iter()
-        .filter_map(|id| extraction.glyphs.iter().find(|glyph| glyph.id == *id))
+        .filter_map(|id| extraction.glyph(*id))
         .max_by(|left, right| {
             left.font_size
                 .total_cmp(&right.font_size)
@@ -20737,7 +20776,12 @@ fn tuck_trailing_formulas(
         .collect();
     let mut shifts: Vec<ListingShift> = Vec::new();
     let mut claimed: HashSet<u32> = HashSet::new();
+    let mut on_page: HashMap<u32, Vec<&Glyph>> = HashMap::new();
+    for glyph in &extraction.glyphs {
+        on_page.entry(glyph.page_index).or_default().push(glyph);
+    }
     for line in drawn {
+        let page_glyphs = on_page.get(&line.page).map_or(&[][..], Vec::as_slice);
         if !line.text.chars().any(is_han_char) {
             continue;
         }
@@ -20775,7 +20819,7 @@ fn tuck_trailing_formulas(
         }
         let mut source_bottom = None;
         for id in &line.glyph_ids {
-            let Some(glyph) = extraction.glyphs.iter().find(|glyph| glyph.id == *id) else {
+            let Some(glyph) = extraction.glyph(*id) else {
                 continue;
             };
             if glyph.font_size < size * 0.75 {
@@ -20820,9 +20864,9 @@ fn tuck_trailing_formulas(
             .iter()
             .map(|glyph| glyph_ink_right(glyph))
             .fold(span_left, f32::max);
-        let scripts: Vec<&Glyph> = extraction
-            .glyphs
+        let scripts: Vec<&Glyph> = page_glyphs
             .iter()
+            .copied()
             .filter(|glyph| {
                 if glyph.page_index != line.page
                     || used.contains(&glyph.id)
@@ -20856,7 +20900,7 @@ fn tuck_trailing_formulas(
         if left > column_left + size * 1.6 {
             continue;
         }
-        let stray = extraction.glyphs.iter().any(|glyph| {
+        let stray = page_glyphs.iter().any(|glyph| {
             glyph.page_index == line.page
                 && !glyph.invisible
                 && !glyph.unicode.trim().is_empty()
@@ -21205,7 +21249,7 @@ fn carry_unmapped_atoms(
         let mut left = glyph_ink_left(glyph);
         let mut right = glyph_ink_right(glyph);
         for id in ids.iter().skip(1) {
-            let Some(script) = extraction.glyphs.iter().find(|item| item.id == *id) else {
+            let Some(script) = extraction.glyph(*id) else {
                 continue;
             };
             left = left.min(glyph_ink_left(script));
@@ -21427,12 +21471,21 @@ fn claim_orphan_scripts(
     let mut extra: Vec<(usize, u32)> = Vec::new();
     let mut shifts = Vec::new();
     let mut clearances: Vec<(usize, usize, f32)> = Vec::new();
+    // Each page's equation letters, gathered once. Scanning the whole
+    // document for every small glyph took minutes on a long article.
+    let mut bases: HashMap<u32, Vec<&Glyph>> = HashMap::new();
+    for base in extraction.glyphs.iter().filter(|base| formula_base(base)) {
+        bases.entry(base.page_index).or_default().push(base);
+    }
     for glyph in &extraction.glyphs {
         if claimed.contains(&glyph.id)
             || glyph.invisible
             || glyph.unicode.trim().is_empty()
             || glyph.font_size > 8.0
-            || script_sits_on_formula(glyph, extraction)
+            || script_sits_on_base(
+                glyph,
+                bases.get(&glyph.page_index).map_or(&[][..], Vec::as_slice),
+            )
         {
             continue;
         }
@@ -21876,7 +21929,7 @@ fn lift_display_formulas(
                     continue;
                 }
                 for id in &line.glyph_ids {
-                    if let Some(glyph) = extraction.glyphs.iter().find(|glyph| glyph.id == *id) {
+                    if let Some(glyph) = extraction.glyph(*id) {
                         source_bottom = source_bottom.min(glyph.matrix[5]);
                     }
                 }
@@ -22115,7 +22168,7 @@ fn complete_display_line(
     }
     let snapshot: Vec<u32> = ids.iter().copied().collect();
     for id in snapshot {
-        let Some(glyph) = extraction.glyphs.iter().find(|glyph| glyph.id == id) else {
+        let Some(glyph) = extraction.glyph(id) else {
             continue;
         };
         let members: Vec<&Glyph> = extraction
@@ -22240,6 +22293,7 @@ fn close_column_holes_with(
     pages.sort_unstable();
     pages.dedup();
     for page in pages {
+        let toc = PageToc::new(extraction, page);
         let mut groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
         for (index, line) in drawn.iter().enumerate() {
             if line.page != page || line.text.trim().is_empty() {
@@ -22310,7 +22364,7 @@ fn close_column_holes_with(
             if !block.listing
                 && (page_number
                     || leaders
-                    || block_is_contents_row(&block, drawn, extraction, by_id))
+                    || block_is_contents_row(&block, drawn, extraction, by_id, &toc))
             {
                 // Contents rows keep the source baseline. A taller or shorter
                 // sub-entry block moves them in `apply_subentry_shifts`, by
@@ -29606,7 +29660,7 @@ mod tests {
         let glyphs: Vec<&Glyph> = segment
             .glyph_ids
             .iter()
-            .filter_map(|id| extraction.glyphs.iter().find(|glyph| glyph.id == *id))
+            .filter_map(|id| extraction.glyph(*id))
             .collect();
         let drawn = layout_segment(
             &glyphs,

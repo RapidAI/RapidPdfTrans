@@ -144,10 +144,17 @@ pub fn assert_complete(glyphs: &[Glyph]) -> Result<()> {
 }
 
 pub fn mark(glyphs: &mut [Glyph], id: u32, disposition: Disposition) -> Result<()> {
-    let glyph = glyphs
-        .iter_mut()
-        .find(|g| g.id == id)
-        .ok_or(Error::MissingGlyph(id))?;
+    // Extraction numbers glyphs by position, so the id is usually the
+    // index. Searching every glyph for every mark made marking a long paper
+    // quadratic (minutes on a 50-page Elsevier article).
+    let index = match glyphs.get(id as usize) {
+        Some(glyph) if glyph.id == id => id as usize,
+        _ => glyphs
+            .iter()
+            .position(|g| g.id == id)
+            .ok_or(Error::MissingGlyph(id))?,
+    };
+    let glyph = &mut glyphs[index];
     if glyph.disposition.is_final() {
         return Err(Error::AlreadyFinal(id, glyph.disposition.name().into()));
     }
@@ -193,6 +200,15 @@ mod tests {
                 resource_name: None,
             },
         }
+    }
+
+    #[test]
+    fn mark_finds_a_glyph_whose_id_is_not_its_index() {
+        let mut glyphs = vec![glyph(5), glyph(3)];
+        mark(&mut glyphs, 3, Disposition::Rewritten { text: "甲".into() }).unwrap();
+        assert!(glyphs[1].disposition.is_final());
+        assert!(!glyphs[0].disposition.is_final());
+        assert!(mark(&mut glyphs, 7, Disposition::Rewritten { text: "乙".into() }).is_err());
     }
 
     #[test]

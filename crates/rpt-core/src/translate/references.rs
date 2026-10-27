@@ -457,18 +457,37 @@ fn is_running_header(placed: &[Placed], tops: &HashMap<u32, f32>, line: &Placed)
 }
 
 fn expand_mates(glyphs: &[Glyph], ids: &mut HashSet<u32>) {
-    let seeds: Vec<&Glyph> = glyphs
-        .iter()
-        .filter(|glyph| ids.contains(&glyph.id))
-        .collect();
+    // Seeds by page, sorted by baseline. Testing every glyph against every
+    // seed was quadratic and took minutes on a long bibliography.
+    let mut seeds: HashMap<u32, (Vec<&Glyph>, f32)> = HashMap::new();
+    for glyph in glyphs.iter().filter(|glyph| ids.contains(&glyph.id)) {
+        let entry = seeds.entry(glyph.page_index).or_insert((Vec::new(), 1.0));
+        entry.0.push(glyph);
+        entry.1 = entry.1.max(glyph.font_size);
+    }
+    for (page_seeds, _) in seeds.values_mut() {
+        page_seeds.sort_by(|left, right| left.matrix[5].total_cmp(&right.matrix[5]));
+    }
+    let mut mates = Vec::new();
     for glyph in glyphs {
         if ids.contains(&glyph.id) {
             continue;
         }
-        if seeds.iter().any(|seed| same_line(seed, glyph)) {
-            ids.insert(glyph.id);
+        let Some((page_seeds, size)) = seeds.get(&glyph.page_index) else {
+            continue;
+        };
+        let reach = size * 0.55 + 0.01;
+        let y = glyph.matrix[5];
+        let from = page_seeds.partition_point(|seed| seed.matrix[5] < y - reach);
+        let to = page_seeds.partition_point(|seed| seed.matrix[5] <= y + reach);
+        if page_seeds[from..to]
+            .iter()
+            .any(|seed| same_line(seed, glyph))
+        {
+            mates.push(glyph.id);
         }
     }
+    ids.extend(mates);
     let ops: HashSet<(String, usize, usize)> = glyphs
         .iter()
         .filter(|glyph| ids.contains(&glyph.id))
