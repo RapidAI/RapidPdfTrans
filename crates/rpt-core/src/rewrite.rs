@@ -9601,10 +9601,12 @@ fn audit_line_gaps(
     shifts: &[ListingShift],
 ) -> Vec<(Option<u32>, String)> {
     let mut notes = Vec::new();
+    let gaps = GapIndex::new(drawn, extraction, shifts);
     for line in drawn {
         if line.text.trim().is_empty() {
             continue;
         }
+        let page_glyphs = gaps.page(line.page);
         let em = line.size.max(1.0);
         let chars: Vec<char> = line.text.chars().collect();
         if line.widths.len() == chars.len() {
@@ -9616,15 +9618,7 @@ fn audit_line_gaps(
                 if gap > em * 2.0
                     && gap <= em * 8.0
                     && gap_side_counts(&left_text)
-                    && !math_sits_in(
-                        extraction,
-                        shifts,
-                        line.page,
-                        origin,
-                        origin + gap,
-                        line.y,
-                        em,
-                    )
+                    && !math_sits_in(&gaps, line.page, origin, origin + gap, line.y, em)
                 {
                     notes.push((
                         Some(line.page),
@@ -9667,21 +9661,15 @@ fn audit_line_gaps(
                 next_math = false;
             }
         }
-        for glyph in &extraction.glyphs {
-            if glyph.page_index != line.page || glyph.invisible || glyph.unicode.trim().is_empty() {
+        for glyph in page_glyphs {
+            if glyph.invisible || glyph.unicode.trim().is_empty() {
                 continue;
             }
-            let repositioned = shifts
-                .iter()
-                .any(|shift| shift.page == line.page && shift.ids.contains(&glyph.id));
-            if !repositioned
-                && drawn
-                    .iter()
-                    .any(|other| other.glyph_ids.contains(&glyph.id))
-            {
+            let shift = gaps.shift(glyph);
+            if shift.is_none() && gaps.drawn_ids.contains(&glyph.id) {
                 continue;
             }
-            let (dx, dy) = glyph_shift(glyph, shifts);
+            let (dx, dy) = shift.unwrap_or((0.0, 0.0));
             let gy = glyph.matrix[5] + dy;
             // The next line's formula sits about 0.7em lower. A subscript on
             // this line stays inside half an em. Counting that next line made
@@ -9769,19 +9757,54 @@ fn glyph_shift(glyph: &Glyph, shifts: &[ListingShift]) -> (f32, f32) {
         .unwrap_or((0.0, 0.0))
 }
 
-fn math_sits_in(
-    extraction: &Extraction,
-    shifts: &[ListingShift],
-    page: u32,
-    x0: f32,
-    x1: f32,
-    y: f32,
-    em: f32,
-) -> bool {
-    extraction.glyphs.iter().any(|glyph| {
-        let (dx, dy) = glyph_shift(glyph, shifts);
-        glyph.page_index == page
-            && !glyph.invisible
+/// Lookups [`audit_line_gaps`] needs for every line, built once. Scanning
+/// all glyphs, shifts and drawn lines per line took many minutes on a long
+/// article.
+struct GapIndex<'a> {
+    on_page: HashMap<u32, Vec<&'a Glyph>>,
+    /// The first shift that names each `(page, id)`, as [`glyph_shift`] picks.
+    shifts: HashMap<(u32, u32), (f32, f32)>,
+    drawn_ids: HashSet<u32>,
+}
+
+impl<'a> GapIndex<'a> {
+    fn new(drawn: &[Drawn], extraction: &'a Extraction, shifts: &[ListingShift]) -> Self {
+        let mut on_page: HashMap<u32, Vec<&Glyph>> = HashMap::new();
+        for glyph in &extraction.glyphs {
+            on_page.entry(glyph.page_index).or_default().push(glyph);
+        }
+        let mut by_glyph = HashMap::new();
+        for shift in shifts {
+            for id in &shift.ids {
+                by_glyph
+                    .entry((shift.page, *id))
+                    .or_insert((shift.dx, shift.dy));
+            }
+        }
+        let drawn_ids = drawn
+            .iter()
+            .flat_map(|line| line.glyph_ids.iter().copied())
+            .collect();
+        Self {
+            on_page,
+            shifts: by_glyph,
+            drawn_ids,
+        }
+    }
+
+    fn page(&self, page: u32) -> &[&'a Glyph] {
+        self.on_page.get(&page).map_or(&[][..], Vec::as_slice)
+    }
+
+    fn shift(&self, glyph: &Glyph) -> Option<(f32, f32)> {
+        self.shifts.get(&(glyph.page_index, glyph.id)).copied()
+    }
+}
+
+fn math_sits_in(index: &GapIndex, page: u32, x0: f32, x1: f32, y: f32, em: f32) -> bool {
+    index.page(page).iter().any(|glyph| {
+        let (dx, dy) = index.shift(glyph).unwrap_or((0.0, 0.0));
+        !glyph.invisible
             && glyph.matrix[4] + dx >= x0 - 0.4
             && glyph.matrix[4] + dx <= x1 + 0.4
             && (glyph.matrix[5] + dy - y).abs() <= em * 0.85
