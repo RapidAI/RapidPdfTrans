@@ -5713,7 +5713,7 @@ fn call_batch(
     let system = system_for(opts, strict, echo);
     *calls += 1;
     let raw = translator.complete(&system, &user)?;
-    let parsed = parse_translations(&raw)?;
+    let parsed = renumber_local_ids(segments, indexes, parse_translations(&raw)?);
     let mut by_id: Vec<(u32, String)> = Vec::new();
     for &i in indexes {
         let id = segments[i].id;
@@ -5725,6 +5725,36 @@ fn call_batch(
         by_id.push((id, text));
     }
     Ok(by_id)
+}
+
+/// The model often numbers its reply 0..n (or 1..n) instead of echoing the
+/// segment ids it was given. That reply used to fail as `model omitted
+/// segment` and split the batch down to single calls. When every requested
+/// id is missing and the reply has one distinct item per segment numbered
+/// from 0 or 1, the items are mapped back in that order.
+fn renumber_local_ids(
+    segments: &[Segment],
+    indexes: &[usize],
+    parsed: Vec<(u32, String)>,
+) -> Vec<(u32, String)> {
+    let wanted: Vec<u32> = indexes.iter().map(|&i| segments[i].id).collect();
+    if parsed.len() != wanted.len() || parsed.iter().any(|(id, _)| wanted.contains(id)) {
+        return parsed;
+    }
+    let mut ids: Vec<u32> = parsed.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    let n = ids.len() as u32;
+    let base = match ids.first() {
+        Some(&first) if first <= 1 => first,
+        _ => return parsed,
+    };
+    if ids.iter().copied().ne(base..base + n) {
+        return parsed;
+    }
+    parsed
+        .into_iter()
+        .map(|(id, text)| (wanted[(id - base) as usize], text))
+        .collect()
 }
 
 fn system_for(opts: &TranslateOptions, strict: bool, echo: bool) -> String {
@@ -6860,6 +6890,38 @@ mod tests {
         fn segment_budget_expired(&self) -> bool {
             self.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2
         }
+    }
+
+    #[test]
+    fn a_reply_numbered_from_zero_maps_back_to_the_segment_ids() {
+        let segments: Vec<Segment> = (0..4)
+            .map(|i| Segment {
+                id: 30 + i,
+                page_index: 0,
+                glyph_ids: vec![i],
+                text: format!("text {i}"),
+            })
+            .collect();
+        let reply = |ids: &[u32]| -> Vec<(u32, String)> {
+            ids.iter().map(|id| (*id, format!("t{id}"))).collect()
+        };
+        let got = renumber_local_ids(&segments, &[1, 2], reply(&[0, 1]));
+        assert_eq!(got, vec![(31, "t0".into()), (32, "t1".into())]);
+        let got = renumber_local_ids(&segments, &[1, 2], reply(&[2, 1]));
+        assert_eq!(got, vec![(32, "t2".into()), (31, "t1".into())]);
+        // Duplicated, short, or already-correct replies are left alone.
+        assert_eq!(
+            renumber_local_ids(&segments, &[1, 2], reply(&[0, 0])),
+            reply(&[0, 0])
+        );
+        assert_eq!(
+            renumber_local_ids(&segments, &[1, 2], reply(&[0])),
+            reply(&[0])
+        );
+        assert_eq!(
+            renumber_local_ids(&segments, &[1, 2], reply(&[31, 0])),
+            reply(&[31, 0])
+        );
     }
 
     #[test]

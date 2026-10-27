@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A batch reply that numbers its items 0..n (or 1..n) instead of echoing the segment ids is mapped back in order. The gateway model does this often; each such reply used to count as an omitted segment and split the batch down to single calls. On the first three pages of arXiv 2610.30485 this cut model calls from 25 to 17.
+
 - `rpt translate` exits 0 when it wrote the PDF and only quality warnings came up (coverage incomplete, an overlap, a wide gap, or another layout check). The warnings go to stderr and to a new `layout_warnings` array in the `--json` summary and the `--detail` file. `--strict` keeps the old exit 1 for a layout failure. A run that writes no PDF still exits non-zero.
 
 - A job no longer fails with `no translation for segment N`. When the only sent copy of a repeated paragraph failed for good, its other copies found nothing to reuse and the whole PDF was abandoned. Those copies now keep the source text, and any paragraph still without a translation at the end keeps its source with a diagnostic instead of failing the job.
