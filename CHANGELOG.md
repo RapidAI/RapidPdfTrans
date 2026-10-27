@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- A full-size `+`/`−` before an inline hole is no longer taken for a stray formula script, so a sentence like `Here w_s,w_c,w_n ≥ 0 … −w_cΔC` is translated instead of kept English (RRSI p22).
 - English leftovers get a second retry round: a gateway that stalls on connect failed a batch and its solo retries, which kept whole paragraphs English and made leftover English swing run to run.
 - An inline hole that opens a bracket (`g_t(`, `ν_t(`) takes its closer and any inner hole (`𝐻′`) on the same baseline. Every caller of the hole builder sees the same holes, so the unholed-math check no longer keeps a sentence in English over a stray `)` (RRSI p20 `Here 𝒯_t … g_t(ℓ)`).
 - A paragraph that opens with a bold or italic run-in heading (`Baselines. Qwen3.5-2B …`) is no longer stitched onto the sentence above it as a continuation; the heading splits from its body again.

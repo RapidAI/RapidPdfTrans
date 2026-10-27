@@ -9409,6 +9409,12 @@ fn formula_script_mark(glyph: &Glyph, body: f32) -> bool {
     let mark = text.chars().all(|ch| {
         ch.is_ascii_digit() || matches!(ch, '(' | ')' | ',' | '.' | '+' | '-' | '−' | '′' | '\'')
     });
+    // `−𝑤_c Δ𝐶` opens with a full-size minus. A sign is a script only when
+    // it is set small (`H^{(t+1)}`).
+    let sign = text.chars().all(|ch| matches!(ch, '+' | '-' | '−'));
+    if sign {
+        return mark && glyph.font_size <= body * 0.84;
+    }
     mark && (glyph.font_size <= body * 0.84 || display_math_face(&glyph.font_name))
 }
 
@@ -39515,6 +39521,16 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             note_position("gap inside a line 3.0pt in \"a\" at (1.5, -2.0)"),
             Some((1.5, -2.0))
         );
+    }
+
+    #[test]
+    fn a_full_size_minus_before_a_hole_is_not_a_script() {
+        let mut minus = ink_glyph(1, 100.0, 400.0, 10.0, "−");
+        minus.font_name = "UYPHCO+txsys".into();
+        assert!(!formula_script_mark(&minus, 10.0));
+        let mut small = ink_glyph(2, 100.0, 404.0, 7.0, "−");
+        small.font_name = "UYPHCO+txsys".into();
+        assert!(formula_script_mark(&small, 10.0));
     }
 
     #[test]
