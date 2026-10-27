@@ -22132,6 +22132,21 @@ fn complete_display_line(
     (ids, left, right)
 }
 
+fn theorem_label_start(text: &str) -> bool {
+    const LABELS: [&str; 9] = [
+        "定义", "定理", "命题", "示例", "例", "推论", "引理", "证明", "注",
+    ];
+    LABELS.iter().any(|label| {
+        text.strip_prefix(label).is_some_and(|rest| {
+            rest.chars().next().is_none_or(|ch| {
+                ch.is_ascii_digit()
+                    || ch.is_whitespace()
+                    || matches!(ch, '。' | '：' | '.' | ':' | '（' | '(')
+            })
+        })
+    })
+}
+
 fn snap_heading_to_formula(lines: &mut [Drawn], extraction: &Extraction, shifts: &[ListingShift]) {
     let by_id = glyph_index(&extraction.glyphs);
     for index in 0..lines.len() {
@@ -22141,8 +22156,10 @@ fn snap_heading_to_formula(lines: &mut [Drawn], extraction: &Extraction, shifts:
         if trimmed.chars().count() > 24 || lines[index].glyph_ids.is_empty() {
             continue;
         }
-        let head = trimmed.chars().next();
-        if !matches!(head, Some('定' | '命' | '示' | '例' | '推' | '引' | '证')) {
+        // `证器将其评分记为` is the tail of 验证器, not 证明. Snapping it to
+        // the formula on its source baseline lifted it onto the run-in
+        // label above. Only a theorem-style label word snaps.
+        if !theorem_label_start(&trimmed) {
             continue;
         }
         let Some(source_y) = lines[index]
@@ -35544,6 +35561,30 @@ mod tests {
         );
         assert!(lines[1].text.ends_with('。'), "{}", lines[1].text);
         assert!(lines[2].text.starts_with('一'), "{}", lines[2].text);
+    }
+
+    #[test]
+    fn only_a_theorem_label_snaps_to_its_formula() {
+        for label in [
+            "定义 1.2",
+            "例 1.6",
+            "证明。",
+            "引理 4.1。",
+            "命题：",
+            "定理",
+        ] {
+            assert!(theorem_label_start(label), "{label}");
+        }
+        for tail in [
+            "证器将其评分记为 ",
+            "示出了",
+            "例如",
+            "推理时",
+            "命运",
+            "注意到",
+        ] {
+            assert!(!theorem_label_start(tail), "{tail}");
+        }
     }
 
     #[test]

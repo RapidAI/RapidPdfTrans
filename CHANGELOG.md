@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Only a theorem-style label (定义, 例, 证明 …) snaps to the formula on its baseline. A wrapped line that merely starts with 证 or 例 (`证器将其评分记为`, `例如`) used to be lifted onto the line above.
+
 - A tail parked on a next line that is already split around a formula now pushes that line's first slice, so the tail no longer paints over it.
 
 - Several slices of one line that run past the column are parked on the next line in reading order instead of on top of each other, and the rest of that line moves after them.
