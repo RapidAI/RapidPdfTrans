@@ -128,6 +128,12 @@ enum Command {
         /// Print the full per-glyph JSON on stdout instead of the summary.
         #[arg(long)]
         glyphs: bool,
+        /// Exit 1 when the PDF was written but the layout check found an
+        /// overlap, a wide gap, or another layout failure. By default those
+        /// are warnings: they go to stderr and to `layout_warnings` in the
+        /// JSON, and the command exits 0.
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -171,6 +177,7 @@ fn main() -> ExitCode {
             compact,
             detail,
             glyphs,
+            strict,
         } => {
             let glossary = match parse_glossary(&glossary) {
                 Ok(pairs) => pairs,
@@ -256,6 +263,7 @@ fn main() -> ExitCode {
                 max_pages,
                 detail,
                 glyphs,
+                strict,
             )
         }
     }
@@ -294,6 +302,7 @@ fn run_translate(
     max_pages: Option<u32>,
     detail: Option<PathBuf>,
     glyphs: bool,
+    strict: bool,
 ) -> ExitCode {
     let mut doc = match PdfDocument::open(path) {
         Ok(doc) => doc,
@@ -335,6 +344,7 @@ fn run_translate(
         )
     };
     let mut layout_failure: Option<String> = None;
+    let mut warnings: Vec<String> = Vec::new();
     if let Some(output) = output.as_ref() {
         let _pulse = PhasePulse::start(opts.progress, "replace");
         if let Err(err) = doc.rewrite(
@@ -351,6 +361,7 @@ fn run_translate(
         note_wrote(opts.progress, output);
         if let Some(warning) = extraction.note_incomplete_coverage() {
             eprintln!("rpt: warning: {warning}");
+            warnings.push(warning);
         }
         warn_cjk_font(&extraction);
         layout_failure = failing_layout_message(&extraction.diagnostics);
@@ -401,6 +412,12 @@ fn run_translate(
         "calls": report.calls,
         "cache_hits": report.cache_hits,
     });
+    if let Some(message) = layout_failure.as_ref() {
+        warnings.push(message.clone());
+        if !strict {
+            eprintln!("rpt: warning: layout check: {message}");
+        }
+    }
     let mut summary = match extraction.to_summary_value() {
         Ok(value) => value,
         Err(err) => return fail(err),
@@ -411,6 +428,7 @@ fn run_translate(
             serde_json::to_value(&report.segments).unwrap_or(serde_json::Value::Null),
         );
         obj.insert("translator".into(), translator.clone());
+        obj.insert("layout_warnings".into(), serde_json::json!(warnings));
     }
     if detail.is_some() || glyphs {
         let mut full = match extraction.to_json_value() {
@@ -423,6 +441,7 @@ fn run_translate(
                 serde_json::to_value(&report.segments).unwrap_or(serde_json::Value::Null),
             );
             obj.insert("translator".into(), translator);
+            obj.insert("layout_warnings".into(), serde_json::json!(warnings));
         }
         if let Some(path) = detail.as_ref() {
             let text = if compact {
@@ -439,16 +458,24 @@ fn run_translate(
             }
         }
         if glyphs {
-            if let Some(message) = layout_failure {
+            if let Some(message) = strict_failure(strict, layout_failure) {
                 return fail(message);
             }
             return emit(&full, compact);
         }
     }
-    if let Some(message) = layout_failure {
+    if let Some(message) = strict_failure(strict, layout_failure) {
+        // The JSON is still printed so a strict caller sees the same report.
+        let _ = emit(&summary, compact);
         return fail(message);
     }
     emit(&summary, compact)
+}
+
+/// A layout failure fails the command only under `--strict`. The PDF was
+/// already written; without `--strict` it is a warning.
+fn strict_failure(strict: bool, layout_failure: Option<String>) -> Option<String> {
+    layout_failure.filter(|_| strict)
 }
 
 /// A rewrite of a large PDF can sit quiet for a minute. Emit a line every
@@ -627,4 +654,32 @@ fn fail(err: impl std::fmt::Display) -> ExitCode {
     }
     eprintln!("rpt: {message}");
     ExitCode::from(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn a_layout_failure_is_a_warning_unless_strict() {
+        let message = Some("glyph overlap 11.0pt".to_string());
+        assert_eq!(strict_failure(false, message.clone()), None);
+        assert_eq!(strict_failure(true, message.clone()), message);
+        assert_eq!(strict_failure(true, None), None);
+    }
+
+    #[test]
+    fn strict_is_opt_in() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["rpt", "translate", "in.pdf"];
+            args.extend_from_slice(extra);
+            match Cli::parse_from(args).command {
+                Command::Translate { strict, .. } => strict,
+                _ => unreachable!(),
+            }
+        };
+        assert!(!parse(&[]));
+        assert!(parse(&["--strict"]));
+    }
 }
