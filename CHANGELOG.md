@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- A booktabs table of words (three or more equal rules, cells two em apart) is kept glyph-identical even without numbers; wrapped caption lines are left out (SpatialBrain p14 Table A1).
+- Primes and spacing accents (`H′`, the `ˆ` of `Ŝ`) attach to their host line instead of becoming their own segment, which drew them over the translation (RRSI p22).
+- An inline formula is no longer pulled left over a preceding formula when tightening the gap after an atom like `max` (RRSI p22 `max(S★, Ŝ(H_{t+1}))`).
+- An equation tag wrapped between two listing lines stays with the listing (RRSI p20 `(12)`).
+- A line never wraps between an inline hole and its relation and short value (`a_i = 1`).
+- `RPT_REPLAY_LENIENT=1` keeps the source of segments missing from a replay file and lists them.
 - A full-size `+`/`−` before an inline hole is no longer taken for a stray formula script, so a sentence like `Here w_s,w_c,w_n ≥ 0 … −w_cΔC` is translated instead of kept English (RRSI p22).
 - English leftovers get a second retry round: a gateway that stalls on connect failed a batch and its solo retries, which kept whole paragraphs English and made leftover English swing run to run.
 - An inline hole that opens a bracket (`g_t(`, `ν_t(`) takes its closer and any inner hole (`𝐻′`) on the same baseline. Every caller of the hole builder sees the same holes, so the unholed-math check no longer keeps a sentence in English over a stray `)` (RRSI p20 `Here 𝒯_t … g_t(ℓ)`).

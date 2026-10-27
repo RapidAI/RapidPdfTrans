@@ -1256,7 +1256,55 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     mark_cjk_compounds(chars, &mut sticky);
     mark_reserved_gaps(chars, &mut sticky);
     mark_angle_formulas(chars, &mut sticky);
+    mark_hole_relations(chars, &mut sticky);
     sticky
+}
+
+/// `⟦0⟧ = 1` and `⟦1⟧ ≤ 𝛿` are one formula. A wrap at the space before
+/// `=` leaves the symbol at a line end and opens the next line on `= 1`.
+fn mark_hole_relations(chars: &[char], sticky: &mut [bool]) {
+    let relation = |ch: char| matches!(ch, '=' | '<' | '>' | '≤' | '≥' | '≠' | '≈' | '∈' | '∉');
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '\u{3000}' {
+            index += 1;
+            continue;
+        }
+        let hole_end = index;
+        let mut cursor = index + 1;
+        while cursor < chars.len() && chars[cursor] == ' ' {
+            cursor += 1;
+        }
+        if cursor >= chars.len() || !relation(chars[cursor]) {
+            index += 1;
+            continue;
+        }
+        cursor += 1;
+        while cursor < chars.len() && chars[cursor] == ' ' {
+            cursor += 1;
+        }
+        let token_start = cursor;
+        while cursor < chars.len()
+            && cursor - token_start < 4
+            && (chars[cursor].is_ascii_alphanumeric() || matches!(chars[cursor], '.' | '−' | '-'))
+        {
+            cursor += 1;
+        }
+        let token_end = if cursor > token_start
+            && (cursor >= chars.len() || !chars[cursor].is_ascii_alphanumeric())
+        {
+            cursor
+        } else {
+            // `= ⟦2⟧` or a long word: keep only the operator with the hole.
+            token_start.saturating_sub(1).max(hole_end + 1)
+        };
+        for boundary in hole_end..token_end.saturating_sub(1) {
+            if let Some(flag) = sticky.get_mut(boundary) {
+                *flag = true;
+            }
+        }
+        index = token_end.max(index + 1);
+    }
 }
 
 /// `⟨x, y, z⟩` and `<x, y, z>` stay on one line. A break after the comma
@@ -2641,6 +2689,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_wrap_never_opens_on_the_relation_after_a_hole() {
+        let text = "其中，当携带编辑的候选被选为获胜者时，00\u{3000} = 1。那些可采纳但输给更高分候选的候选取值为 01\u{3000} = 0。";
+        let font = mixed_ascii_font(text);
+        let holes = std::collections::HashMap::from([(0usize, 12.0f32), (1usize, 12.0f32)]);
+        for width in (60..400).step_by(3) {
+            let lines = wrap_text_holes(text, 10.0, width as f32, width as f32, &font, &holes)
+                .expect("wrap");
+            assert!(
+                lines.iter().all(|line| !line.trim_start().starts_with('=')),
+                "{width}: {lines:?}"
+            );
+        }
+    }
+
     fn mixed_ascii_font(text: &str) -> SubsetFont {
         let mut glyphs = std::collections::HashMap::new();
         for (id, ch) in (1u16..).zip(text.chars()) {
@@ -3692,5 +3755,21 @@ mod tests {
             wide_lines.iter().any(|line| line.contains("15\u{3000}")),
             "the wide hole was split: {wide_lines:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod hole_relation_tests {
+    use super::*;
+
+    #[test]
+    fn a_hole_keeps_its_relation_and_value() {
+        let chars: Vec<char> = "时，00\u{3000} = 1。那些".chars().collect();
+        let mut sticky = vec![false; chars.len() - 1];
+        mark_hole_relations(&chars, &mut sticky);
+        let hole = chars.iter().position(|ch| *ch == '\u{3000}').unwrap();
+        let one = chars.iter().position(|ch| *ch == '1').unwrap();
+        assert!((hole..one).all(|boundary| sticky[boundary]), "{sticky:?}");
+        assert!(!sticky[one], "the break after the value stays open");
     }
 }

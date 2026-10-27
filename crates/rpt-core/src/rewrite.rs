@@ -7971,7 +7971,19 @@ fn tighten_formula_after_atom(
     shifts: &mut [ListingShift],
     extraction: &Extraction,
 ) {
-    for shift in shifts.iter_mut() {
+    let placed: Vec<Option<(u32, f32, f32, f32)>> = shifts
+        .iter()
+        .map(|shift| {
+            let (left, right) = seated_ink_span(shift, extraction)?;
+            let y = extraction
+                .glyphs
+                .iter()
+                .find(|glyph| shift.ids.contains(&glyph.id))
+                .map(|glyph| glyph.matrix[5] + shift.dy)?;
+            Some((shift.page, y, left, right))
+        })
+        .collect();
+    for (index, shift) in shifts.iter_mut().enumerate() {
         let Some((ink_left, _ink_right)) = seated_ink_span(shift, extraction) else {
             continue;
         };
@@ -8000,6 +8012,20 @@ fn tighten_formula_after_atom(
         let room = em.max(1.0);
         let gap = ink_left - atom_right;
         if gap <= room * 0.45 || gap > room * 2.2 {
+            continue;
+        }
+        // `max⟦1⟧⟦2⟧`: the gap after `max` is the first formula. Sliding the
+        // second one back paints it over the first.
+        let filled = placed.iter().enumerate().any(|(other, span)| {
+            other != index
+                && span.is_some_and(|(page, y, left, right)| {
+                    page == shift.page
+                        && (y - seated_y).abs() <= room * 0.45
+                        && right > atom_right + 0.4
+                        && left < ink_left - 0.4
+                })
+        });
+        if filled {
             continue;
         }
         let mut pull = gap - room * 0.28;
@@ -24368,7 +24394,7 @@ fn listing_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<Co
         lines.push(vec![glyph]);
     }
     let mut claimed = HashSet::new();
-    lines
+    let blocks = lines
         .into_iter()
         .map(|line| {
             let y = line[0].matrix[5];
@@ -24418,7 +24444,66 @@ fn listing_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<Co
                 listing: true,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    claim_wrapped_display_tags(blocks, extraction, page, &used, &claimed)
+}
+
+/// `(12)` sits between the two lines of a wrapped code display, on neither
+/// baseline. It moves with the line above it, or it stays in the gap the
+/// display left.
+fn claim_wrapped_display_tags(
+    mut blocks: Vec<ColumnBlock>,
+    extraction: &Extraction,
+    page: u32,
+    used: &HashSet<u32>,
+    claimed: &HashSet<u32>,
+) -> Vec<ColumnBlock> {
+    {
+        let mut runs: Vec<Vec<&Glyph>> = Vec::new();
+        for glyph in extraction.glyphs.iter().filter(|glyph| {
+            glyph.page_index == page
+                && !used.contains(&glyph.id)
+                && !claimed.contains(&glyph.id)
+                && !glyph.invisible
+                && !glyph.unicode.trim().is_empty()
+        }) {
+            match runs.iter_mut().find(|run| {
+                let last = run[run.len() - 1];
+                (last.matrix[5] - glyph.matrix[5]).abs() < 0.8
+                    && glyph.matrix[4] >= last.matrix[4]
+                    && glyph.matrix[4] - glyph_paint_right(last) < glyph.font_size * 0.6
+            }) {
+                Some(run) => run.push(glyph),
+                None => runs.push(vec![glyph]),
+            }
+        }
+        for run in runs {
+            let text: String = run.iter().map(|glyph| glyph.unicode.trim()).collect();
+            if !text.starts_with('(') || !equation_tag(&text) {
+                continue;
+            }
+            let (x, y) = (run[0].matrix[4], run[0].matrix[5]);
+            let size = run[0].font_size.max(1.0);
+            let above = blocks
+                .iter()
+                .enumerate()
+                .filter(|(_, block)| {
+                    block.right < x && block.source_top > y && block.source_top - y <= size * 1.2
+                })
+                .min_by(|left, right| left.1.source_top.total_cmp(&right.1.source_top))
+                .map(|(index, _)| index);
+            let below = blocks.iter().any(|block| {
+                block.right < x && block.source_top < y && y - block.source_top <= size * 1.2
+            });
+            let (Some(host), true) = (above, below) else {
+                continue;
+            };
+            blocks[host]
+                .kept_ids
+                .extend(run.iter().map(|glyph| glyph.id));
+        }
+    }
+    blocks
 }
 
 /// Blank a moved listing and draw it again with the original face, at the

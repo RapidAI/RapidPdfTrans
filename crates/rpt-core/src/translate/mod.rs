@@ -795,6 +795,13 @@ pub fn replay_extraction(
         }
         let Some(text) = lookup_saved(&seg.text, &saved_map) else {
             let preview: String = seg.text.chars().take(48).collect();
+            // A layout check after a hole change: the changed segments keep
+            // their source and are listed, the rest replays.
+            if std::env::var_os("RPT_REPLAY_LENIENT").is_some() {
+                eprintln!("rpt: replay missing segment {} ({preview})", seg.id);
+                translated.push(Some(seg.text.clone()));
+                continue;
+            }
             return Err(Error::Translate(format!(
                 "no saved translation for segment {} ({preview})",
                 seg.id

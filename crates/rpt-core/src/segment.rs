@@ -1826,6 +1826,10 @@ fn assemble(
     kept.extend(region_interiors(&lines, flags, regions, pages));
     let ruled = ruled_table_rows(&lines, &kept, regions);
     kept.extend(ruled);
+    // A booktabs table of words (`Factor  Setting  Applies to`) has no
+    // numeric cell for the grid detector. Its rules and columns mark it.
+    let worded = worded_ruled_tables(&lines, &kept, regions);
+    kept.extend(worded);
     // A contents row can sit in a table: Word paints "Table 1: … …. 5"
     // as a caption, and a boxed contents list looks like a figure. The
     // title is still translated. Leaders and page numbers stay.
@@ -4199,6 +4203,120 @@ fn ruled_table_rows(
     out
 }
 
+/// A table whose cells are all words sits between three or more rules of one
+/// width, and most of its baselines carry two or more cells apart by a gap.
+/// A paragraph between rules has one line per baseline.
+fn worded_ruled_tables(
+    lines: &[VisualLine<'_>],
+    kept: &[(u32, String)],
+    regions: &[PaintedRegion],
+) -> Vec<(u32, String)> {
+    let all_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let mut rules: Vec<&PaintedRegion> = regions
+        .iter()
+        .filter(|region| {
+            region.kind == "path"
+                && (region.bbox[3] - region.bbox[1]).abs() < 1.5
+                && region.bbox[2] - region.bbox[0] >= 100.0
+        })
+        .collect();
+    rules.sort_by(|a, b| {
+        (a.page_index, -a.bbox[1])
+            .partial_cmp(&(b.page_index, -b.bbox[1]))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < rules.len() {
+        let first = rules[start];
+        let same = |rule: &PaintedRegion| {
+            rule.page_index == first.page_index
+                && (rule.bbox[0] - first.bbox[0]).abs() < 2.0
+                && (rule.bbox[2] - first.bbox[2]).abs() < 2.0
+                && first.bbox[1] - rule.bbox[1] <= 350.0
+        };
+        let mut end = start + 1;
+        while end < rules.len() && same(rules[end]) {
+            end += 1;
+        }
+        let count = end - start;
+        let (top, bottom) = (first.bbox[1], rules[end - 1].bbox[1]);
+        let (left, right) = (first.bbox[0], first.bbox[2]);
+        start = end;
+        if count < 3 {
+            continue;
+        }
+        let inside: Vec<&VisualLine<'_>> = lines
+            .iter()
+            .filter(|line| {
+                line.page == first.page_index
+                    && line.y < top
+                    && line.y > bottom
+                    && line.left >= left - 1.0
+                    && line.right <= right + 1.0
+                    && caption_kind(&line.text).is_none()
+                    && !continues_caption(line, lines)
+            })
+            .collect();
+        let mut baselines: Vec<Vec<&VisualLine<'_>>> = Vec::new();
+        for line in &inside {
+            match baselines
+                .iter_mut()
+                .find(|row| (row[0].y - line.y).abs() < line.size * 0.3)
+            {
+                Some(row) => row.push(line),
+                None => baselines.push(vec![line]),
+            }
+        }
+        for row in &mut baselines {
+            row.sort_by(|a, b| {
+                a.left
+                    .partial_cmp(&b.left)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        let celled = baselines
+            .iter()
+            .filter(|row| {
+                row.windows(2)
+                    .any(|pair| pair[1].left - pair[0].right >= pair[0].size * 2.0)
+            })
+            .count();
+        if celled < 3 || celled * 2 < baselines.len() {
+            continue;
+        }
+        for line in inside {
+            for glyph in &line.glyphs {
+                if !all_ids.contains(&glyph.id) {
+                    out.push((glyph.id, "table".to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The line wraps a caption: a chain of left-aligned lines one leading
+/// apart leads up to a caption line.
+fn continues_caption(line: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> bool {
+    let mut current = line;
+    for _ in 0..6 {
+        let Some(above) = lines.iter().find(|other| {
+            other.page == current.page
+                && (other.left - current.left).abs() < current.size
+                && other.y > current.y
+                && other.y - current.y < current.size * 1.8
+        }) else {
+            return false;
+        };
+        if caption_kind(&above.text).is_some() {
+            return true;
+        }
+        current = above;
+    }
+    false
+}
+
 fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     let mut release = std::collections::HashSet::new();
     for line in lines {
@@ -6142,7 +6260,22 @@ fn radical_meets_base(script: &VisualLine<'_>, host: &VisualLine<'_>) -> bool {
     })
 }
 
+/// A prime or a spacing accent (`𝐻′`, `𝑆̂` drawn as `ˆ` over `𝑆`) that the
+/// extractor left on its own raised line.
+fn is_math_mark(text: &str) -> bool {
+    matches!(
+        text,
+        "′" | "″" | "‴" | "ˆ" | "˜" | "¯" | "˙" | "¨" | "ˇ" | "˘" | "´" | "`" | "^" | "~"
+    ) || (!text.is_empty()
+        && text
+            .chars()
+            .all(|ch| ('\u{0300}'..='\u{036f}').contains(&ch)))
+}
+
 fn is_math_script(line: &VisualLine<'_>) -> bool {
+    if line.glyphs.len() == 1 && is_math_mark(line.text.trim()) {
+        return true;
+    }
     let width = line.right - line.left;
     let symbol = |glyph: &Glyph| math_font_glyph(glyph) || vector_symbol_glyph(glyph);
     width <= line.size.max(1.0) * 6.0
@@ -7149,6 +7282,50 @@ mod tests {
         let mut kept = vec![(2, "table".into()), (3, "table".into())];
         release_table_group_labels(&lines, &mut kept);
         assert_eq!(kept.len(), 2, "header cells were released: {kept:?}");
+    }
+
+    #[test]
+    fn a_table_of_words_between_three_rules_is_kept() {
+        let texts = [
+            (1, 60.0, 720.0, "Factor"),
+            (2, 300.0, 720.0, "Applies to"),
+            (3, 60.0, 700.0, "Metric"),
+            (4, 300.0, 700.0, "Our scored comparisons"),
+            (5, 60.0, 685.0, "Backbone"),
+            (6, 300.0, 685.0, "Direct pair"),
+            (7, 60.0, 670.0, "Reference answers"),
+            (8, 300.0, 670.0, "Our agent evaluations"),
+            (9, 60.0, 600.0, "A paragraph between other rules."),
+        ];
+        let glyphs: Vec<Glyph> = texts
+            .iter()
+            .map(|(id, x, y, text)| glyph(*id, *x, *y, text, false))
+            .collect();
+        let lines: Vec<VisualLine<'_>> = glyphs
+            .iter()
+            .map(|g| VisualLine {
+                glyphs: vec![g],
+                text: g.unicode.clone(),
+                page: 0,
+                y: g.matrix[5],
+                left: g.matrix[4],
+                right: g.matrix[4] + 80.0,
+                size: 9.0,
+                font: g.font_name.clone(),
+                toc: false,
+                sole_on_baseline: false,
+            })
+            .collect();
+        let rule = |y: f32| PaintedRegion {
+            page_index: 0,
+            bbox: [50.0, y, 550.0, y],
+            kind: "path".into(),
+        };
+        let regions = vec![rule(730.0), rule(712.0), rule(660.0), rule(620.0)];
+        let added = worded_ruled_tables(&lines, &[], &regions);
+        let mut ids: Vec<_> = added.iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 7, 8], "{added:?}");
     }
 
     #[test]
@@ -9355,6 +9532,23 @@ mod tests {
                         continue;
                     };
                     if !prev.iter().all(|glyph| caption_ids.contains(&glyph.id)) {
+                        continue;
+                    }
+                    // Only kept glyphs under the caption line count: a table
+                    // cell beside a body column is not the caption's tail.
+                    let prev_right = prev
+                        .iter()
+                        .map(|glyph| glyph.bbox[2])
+                        .fold(f32::MIN, f32::max);
+                    let prev_left = prev
+                        .iter()
+                        .map(|glyph| glyph.bbox[0])
+                        .fold(f32::MAX, f32::min);
+                    if !line.iter().any(|glyph| {
+                        kept.contains(&glyph.id)
+                            && glyph.bbox[0] < prev_right
+                            && glyph.bbox[2] > prev_left
+                    }) {
                         continue;
                     }
                     let prev_text: String =
