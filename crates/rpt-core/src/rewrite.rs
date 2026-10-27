@@ -7914,8 +7914,9 @@ fn drop_echoed_subscripts(lines: &mut Vec<Drawn>) {
 /// `Bx1 ∪···∪   Bxn`: the union moved left and the word after it kept the
 /// gap that used to clear the old ink. Leave one word space.
 fn close_gap_after_formula(lines: &mut [Drawn], shifts: &[ListingShift], extraction: &Extraction) {
+    let mut seated: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
     for shift in shifts {
-        let Some((_, ink_right)) = seated_ink_span(shift, extraction) else {
+        let Some((ink_left, ink_right)) = seated_ink_span(shift, extraction) else {
             continue;
         };
         let Some((seated_y, member_size)) = extraction.glyphs.iter().find_map(|glyph| {
@@ -7926,26 +7927,52 @@ fn close_gap_after_formula(lines: &mut [Drawn], shifts: &[ListingShift], extract
         }) else {
             continue;
         };
-        let room = member_size.max(1.0);
+        seated.push((
+            shift.page,
+            seated_y,
+            ink_left,
+            ink_right,
+            member_size.max(1.0),
+        ));
+    }
+    for &(page, seated_y, _, ink_right, room) in &seated {
+        // `⟦0⟧ = ⟦1⟧。其中`: the tail after `⟦0⟧` already clears `⟦1⟧`,
+        // which is seated in the gap. Pull only up to the last formula
+        // standing before the tail.
+        let others: Vec<(f32, f32)> = seated
+            .iter()
+            .filter(|other| {
+                other.0 == page
+                    && (other.1 - seated_y).abs() <= room * 0.45
+                    && other.2 > ink_right - 0.5
+            })
+            .map(|other| (other.2, other.3))
+            .collect();
         for line in lines.iter_mut() {
-            if line.page != shift.page {
+            if line.page != page {
                 continue;
             }
             let em = line.size.max(room).max(1.0);
             if (line.y - seated_y).abs() > em * 0.45 {
                 continue;
             }
-            pull_tail_after_ink(line, ink_right, em);
+            pull_tail_after_ink(line, ink_right, em, &others);
         }
     }
 }
 
 /// Shrink the gap between `ink_right` and the next letter on this line.
-fn pull_tail_after_ink(line: &mut Drawn, ink_right: f32, em: f32) {
+/// A gap that holds other seated ink (`others`) is not empty.
+fn pull_tail_after_ink(line: &mut Drawn, ink_right: f32, em: f32, others: &[(f32, f32)]) {
     let chars: Vec<char> = line.text.chars().collect();
     if chars.is_empty() || line.widths.len() != chars.len() {
         return;
     }
+    let holds_ink = |next: f32| {
+        others
+            .iter()
+            .any(|&(left, right)| right > ink_right + 0.5 && left < next)
+    };
     let mut origin = line.x;
     for index in 0..chars.len() {
         let width = line.widths[index];
@@ -7962,6 +7989,9 @@ fn pull_tail_after_ink(line: &mut Drawn, ink_right: f32, em: f32) {
             && next > ink_right + em * 0.45
             && next - ink_right < em * 2.2
         {
+            if holds_ink(next) {
+                return;
+            }
             // A leftover hole-space has no ink. The next letter sits one
             // word space after the formula, not after that space plus a gap.
             let desired = if hole {
@@ -7981,7 +8011,7 @@ fn pull_tail_after_ink(line: &mut Drawn, ink_right: f32, em: f32) {
         // The tail is its own line, starting after the formula.
         if index == 0 && !hole && origin > ink_right + em * 0.45 && origin - ink_right < em * 2.2 {
             let desired = ink_right + em * 0.28;
-            if origin - desired > 0.4 {
+            if origin - desired > 0.4 && !holds_ink(origin) {
                 line.x = desired;
             }
             return;
@@ -8193,17 +8223,29 @@ fn drop_overflow_tail(lines: &mut Vec<Drawn>) {
             continue;
         }
         // A short line under a formula (`n · m 个元素。`) is not the column.
-        // Measure the edge from lines that start at the paragraph margin.
+        // Measure the edge from baselines that start at the paragraph
+        // margin. A baseline split around inline math (`火编辑预算，⟦5⟧ 包含…`)
+        // reaches the edge with its last slice, not its first.
+        let y = lines[index].y;
+        let x = lines[index].x;
+        let mut margin_ys: Vec<f32> = Vec::new();
+        for line in lines.iter() {
+            if line.page == page
+                && paragraph_ids(&line.glyph_ids, &ids)
+                && line.x <= column_left + size * 2.0
+            {
+                margin_ys.push(line.y);
+            }
+        }
         let column_right = lines
             .iter()
-            .enumerate()
-            .filter(|(slot, line)| {
-                *slot != index
-                    && line.page == page
+            .filter(|line| {
+                line.page == page
                     && paragraph_ids(&line.glyph_ids, &ids)
-                    && line.x <= column_left + size * 2.0
+                    && margin_ys.iter().any(|my| (line.y - my).abs() <= size * 0.2)
+                    && ((line.y - y).abs() > size * 0.2 || line.x < x)
             })
-            .map(|(_, line)| line_ink_right(line))
+            .map(line_ink_right)
             .fold(f32::MIN, f32::max);
         if !column_right.is_finite() || column_right < column_left + size * 8.0 {
             continue;
@@ -8213,7 +8255,6 @@ fn drop_overflow_tail(lines: &mut Vec<Drawn>) {
         if lines[index].x < column_right - size * 3.0 || right <= column_right + size * 0.5 {
             continue;
         }
-        let y = lines[index].y;
         let Some(next) = (0..lines.len())
             .filter(|&other| {
                 other != index
@@ -35742,6 +35783,44 @@ mod tests {
         ] {
             assert!(!theorem_label_start(tail), "{tail}");
         }
+    }
+
+    #[test]
+    fn a_slice_inside_the_column_is_not_an_overflow_tail() {
+        let mk = |x: f32, y: f32, text: &str| {
+            let mut line = test_draw(x, y, 10.0, text, vec![1, 2]);
+            let count = line.text.chars().count();
+            line.widths = vec![10.0; count];
+            line.gaps = vec![0.0; count.saturating_sub(1)];
+            line.cids = vec![1; count];
+            line
+        };
+        // The margin baselines are split around inline math, so their first
+        // slices are short. The column still reaches their last slice.
+        let mut lines = vec![
+            mk(60.0, 400.0, "若无候选可被采纳，则"),
+            mk(410.0, 400.0, " 是来自当前轮次的反馈，"),
+            mk(60.0, 386.0, "火编辑预算，"),
+            mk(400.0, 386.0, " 包含从近期历史推断出的"),
+            mk(60.0, 372.0, "的候选集合。"),
+        ];
+        let before: Vec<(f32, f32)> = lines.iter().map(|line| (line.x, line.y)).collect();
+        drop_overflow_tail(&mut lines);
+        let after: Vec<(f32, f32)> = lines.iter().map(|line| (line.x, line.y)).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_tail_after_two_formulas_keeps_clear_of_the_second() {
+        let mut line = test_draw(204.0, 400.0, 10.0, "。其中", vec![1]);
+        line.widths = vec![10.0; 3];
+        line.gaps = vec![0.0; 2];
+        line.cids = vec![1; 3];
+        // `⟦0⟧` ends at 186, `⟦1⟧` is seated at 194..203.
+        pull_tail_after_ink(&mut line, 186.0, 10.0, &[(194.0, 203.0)]);
+        assert_eq!(line.x, 204.0);
+        pull_tail_after_ink(&mut line, 186.0, 10.0, &[]);
+        assert!(line.x < 190.0, "{}", line.x);
     }
 
     #[test]

@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- An overflow check measured the column from the first slice of each margin line, so a paragraph split around inline math looked narrow and its in-column slices were parked on the next baseline over other text.
+- The tail after `⟦0⟧ = ⟦1⟧` is no longer pulled back over the second formula when closing the gap after the first.
 
 - A paragraph that continues on the next page starts beside its bold run-in heading (`Harness evolution.`) instead of under it, and an overlap between a short label and a long paragraph now keeps only the label in English, not the whole paragraph.
 - An echoed English paragraph whose `and`/`if` were glossed as 且/如果 is sent to the model again instead of being painted as mixed English.
