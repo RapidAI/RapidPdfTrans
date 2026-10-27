@@ -190,6 +190,12 @@ fn colliding_drawn_ids(drawn: &[Drawn]) -> HashSet<u32> {
             }
             let (oleft, oright) = drawn_ink_span(other);
             if right.min(oright) - left.max(oleft) > size * 0.5 {
+                if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+                    eprintln!(
+                        "collide p{} ({:.1},{:.1}) {:?} | ({:.1},{:.1}) {:?}",
+                        line.page, line.x, line.y, line.text, other.x, other.y, other.text
+                    );
+                }
                 ids.extend(line.glyph_ids.iter().copied());
                 ids.extend(other.glyph_ids.iter().copied());
             }
@@ -8195,6 +8201,19 @@ fn drop_overflow_tail(lines: &mut Vec<Drawn>) {
         };
         moves.push((index, next, column_left));
     }
+    // Several slices of one line (`其中 ⟦2⟧ 是…，⟦3⟧ 是…`) can all run
+    // past the column. Each used to be parked at the column edge, so they
+    // were painted on top of each other. Park them in reading order and
+    // push the whole next baseline of the paragraph after the last one.
+    moves.sort_by(|left, right| {
+        lines[left.0]
+            .y
+            .total_cmp(&lines[right.0].y)
+            .reverse()
+            .then(lines[left.0].x.total_cmp(&lines[right.0].x))
+    });
+    let mut cursors: HashMap<usize, f32> = HashMap::new();
+    let mut moved: HashSet<usize> = HashSet::new();
     let mut parked = Vec::new();
     for (index, next, column_left) in moves {
         if let Some(mark) = peel_leading_closer(&mut lines[index]) {
@@ -8205,11 +8224,31 @@ fn drop_overflow_tail(lines: &mut Vec<Drawn>) {
         }
         let size = lines[index].size.max(1.0);
         let width = line_ink_right(&lines[index]) - lines[index].x;
-        lines[index].x = column_left;
+        let x = cursors.get(&next).copied().unwrap_or(column_left);
+        lines[index].x = x;
         lines[index].y = lines[next].y;
-        let follow = column_left + width + size * 0.35;
-        if (lines[next].x - follow).abs() > 0.4 {
-            lines[next].x = follow;
+        cursors.insert(next, x + width + size * 0.35);
+        moved.insert(index);
+    }
+    for (next, follow) in cursors {
+        let delta = follow - lines[next].x;
+        if delta.abs() <= 0.4 {
+            continue;
+        }
+        let page = lines[next].page;
+        let y = lines[next].y;
+        let from = lines[next].x;
+        let ids = lines[next].glyph_ids.clone();
+        let size = lines[next].size.max(1.0);
+        for (slot, line) in lines.iter_mut().enumerate() {
+            if !moved.contains(&slot)
+                && line.page == page
+                && (line.y - y).abs() <= size * 0.2
+                && line.x >= from - 0.4
+                && paragraph_ids(&line.glyph_ids, &ids)
+            {
+                line.x += delta;
+            }
         }
     }
     lines.extend(parked);
@@ -35494,6 +35533,38 @@ mod tests {
         );
         assert!(lines[1].text.ends_with('。'), "{}", lines[1].text);
         assert!(lines[2].text.starts_with('一'), "{}", lines[2].text);
+    }
+
+    #[test]
+    fn several_overflowing_slices_park_in_reading_order() {
+        let mk = |x: f32, y: f32, text: &str, w: f32| {
+            let mut line = test_draw(x, y, 10.0, text, vec![1, 2]);
+            let count = line.text.chars().count();
+            line.widths = vec![w; count];
+            line.gaps = vec![0.0; count.saturating_sub(1)];
+            line.cids = vec![1; count];
+            line
+        };
+        let mut lines = vec![
+            mk(160.0, 400.0, "也需要有序序列", 20.0),
+            mk(470.0, 400.0, "是编辑历史，", 10.0),
+            mk(540.0, 400.0, "包含探索指令，", 10.0),
+            mk(160.0, 386.0, "一般而言，我们", 10.0),
+        ];
+        drop_overflow_tail(&mut lines);
+        let mut on_next: Vec<(f32, f32)> = lines
+            .iter()
+            .filter(|line| (line.y - 386.0).abs() < 0.5 && line.text.chars().count() > 1)
+            .map(|line| (line.x, line.x + line.widths.iter().sum::<f32>()))
+            .collect();
+        on_next.sort_by(|left, right| left.0.total_cmp(&right.0));
+        assert_eq!(on_next.len(), 3, "{on_next:?}");
+        for pair in on_next.windows(2) {
+            assert!(
+                pair[1].0 >= pair[0].1 - 0.5,
+                "parked slices overlap: {on_next:?}"
+            );
+        }
     }
 
     #[test]

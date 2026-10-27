@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Several slices of one line that run past the column are parked on the next line in reading order instead of on top of each other, and the rest of that line moves after them.
+
 - A bold run-in label no longer pulls a paragraph that continues on the next page onto its own page; the continuation used to be painted over the top of the label's page.
 
 - A bibliography whose entries put initials first (`T. Chen, S. Lu, K. Zhao, …`) or start with an organisation (`Anthropic. Introducing claude opus 4.8, 2026a. URL …`) is kept in the source again. Neither form was recognised as an entry, so the `References` heading of arXiv 2609.24972 was followed by a translated, scrambled bibliography.
