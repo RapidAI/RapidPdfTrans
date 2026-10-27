@@ -1824,6 +1824,8 @@ fn assemble(
     kept.extend(detach_toc_marks(&mut lines));
     kept.extend(interior_glyphs(&lines, flags));
     kept.extend(region_interiors(&lines, flags, regions, pages));
+    let ruled = ruled_table_rows(&lines, &kept, regions);
+    kept.extend(ruled);
     // A contents row can sit in a table: Word paints "Table 1: … …. 5"
     // as a caption, and a boxed contents list looks like a figure. The
     // title is still translated. Leaders and page numbers stay.
@@ -4080,6 +4082,123 @@ fn algorithm_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
     out
 }
 
+/// A text-only table caught under its caption by the cells that overlap the
+/// caption. The first and last columns sit wider than the caption, so they
+/// were translated while the middle columns stayed. The table's own rules
+/// span every column: a line between them, inside their width, is a cell.
+fn ruled_table_rows(
+    lines: &[VisualLine<'_>],
+    kept: &[(u32, String)],
+    regions: &[PaintedRegion],
+) -> Vec<(u32, String)> {
+    let table_ids: std::collections::HashSet<u32> = kept
+        .iter()
+        .filter(|(_, reason)| reason == "table")
+        .map(|(id, _)| *id)
+        .collect();
+    if table_ids.is_empty() {
+        return Vec::new();
+    }
+    let all_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let rules: Vec<&PaintedRegion> = regions
+        .iter()
+        .filter(|region| {
+            region.kind == "path"
+                && (region.bbox[3] - region.bbox[1]).abs() < 1.5
+                && region.bbox[2] - region.bbox[0] >= 100.0
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut done = std::collections::HashSet::new();
+    for seed in lines {
+        if !seed
+            .glyphs
+            .iter()
+            .all(|glyph| table_ids.contains(&glyph.id))
+        {
+            continue;
+        }
+        let page_rules: Vec<&&PaintedRegion> = rules
+            .iter()
+            .filter(|rule| {
+                rule.page_index == seed.page
+                    && rule.bbox[0] <= seed.left + 1.0
+                    && rule.bbox[2] >= seed.right - 1.0
+            })
+            .collect();
+        let reach = seed.size * 3.0;
+        let (mut lo, mut hi) = (seed.y, seed.y);
+        let (mut left, mut right) = (f32::MAX, f32::MIN);
+        let mut used = vec![false; page_rules.len()];
+        loop {
+            let mut grew = false;
+            for (index, rule) in page_rules.iter().enumerate() {
+                let y = rule.bbox[1];
+                if used[index] || y < lo - reach || y > hi + reach {
+                    continue;
+                }
+                used[index] = true;
+                lo = lo.min(y);
+                hi = hi.max(y);
+                left = left.min(rule.bbox[0]);
+                right = right.max(rule.bbox[2]);
+                grew = true;
+            }
+            // The kept cells carry the band down to the bottom rule.
+            for line in lines {
+                if line.page != seed.page
+                    || line.y >= lo - reach * 0.5 && line.y <= hi + reach * 0.5
+                    || line.y < lo - reach
+                    || line.y > hi + reach
+                    || !line
+                        .glyphs
+                        .iter()
+                        .all(|glyph| table_ids.contains(&glyph.id))
+                {
+                    continue;
+                }
+                lo = lo.min(line.y);
+                hi = hi.max(line.y);
+                grew = true;
+            }
+            if !grew {
+                break;
+            }
+        }
+        let above = used
+            .iter()
+            .zip(&page_rules)
+            .any(|(u, rule)| *u && rule.bbox[1] > seed.y);
+        let below = used
+            .iter()
+            .zip(&page_rules)
+            .any(|(u, rule)| *u && rule.bbox[1] < seed.y);
+        if !above || !below || !done.insert((seed.page, lo.to_bits(), hi.to_bits())) {
+            continue;
+        }
+        for line in lines {
+            if line.page != seed.page
+                || line.y <= lo
+                || line.y >= hi
+                || line.left < left - 1.0
+                || line.right > right + 1.0
+                || caption_kind(&line.text).is_some()
+                // A caption's wrap or a paragraph inside the rules runs most
+                // of their width. A cell is a column's share of it.
+                || line.right - line.left > (right - left) * 0.4
+            {
+                continue;
+            }
+            for glyph in &line.glyphs {
+                if !all_ids.contains(&glyph.id) {
+                    out.push((glyph.id, "table".to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     let mut release = std::collections::HashSet::new();
     for line in lines {
@@ -4106,6 +4225,25 @@ fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, Str
             style.bold || crate::font::medium_weight(&glyph.font_name)
         });
         if !emphasized {
+            continue;
+        }
+        // `Demonstration  Objective  Technique (model)` is a header row. A
+        // group label has no other bold cell on its baseline. A bold run-in
+        // has plain body text beside it and is still released.
+        let run_in = line.text.trim_end().ends_with(['.', ':']);
+        let row = !run_in
+            && lines.iter().any(|other| {
+                !std::ptr::eq(other, line)
+                    && other.page == line.page
+                    && (other.y - line.y).abs() < line.size * 0.3
+                    && (other.left >= line.right + line.size * 2.0
+                        || other.right + line.size * 2.0 <= line.left)
+                    && other.glyphs.iter().all(|glyph| {
+                        let style = crate::font::face_style(&glyph.font_name);
+                        style.bold || crate::font::medium_weight(&glyph.font_name)
+                    })
+            });
+        if row {
             continue;
         }
         for glyph in &line.glyphs {
@@ -6974,6 +7112,76 @@ mod tests {
             kept.iter().any(|(id, _)| *id == 3),
             "method cell was released: {kept:?}"
         );
+    }
+
+    #[test]
+    fn a_bold_header_row_stays_in_the_table() {
+        let mut caption = glyph(1, 72.0, 700.0, "Table 3. Demonstrations.", false);
+        caption.font_name = "NimbusRomNo9L-Regu".into();
+        let mut first = glyph(2, 72.0, 680.0, "Demonstration", false);
+        first.font_name = "NimbusRomNo9L-Medi".into();
+        let mut second = glyph(3, 300.0, 680.0, "Location (text body)", false);
+        second.font_name = "NimbusRomNo9L-Medi".into();
+        let glyphs = [caption, first, second];
+        let line = |index: usize, y: f32, width: f32| VisualLine {
+            glyphs: vec![&glyphs[index]],
+            text: glyphs[index].unicode.clone(),
+            page: 0,
+            y,
+            left: glyphs[index].matrix[4],
+            right: glyphs[index].matrix[4] + width,
+            size: 12.0,
+            font: glyphs[index].font_name.clone(),
+            toc: false,
+            sole_on_baseline: true,
+        };
+        let lines = vec![
+            line(0, 700.0, 180.0),
+            line(1, 680.0, 90.0),
+            line(2, 680.0, 120.0),
+        ];
+        let mut kept = vec![(2, "table".into()), (3, "table".into())];
+        release_table_group_labels(&lines, &mut kept);
+        assert_eq!(kept.len(), 2, "header cells were released: {kept:?}");
+    }
+
+    #[test]
+    fn a_cell_wider_than_the_caption_stays_between_the_rules() {
+        let caption = glyph(1, 200.0, 760.0, "Table 3. Demonstrations.", false);
+        let middle = glyph(2, 240.0, 718.0, "Influence the result", false);
+        let low = glyph(3, 240.0, 700.0, "T5 injection", false);
+        let edge = glyph(4, 47.0, 718.0, "Exp. 1", false);
+        let below = glyph(5, 47.0, 600.0, "Body text after the table.", false);
+        let glyphs = [caption, middle, low, edge, below];
+        let line = |index: usize, y: f32, width: f32| VisualLine {
+            glyphs: vec![&glyphs[index]],
+            text: glyphs[index].unicode.clone(),
+            page: 0,
+            y,
+            left: glyphs[index].matrix[4],
+            right: glyphs[index].matrix[4] + width,
+            size: 9.0,
+            font: glyphs[index].font_name.clone(),
+            toc: false,
+            sole_on_baseline: false,
+        };
+        let lines = vec![
+            line(0, 760.0, 200.0),
+            line(1, 718.0, 80.0),
+            line(2, 700.0, 80.0),
+            line(3, 718.0, 30.0),
+            line(4, 600.0, 300.0),
+        ];
+        let rule = |y: f32| PaintedRegion {
+            page_index: 0,
+            bbox: [37.0, y, 557.0, y],
+            kind: "path".into(),
+        };
+        let regions = vec![rule(745.0), rule(729.0), rule(680.0)];
+        let kept = vec![(2, "table".to_string()), (3, "table".to_string())];
+        let added = ruled_table_rows(&lines, &kept, &regions);
+        let ids: Vec<_> = added.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![4], "{added:?}");
     }
 
     #[test]
