@@ -1845,6 +1845,7 @@ fn assemble(
     // sentence, so those words stay in the paragraph. The listing itself is
     // not translated.
     kept.extend(listing_glyphs(&lines));
+    kept.extend(algorithm_glyphs(&lines));
     kept.extend(keep_low_prose_math(&lines));
     let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     if !kept_ids.is_empty() {
@@ -3894,6 +3895,118 @@ fn table_note_marker(line: &VisualLine<'_>) -> bool {
     let symbol = ch.is_ascii_lowercase() || matches!(ch, '*' | '†' | '‡' | '§' | '¶');
     let raised = first.matrix[5] - second.matrix[5] > line.size * 0.15;
     symbol && raised && second.matrix[4] > first.matrix[4]
+}
+
+/// `3: for H ∈ P in parallel do` is a numbered step of an algorithm block.
+/// `Require:` and `Data:` open one. algorithm2e numbers without the colon
+/// (`1 while c ≥ 0 do`); such a step only counts next to an opening key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlgorithmLine {
+    Key,
+    Numbered,
+    Plain,
+}
+
+fn algorithm_step(text: &str) -> Option<AlgorithmLine> {
+    let text = text.trim_start();
+    for key in [
+        "Require:", "Ensure:", "Input:", "Output:", "Data:", "Result:",
+    ] {
+        if text.starts_with(key) {
+            return Some(AlgorithmLine::Key);
+        }
+    }
+    let digits = text.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if !(1..=3).contains(&digits) {
+        return None;
+    }
+    let rest = &text[digits..];
+    if rest.starts_with(':') && rest[1..].chars().next().is_none_or(char::is_whitespace) {
+        return Some(AlgorithmLine::Numbered);
+    }
+    if rest.trim().is_empty() {
+        return Some(AlgorithmLine::Plain);
+    }
+    let word = rest.trim_start();
+    (rest.starts_with(char::is_whitespace)
+        && word
+            .chars()
+            .next()
+            .is_some_and(|ch| !ch.is_uppercase() && !ch.is_ascii_digit()))
+    .then_some(AlgorithmLine::Plain)
+}
+
+/// An algorithm block stays as drawn: code, not prose. Its numbered steps
+/// and the wraps between them are kept; the `Algorithm 1 …` caption is not.
+fn algorithm_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
+    struct Block {
+        page: u32,
+        top: f32,
+        bottom: f32,
+        left: f32,
+        right: f32,
+        size: f32,
+        numbered: usize,
+        keys: usize,
+        plain: usize,
+        lines: usize,
+    }
+    let mut steps: Vec<(&VisualLine<'_>, AlgorithmLine)> = lines
+        .iter()
+        .filter_map(|line| algorithm_step(&line.text).map(|kind| (line, kind)))
+        .collect();
+    steps.sort_by(|a, b| a.0.page.cmp(&b.0.page).then(b.0.y.total_cmp(&a.0.y)));
+    let mut blocks: Vec<Block> = Vec::new();
+    for (line, kind) in steps {
+        let near = blocks.iter_mut().rev().find(|block| {
+            block.page == line.page
+                && line.left < block.right + 2.0 * block.size
+                && line.right > block.left - 2.0 * block.size
+                && block.bottom - line.y <= 4.0 * block.size.max(line.size)
+        });
+        match near {
+            Some(block) => {
+                block.bottom = block.bottom.min(line.y);
+                block.left = block.left.min(line.left);
+                block.right = block.right.max(line.right);
+                block.numbered += usize::from(kind == AlgorithmLine::Numbered);
+                block.keys += usize::from(kind == AlgorithmLine::Key);
+                block.plain += usize::from(kind == AlgorithmLine::Plain);
+                block.lines += 1;
+            }
+            None => blocks.push(Block {
+                page: line.page,
+                top: line.y,
+                bottom: line.y,
+                left: line.left,
+                right: line.right,
+                size: line.size,
+                numbered: usize::from(kind == AlgorithmLine::Numbered),
+                keys: usize::from(kind == AlgorithmLine::Key),
+                plain: usize::from(kind == AlgorithmLine::Plain),
+                lines: 1,
+            }),
+        }
+    }
+    let mut out = Vec::new();
+    for block in blocks.iter().filter(|block| {
+        block.lines >= 3 && (block.numbered >= 2 || (block.keys >= 1 && block.plain >= 2))
+    }) {
+        for line in lines {
+            let inside = line.page == block.page
+                && line.y <= block.top + block.size * 0.5
+                && line.y >= block.bottom - block.size * 0.5
+                && line.left >= block.left - block.size
+                && line.left < block.right;
+            if inside && !line.text.trim_start().starts_with("Algorithm") {
+                if std::env::var_os("RPT_ALG_DEBUG").is_some() {
+                    eprintln!("ALG p{} {}", line.page, line.text);
+                }
+                out.extend(line.glyphs.iter().map(|g| (g.id, "algorithm".to_string())));
+            }
+        }
+    }
+    out
 }
 
 fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
@@ -8120,6 +8233,129 @@ mod tests {
         assert!(
             texts.iter().all(|text| !text.contains("Visible")),
             "the table note left the grid: {texts:?}"
+        );
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.contains("ordinary body"))
+                .count(),
+            2,
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_algorithm_block_stays_original_and_its_caption_is_translated() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let glyphs = vec![
+            wide(0, 72.0, 740.0, body, 360.0, 10.0),
+            wide(
+                1,
+                72.0,
+                700.0,
+                "Algorithm 1 The proposal side of the search.",
+                200.0,
+                10.0,
+            ),
+            wide(
+                2,
+                72.0,
+                688.0,
+                "Require: the history of earlier rounds and a budget",
+                220.0,
+                10.0,
+            ),
+            wide(
+                3,
+                72.0,
+                676.0,
+                "1: for each round of the search do",
+                160.0,
+                10.0,
+            ),
+            wide(
+                4,
+                84.0,
+                664.0,
+                "2: draft a pool of atomic edits to the harness",
+                200.0,
+                10.0,
+            ),
+            wide(5, 72.0, 652.0, "3: end for", 50.0, 10.0),
+            wide(6, 72.0, 600.0, body, 360.0, 10.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts.contains(&"Algorithm 1 The proposal side of the search."),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains("Require") && !text.contains("draft")),
+            "an algorithm step was translated: {texts:?}"
+        );
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.contains("ordinary body"))
+                .count(),
+            2,
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_algorithm2e_block_with_gutter_numbers_stays_original() {
+        let body =
+            "This sentence is long enough to count as ordinary body text in the column today.";
+        let glyphs = vec![
+            wide(0, 72.0, 740.0, body, 360.0, 10.0),
+            wide(
+                1,
+                80.0,
+                700.0,
+                "Data: a weighted graph with edge costs",
+                180.0,
+                10.0,
+            ),
+            wide(
+                2,
+                80.0,
+                688.0,
+                "Result: the clusters of the graph",
+                150.0,
+                10.0,
+            ),
+            wide(3, 72.0, 676.0, "1", 4.0, 10.0),
+            wide(
+                4,
+                96.0,
+                676.0,
+                "while the best edge is attractive do",
+                170.0,
+                10.0,
+            ),
+            wide(5, 72.0, 664.0, "2", 4.0, 10.0),
+            wide(
+                6,
+                96.0,
+                664.0,
+                "contract the edge and update the costs",
+                175.0,
+                10.0,
+            ),
+            wide(7, 72.0, 600.0, body, 360.0, 10.0),
+        ];
+        let seg = segment_with(&glyphs, &SegmentFlags::default());
+        let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains("graph") && !text.contains("contract")),
+            "an algorithm step was translated: {texts:?}"
         );
         assert_eq!(
             texts

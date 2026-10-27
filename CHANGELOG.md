@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- An algorithm block (`Require:`/`Data:` and its numbered steps, `algorithmic` or algorithm2e style) stays original; only its `Algorithm 1 …` caption is translated. `RPT_ALG_DEBUG` prints the kept lines.
+
 - A table's own notes (`ᵃ Visible if …`, `† …`) stay original with the grid. The paragraph interrupted by the table now continues past the notes instead of ending at them.
 
 - Table column headers stay glyph for glyph with the rest of the grid. A translated header row no longer misaligns with its cells.
