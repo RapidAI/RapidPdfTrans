@@ -2905,6 +2905,9 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     absorb_math_accents(glyphs, body, &mut groups);
     fuse_script_groups(glyphs, body, &mut groups);
     union_shared_members(&mut groups);
+    // Every caller sees the same holes. The unholed-math check used to see
+    // `g_t(` without its `ℓ)` and kept the sentence in English.
+    let mut groups = close_open_brackets(glyphs, groups, body);
     sort_placeholder_groups(glyphs, body, &mut groups);
     groups
 }
@@ -3638,6 +3641,107 @@ fn citation_mark_text(text: &str) -> bool {
                 || is_footnote_symbol(text)
                 || matches!(ch, '+' | '-' | '*' | '†' | '‡' | '\u{2212}' | '\u{207A}')
         })
+}
+
+/// `𝑤𝑛𝜈𝑡(` was one hole and `𝐻′)` stayed in the sentence, so the paragraph
+/// read as inline math the holes missed and stayed English. A hole that
+/// opens a bracket takes the glyphs up to its closer on the same baseline.
+fn close_open_brackets(glyphs: &[&Glyph], mut groups: Vec<Vec<u32>>, body: f32) -> Vec<Vec<u32>> {
+    let mut owner: HashMap<u32, usize> = HashMap::new();
+    for (index, group) in groups.iter().enumerate() {
+        for id in group {
+            owner.insert(*id, index);
+        }
+    }
+    let mut absorbed: HashSet<usize> = HashSet::new();
+    let mut taken: HashSet<u32> = HashSet::new();
+    for index in 0..groups.len() {
+        if absorbed.contains(&index) {
+            continue;
+        }
+        let members: Vec<&Glyph> = glyphs
+            .iter()
+            .copied()
+            .filter(|glyph| groups[index].contains(&glyph.id))
+            .collect();
+        let depth: i32 = members
+            .iter()
+            .map(|glyph| {
+                glyph.unicode.chars().filter(|ch| *ch == '(').count() as i32
+                    - glyph.unicode.chars().filter(|ch| *ch == ')').count() as i32
+            })
+            .sum();
+        if depth <= 0 {
+            continue;
+        }
+        let Some(last) = members
+            .iter()
+            .copied()
+            .max_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]))
+        else {
+            continue;
+        };
+        let mut line: Vec<&Glyph> = glyphs
+            .iter()
+            .copied()
+            .filter(|glyph| {
+                glyph.page_index == last.page_index
+                    && glyph.matrix[4] > last.matrix[4]
+                    && glyph.matrix[4] < last.matrix[4] + body * 4.0
+                    && (glyph.matrix[5] - last.matrix[5]).abs() <= body * 0.5
+                    && !groups[index].contains(&glyph.id)
+            })
+            .collect();
+        line.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+        let mut open = depth;
+        let mut add = Vec::new();
+        // `ν_t(` then `𝐻′` as its own hole, then `)`. The inner hole joins
+        // the bracket so the closer is not left in the sentence.
+        let mut inner: Vec<usize> = Vec::new();
+        for glyph in line {
+            if taken.contains(&glyph.id) {
+                break;
+            }
+            if let Some(&other) = owner.get(&glyph.id) {
+                if other == index || absorbed.contains(&other) {
+                    break;
+                }
+                if !inner.contains(&other) {
+                    inner.push(other);
+                }
+            } else {
+                let text = glyph.unicode.trim();
+                // Only math: a word inside the brackets is prose.
+                if text.chars().any(|ch| ch.is_ascii_alphabetic())
+                    && !is_math_font(&glyph.font_name)
+                {
+                    break;
+                }
+                add.push(glyph.id);
+            }
+            let text = glyph.unicode.trim();
+            open += text.chars().filter(|ch| *ch == '(').count() as i32;
+            open -= text.chars().filter(|ch| *ch == ')').count() as i32;
+            if open <= 0 {
+                break;
+            }
+        }
+        if open <= 0 {
+            taken.extend(add.iter().copied());
+            let mut extra = add;
+            for other in inner {
+                extra.extend(groups[other].iter().copied());
+                absorbed.insert(other);
+            }
+            groups[index].extend(extra);
+        }
+    }
+    groups
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !absorbed.contains(index))
+        .map(|(_, group)| group)
+        .collect()
 }
 
 /// `µ(AG)` and `ν(det A)` stay one hole. A lone italic `k` stays in the sentence.
@@ -39411,6 +39515,34 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             note_position("gap inside a line 3.0pt in \"a\" at (1.5, -2.0)"),
             Some((1.5, -2.0))
         );
+    }
+
+    #[test]
+    fn a_hole_that_opens_a_bracket_takes_its_closer() {
+        let mut glyphs = Vec::new();
+        for (id, x, text) in [
+            (1u32, 100.0f32, "ν"),
+            (2, 105.0, "("),
+            (3, 110.0, "𝐻"),
+            (4, 116.0, ")"),
+            (5, 122.0, "."),
+            (6, 130.0, "D"),
+        ] {
+            let mut glyph = ink_glyph(id, x, 400.0, 10.0, text);
+            if matches!(text, "ν" | "𝐻") {
+                glyph.font_name = "XCharterMathMI".into();
+            }
+            glyphs.push(glyph);
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let groups = close_open_brackets(&refs, vec![vec![1, 2]], 10.0);
+        assert_eq!(groups, vec![vec![1, 2, 3, 4]]);
+        // No closer within reach: the hole stays as it was.
+        let groups = close_open_brackets(&refs[..3], vec![vec![1, 2]], 10.0);
+        assert_eq!(groups, vec![vec![1, 2]]);
+        // `𝐻′` is its own hole inside the bracket. It joins the opener.
+        let groups = close_open_brackets(&refs, vec![vec![1, 2], vec![3]], 10.0);
+        assert_eq!(groups, vec![vec![1, 2, 4, 3]]);
     }
 
     #[test]
