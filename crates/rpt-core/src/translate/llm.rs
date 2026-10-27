@@ -379,7 +379,9 @@ fn request_retryable(err: &Error) -> bool {
 
 fn http_status_retryable(err: &Error) -> bool {
     let msg = err.to_string();
-    ["500", "502", "503", "429"]
+    // The pooled gateway passes an upstream hiccup through as 400; the same
+    // batch succeeds on the next call (guide p1 lost eight paragraphs).
+    ["400", "500", "502", "503", "504", "429"]
         .iter()
         .any(|code| msg.contains(&format!("HTTP status {code}")))
         || connection_dropped(&msg)
@@ -469,6 +471,9 @@ mod tests {
         )));
         assert!(!request_retryable(&Error::Translate(
             "LLM HTTP status 401".into()
+        )));
+        assert!(request_retryable(&Error::Translate(
+            "LLM HTTP status 400".into()
         )));
     }
 

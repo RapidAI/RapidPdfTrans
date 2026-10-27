@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- A gateway HTTP 400 or 504 is retried like a 5xx; the pooled gateway returns 400 for transient upstream failures.
 - A widely justified narrow-column line (`All   three   attacks …`) stays one segment instead of splitting into word cells.
 - Subscript words a few points under the line (`σ²_ctx … σ²_proc`) join that line instead of forming a baseline that stacked two Chinese lines (guide p4 overlap fallback).
 - A `”` drawn as its own slice before `。` goes up with the period; the words start at the quote's place.
