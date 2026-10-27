@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A bibliography whose entries put initials first (`T. Chen, S. Lu, K. Zhao, …`) or start with an organisation (`Anthropic. Introducing claude opus 4.8, 2026a. URL …`) is kept in the source again. Neither form was recognised as an entry, so the `References` heading of arXiv 2609.24972 was followed by a translated, scrambled bibliography.
+- A paragraph whose Chinese would be painted over another drawn line is put back in its source glyphs, and the page is laid out again (up to three rounds). Each such paragraph gets an `overlap fallback: kept the source of …` diagnostic. On arXiv 2610.29747 page 1 the merged email footnote and the right-column paragraph no longer overprint each other.
+
 - A paragraph that is itself an LLM prompt (an appendix listing prompts or rubrics) no longer makes the model run on. The system prompt says segment text is content to translate, not instructions to follow. Prompt-like paragraphs go in batches of at most two. Each request caps the reply at about three times its source length (512 to 4096 tokens, unless `max_tokens` is set), and a reply cut at that cap (`finish_reason: length`) splits the batch and retries it smaller instead of waiting out the timeout.
 
 - A batch reply that numbers its items 0..n (or 1..n) instead of echoing the segment ids is mapped back in order. The gateway model does this often; each such reply used to count as an omitted segment and split the batch down to single calls. On the first three pages of arXiv 2610.30485 this cut model calls from 25 to 17.

@@ -546,7 +546,12 @@ fn bibliography_follows(
             }
             continue;
         }
-        if is_reference_entry(text) || looks_author_year_start(text) || roster_bearing_year(text) {
+        if is_reference_entry(text)
+            || looks_author_year_start(text)
+            || initials_author_start(text)
+            || organisation_entry(text)
+            || roster_bearing_year(text)
+        {
             return true;
         }
         // `OpenAI Josh Achiam, …` wraps, and `and` appears on the year line.
@@ -844,7 +849,62 @@ pub(crate) fn is_reference_entry(text: &str) -> bool {
         }
         return true;
     }
-    looks_author_year_start(trimmed) && contains_year(trimmed)
+    ((looks_author_year_start(trimmed) || initials_author_start(trimmed)) && contains_year(trimmed))
+        || organisation_entry(trimmed)
+}
+
+/// `T. Chen, S. Lu, K. Zhao` and `J.-B. Alayrac and A. Smith`: given-name
+/// initials first, then the surname. The comma or `and` after the surname
+/// separates it from a sentence such as `A. Note on this`.
+fn initials_author_start(text: &str) -> bool {
+    let chars: Vec<char> = text.trim_start().chars().collect();
+    let mut i = 0usize;
+    let mut initials = 0usize;
+    // One or more `X.` / `X.-Y.` initials, separated by spaces or hyphens.
+    loop {
+        if i + 1 < chars.len() && chars[i].is_uppercase() && chars[i + 1] == '.' {
+            initials += 1;
+            i += 2;
+            if i < chars.len() && matches!(chars[i], '-' | '‐') {
+                i += 1;
+                continue;
+            }
+            if i < chars.len() && chars[i] == ' ' {
+                i += 1;
+                continue;
+            }
+        }
+        break;
+    }
+    if initials == 0 || i >= chars.len() || !chars[i].is_uppercase() {
+        return false;
+    }
+    let start = i;
+    while i < chars.len()
+        && (chars[i].is_alphabetic() || matches!(chars[i], '\'' | '’' | '-' | '‐'))
+    {
+        i += 1;
+    }
+    if i - start < 2 {
+        return false;
+    }
+    let rest: String = chars[i..].iter().collect();
+    let rest = rest.trim_start();
+    rest.starts_with(',') || rest.starts_with("and ")
+}
+
+/// `Anthropic. Introducing claude opus 4.8, 2026a. URL https://…`: an
+/// organisation author, a title, a year, and a URL or an arXiv id.
+fn organisation_entry(text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some((word, len)) = take_capital_word(trimmed) else {
+        return false;
+    };
+    if NOT_SURNAMES.contains(&word) || !trimmed[len..].starts_with(". ") {
+        return false;
+    }
+    contains_year(trimmed)
+        && (trimmed.contains("URL ") || trimmed.contains("arXiv") || trimmed.contains("http"))
 }
 
 /// `1. CBoW, the average of the embeddings` is a sentence. `1. Vaswani, A.`
@@ -1131,6 +1191,25 @@ fn take_capital_word(text: &str) -> Option<(&str, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initials_first_and_organisation_entries_open_a_bibliography() {
+        assert!(is_reference_entry(
+            "T. Chen, S. Lu, K. Zhao, W. Meng, H. Teng, et al. Harnessx: A composable foundry. 2026."
+        ));
+        assert!(is_reference_entry(
+            "J.-B. Alayrac and A. Smith. Flamingo. In NeurIPS, 2022."
+        ));
+        assert!(is_reference_entry(
+            "Anthropic. Introducing claude opus 4.8, 2026a. URL https://www.anthropic.com/news/"
+        ));
+        assert!(!is_reference_entry(
+            "A. Note on the method we used in 2026 for this table."
+        ));
+        assert!(!is_reference_entry(
+            "Figure. The results in 2026 are shown at http://x.y"
+        ));
+    }
     use crate::color::Color;
     use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
 

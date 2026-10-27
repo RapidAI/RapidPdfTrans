@@ -120,6 +120,90 @@ pub fn rewrite_translation(
     report: &TranslateReport,
     opts: &RewriteOptions,
 ) -> Result<()> {
+    // Layout is deterministic, so a paragraph whose Chinese collides with
+    // another drawn line collides every time. Such a paragraph is put back in
+    // its source glyphs and the page is laid out again, so the saved PDF
+    // never paints one translation over another.
+    let pristine_doc = doc.clone();
+    let pristine_extraction = extraction.clone();
+    let mut current = report.clone();
+    let mut fallen_back: Vec<(u32, String)> = Vec::new();
+    for round in 0..4 {
+        let colliding = rewrite_translation_once(doc, extraction, &current, opts)?;
+        let culprits = fallback_segments(&current, &colliding);
+        if culprits.is_empty() || round == 3 {
+            break;
+        }
+        for index in culprits {
+            let segment = &mut current.segments[index];
+            fallen_back.push((segment.page_index, segment.source.clone()));
+            segment.translated = segment.source.clone();
+        }
+        *doc = pristine_doc.clone();
+        *extraction = pristine_extraction.clone();
+    }
+    for (page, source) in fallen_back {
+        let head: String = source.chars().take(60).collect();
+        extraction.diagnostics.push(crate::glyph::Diagnostic {
+            page_index: Some(page),
+            message: format!("overlap fallback: kept the source of {head:?}"),
+        });
+    }
+    Ok(())
+}
+
+/// Segments that own a glyph of a colliding drawn line. A segment whose
+/// translation equals its source is already original and is skipped.
+fn fallback_segments(report: &TranslateReport, colliding: &HashSet<u32>) -> Vec<usize> {
+    if colliding.is_empty() {
+        return Vec::new();
+    }
+    report
+        .segments
+        .iter()
+        .enumerate()
+        .filter(|(_, segment)| {
+            segment.translated != segment.source
+                && segment.glyph_ids.iter().any(|id| colliding.contains(id))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Source glyph ids of drawn lines that overlap another drawn line by more
+/// than kerning slop. Single-character pairs (`且` over `∈`) are left to the
+/// audit, which reports them.
+fn colliding_drawn_ids(drawn: &[Drawn]) -> HashSet<u32> {
+    let mut ids = HashSet::new();
+    for (index, line) in drawn.iter().enumerate() {
+        if line.text.trim().chars().count() < 2 {
+            continue;
+        }
+        let (left, right) = drawn_ink_span(line);
+        for other in drawn.iter().skip(index + 1) {
+            if other.page != line.page || other.text.trim().chars().count() < 2 {
+                continue;
+            }
+            let size = line.size.min(other.size).max(1.0);
+            if (line.y - other.y).abs() > size * 0.6 {
+                continue;
+            }
+            let (oleft, oright) = drawn_ink_span(other);
+            if right.min(oright) - left.max(oleft) > size * 0.5 {
+                ids.extend(line.glyph_ids.iter().copied());
+                ids.extend(other.glyph_ids.iter().copied());
+            }
+        }
+    }
+    ids
+}
+
+fn rewrite_translation_once(
+    doc: &mut Document,
+    extraction: &mut Extraction,
+    report: &TranslateReport,
+    opts: &RewriteOptions,
+) -> Result<HashSet<u32>> {
     let cjk_family = CjkStyle::resolve(opts.cjk_style.as_deref()).map_err(Error::Options)?;
     let compose = match opts.mode {
         OutputMode::Bilingual(
@@ -1163,7 +1247,7 @@ pub fn rewrite_translation(
         });
     }
     record_unfitted_line_warnings(extraction);
-    Ok(())
+    Ok(colliding_drawn_ids(&drawn))
 }
 
 /// A short line whose translation did not fit is kept as printed. The rest of
@@ -29316,6 +29400,58 @@ mod tests {
         TranslatedSegment, Translator,
     };
     use lopdf::dictionary;
+
+    fn fallback_line(page: u32, x: f32, y: f32, text: &str, ids: Vec<u32>) -> Drawn {
+        let count = text.chars().count();
+        Drawn {
+            page,
+            x,
+            y,
+            size: 10.0,
+            color: Color::default(),
+            cids: Vec::new(),
+            resource: String::new(),
+            skew: 0.0,
+            text: text.to_string(),
+            glyph_ids: ids,
+            widths: vec![10.0; count],
+            gaps: vec![0.0; count.saturating_sub(1)],
+            supers: vec![false; count],
+            sup_scale: 0.0,
+            sup_rise: 0.0,
+        }
+    }
+
+    #[test]
+    fn overlapping_paragraphs_fall_back_to_their_source() {
+        let drawn = vec![
+            fallback_line(0, 40.0, 256.0, "邮件地址本文有三个贡献", vec![1, 2]),
+            fallback_line(0, 60.0, 256.5, "五技术分类法按读者", vec![3]),
+            fallback_line(0, 300.0, 256.0, "右栏正文不相交", vec![4]),
+            fallback_line(0, 40.0, 240.0, "下一行", vec![5]),
+        ];
+        let colliding = colliding_drawn_ids(&drawn);
+        assert_eq!(colliding, HashSet::from([1, 2, 3]));
+        let segment = |id: u32, ids: Vec<u32>, translated: &str| TranslatedSegment {
+            id,
+            page_index: 0,
+            glyph_ids: ids,
+            source: format!("source {id}"),
+            translated: translated.to_string(),
+        };
+        let report = TranslateReport {
+            segments: vec![
+                segment(0, vec![1, 2], "中文"),
+                segment(1, vec![3], "中文"),
+                segment(2, vec![4, 5], "中文"),
+                segment(3, vec![9], "source 3"),
+            ],
+            calls: 0,
+            cache_hits: 0,
+        };
+        assert_eq!(fallback_segments(&report, &colliding), vec![0, 1]);
+        assert!(fallback_segments(&report, &HashSet::new()).is_empty());
+    }
 
     #[test]
     fn a_footnote_url_is_not_an_unfinished_paragraph() {
