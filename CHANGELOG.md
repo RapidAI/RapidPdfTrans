@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Unchanged contents rows (`B Baseline Methods ……… 18`, `A.1 Terminal-Bench 2.1`) keep their source glyphs: they are no longer redrawn as a body line or chained as a wrapped prompt, which dropped or added bold and pulled the page number to the title.
 - An overflow check measured the column from the first slice of each margin line, so a paragraph split around inline math looked narrow and its in-column slices were parked on the next baseline over other text.
 - The tail after `⟦0⟧ = ⟦1⟧` is no longer pulled back over the second formula when closing the gap after the first.
 

@@ -17372,12 +17372,18 @@ fn adopt_unchanged_body_lines(
         .map(|(id, _)| *id)
         .collect();
     ids.sort_unstable();
+    // `B Baseline Methods ……… 18` is a contents row. Joining it into one
+    // body-face run drops its bold and pulls the page number to the title.
+    let contents = contents_page_indexes(extraction);
     let mut lines: Vec<Vec<usize>> = Vec::new();
     for id in ids {
         let Some(&index) = by_id.get(&id) else {
             continue;
         };
         let glyph = &extraction.glyphs[index];
+        if contents.contains(&glyph.page_index) {
+            continue;
+        }
         let y = glyph.matrix[5];
         if let Some(line) = lines.iter_mut().find(|line| {
             let other = &extraction.glyphs[line[0]];
@@ -20390,8 +20396,14 @@ fn reflow_prompt_continuations(
         }
         groups.entry((line.page, key)).or_default().push(index);
     }
+    // A contents page (`A 评估 ……… 17` over `A.1 Terminal-Bench 2.1`)
+    // is a stack of rows, not one wrapped prompt.
+    let contents = contents_page_indexes(extraction);
     let mut runs = Vec::new();
     for ((page, ids), indices) in groups {
+        if contents.contains(&page) {
+            continue;
+        }
         let Some(run) = prompt_run(drawn, &indices, page, &ids, extraction, by_id) else {
             continue;
         };
@@ -39254,6 +39266,77 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             "left line moved to {:.1}",
             aside.x
         );
+    }
+
+    #[test]
+    fn an_unchanged_contents_row_is_not_redrawn_as_body() {
+        let row = spanned(
+            ink_glyph(1, 72.0, 500.0, 11.0, "Baseline Methods for agents"),
+            0,
+            27,
+        );
+        let mut glyphs = vec![row];
+        for (id, y) in [(2u32, 520.0f32), (3, 540.0), (4, 560.0)] {
+            let mut mark = spanned(
+                ink_glyph(id, 500.0, y, 11.0, "1"),
+                40 + id as usize,
+                41 + id as usize,
+            );
+            mark.disposition = Disposition::KeptOriginal {
+                reason: "toc".into(),
+            };
+            glyphs.push(mark);
+        }
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let font = uniform_font("Baseline Methods for agents中");
+        let by_id = glyph_index(&extraction.glyphs);
+        let owners = operator_owners(&extraction.glyphs);
+        let mut drawn = vec![Drawn {
+            page: 0,
+            x: 108.0,
+            y: 700.0,
+            size: 11.0,
+            color: Color::black(),
+            cids: cids_of("中", &font),
+            resource: "RPT".into(),
+            skew: 0.0,
+            widths: char_widths("中", 11.0, &font),
+            gaps: Vec::new(),
+            text: "中".into(),
+            supers: Vec::new(),
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+            glyph_ids: vec![9],
+        }];
+        let mut succeeded = HashSet::new();
+        let mut keep = HashMap::from([(1, "unchanged".into())]);
+        super::adopt_unchanged_body_lines(
+            &mut drawn,
+            &mut succeeded,
+            &mut keep,
+            &extraction,
+            &by_id,
+            &[("RPT".into(), font)],
+            &owners,
+        );
+        assert_eq!(
+            drawn.len(),
+            1,
+            "{:?}",
+            drawn.iter().map(|line| &line.text).collect::<Vec<_>>()
+        );
+        assert!(keep.contains_key(&1));
     }
 
     #[test]
