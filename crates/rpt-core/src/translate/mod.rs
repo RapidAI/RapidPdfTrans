@@ -696,17 +696,26 @@ pub fn translate_extraction(
     // once more, alone. References, URLs, and formulas were filled in earlier
     // and are not in `batches`, so this pass does not translate them.
     let attempted: HashSet<usize> = batches.iter().flatten().copied().collect();
-    retry_english_leftovers(
-        &segments,
-        &mut translated,
-        &mut cache,
-        &attempted,
-        opts,
-        translator,
-        jobs,
-        &mut calls,
-        &progress,
-    );
+    // A gateway that stalls on connect fails a whole batch and then its solo
+    // retries, so the run kept whole pages in English. A second round asks
+    // what is still English; it stops when the first round had nothing to send.
+    for _ in 0..2 {
+        let before = calls;
+        let improved = retry_english_leftovers(
+            &segments,
+            &mut translated,
+            &mut cache,
+            &attempted,
+            opts,
+            translator,
+            jobs,
+            &mut calls,
+            &progress,
+        );
+        if improved == 0 && calls == before {
+            break;
+        }
+    }
     progress.emit_done();
 
     finish_report(
@@ -1437,7 +1446,7 @@ fn retry_english_leftovers(
     jobs: usize,
     calls: &mut usize,
     progress: &progress::Progress,
-) {
+) -> usize {
     let pending: Vec<usize> = translated
         .iter()
         .enumerate()
@@ -1450,7 +1459,7 @@ fn retry_english_leftovers(
         .map(|(index, _)| index)
         .collect();
     if pending.is_empty() {
-        return;
+        return 0;
     }
     let improved = if jobs <= 1 || pending.len() == 1 {
         let mut improved = Vec::new();
@@ -1502,6 +1511,7 @@ fn retry_english_leftovers(
         *calls += call_count.load(std::sync::atomic::Ordering::SeqCst);
         improved.into_inner().unwrap_or_default()
     };
+    let count = improved.len();
     for (index, text) in improved {
         let source = segments[index].text.clone();
         for (slot, segment) in translated.iter_mut().zip(segments.iter()) {
@@ -1511,6 +1521,7 @@ fn retry_english_leftovers(
         }
         cache.insert(source, text);
     }
+    count
 }
 
 fn translate_batch(
@@ -7313,6 +7324,45 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
         }
+    }
+
+    /// The batch echoes, the first retry round fails, the second answers.
+    struct RetryFailsOnce(std::sync::atomic::AtomicUsize);
+    impl Translator for RetryFailsOnce {
+        fn complete(&self, system: &str, user: &str) -> Result<String> {
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let segs = payload["segments"].as_array().unwrap();
+            let retry = system.contains("copied the English");
+            if retry && self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err(Error::Options("gateway stalled on connect".into()));
+            }
+            let translations: Vec<Value> = segs
+                .iter()
+                .map(|seg| {
+                    let text = if retry {
+                        "这些项目面向较新的 Python 版本，并使用标准工具。"
+                    } else {
+                        seg["text"].as_str().unwrap()
+                    };
+                    serde_json::json!({"id": seg["id"], "text": text})
+                })
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+    }
+
+    #[test]
+    fn an_english_paragraph_is_asked_again_after_a_failed_retry() {
+        let source = "The projects target modern versions of Python and use standard tools such as pip and virtual environments for every chapter.";
+        let mut ex = extraction_from_lines(&[source]);
+        let translator = RetryFailsOnce(std::sync::atomic::AtomicUsize::new(0));
+        let report =
+            translate_extraction(&mut ex, &TranslateOptions::default(), &translator).unwrap();
+        assert!(
+            report.segments[0].translated.chars().any(is_cjk_char),
+            "{}",
+            report.segments[0].translated
+        );
     }
 
     #[test]
