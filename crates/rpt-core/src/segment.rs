@@ -2242,8 +2242,9 @@ fn toc_leader_suffix(glyphs: &[&Glyph]) -> Vec<u32> {
         break;
     }
     // Dots alone are an ellipsis (`tion.......`). A contents row also has
-    // its page number on this edge.
-    if dot_chars < 4 || !page_ok {
+    // its page number on this edge, or spaced leaders (`. . . .`) whose
+    // number the column split put on its own line.
+    if dot_chars < 4 || !(page_ok || spaced_leaders(&ordered[dots_start..dots_end])) {
         return Vec::new();
     }
     let end = page_end;
@@ -2252,6 +2253,28 @@ fn toc_leader_suffix(glyphs: &[&Glyph]) -> Vec<u32> {
         .filter(|glyph| !glyph.unicode.trim().is_empty())
         .map(|glyph| glyph.id)
         .collect()
+}
+
+/// At least eight dots set an em apart: TeX's `\\dotfill` leaders. An
+/// ellipsis packs its dots together.
+fn spaced_leaders(glyphs: &[&Glyph]) -> bool {
+    let dots: Vec<&&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.unicode.trim().chars().all(is_leader_dot) && !glyph.unicode.trim().is_empty()
+        })
+        .collect();
+    if dots.len() < 8 {
+        return false;
+    }
+    let first = glyph_left(dots[0]);
+    let last = glyph_left(dots[dots.len() - 1]);
+    let step = (last - first) / (dots.len() - 1) as f32;
+    let width = dots
+        .iter()
+        .map(|glyph| (glyph.bbox[2] - glyph.bbox[0]).abs())
+        .fold(0.0f32, f32::max);
+    step > width * 2.0
 }
 
 fn is_page_prefix(text: &str) -> bool {
@@ -13377,6 +13400,31 @@ mod tests {
             .collect();
         assert_eq!(texts.len(), 1, "{texts:?}");
         assert!(texts[0].contains("Notation") && texts[0].contains("periodic"));
+    }
+
+    #[test]
+    fn spaced_leaders_without_a_page_number_stay_off_the_title() {
+        let mut glyphs = vec![block(
+            0,
+            90.0,
+            400.0,
+            150.0,
+            10.0,
+            "A.1 Terminal benchmark results",
+        )];
+        for index in 0..20u32 {
+            glyphs.push(block(
+                1 + index,
+                250.0 + 8.0 * index as f32,
+                400.0,
+                2.5,
+                10.0,
+                ".",
+            ));
+        }
+        let seg = segment_glyphs(&glyphs);
+        let texts: Vec<_> = seg.iter().map(|item| item.text.trim()).collect();
+        assert_eq!(texts, ["A.1 Terminal benchmark results"], "{texts:?}");
     }
 
     #[test]
