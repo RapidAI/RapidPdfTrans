@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- A widely justified narrow-column line (`All   three   attacks …`) stays one segment instead of splitting into word cells.
+- Subscript words a few points under the line (`σ²_ctx … σ²_proc`) join that line instead of forming a baseline that stacked two Chinese lines (guide p4 overlap fallback).
+- A `”` drawn as its own slice before `。` goes up with the period; the words start at the quote's place.
 - URLs, file names, reference author runs, letter-spaced code and math alphanumerics are kept as-is and no longer retried; coverage counts them as intentional (`url`).
 - Coverage records the page of each leftover English body (`english_body_pages`).
 - Column stitching checks a snapshot of column heads, so a paragraph ending in a colon no longer jumps into the middle of the next column (guide paper p4 mega-segment hid 2600 English glyphs as math).

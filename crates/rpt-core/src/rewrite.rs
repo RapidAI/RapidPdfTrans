@@ -8978,6 +8978,7 @@ fn ends_inside_formula(line: &Drawn) -> bool {
 /// previous line of the same paragraph so the next line starts on a character.
 fn pull_opening_punctuation(lines: &mut [Drawn]) {
     let mut moves: Vec<(usize, usize)> = Vec::new();
+    let mut reseat: Vec<(usize, f32)> = Vec::new();
     for index in 0..lines.len() {
         let chars: Vec<char> = lines[index].text.chars().collect();
         if lines[index].widths.len() != chars.len() || lines[index].cids.len() != chars.len() {
@@ -9001,13 +9002,29 @@ fn pull_opening_punctuation(lines: &mut [Drawn]) {
         }
         // `是 ⟦0⟧。对` is one baseline split around the hole. The `。` already
         // follows the formula. Pulling it onto the line above leaves `：。`.
-        let beside_hole = (0..lines.len()).any(|other| {
-            other != index
-                && lines[other].page == page
-                && same_glyph_ids(&lines[other].glyph_ids, &ids)
-                && (lines[other].y - y).abs() <= size * 0.25
-                && lines[other].x + 1.0 < lines[index].x
-        });
+        let beside: Vec<usize> = (0..lines.len())
+            .filter(|&other| {
+                other != index
+                    && lines[other].page == page
+                    && (lines[other].y - y).abs() <= size * 0.25
+                    && lines[other].x + 1.0 < lines[index].x
+                    && lines[other].x + size * 1.5 > lines[index].x
+            })
+            .collect();
+        // `”` drawn as its own slice in front of `。因此` is not a hole: the
+        // pair wrapped together and both go up.
+        let closer_slice = beside.len() == 1 && {
+            let text = lines[beside[0]].text.trim();
+            !text.is_empty() && text.chars().all(line_start_closer)
+        };
+        let beside_hole = !closer_slice
+            && (0..lines.len()).any(|other| {
+                other != index
+                    && lines[other].page == page
+                    && same_glyph_ids(&lines[other].glyph_ids, &ids)
+                    && (lines[other].y - y).abs() <= size * 0.25
+                    && lines[other].x + 1.0 < lines[index].x
+            });
         if beside_hole {
             continue;
         }
@@ -9045,9 +9062,42 @@ fn pull_opening_punctuation(lines: &mut [Drawn]) {
         if lines[above].text.trim_end().ends_with(chars[start]) {
             continue;
         }
+        if closer_slice {
+            moves.push((beside[0], above));
+            reseat.push((index, lines[beside[0]].x));
+        }
         moves.push((index, above));
     }
     for (from, to) in moves {
+        let lone: String = lines[from].text.trim().to_string();
+        if !lone.is_empty()
+            && lone.chars().all(line_start_closer)
+            && lines[from].widths.len() == lines[from].text.chars().count()
+            && lines[from].cids.len() == lines[from].widths.len()
+        {
+            let chars: Vec<char> = lines[from].text.chars().collect();
+            for (offset, ch) in chars.iter().enumerate() {
+                if ch.is_whitespace() {
+                    continue;
+                }
+                if !lines[to].widths.is_empty() {
+                    lines[to].gaps.push(0.0);
+                }
+                let (width, cid) = (lines[from].widths[offset], lines[from].cids[offset]);
+                lines[to].text.push(*ch);
+                lines[to].widths.push(width);
+                lines[to].cids.push(cid);
+                if !lines[to].supers.is_empty() {
+                    lines[to].supers.push(false);
+                }
+            }
+            lines[from].text.clear();
+            lines[from].widths.clear();
+            lines[from].cids.clear();
+            lines[from].gaps.clear();
+            lines[from].supers.clear();
+            continue;
+        }
         // `”。因此` wrapped both closers. Taking only `”` left `。` opening
         // the line, so carry the whole run of closers.
         for _ in 0..3 {
@@ -9063,6 +9113,12 @@ fn pull_opening_punctuation(lines: &mut [Drawn]) {
             if !lines[to].supers.is_empty() {
                 lines[to].supers.push(false);
             }
+        }
+    }
+    // The words start where the quote slice did, not a quote's width in.
+    for (index, x) in reseat {
+        if !lines[index].text.trim().is_empty() {
+            lines[index].x = x;
         }
     }
 }
@@ -28568,7 +28624,11 @@ fn absorb_script_baselines(groups: &mut Vec<Vec<&Glyph>>) {
 
 fn script_baseline_host(index: usize, groups: &[Vec<&Glyph>]) -> Option<usize> {
     let group = &groups[index];
-    if !is_script_baseline(group) {
+    let script = is_script_baseline(group);
+    // `σ²_ctx and … σ²_proc` drops eight subscript letters 3pt under the
+    // line. They are words in a smaller face, not a baseline of their own.
+    let own_size = crate::segment::representative_size(group);
+    if !script && group.len() > 16 {
         return None;
     }
     let y = group_anchor_y(group);
@@ -28579,6 +28639,9 @@ fn script_baseline_host(index: usize, groups: &[Vec<&Glyph>]) -> Option<usize> {
             continue;
         }
         let size = crate::segment::representative_size(other).max(1.0);
+        if !script && own_size > size * 0.8 {
+            continue;
+        }
         let dy = (y - group_anchor_y(other)).abs();
         if dy < size * 0.08 || dy > size * 0.55 {
             continue;
@@ -34538,6 +34601,34 @@ mod tests {
     }
 
     #[test]
+    fn subscript_words_under_the_line_are_not_their_own_baseline() {
+        let mut glyphs = Vec::new();
+        let mut x = 54.0f32;
+        for (index, ch) in "elimination of and reduction of re-".chars().enumerate() {
+            let width = if ch == ' ' { 2.5 } else { 4.6 };
+            let mut item = ink_glyph(index as u32, x, 252.9, 9.0, &ch.to_string());
+            item.bbox = [x, 250.9, x + width, 260.0];
+            x += width;
+            glyphs.push(item);
+        }
+        let base = glyphs.len() as u32;
+        for (index, ch) in "ctxproc".chars().enumerate() {
+            let sx = 110.0 + index as f32 * 3.5;
+            let mut item = ink_glyph(base + index as u32, sx, 249.6, 6.3, &ch.to_string());
+            item.bbox = [sx, 248.0, sx + 3.2, 254.0];
+            glyphs.push(item);
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let lines = ink_lines(&refs);
+        assert_eq!(
+            lines.len(),
+            1,
+            "{:?}",
+            lines.iter().map(|line| line.y).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn affiliation_marks_are_superscripts_and_years_are_not() {
         let author = superscript_mask("Zhang1,2 Lee");
         let e1 = superscript_mask("乘以 e1，这些");
@@ -36771,6 +36862,30 @@ mod tests {
         assert!(audit_drawn(&lines)
             .iter()
             .all(|(_, n)| !n.contains("overlap")));
+    }
+
+    #[test]
+    fn a_quote_slice_and_the_period_after_it_both_go_up() {
+        let mut above = test_draw(326.0, 238.0, 10.0, "批准通过“全部允许", vec![1]);
+        let n = above.text.chars().count();
+        above.widths = vec![10.0; n];
+        above.cids = vec![1; n];
+        above.gaps = vec![0.0; n - 1];
+        let mut quote = test_draw(326.0, 226.0, 10.0, "”", vec![2]);
+        quote.widths = vec![9.0];
+        quote.cids = vec![1];
+        quote.gaps.clear();
+        let mut below = test_draw(335.5, 226.0, 10.0, "。因此，权限能防御", vec![1]);
+        let m = below.text.chars().count();
+        below.widths = vec![10.0; m];
+        below.cids = vec![1; m];
+        below.gaps = vec![0.0; m - 1];
+        let mut lines = vec![above, quote, below];
+        pull_opening_punctuation(&mut lines);
+        assert!(lines[0].text.ends_with("允许”。"), "{}", lines[0].text);
+        assert!(lines[1].text.is_empty(), "{}", lines[1].text);
+        assert!(lines[2].text.starts_with('因'), "{}", lines[2].text);
+        assert!((lines[2].x - 326.0).abs() < 0.5, "{}", lines[2].x);
     }
 
     #[test]

@@ -300,6 +300,38 @@ fn peel_stacked_labels(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
 }
 
 /// Split one baseline where a gap is a column gutter rather than a word space.
+/// `All   three   attacks   succeeded   on   gemma-4-12b,` is one justified
+/// line in a narrow column: a long token left every word space at ~1.4em.
+/// Three or more wide gaps of about the same width between lowercase words
+/// are word spaces, not table cells or a gutter.
+fn justified_spread_line(line: &[&Glyph], gaps: &[f32], trigger: f32, hard: f32) -> bool {
+    let wide: Vec<usize> = gaps
+        .iter()
+        .enumerate()
+        .filter(|(_, gap)| **gap > trigger && **gap <= hard)
+        .map(|(index, _)| index)
+        .collect();
+    if wide.len() < 3 || gaps.iter().any(|gap| *gap > hard) {
+        return false;
+    }
+    let low = wide.iter().map(|i| gaps[*i]).fold(f32::MAX, f32::min);
+    let high = wide.iter().map(|i| gaps[*i]).fold(0.0f32, f32::max);
+    if high > low * 1.35 {
+        return false;
+    }
+    let lowercase_starts = wide
+        .iter()
+        .filter(|i| {
+            line[**i + 1]
+                .unicode
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_lowercase())
+        })
+        .count();
+    lowercase_starts * 2 > wide.len()
+}
+
 fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
     if line.len() < 2 {
         return vec![line];
@@ -329,6 +361,7 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
     let second = ranked.get(1).copied().unwrap_or(0.0);
     let span = piece_width(&line);
     let header_labels = title_case_header_line(&line);
+    let justified_spread = justified_spread_line(&line, &gaps, trigger, hard);
     let mut parts = Vec::new();
     let mut current = vec![line[0]];
     for (index, glyph) in line.iter().copied().enumerate().skip(1) {
@@ -382,7 +415,10 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // "Table 1." then a one-em space is the caption sentence, not the
         // other column. The hard gap still splits a label from a real column.
         let caption_label = gap_inside_caption(&current, gap, size);
-        let column_gap = (gap > hard || gap > trigger) && !trailing_word && !caption_label;
+        let column_gap = (gap > hard || gap > trigger)
+            && !trailing_word
+            && !caption_label
+            && !(justified_spread && gap <= hard);
         // Two full columns on one baseline can leave only ~1.2em. Em boxes
         // overlap, so the median gap is 0 and the trigger rises to 1.25em,
         // just above that gutter. A line wider than one column, with the
@@ -12613,6 +12649,31 @@ mod tests {
             item.font_size = 10.0;
             item.bbox = [x, 500.0, x + 6.0, 510.0];
             glyphs.push(item);
+        }
+        let segs = segment_glyphs(&glyphs);
+        assert_eq!(
+            segs.len(),
+            1,
+            "{:?}",
+            segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_widely_justified_narrow_line_stays_one_segment() {
+        let mut glyphs = Vec::new();
+        let mut x = 316.6f32;
+        let mut id = 0;
+        for word in ["All", "three", "attacks", "succeeded", "on", "gemma-4-12b,"] {
+            for ch in word.chars() {
+                let mut item = glyph(id, x, 600.0, &ch.to_string(), false);
+                item.font_size = 10.0;
+                item.bbox = [x, 600.0, x + 4.5, 610.0];
+                glyphs.push(item);
+                x += 4.6;
+                id += 1;
+            }
+            x += 14.0;
         }
         let segs = segment_glyphs(&glyphs);
         assert_eq!(
