@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A job no longer fails with `no translation for segment N`. When the only sent copy of a repeated paragraph failed for good, its other copies found nothing to reuse and the whole PDF was abandoned. Those copies now keep the source text, and any paragraph still without a translation at the end keeps its source with a diagnostic instead of failing the job.
+- A batch that times out and splits keeps the half that translated. Only the paragraphs that still failed are sent again, and that second pass shares one segment budget instead of opening a new retry chain on every split. With `--jobs 1` finished batches are written to `RPT_TRANSLATE_CHECKPOINT` too, so a killed job resumes.
+
 - Text inside a figure stays in the source language. A panel title such as `(d) Following vs. ignoring summaries` is not translated. A hyphenated benchmark token (`SWE-PolyBench`, `SWE-bench`) stays in Latin; a table header, a group label, and a contents title still translate.
 - No line opens on `。` `，` or `、`. A closer after a formula stays with that formula, including one peeled off an overflowing tail, and the next words start on a character. A definition heading sits against its formula on that baseline. A display equation keeps the source gap under the sentence above it. `且` and `因为每当` use the width the English word gave up, so the following symbol is not left a word-width away. `Bx1 ∪···∪` keeps one word space, and a word between that atom and the formula is not covered when the formula slides back. A QED square keeps its four sides.
 - The command fails, after the PDF and the detail file are written, when a line opens on punctuation, figure text was translated, a gap inside a line is wider than 2em, a display formula leaves its baseline or changes glyph order, a display equation's glyphs are rewritten, glyphs overlap, or a QED box is only the two vertical bars. Tofu and a stray mark stay warnings.
