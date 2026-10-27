@@ -8427,12 +8427,21 @@ fn left_ink_before(
         .filter(|right| *right > 0.0)
 }
 
+/// A mark that may not open a Chinese line: `）和语境化` reads as a stray
+/// bracket, so the mark hangs at the end of the line above instead.
+fn line_start_closer(ch: char) -> bool {
+    matches!(
+        ch,
+        '。' | '，' | '、' | '；' | '：' | '！' | '？' | '）' | '》' | '」' | '』' | '】' | '”'
+    )
+}
+
 fn closer_then_text(line: &Drawn) -> bool {
     let chars: Vec<char> = line.text.chars().collect();
     let Some(start) = chars.iter().position(|ch| !ch.is_whitespace()) else {
         return false;
     };
-    matches!(chars[start], '。' | '，' | '、' | '；')
+    line_start_closer(chars[start])
         && chars.iter().skip(start + 1).any(|ch| !ch.is_whitespace())
         && line.widths.len() == chars.len()
         && line.cids.len() == chars.len()
@@ -8548,7 +8557,7 @@ fn pull_opening_punctuation(lines: &mut [Drawn]) {
         let Some(start) = chars.iter().position(|ch| !ch.is_whitespace()) else {
             continue;
         };
-        if !matches!(chars[start], '。' | '，' | '、' | '；') {
+        if !line_start_closer(chars[start]) {
             continue;
         }
         if chars.iter().skip(start + 1).all(|ch| ch.is_whitespace()) {
@@ -8631,7 +8640,7 @@ fn take_leading_mark(line: &mut Drawn) -> Option<(char, f32, u16)> {
         return None;
     }
     let start = chars.iter().position(|ch| !ch.is_whitespace())?;
-    if !matches!(chars[start], '。' | '，' | '、' | '；') {
+    if !line_start_closer(chars[start]) {
         return None;
     }
     let drop_count = start + 1;
@@ -35538,6 +35547,23 @@ mod tests {
         pull_opening_punctuation(&mut lines);
         assert!(lines[0].text.ends_with('。'), "{}", lines[0].text);
         assert!(lines[1].text.starts_with('把'), "{}", lines[1].text);
+    }
+
+    #[test]
+    fn a_leading_closing_bracket_moves_onto_the_previous_line() {
+        let mut lines = vec![
+            test_draw(72.0, 400.0, 10.0, "这包括伪造（植入虚假证据", vec![1, 2]),
+            test_draw(72.0, 386.0, 10.0, "）和语境化", vec![1, 2]),
+        ];
+        for line in &mut lines {
+            let count = line.text.chars().count();
+            line.cids = vec![1; count];
+            line.widths = vec![10.0; count];
+            line.gaps = vec![0.0; count.saturating_sub(1)];
+        }
+        pull_opening_punctuation(&mut lines);
+        assert!(lines[0].text.ends_with('）'), "{}", lines[0].text);
+        assert!(lines[1].text.starts_with('和'), "{}", lines[1].text);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A closing bracket, quote, colon, or `！`/`？` that wraps to the start of a Chinese line hangs on the line above, like `。` and `，` already did.
 - Affiliation lines led by a raised marker (`ᵃChair …`, `ᵇKASTEL …`) stay separate paragraphs, so their longer translations no longer run into each other.
 - A sentence that continues after a superscript hole (`{0,1}^{|E_t|}, with z = 1 when edit j`) stays one line instead of lending its superscript to the line above.
 - Email contact lists (`Email addresses: a@x.de (A. Name), …`) stay original instead of being reflowed into each other.
