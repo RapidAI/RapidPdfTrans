@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A paragraph that is itself an LLM prompt (an appendix listing prompts or rubrics) no longer makes the model run on. The system prompt says segment text is content to translate, not instructions to follow. Prompt-like paragraphs go in batches of at most two. Each request caps the reply at about three times its source length (512 to 4096 tokens, unless `max_tokens` is set), and a reply cut at that cap (`finish_reason: length`) splits the batch and retries it smaller instead of waiting out the timeout.
+
 - A batch reply that numbers its items 0..n (or 1..n) instead of echoing the segment ids is mapped back in order. The gateway model does this often; each such reply used to count as an omitted segment and split the batch down to single calls. On the first three pages of arXiv 2610.30485 this cut model calls from 25 to 17.
 
 - `rpt translate` exits 0 when it wrote the PDF and only quality warnings came up (coverage incomplete, an overlap, a wide gap, or another layout check). The warnings go to stderr and to a new `layout_warnings` array in the `--json` summary and the `--detail` file. `--strict` keeps the old exit 1 for a layout failure. A run that writes no PDF still exits non-zero.

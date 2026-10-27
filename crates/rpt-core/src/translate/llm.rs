@@ -185,9 +185,10 @@ impl LlmTranslator {
                 {"role": "user", "content": user},
             ]
         });
-        if let Some(max_tokens) = self.max_tokens {
-            body["max_tokens"] = json!(max_tokens);
-        }
+        // A reply far longer than its source is a runaway (the model acting on
+        // prompt-like text). The cap stops it early; the batch then splits.
+        let max_tokens = self.max_tokens.unwrap_or_else(|| reply_token_cap(user));
+        body["max_tokens"] = json!(max_tokens);
         // ureq's socket timeout does not always interrupt a stalled TLS read.
         // A thread deadline makes `timeout: global` real so a batch can split.
         // The worker clones the shared agent: idle connections are reused, and
@@ -274,6 +275,15 @@ fn post_chat(
         .into_body()
         .read_json()
         .map_err(|err| Error::Translate(scrub_secrets(&err.to_string(), api_key)))?;
+    if parsed
+        .pointer("/choices/0/finish_reason")
+        .and_then(|v| v.as_str())
+        == Some("length")
+    {
+        return Err(Error::Translate(
+            "LLM reply too long for its source (finish_reason length)".into(),
+        ));
+    }
     parsed
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())
@@ -285,6 +295,14 @@ fn post_chat(
                 "LLM response had empty message.content (reasoning tokens are ignored)".into(),
             )
         })
+}
+
+/// Output tokens allowed for one request: about three times the user
+/// message's token count (a translation is roughly as long as its source),
+/// never below 512 and never above 4096.
+pub(crate) fn reply_token_cap(user: &str) -> u32 {
+    let source_tokens = user.chars().count() / 4;
+    (source_tokens * 3).clamp(512, 4096) as u32
 }
 
 fn http_error(err: ureq::Error, api_key: &str) -> Error {
@@ -482,7 +500,7 @@ mod tests {
         let posted: Value = serde_json::from_str(&captured[json_start..]).unwrap();
         assert_eq!(posted["model"], "auto");
         assert_eq!(posted["temperature"], 0.0);
-        assert!(posted.get("max_tokens").is_none());
+        assert_eq!(posted["max_tokens"], 512);
         let lower = captured.to_ascii_lowercase();
         assert!(
             lower.contains("authorization: bearer test-key-not-real"),
@@ -493,6 +511,26 @@ mod tests {
         let debug = format!("{client:?}");
         assert!(debug.contains("redacted"));
         assert!(!debug.contains("test-key-not-real"));
+    }
+
+    #[test]
+    fn a_reply_cut_at_the_token_cap_is_a_recoverable_error() {
+        let response = r#"{"choices":[{"finish_reason":"length","message":{"content":"{\"translations\":[{\"id\":0,\"text\":\"runaway"}}]}"#;
+        let mock = Mock::start(200, response.into());
+        let opts = TranslateOptions {
+            base_url: Some(mock.base.clone()),
+            ..TranslateOptions::default()
+        };
+        let client = LlmTranslator::with_key(&opts, "test-key-not-real").unwrap();
+        let err = client.complete("sys", "user").unwrap_err();
+        assert!(err.to_string().contains("reply too long"), "{err}");
+    }
+
+    #[test]
+    fn the_reply_cap_follows_the_source_length() {
+        assert_eq!(reply_token_cap("short"), 512);
+        assert_eq!(reply_token_cap(&"a".repeat(4000)), 3000);
+        assert_eq!(reply_token_cap(&"a".repeat(100_000)), 4096);
     }
 
     #[test]
