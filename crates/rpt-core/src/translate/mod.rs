@@ -635,7 +635,12 @@ pub fn translate_extraction(
         let _watch = progress.watch(&segments, &batch);
         let before = calls;
         let pages = batch_pages(&segments, &batch);
-        match translate_batch(&segments, &shielded, &batch, opts, translator, &mut calls) {
+        // The second pass gets one segment budget too. Without it a batch
+        // that already stalled could open a fresh retry chain on every split.
+        translator.arm_segment_budget(segment_retry_budget(opts));
+        let outcome = translate_batch(&segments, &shielded, &batch, opts, translator, &mut calls);
+        translator.clear_segment_budget();
+        match outcome {
             Ok(part) => apply_rendered(&segments, &mut translated, &mut cache, part),
             Err(err) => {
                 // One batch failed. The paragraphs already translated stay.
@@ -1248,20 +1253,18 @@ fn dispatch_batches(
             let _watch = progress.watch(segments, batch);
             let before = *calls;
             translator.arm_segment_budget(segment_retry_budget(opts));
-            let outcome = translate_batch(segments, shielded, batch, opts, translator, calls);
+            let part = translate_batch_parts(segments, shielded, batch, opts, translator, calls);
             translator.clear_segment_budget();
-            match outcome {
-                Ok(part) => {
-                    progress.finish_batch(
-                        &batch_pages(segments, batch),
-                        (*calls).saturating_sub(before),
-                    );
-                    rendered.extend(part);
-                }
-                Err(_) => {
-                    progress.add_calls((*calls).saturating_sub(before));
-                    failed.push(batch.clone());
-                }
+            append_checkpoint(segments, &part.done);
+            rendered.extend(part.done);
+            if part.failed.is_empty() {
+                progress.finish_batch(
+                    &batch_pages(segments, batch),
+                    (*calls).saturating_sub(before),
+                );
+            } else {
+                progress.add_calls((*calls).saturating_sub(before));
+                failed.push(part.failed);
             }
         }
         return Ok(BatchDispatch { rendered, failed });
@@ -1287,7 +1290,7 @@ fn dispatch_batches(
                 // half, so one stuck paragraph could sit in connect for many
                 // minutes.
                 translator.arm_segment_budget(segment_retry_budget(opts));
-                let outcome = translate_batch(
+                let part = translate_batch_parts(
                     segments,
                     shielded,
                     &batches[index],
@@ -1296,31 +1299,27 @@ fn dispatch_batches(
                     &mut local_calls,
                 );
                 translator.clear_segment_budget();
-                match outcome {
-                    Ok(part) => {
-                        call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
-                        progress.finish_batch(&batch_pages(segments, &batches[index]), local_calls);
-                        append_checkpoint(segments, &part);
-                        let Ok(mut guard) = slots.lock() else {
-                            break;
-                        };
-                        for (seg_index, text) in part {
-                            if let Some(slot) = guard.get_mut(seg_index) {
-                                *slot = Some(prefer_translation(
-                                    &segments[seg_index].text,
-                                    slot.take(),
-                                    text,
-                                ));
-                            }
-                        }
+                call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
+                if part.failed.is_empty() {
+                    progress.finish_batch(&batch_pages(segments, &batches[index]), local_calls);
+                } else {
+                    progress.add_calls(local_calls);
+                    // Keep going. Other workers still own other paragraphs.
+                    if let Ok(mut guard) = failed.lock() {
+                        guard.push(part.failed);
                     }
-                    Err(_) => {
-                        call_count.fetch_add(local_calls, std::sync::atomic::Ordering::SeqCst);
-                        progress.add_calls(local_calls);
-                        // Keep going. Other workers still own other paragraphs.
-                        if let Ok(mut guard) = failed.lock() {
-                            guard.push(batches[index].clone());
-                        }
+                }
+                append_checkpoint(segments, &part.done);
+                let Ok(mut guard) = slots.lock() else {
+                    break;
+                };
+                for (seg_index, text) in part.done {
+                    if let Some(slot) = guard.get_mut(seg_index) {
+                        *slot = Some(prefer_translation(
+                            &segments[seg_index].text,
+                            slot.take(),
+                            text,
+                        ));
                     }
                 }
             });
@@ -1468,13 +1467,54 @@ fn translate_batch(
     translator: &dyn Translator,
     calls: &mut usize,
 ) -> Result<Vec<(usize, String)>> {
+    let part = translate_batch_parts(segments, shielded, indexes, opts, translator, calls);
+    match part.error {
+        Some(err) if !part.failed.is_empty() => Err(err),
+        _ => Ok(part.done),
+    }
+}
+
+/// What one batch produced. A split batch keeps the half that translated;
+/// only the paragraphs in `failed` are retried or kept as source.
+struct BatchPart {
+    done: Vec<(usize, String)>,
+    failed: Vec<usize>,
+    error: Option<Error>,
+}
+
+impl BatchPart {
+    fn ok(done: Vec<(usize, String)>) -> Self {
+        Self {
+            done,
+            failed: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn failed(indexes: &[usize], err: Error) -> Self {
+        Self {
+            done: Vec::new(),
+            failed: indexes.to_vec(),
+            error: Some(err),
+        }
+    }
+}
+
+fn translate_batch_parts(
+    segments: &[Segment],
+    shielded: &[protect::Shielded],
+    indexes: &[usize],
+    opts: &TranslateOptions,
+    translator: &dyn Translator,
+    calls: &mut usize,
+) -> BatchPart {
     // The caller armed one deadline for this batch. A split must not open
     // another full retry chain after that deadline.
     if translator.segment_budget_expired() {
-        return Err(Error::Translate("timeout: segment".into()));
+        return BatchPart::failed(indexes, Error::Translate("timeout: segment".into()));
     }
     match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
-        Ok(restored) => Ok(polish(lint_fix(
+        Ok(restored) => BatchPart::ok(polish(lint_fix(
             segments,
             echo_fix(segments, shielded, restored, opts, translator, calls),
             opts,
@@ -1482,22 +1522,21 @@ fn translate_batch(
             calls,
         ))),
         Err(err) if recoverable(&err) && indexes.len() > 1 => {
+            // A half that translated is kept even when the other half fails.
+            // Dropping it sent the whole batch back for a second, slower pass.
             let mid = indexes.len() / 2;
             let mut left =
-                translate_batch(segments, shielded, &indexes[..mid], opts, translator, calls)?;
-            left.extend(translate_batch(
-                segments,
-                shielded,
-                &indexes[mid..],
-                opts,
-                translator,
-                calls,
-            )?);
-            Ok(left)
+                translate_batch_parts(segments, shielded, &indexes[..mid], opts, translator, calls);
+            let right =
+                translate_batch_parts(segments, shielded, &indexes[mid..], opts, translator, calls);
+            left.done.extend(right.done);
+            left.failed.extend(right.failed);
+            left.error = left.error.or(right.error);
+            left
         }
         Err(err) if recoverable(&err) => {
             match translate_batch_once(segments, shielded, indexes, opts, translator, calls) {
-                Ok(restored) => Ok(polish(lint_fix(
+                Ok(restored) => BatchPart::ok(polish(lint_fix(
                     segments,
                     echo_fix(segments, shielded, restored, opts, translator, calls),
                     opts,
@@ -1543,11 +1582,11 @@ fn translate_batch(
                     if owns_budget {
                         translator.clear_segment_budget();
                     }
-                    Ok(polish(fallback))
+                    BatchPart::ok(polish(fallback))
                 }
             }
         }
-        Err(err) => Err(err),
+        Err(err) => BatchPart::failed(indexes, err),
     }
 }
 
@@ -6794,6 +6833,69 @@ mod tests {
         );
         assert!(out.is_none());
         assert_eq!(calls, 0);
+    }
+
+    /// Times out the first (two-paragraph) call, translates the next one,
+    /// then reports the segment budget as spent.
+    struct TimeoutThenExpire {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Translator for TimeoutThenExpire {
+        fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                return Err(Error::Translate("timeout: global".into()));
+            }
+            let payload: Value = serde_json::from_str(user).unwrap();
+            let translations: Vec<Value> = payload["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|seg| serde_json::json!({"id": seg["id"], "text": "你好世界。"}))
+                .collect();
+            Ok(serde_json::json!({"translations": translations}).to_string())
+        }
+
+        fn segment_budget_expired(&self) -> bool {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2
+        }
+    }
+
+    #[test]
+    fn a_split_keeps_the_half_that_translated() {
+        let segments: Vec<Segment> = ["Hello world.", "Second line here."]
+            .iter()
+            .enumerate()
+            .map(|(i, text)| Segment {
+                id: i as u32,
+                page_index: 0,
+                glyph_ids: vec![i as u32],
+                text: (*text).into(),
+            })
+            .collect();
+        let shielded: Vec<_> = segments.iter().map(|seg| shield(&seg.text, &[])).collect();
+        let opts = TranslateOptions {
+            context_window: 0,
+            ..TranslateOptions::default()
+        };
+        let translator = TimeoutThenExpire {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let mut calls = 0usize;
+        let part = translate_batch_parts(
+            &segments,
+            &shielded,
+            &[0, 1],
+            &opts,
+            &translator,
+            &mut calls,
+        );
+        assert_eq!(part.done.len(), 1, "{:?}", part.done);
+        assert_eq!(part.done[0].0, 0);
+        assert_eq!(part.failed, vec![1]);
+        assert!(part.error.is_some());
+        assert_eq!(calls, 2);
     }
 
     #[test]
