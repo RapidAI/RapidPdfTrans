@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A sentence that continues after a superscript hole (`{0,1}^{|E_t|}, with z = 1 when edit j`) stays one line instead of lending its superscript to the line above.
 - Spaced contents leaders (`A.1 Terminal-Bench . . . . .`) stay original even when the page number sits on its own line; only the title is translated.
 
 - An algorithm block (`Require:`/`Data:` and its numbered steps, `algorithmic` or algorithm2e style) stays original; only its `Algorithm 1 …` caption is translated. `RPT_ALG_DEBUG` prints the kept lines.

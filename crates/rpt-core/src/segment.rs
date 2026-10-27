@@ -6004,7 +6004,16 @@ fn next_formula_shard(lines: &[VisualLine<'_>], index: usize) -> Option<usize> {
     // Equation (1) is already a display equation. Bridging its fraction
     // hole pulls `)V` and the transpose into the segment, and the formula
     // is then redrawn off its baseline.
-    if display_equation_glyphs(&left.glyphs) || display_equation_glyphs(&right.glyphs) {
+    // A shard that reads `, with z = 1 when edit j` is the sentence going
+    // on after the script, not a displayed formula.
+    let prose_words = right
+        .text
+        .split_whitespace()
+        .filter(|word| word.len() >= 3 && word.chars().all(|ch| ch.is_ascii_alphabetic()))
+        .count();
+    if display_equation_glyphs(&left.glyphs)
+        || (display_equation_glyphs(&right.glyphs) && prose_words < 2)
+    {
         return None;
     }
     let gap = right.left - left.right;
@@ -13425,6 +13434,80 @@ mod tests {
         let seg = segment_glyphs(&glyphs);
         let texts: Vec<_> = seg.iter().map(|item| item.text.trim()).collect();
         assert_eq!(texts, ["A.1 Terminal benchmark results"], "{texts:?}");
+    }
+
+    #[test]
+    fn a_sentence_after_a_superscript_hole_joins_its_line() {
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        let mut run = |x: f32, y: f32, text: &str, size: f32, font: &str, out: &mut Vec<Glyph>| {
+            let mut x = x;
+            for ch in text.chars() {
+                let width = if ch == ' ' { size * 0.3 } else { size * 0.5 };
+                let mut item = wide(id, x, y, &ch.to_string(), width, size);
+                item.font_name = font.into();
+                out.push(item);
+                id += 1;
+                x += width;
+            }
+            x
+        };
+        let body = "This sentence is long enough to count as ordinary body text in the column.";
+        run(62.0, 200.0, body, 10.0, "Times-Roman", &mut glyphs);
+        let x = run(
+            62.0,
+            186.0,
+            "a subset of the pool. Write this subset as ",
+            10.0,
+            "Times-Roman",
+            &mut glyphs,
+        );
+        let x = run(x, 186.0, "𝑧", 10.0, "LibertinusMath", &mut glyphs);
+        let x = run(
+            x + 2.0,
+            186.0,
+            "∈ {0, 1}",
+            10.0,
+            "LibertinusMath",
+            &mut glyphs,
+        );
+        let split_left = x + 0.1;
+        let x = run(x + 0.5, 190.0, "|𝐸|", 7.0, "LibertinusMath", &mut glyphs);
+        let split_right = x + 0.5;
+        let x = run(x + 1.0, 186.0, ", with ", 10.0, "Times-Roman", &mut glyphs);
+        let x = run(x, 186.0, "𝑧 = 1", 10.0, "LibertinusMath", &mut glyphs);
+        let x = run(
+            x + 2.0,
+            186.0,
+            " when edit ",
+            10.0,
+            "Times-Roman",
+            &mut glyphs,
+        );
+        run(x, 186.0, "𝑗", 10.0, "LibertinusMath", &mut glyphs);
+        run(62.0, 172.0, body, 10.0, "Times-Roman", &mut glyphs);
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let on = |y: f32, from: f32, to: f32| {
+            visual_line(
+                refs.iter()
+                    .copied()
+                    .filter(|g| g.matrix[5] == y && g.matrix[4] >= from && g.matrix[4] < to)
+                    .collect(),
+            )
+        };
+        let lines = vec![
+            on(200.0, 0.0, 999.0),
+            on(186.0, 0.0, split_left),
+            on(190.0, 0.0, 999.0),
+            on(186.0, split_right, 999.0),
+            on(172.0, 0.0, 999.0),
+        ];
+        assert_eq!(
+            next_formula_shard(&lines, 1),
+            Some(3),
+            "the sentence after the script split off: {}",
+            lines[3].text
+        );
     }
 
     #[test]
