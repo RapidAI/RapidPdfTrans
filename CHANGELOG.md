@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Table column headers and group labels stay glyph for glyph with the rest of the grid. A translated header row no longer misaligns with its cells.
+
 - A footnote at the foot of one column no longer continues into the next column's body when the type size differs; the email footnote used to swallow the first paragraph of the right column.
 
 - Only a theorem-style label (定义, 例, 证明 …) snaps to the formula on its baseline. A wrapped line that merely starts with 证 or 例 (`证器将其评分记为`, `例如`) used to be lifted onto the line above.

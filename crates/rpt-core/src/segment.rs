@@ -1828,9 +1828,8 @@ fn assemble(
     // as a caption, and a boxed contents list looks like a figure. The
     // title is still translated. Leaders and page numbers stay.
     release_toc_titles(&lines, &mut kept);
-    // Column headers are the same kind of label as the caption. Numeric
-    // cells stay in the source language.
-    release_table_headers(&lines, &mut kept);
+    // A table is kept glyph for glyph, column headers included: a header
+    // row redrawn in another script no longer lines up with its cells.
     release_table_group_labels(&lines, &mut kept);
     kept.extend(margin_stamps(&lines));
     release_hyphen_continuations(&lines, &mut kept);
@@ -3828,163 +3827,6 @@ fn release_toc_titles(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     }
     kept.retain(|(id, reason)| !(titles.contains(id) && (reason == "table" || reason == "figure")));
 }
-
-/// The column-header band of a grid. The caption may sit above the grid or
-/// under it, so the band is the top of the table, not whichever row is
-/// nearest the caption. A wrapped header (`SWE-bench` / `Verified (%)`) is
-/// a few points apart. The next body row is a full leading further down, and
-/// a prose cell (`diver watch was the Seamaster.`) is not a header.
-fn release_table_headers(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
-    let table_ids: std::collections::HashSet<u32> = kept
-        .iter()
-        .filter(|(_, reason)| reason == "table")
-        .map(|(id, _)| *id)
-        .collect();
-    // A ruled grid is also a painted figure. Its column titles are kept as
-    // figure labels, while the cells stay table rows. Both have to be visible
-    // to the header walk, or `Method` never leaves the grid.
-    let figure_ids: std::collections::HashSet<u32> = kept
-        .iter()
-        .filter(|(_, reason)| reason == "figure")
-        .map(|(id, _)| *id)
-        .collect();
-    if table_ids.is_empty() {
-        return;
-    }
-    let mut release = std::collections::HashSet::new();
-    for (caption_index, caption) in lines.iter().enumerate() {
-        if caption_kind(&caption.text) != Some("table") {
-            continue;
-        }
-        let near_table = |line: &VisualLine<'_>| {
-            lines.iter().any(|other| {
-                other.page == line.page
-                    && other
-                        .glyphs
-                        .iter()
-                        .any(|glyph| table_ids.contains(&glyph.id))
-                    && (other.y - line.y).abs() <= line.size.max(other.size).max(1.0) * 4.5
-            })
-        };
-        let mut candidates: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(index, line)| {
-                *index != caption_index
-                    && line.page == caption.page
-                    && span_overlaps(caption.left - 24.0, caption.right + 280.0, line)
-                    && line.glyphs.iter().any(|glyph| {
-                        table_ids.contains(&glyph.id)
-                            || (figure_ids.contains(&glyph.id) && near_table(line))
-                    })
-            })
-            .map(|(index, _)| index)
-            .collect();
-        if candidates.is_empty() {
-            continue;
-        }
-        let below = candidates
-            .iter()
-            .filter(|index| lines[**index].y < caption.y - 0.8)
-            .count();
-        let downward = below * 2 >= candidates.len();
-        candidates.retain(|index| {
-            if downward {
-                lines[*index].y < caption.y - 0.8
-            } else {
-                lines[*index].y > caption.y + 0.8
-            }
-        });
-        candidates.sort_by(|&left, &right| lines[right].y.total_cmp(&lines[left].y));
-        let mut rows: Vec<Vec<usize>> = Vec::new();
-        for index in candidates {
-            let line = &lines[index];
-            if let Some(row) = rows.last_mut() {
-                let anchor = &lines[row[0]];
-                let size = anchor.size.max(line.size).max(1.0);
-                if (anchor.y - line.y).abs() <= size * 0.55 {
-                    row.push(index);
-                    continue;
-                }
-            }
-            rows.push(vec![index]);
-        }
-        if rows.is_empty() {
-            continue;
-        }
-        // The grid is one stack of rows. Another table on this page is a
-        // wider gap away, and its header belongs to its own caption.
-        let nearest = rows
-            .iter()
-            .enumerate()
-            .min_by(|(_, left), (_, right)| {
-                (row_y(left, lines) - caption.y)
-                    .abs()
-                    .total_cmp(&(row_y(right, lines) - caption.y).abs())
-            })
-            .map(|(index, _)| index)
-            .unwrap();
-        let mut lo = nearest;
-        let mut hi = nearest;
-        while lo > 0 && rows_share_grid(&rows[lo - 1], &rows[lo], lines) {
-            lo -= 1;
-        }
-        while hi + 1 < rows.len() && rows_share_grid(&rows[hi], &rows[hi + 1], lines) {
-            hi += 1;
-        }
-        let block = &rows[lo..=hi];
-        let mut start = 0usize;
-        while start < block.len() && !header_row(&block[start], lines) {
-            if numeric_row(&block[start], lines) {
-                break;
-            }
-            let next = start + 1;
-            if next >= block.len() || !tight_header_gap(&block[start], &block[next], lines) {
-                break;
-            }
-            start += 1;
-        }
-        let mut end = start;
-        while end < block.len() && header_row(&block[end], lines) {
-            if end > start && !tight_header_gap(&block[end - 1], &block[end], lines) {
-                // `ImageNet-100` then `Method` / `Obj`, and the next row is
-                // `4.5`. A word cell such as `no` or `Base` is not that row.
-                let size = row_size(&block[end], lines);
-                let gap = (row_y(&block[end - 1], lines) - row_y(&block[end], lines)).abs();
-                let body_follows = end + 1 < block.len() && numeric_row(&block[end + 1], lines);
-                if gap <= size * 1.75 && body_follows {
-                    end += 1;
-                }
-                break;
-            }
-            end += 1;
-        }
-        for row in &block[start..end] {
-            for index in row {
-                // A panel title under the drawing is not a column header,
-                // even when a table on the same page kept the other panel.
-                if is_panel_label(&lines[*index].text) {
-                    continue;
-                }
-                for glyph in &lines[*index].glyphs {
-                    if table_ids.contains(&glyph.id) || figure_ids.contains(&glyph.id) {
-                        release.insert(glyph.id);
-                    }
-                }
-            }
-        }
-    }
-    if release.is_empty() {
-        return;
-    }
-    kept.retain(|(id, reason)| {
-        !(release.contains(id) && (reason == "table" || reason == "figure"))
-    });
-}
-
-/// A medium row that is the only text on its baseline under a table caption
-/// (`Full-history baseline`). Method cells share the baseline with numbers
-/// and stay in the source language.
 fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     let mut release = std::collections::HashSet::new();
     for line in lines {
@@ -4023,70 +3865,6 @@ fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, Str
     kept.retain(|(id, reason)| {
         !(release.contains(id) && (reason == "table" || reason == "figure"))
     });
-}
-
-fn row_y(row: &[usize], lines: &[VisualLine<'_>]) -> f32 {
-    row.iter().map(|&index| lines[index].y).sum::<f32>() / row.len() as f32
-}
-
-fn row_size(row: &[usize], lines: &[VisualLine<'_>]) -> f32 {
-    row.iter()
-        .map(|&index| lines[index].size)
-        .fold(1.0f32, f32::max)
-        .max(1.0)
-}
-
-fn rows_share_grid(upper: &[usize], lower: &[usize], lines: &[VisualLine<'_>]) -> bool {
-    let size = row_size(upper, lines).max(row_size(lower, lines));
-    (row_y(upper, lines) - row_y(lower, lines)).abs() <= size * 2.4
-}
-
-fn tight_header_gap(upper: &[usize], lower: &[usize], lines: &[VisualLine<'_>]) -> bool {
-    let size = row_size(lower, lines);
-    (row_y(upper, lines) - row_y(lower, lines)).abs() <= size * 0.95
-}
-
-struct RowShape {
-    letters: usize,
-    digits: usize,
-    longest: usize,
-    words: usize,
-}
-
-fn row_shape(row: &[usize], lines: &[VisualLine<'_>]) -> RowShape {
-    let mut letters = 0usize;
-    let mut digits = 0usize;
-    let mut longest = 0usize;
-    let mut words = 0usize;
-    for index in row {
-        let mut line_letters = 0usize;
-        for ch in lines[*index].text.chars() {
-            if ch.is_ascii_alphabetic() {
-                letters += 1;
-                line_letters += 1;
-            } else if ch.is_ascii_digit() {
-                digits += 1;
-            }
-        }
-        longest = longest.max(line_letters);
-        words = words.max(lines[*index].text.split_whitespace().count());
-    }
-    RowShape {
-        letters,
-        digits,
-        longest,
-        words,
-    }
-}
-
-fn numeric_row(row: &[usize], lines: &[VisualLine<'_>]) -> bool {
-    let shape = row_shape(row, lines);
-    shape.digits >= 2 && shape.digits * 2 >= shape.letters
-}
-
-fn header_row(row: &[usize], lines: &[VisualLine<'_>]) -> bool {
-    let shape = row_shape(row, lines);
-    !numeric_row(row, lines) && shape.letters >= 2 && shape.longest <= 48 && shape.words < 5
 }
 
 fn x_overlaps(anchor: &VisualLine<'_>, line: &VisualLine<'_>) -> bool {
@@ -8266,17 +8044,20 @@ mod tests {
             "{texts:?}"
         );
         assert!(
-            texts.iter().any(|text| text.contains("Method")),
-            "column header should be translated: {texts:?}"
+            texts.iter().all(|text| !text.contains("Method")),
+            "column header left the grid: {texts:?}"
         );
-        assert!(texts.iter().any(|text| text.contains("Score")), "{texts:?}");
+        assert!(
+            texts.iter().all(|text| !text.contains("Score")),
+            "{texts:?}"
+        );
         assert!(
             !texts.iter().any(|text| text.contains("30.4")),
             "a numeric cell stays in the source language: {texts:?}"
         );
         let kept: Vec<_> = seg.kept.iter().map(|(id, _)| *id).collect();
         assert!(kept.contains(&5), "{:?}", seg.kept);
-        assert!(!kept.contains(&1) && !kept.contains(&2), "{:?}", seg.kept);
+        assert!(kept.contains(&1) && kept.contains(&2), "{:?}", seg.kept);
         assert!(seg.kept.iter().all(|(_, reason)| reason == "table"));
     }
 
@@ -8356,16 +8137,16 @@ mod tests {
             seg.kept
         );
         assert!(
-            !seg.kept
+            seg.kept
                 .iter()
                 .any(|(id, reason)| (*id == 5 || *id == 6) && reason == "table"),
-            "column header should be translated: {:?}",
+            "column header left the grid: {:?}",
             seg.kept
         );
         assert!(
             seg.segments
                 .iter()
-                .any(|item| item.text.contains("Layer Type")),
+                .all(|item| !item.text.contains("Layer Type")),
             "header missing: {:?}",
             seg.segments
                 .iter()
@@ -8437,8 +8218,8 @@ mod tests {
         );
         let texts: Vec<_> = seg.segments.iter().map(|item| item.text.as_str()).collect();
         assert!(
-            texts.iter().any(|text| text.contains("Layer")),
-            "column header stayed in the grid: {texts:?}"
+            texts.iter().all(|text| !text.contains("Layer")),
+            "column header left the grid: {texts:?}"
         );
         for cell in [
             "512",
@@ -9212,8 +8993,8 @@ mod tests {
             "{texts:?}"
         );
         assert!(
-            texts.iter().any(|text| text.contains("Method")),
-            "column header stayed in the grid: {texts:?}"
+            texts.iter().all(|text| !text.contains("Method")),
+            "column header left the grid: {texts:?}"
         );
         let reason = |id: u32| -> Vec<&str> {
             seg.kept
@@ -9237,8 +9018,8 @@ mod tests {
             );
         }
         assert!(
-            reason(13).is_empty() && reason(14).is_empty(),
-            "column header stayed a cell: {:?} {:?}",
+            !reason(13).is_empty() && !reason(14).is_empty(),
+            "column header left the grid: {:?} {:?}",
             reason(13),
             reason(14)
         );
@@ -9371,8 +9152,8 @@ mod tests {
             "{texts:?}"
         );
         assert!(
-            texts.iter().any(|text| text.contains("Method")),
-            "column header stayed in the grid: {texts:?}"
+            texts.iter().all(|text| !text.contains("Method")),
+            "column header left the grid: {texts:?}"
         );
         assert!(!texts.iter().any(|text| text.contains("30.4")), "{texts:?}");
         assert!(seg.kept.iter().any(|(_, reason)| reason == "table"));
@@ -9534,10 +9315,7 @@ mod tests {
                 && glyph.matrix[4] < 140.0
         });
         let cell = cell.expect("table header");
-        assert!(
-            !kept.contains(&cell.id),
-            "column header should be translated"
-        );
+        assert!(kept.contains(&cell.id), "column header left the grid");
         let placed = segment_placed(
             &extraction.glyphs,
             &SegmentFlags::default(),
@@ -9575,8 +9353,8 @@ mod tests {
             .map(|(_, reason)| reason.as_str())
             .collect();
         assert!(
-            in_seg && reasons.is_empty(),
-            "a ruled column header stayed a figure label: reasons={reasons:?} in_segment={in_seg}"
+            !in_seg && !reasons.is_empty(),
+            "a ruled column header left the grid: reasons={reasons:?} in_segment={in_seg}"
         );
         assert!(
             placed.kept.iter().any(|(id, _)| *id == numeric.id),
