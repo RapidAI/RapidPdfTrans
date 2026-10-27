@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- A slice after an inline formula is measured against the source paragraph's right edge, so a two-line paragraph no longer parks `= 1。那些可采纳` at the start of the next line under the next formula (RRSI p20).
+- A formula's tail no longer chains through italic letters or the sentence's own commas, which pushed the translated `、` of `w_s、w_c、w_n` past the last formula (RRSI p22).
 - A booktabs table of words (three or more equal rules, cells two em apart) is kept glyph-identical even without numbers; wrapped caption lines are left out (SpatialBrain p14 Table A1).
 - Primes and spacing accents (`H′`, the `ˆ` of `Ŝ`) attach to their host line instead of becoming their own segment, which drew them over the translation (RRSI p22).
 - An inline formula is no longer pulled left over a preceding formula when tightening the gap after an atom like `max` (RRSI p22 `max(S★, Ŝ(H_{t+1}))`).

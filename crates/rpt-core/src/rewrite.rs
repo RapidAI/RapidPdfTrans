@@ -1085,7 +1085,7 @@ fn rewrite_translation_once(
     // `，依此类推` seated after the second formula runs past the column.
     // Drop that tail onto the next line, ahead of `一般而言`. The comma
     // stays with the formula.
-    drop_overflow_tail(&mut drawn);
+    drop_overflow_tail_in(&mut drawn, &source_paragraph_right(extraction));
     // The comma peeled off `，依此类推` kept the overflow x, so it sat in
     // the margin past `⟩`. Seat it on the formula. A period already against
     // that ink stays where it is.
@@ -8381,7 +8381,28 @@ fn starts_with_formula_tail(line: &Drawn) -> bool {
 /// the column. Put that tail on the next line of the paragraph, at the
 /// column edge, and let the indented continuation follow it. A leading
 /// `，` stays on the formula's baseline.
+#[cfg(test)]
 fn drop_overflow_tail(lines: &mut Vec<Drawn>) {
+    drop_overflow_tail_in(lines, &|_| None);
+}
+
+/// Right edge of the source glyphs behind a drawn paragraph.
+fn source_paragraph_right(extraction: &Extraction) -> impl Fn(&[u32]) -> Option<f32> + '_ {
+    let by_id = glyph_index(&extraction.glyphs);
+    move |ids: &[u32]| {
+        ids.iter()
+            .filter_map(|id| {
+                by_id
+                    .get(id)
+                    .and_then(|index| extraction.glyphs.get(*index))
+            })
+            .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+            .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+            .reduce(f32::max)
+    }
+}
+
+fn drop_overflow_tail_in(lines: &mut Vec<Drawn>, source_right: &dyn Fn(&[u32]) -> Option<f32>) {
     let mut moves: Vec<(usize, usize, f32)> = Vec::new();
     for index in 0..lines.len() {
         if lines[index].glyph_ids.is_empty() || !lines[index].text.chars().any(is_han_char) {
@@ -8428,6 +8449,10 @@ fn drop_overflow_tail(lines: &mut Vec<Drawn>) {
             })
             .map(line_ink_right)
             .fold(f32::MIN, f32::max);
+        // A two-line paragraph (`…时，⟦0⟧ = 1。那些可采纳` / `但输给…`) has
+        // no full drawn baseline: the slice before the formula ends where
+        // the formula starts. The source lines still reach the column.
+        let column_right = column_right.max(source_right(&ids).unwrap_or(f32::MIN));
         if !column_right.is_finite() || column_right < column_left + size * 8.0 {
             continue;
         }
@@ -10203,7 +10228,15 @@ fn reserve_formula_ink(lines: &mut [Drawn], shift: &mut ListingShift, extraction
     };
     // `{0,` was the seated cluster and `1},` stayed a separate glyph. The
     // following character has to clear that tail, not only the cluster.
-    (ink_left, ink_right) = extend_ink_across_formula_tail(ink_left, ink_right, shift, extraction);
+    // A source comma or `=` of this sentence (`w_s, w_c`, `H_{t+1} = H_t`)
+    // is blanked and redrawn in the translation. It is not ink, and
+    // chaining through it pushed `、` or ` = ` past the next formula.
+    let prose: HashSet<u32> = lines
+        .iter()
+        .flat_map(|line| line.glyph_ids.iter().copied())
+        .collect();
+    (ink_left, ink_right) =
+        extend_ink_across_tail_except(ink_left, ink_right, shift, extraction, &prose);
     let pad = 1.0;
     // `形如` is the text in front of the hole. The seated ink still covers
     // those characters, and pushing them past the formula paints the formula
@@ -10299,8 +10332,13 @@ fn yield_formula_past_leading_han(
 }
 
 fn formula_tail_glyph(glyph: &Glyph) -> bool {
-    if is_math_font(&glyph.font_name) || glyph.unmapped {
+    if glyph.unmapped {
         return true;
+    }
+    // `w_s, w_c, w_n`: the next italic letter is its own hole. Chaining
+    // through it swept the translated `、` past all three formulas.
+    if is_math_font(&glyph.font_name) {
+        return !glyph.unicode.chars().any(char::is_alphabetic);
     }
     let text = glyph.unicode.trim();
     if text.is_empty() {
@@ -10322,10 +10360,20 @@ fn formula_tail_glyph(glyph: &Glyph) -> bool {
 /// still part of the formula (`1},` after `{0,`) and the next word must
 /// start after them.
 fn extend_ink_across_formula_tail(
+    ink_left: f32,
+    ink_right: f32,
+    shift: &ListingShift,
+    extraction: &Extraction,
+) -> (f32, f32) {
+    extend_ink_across_tail_except(ink_left, ink_right, shift, extraction, &HashSet::new())
+}
+
+fn extend_ink_across_tail_except(
     mut ink_left: f32,
     mut ink_right: f32,
     shift: &ListingShift,
     extraction: &Extraction,
+    prose: &HashSet<u32>,
 ) -> (f32, f32) {
     let member = extraction
         .glyphs
@@ -10353,6 +10401,12 @@ fn extend_ink_across_formula_tail(
                 continue;
             }
             if !formula_tail_glyph(glyph) {
+                continue;
+            }
+            let redrawn = !glyph.unmapped
+                && (!is_math_font(&glyph.font_name)
+                    || matches!(glyph.unicode.trim(), "," | ";" | "."));
+            if prose.contains(&glyph.id) && redrawn {
                 continue;
             }
             let left = glyph.bbox[0].min(glyph.bbox[2]).min(glyph.matrix[4]);
@@ -36069,6 +36123,35 @@ mod tests {
     }
 
     #[test]
+    fn a_slice_after_a_formula_in_a_two_line_paragraph_stays() {
+        let mk = |x: f32, y: f32, text: &str| {
+            let mut line = test_draw(x, y, 10.0, text, vec![1, 2]);
+            let count = line.text.chars().count();
+            line.widths = vec![10.0; count];
+            line.gaps = vec![0.0; count.saturating_sub(1)];
+            line.cids = vec![1; count];
+            line
+        };
+        // `…时，⟦0⟧ = 1。那些可采纳` / `但输给…`: the slice before the
+        // formula is not the column edge; the source paragraph is.
+        let mut lines = vec![
+            mk(60.0, 400.0, "其中当携带编辑的候选被选为获胜者时，"),
+            mk(420.0, 400.0, " = 1。那些可采纳"),
+            mk(60.0, 386.0, "但输给得分更高的候选"),
+        ];
+        let before: Vec<(f32, f32)> = lines.iter().map(|line| (line.x, line.y)).collect();
+        drop_overflow_tail_in(&mut lines, &|_| Some(600.0));
+        let mut without = lines.clone();
+        drop_overflow_tail(&mut without);
+        assert_ne!(
+            without[1].y, 400.0,
+            "the test no longer needs the source edge"
+        );
+        let after: Vec<(f32, f32)> = lines.iter().map(|line| (line.x, line.y)).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
     fn a_tail_after_two_formulas_keeps_clear_of_the_second() {
         let mut line = test_draw(204.0, 400.0, 10.0, "。其中", vec![1]);
         line.widths = vec![10.0; 3];
@@ -37685,6 +37768,38 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             head_advance,
             body.x
         );
+    }
+
+    #[test]
+    fn a_translated_comma_is_not_formula_tail_ink() {
+        let mut w = ink_glyph(1, 90.0, 400.0, 10.0, "w");
+        w.font_name = "CMMI10".into();
+        w.bbox = [90.0, 398.0, 98.0, 406.0];
+        let mut comma = ink_glyph(2, 99.0, 400.0, 10.0, ",");
+        comma.bbox = [99.0, 398.0, 101.0, 406.0];
+        let mut next = ink_glyph(3, 104.0, 400.0, 10.0, "w");
+        next.font_name = "CMMI10".into();
+        next.bbox = [104.0, 398.0, 112.0, 406.0];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![w, comma, next],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let shift = ListingShift {
+            page: 0,
+            ids: vec![1],
+            dx: 0.0,
+            dy: 0.0,
+            host_y: 400.0,
+        };
+        // `w_s, w_c`: the comma is redrawn as `、` and `w_c` is its own hole.
+        let prose: HashSet<u32> = [2].into_iter().collect();
+        let (_, right) = extend_ink_across_tail_except(90.0, 98.0, &shift, &extraction, &prose);
+        assert!(right < 99.0, "{right}");
+        let (_, kept) = extend_ink_across_formula_tail(90.0, 98.0, &shift, &extraction);
+        assert!((101.0..104.0).contains(&kept), "{kept}");
     }
 
     #[test]
