@@ -107,6 +107,21 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
             } else {
                 size * 0.5
             };
+            // A display delimiter (`(` from CMEX) is drawn from a baseline
+            // well off its text. Half an em glued the formula's big parens
+            // into the heading above it (`Defini(tion 3 (Fisher Infor)mation`).
+            let prose_letters = current
+                .iter()
+                .filter(|item| !math_font_glyph(item))
+                .filter(|item| item.unicode.chars().any(char::is_alphabetic))
+                .count();
+            let big_delimiter =
+                prose_letters >= 16 && glyph.font_name.to_ascii_uppercase().contains("CMEX");
+            let tolerance = if big_delimiter {
+                tolerance.min(size * 0.3)
+            } else {
+                tolerance
+            };
             (y, tolerance)
         } else {
             (last_y.unwrap_or(glyph.matrix[5]), last_size * 0.5)
@@ -4754,13 +4769,30 @@ fn stamp_glyph(glyph: &Glyph) -> bool {
     left <= 56.0 && right - left <= 24.0 && glyph.font_size >= 14.0
 }
 
+fn big_delimiter_line(line: &VisualLine<'_>) -> bool {
+    !line.glyphs.is_empty()
+        && line.glyphs.len() <= 2
+        && line
+            .glyphs
+            .iter()
+            .all(|glyph| glyph.font_name.to_ascii_uppercase().contains("CMEX"))
+}
+
 fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
     // A left-edge stamp between two body baselines must not split the paragraph.
     // Join each column on its own. The anchor is that column's median left edge,
     // so a chain of small indents cannot pull the other column in.
     let measures = page_measures(&lines);
     let mut columns: Vec<Vec<VisualLine>> = Vec::new();
+    // A display delimiter split off a heading (`(` at x 99) is no margin.
+    // As a column it took the hanging bullet line `histories, …` and cut the
+    // bullet in two. It stays a paragraph of its own.
+    let mut loose: Vec<Vec<VisualLine>> = Vec::new();
     for line in lines {
+        if big_delimiter_line(&line) {
+            loose.push(vec![line]);
+            continue;
+        }
         // A math gap can park the hyphen on the right half of the baseline.
         // That fragment has to claim the next line before the left-hand piece,
         // which shares the body margin, takes it.
@@ -4871,6 +4903,7 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
             paragraphs.push(current);
         }
     }
+    paragraphs.extend(loose);
     paragraphs
 }
 
@@ -12668,6 +12701,70 @@ mod tests {
                     && text.contains('i')
                     && text.contains("quadrants")
             }),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_big_delimiter_under_a_heading_does_not_join_its_words() {
+        let mut head = wide(
+            0,
+            72.0,
+            760.1,
+            "Definition 3 (Fisher Information Selection). Let",
+            240.0,
+            10.9,
+        );
+        head.font_name = "NimbusRomNo9L-Medi".into();
+        let mut open = wide(1, 99.0, 755.4, "(", 5.0, 10.9);
+        open.font_name = "CMEX10".into();
+        let mut close = wide(2, 187.0, 755.4, ")", 5.0, 10.9);
+        close.font_name = "CMEX10".into();
+        let segs = segment_glyphs(&[head, open, close]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Definition 3 (Fisher Information Selection)")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_lone_display_delimiter_does_not_claim_a_hanging_bullet_line() {
+        let mut body = wide(
+            0,
+            70.9,
+            520.0,
+            "A body paragraph line that sets the left margin of the column.",
+            227.0,
+            10.0,
+        );
+        body.font_name = "NimbusRomNo9L-Regu".into();
+        let mut open = wide(1, 99.0, 500.0, "(", 5.0, 10.9);
+        open.font_name = "CMEX10".into();
+        let mut bullet = wide(
+            2,
+            84.0,
+            400.0,
+            "\u{2022} Relational signals: user-item collaborative features from interaction",
+            214.0,
+            10.0,
+        );
+        bullet.font_name = "NimbusRomNo9L-Regu".into();
+        let mut tail = wide(
+            3,
+            92.7,
+            388.0,
+            "histories, encoding user preference patterns.",
+            160.0,
+            10.0,
+        );
+        tail.font_name = "NimbusRomNo9L-Regu".into();
+        let segs = segment_glyphs(&[body, open, bullet, tail]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("interaction histories")),
             "{texts:?}"
         );
     }
