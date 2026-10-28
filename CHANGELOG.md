@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.7 — 2026-10-28
+
+Tag `v0.1.7`. This changelog is the release note.
+
 ### Fixed
 
 - Intentional formula keeps are not overwritten by `gloss_echoed_words` or `settle_translation` (so `(high)` stays Latin instead of becoming `处理`).
