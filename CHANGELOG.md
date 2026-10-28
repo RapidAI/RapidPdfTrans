@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Formula marks (`⊤`, `−1`) sitting most of an em below a prose line are no longer glued into its words (`Info⊤r)m−a1tion`).
 - Dotted section headings that wrap with a hanging indent are joined back into one heading.
 - Italic bullet items with a bolder lead stay whole; a bold lead over a roman body still splits.
 - A styled run-in stays with its paragraph when the paragraph continues into the next column (prompt boxes).
