@@ -9,6 +9,7 @@
 - The in-line gap audit ignores neighbours past the line's own source extent (gutters, boxes in the next column).
 - A Greek base letter that ends a slice in front of its seated sub/superscript (`和 σ` + `²path`) seats the formula after the letter instead of pushing the letter over the next slice.
 - A bold run-in label no longer takes a paragraph in the next column on the same baseline as its body (it was redrawn in the label's column).
+- A line that ends in a hyphen break no longer takes the next column's last words on the same baseline (`conversa-` … `data.`), which made the paragraph overflow.
 
 ### Fixed
 

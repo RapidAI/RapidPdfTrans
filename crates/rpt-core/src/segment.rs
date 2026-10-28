@@ -412,6 +412,19 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             && right_w >= size * 0.8
             && gap >= size
             && gap + 0.05 >= largest;
+        // `conversa-` then `data.` 1.4em later: a word broken at the line end
+        // is not followed by another word of the same line. That tail is the
+        // next column's last line.
+        let hyphen_break = gap >= size * 1.0
+            && left_w >= size * 12.0
+            && !off_baseline
+            && current.len() >= 2
+            && current[current.len() - 1].unicode.trim() == "-"
+            && current[current.len() - 2]
+                .unicode
+                .chars()
+                .all(|ch| ch.is_alphabetic())
+            && glyph.unicode.chars().all(|ch| ch.is_alphanumeric());
         // "Table 1." then a one-em space is the caption sentence, not the
         // other column. The hard gap still splits a label from a real column.
         let caption_label = gap_inside_caption(&current, gap, size);
@@ -514,6 +527,7 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             || lone_mark
             || gutter_digit
             || stray_column_fragment
+            || hyphen_break
             || header_word)
             && !current.is_empty()
             && !crumb
@@ -7892,6 +7906,40 @@ mod tests {
         assert_eq!(
             segs.len(),
             2,
+            "{:?}",
+            segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_hyphen_broken_line_does_not_take_the_next_columns_tail() {
+        // `…music-domain conversa-` then `data.` 15pt later on one baseline.
+        let mut glyphs = Vec::new();
+        let mut x = 70.0f32;
+        let mut id = 0u32;
+        for ch in "synthesizemusicdomainconversa-".chars() {
+            let mut item = glyph(id, x, 638.0, &ch.to_string(), false);
+            item.font_size = 10.9;
+            item.matrix = [10.9, 0.0, 0.0, 10.9, x, 638.0];
+            item.bbox = [x, 636.0, x + 5.0, 646.0];
+            glyphs.push(item);
+            x += 7.3;
+            id += 1;
+        }
+        x += 15.0;
+        for ch in "data.".chars() {
+            let mut item = glyph(id, x, 638.0, &ch.to_string(), false);
+            item.font_size = 10.9;
+            item.matrix = [10.9, 0.0, 0.0, 10.9, x, 638.0];
+            item.bbox = [x, 636.0, x + 5.0, 646.0];
+            glyphs.push(item);
+            x += 5.0;
+            id += 1;
+        }
+        let segs = segment_glyphs(&glyphs);
+        assert!(
+            segs.iter()
+                .all(|segment| !segment.text.contains("-d") && !segment.text.contains("- d")),
             "{:?}",
             segs.iter().map(|segment| &segment.text).collect::<Vec<_>>()
         );
