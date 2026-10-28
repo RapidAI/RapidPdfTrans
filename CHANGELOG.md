@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- Metric names with `@` (`Recall@k`, `NDCG@10`) are no longer taken for e-mail addresses. They made a body line look like an author column, so the English source was redrawn over the Chinese and the overlap fallback reverted whole paragraphs (arXiv 2504.15476: 2183 → 809 English-body glyphs; pages 5, 6, 7 clean).
+- A paragraph still untranslated after every retry is no longer silent: `rpt` prints `warning: N paragraph(s) left untranslated after retries`, adds it to `layout_warnings`, and exits with status 2 (the PDF is still written). Diagnostics of paragraphs the leftover rounds recovered are dropped.
+- When the second pass splits a failed batch, the half that translated is kept; only the refused paragraphs stay source. Gateway error bodies are now in the message (`LLM HTTP status 400: …`).
+- The body line just above a table (`all test conversations.`) is released from the table when it continues the paragraph above in the same face and size.
+- A dotted section heading joins its hanging wrap (`2.4 Pipeline: From … CRS` / `Training Data`).
+
 ## 0.1.7 — 2026-10-28
 
 Tag `v0.1.7`. This changelog is the release note.

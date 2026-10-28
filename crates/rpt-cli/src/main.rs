@@ -345,6 +345,7 @@ fn run_translate(
     };
     let mut layout_failure: Option<String> = None;
     let mut warnings: Vec<String> = Vec::new();
+    let mut untranslated: Option<String> = None;
     if let Some(output) = output.as_ref() {
         let _pulse = PhasePulse::start(opts.progress, "replace");
         if let Err(err) = doc.rewrite(
@@ -362,6 +363,11 @@ fn run_translate(
         if let Some(warning) = extraction.note_incomplete_coverage() {
             eprintln!("rpt: warning: {warning}");
             warnings.push(warning);
+        }
+        if let Some(warning) = untranslated_warning(&extraction) {
+            eprintln!("rpt: warning: {warning}");
+            warnings.push(warning.clone());
+            untranslated = Some(warning);
         }
         warn_cjk_font(&extraction);
         layout_failure = failing_layout_message(&extraction.diagnostics);
@@ -469,7 +475,27 @@ fn run_translate(
         let _ = emit(&summary, compact);
         return fail(message);
     }
-    emit(&summary, compact)
+    let code = emit(&summary, compact);
+    if untranslated.is_some() {
+        // The PDF and the report were written, but part of the document is
+        // still in the source language. A caller must not read that as done.
+        return ExitCode::from(UNTRANSLATED_EXIT);
+    }
+    code
+}
+
+/// Exit status when the PDF was written but some paragraphs stayed in the
+/// source language after every retry.
+const UNTRANSLATED_EXIT: u8 = 2;
+
+fn untranslated_warning(extraction: &rpt_core::Extraction) -> Option<String> {
+    let count = rpt_core::translate::untranslated_paragraphs(&extraction.diagnostics);
+    (count > 0).then(|| {
+        format!(
+            "{count} paragraph(s) left untranslated after retries (translation request failed); \
+             see diagnostics in --detail, exit status {UNTRANSLATED_EXIT}"
+        )
+    })
 }
 
 /// A layout failure fails the command only under `--strict`. The PDF was

@@ -17573,6 +17573,11 @@ fn seat_author_columns(
             if seated {
                 continue;
             }
+            // A body line whose paragraph was translated is already drawn in
+            // Chinese. Redrawing its source here painted English over it.
+            if line.ids.iter().any(|id| succeeded.contains(id)) {
+                continue;
+            }
             let text = line.text.trim();
             if !credit_kept_text(text) {
                 continue;
@@ -17654,7 +17659,7 @@ fn credit_drawn_text(text: &str) -> bool {
 }
 
 fn credit_kept_text(text: &str) -> bool {
-    if text.contains('@') {
+    if crate::translate::has_email_address(text) {
         return text.chars().any(|ch| ch.is_ascii_alphabetic());
     }
     if crate::translate::is_institution_line(text) {
@@ -17839,7 +17844,9 @@ fn is_author_column(lines: &[CreditLine], column: &[usize]) -> bool {
     if column.len() < 2 {
         return false;
     }
-    let email = column.iter().any(|&index| lines[index].text.contains('@'));
+    let email = column
+        .iter()
+        .any(|&index| crate::translate::has_email_address(&lines[index].text));
     let institution = column
         .iter()
         .any(|&index| crate::translate::is_institution_line(&lines[index].text));
@@ -29621,7 +29628,7 @@ fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
 fn english_body_source(text: &str) -> bool {
     // Author email lines stay in Latin. They are not a body paragraph the
     // model left untranslated.
-    if text.contains('@') {
+    if crate::translate::has_email_address(text) {
         return false;
     }
     // An HTML row echoed by the model is markup, not a paragraph that failed
@@ -29657,7 +29664,7 @@ fn english_body_source(text: &str) -> bool {
             word.starts_with("http://")
                 || word.starts_with("https://")
                 || word.starts_with("www.")
-                || word.contains('@')
+                || crate::translate::is_email_token(word)
                 || word.chars().all(|ch| ch.is_ascii_digit())
         })
 }
@@ -29666,7 +29673,7 @@ fn english_body_source(text: &str) -> bool {
 /// line of that list used to fall under the 40-letter floor, so coverage
 /// reported `english_body: 0` while the paragraph was still English.
 fn comma_list_english(text: &str) -> bool {
-    if text.chars().any(is_han_char) || text.contains('@') {
+    if text.chars().any(is_han_char) || crate::translate::has_email_address(text) {
         return false;
     }
     if text.matches(',').count() < 3 {

@@ -567,6 +567,19 @@ pub struct TranslateReport {
     pub cache_hits: usize,
 }
 
+/// The diagnostic prefix of a paragraph kept as source because no
+/// translation came back, after every retry.
+pub const UNTRANSLATED_PREFIX: &str = "left a paragraph unchanged";
+
+/// How many paragraphs stayed in the source language because the
+/// translation request failed or never reached them.
+pub fn untranslated_paragraphs(diagnostics: &[Diagnostic]) -> usize {
+    diagnostics
+        .iter()
+        .filter(|item| item.message.starts_with(UNTRANSLATED_PREFIX))
+        .count()
+}
+
 /// Translate every mapped glyph run. Unmapped glyphs are left `pending`.
 pub fn translate_extraction(
     extraction: &mut Extraction,
@@ -640,10 +653,19 @@ pub fn translate_extraction(
         // that already stalled could open a fresh retry chain on every split.
         // It also waits longer per call: the first try already timed out.
         translator.arm_segment_budget(leftover_budget(opts, 1));
-        let outcome = translate_batch(&segments, &shielded, &batch, opts, translator, &mut calls);
+        let part =
+            translate_batch_parts(&segments, &shielded, &batch, opts, translator, &mut calls);
         translator.clear_segment_budget();
+        // A split batch keeps the half that translated. Only the paragraphs
+        // the gateway still refused (`HTTP 400`) are kept as source; the
+        // whole batch used to be dropped with them.
+        apply_rendered(&segments, &mut translated, &mut cache, part.done);
+        let outcome: Result<()> = match part.error {
+            Some(err) if !part.failed.is_empty() => Err(err),
+            _ => Ok(()),
+        };
         match outcome {
-            Ok(part) => apply_rendered(&segments, &mut translated, &mut cache, part),
+            Ok(()) => {}
             Err(err) => {
                 // One batch failed. The paragraphs already translated stay.
                 // This batch is kept as source so the PDF can still be saved.
@@ -726,6 +748,20 @@ pub fn translate_extraction(
         }
     }
     progress.emit_done();
+    // A paragraph the leftover rounds did translate is no longer kept as
+    // source. Only the ones still in English are reported.
+    let recovered: HashSet<(u32, String)> = segments
+        .iter()
+        .zip(translated.iter())
+        .filter(|(seg, text)| text.as_deref().is_some_and(|text| text != seg.text))
+        .map(|(seg, _)| (seg.page_index, seg.text.chars().take(80).collect()))
+        .collect();
+    extraction.diagnostics.retain(|item| {
+        !item.message.starts_with(UNTRANSLATED_PREFIX)
+            || !recovered.iter().any(|(page, preview)| {
+                item.page_index == Some(*page) && item.message.contains(preview.as_str())
+            })
+    });
 
     finish_report(
         extraction,
@@ -1571,6 +1607,7 @@ fn retry_english_leftovers(
     count
 }
 
+#[cfg(test)]
 fn translate_batch(
     segments: &[Segment],
     shielded: &[protect::Shielded],
@@ -5250,7 +5287,7 @@ fn heading_period(text: &str) -> bool {
 /// `Computer Science` and `Special Sales Department` do not match.
 pub(crate) fn is_institution_line(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.contains('@') || trimmed.len() > 160 {
+    if trimmed.is_empty() || has_email_address(trimmed) || trimmed.len() > 160 {
         return false;
     }
     if trimmed.ends_with(['.', '?', '!']) {
@@ -5767,8 +5804,40 @@ fn prose_echo(source: &str) -> bool {
     !words.iter().all(|word| is_acronym_token(word))
 }
 
+/// One whitespace word that is an email address: `name@host.tld`, also the
+/// grouped form `{alice,bob}@mit.edu`. A metric name (`Recall@k`,
+/// `NDCG@10`, `Coverage@K:`) has no dotted domain and is not an address.
+pub(crate) fn is_email_token(word: &str) -> bool {
+    let word = word.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '(' | ')' | '<' | '>' | '[' | ']' | ',' | ';' | ':' | '"' | '\'' | '.'
+        )
+    });
+    let Some((local, domain)) = word.rsplit_once('@') else {
+        return false;
+    };
+    if local.is_empty() || domain.is_empty() {
+        return false;
+    }
+    let Some((host, tld)) = domain.rsplit_once('.') else {
+        return false;
+    };
+    !host.is_empty()
+        && tld.chars().count() >= 2
+        && tld.chars().all(|ch| ch.is_ascii_alphabetic())
+        && host
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+}
+
+/// True when some word of `text` is an email address (see [`is_email_token`]).
+pub(crate) fn has_email_address(text: &str) -> bool {
+    text.split_whitespace().any(is_email_token)
+}
+
 fn is_url_or_email_token(word: &str) -> bool {
-    word.contains("://") || word.contains('@') || word.starts_with("www.")
+    word.contains("://") || is_email_token(word) || word.starts_with("www.")
 }
 
 fn is_acronym_token(word: &str) -> bool {
@@ -5977,7 +6046,7 @@ fn url_or_email_only(source: &str) -> bool {
             word.starts_with("http://")
                 || word.starts_with("https://")
                 || word.starts_with("www.")
-                || word.contains('@')
+                || is_email_token(word)
         })
 }
 
@@ -6195,6 +6264,35 @@ fn prompt_for(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_metric_with_an_at_sign_is_not_an_email() {
+        use super::{has_email_address, is_email_token};
+        assert!(!is_email_token("Recall@k"));
+        assert!(!is_email_token("NDCG@10"));
+        assert!(!is_email_token("Recall@1,"));
+        assert!(is_email_token("a@b.edu"));
+        assert!(is_email_token("{alice,bob}@mit.edu"));
+        assert!(is_email_token("(jane.doe@uni-x.de)"));
+        assert!(!has_email_address("We report Recall@k and NDCG@10."));
+        assert!(has_email_address("Contact: jane@example.org"));
+    }
+
+    #[test]
+    fn only_paragraphs_kept_after_a_failed_request_count_as_untranslated() {
+        use super::{untranslated_paragraphs, Diagnostic};
+        let diagnostics = vec![
+            Diagnostic {
+                page_index: Some(5),
+                message: "left a paragraph unchanged after the translation request failed: Finding 2 (translation failed: LLM HTTP status 400)".into(),
+            },
+            Diagnostic {
+                page_index: Some(1),
+                message: "gap inside a line 27.8pt".into(),
+            },
+        ];
+        assert_eq!(untranslated_paragraphs(&diagnostics), 1);
+    }
+
     #[test]
     fn an_apa_author_line_split_from_its_title_is_a_reference() {
         assert!(apa_author_line(
@@ -8820,6 +8918,26 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
         }
+    }
+
+    #[test]
+    fn a_refused_paragraph_is_reported_and_its_batch_mates_still_translate() {
+        let opts = TranslateOptions {
+            batch_size: 4,
+            jobs: 1,
+            context_window: 0,
+            ..TranslateOptions::default()
+        };
+        let mut doc =
+            extraction_from_lines(&["Beta two", "Alpha one", "Gamma three", "Delta four"]);
+        let report = translate_extraction(&mut doc, &opts, &FailAlpha).unwrap();
+        for stem in ["Beta", "Gamma", "Delta"] {
+            assert!(report
+                .segments
+                .iter()
+                .any(|seg| seg.source.starts_with(stem) && seg.translated.contains('译')));
+        }
+        assert_eq!(untranslated_paragraphs(&doc.diagnostics), 1);
     }
 
     #[test]

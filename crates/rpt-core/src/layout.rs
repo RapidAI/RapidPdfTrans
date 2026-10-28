@@ -287,7 +287,7 @@ pub fn cjk_indent_ems(line_count: usize, source_size: f32, bold: bool, text: &st
 }
 
 fn is_one_line_prose(text: &str, source_size: f32, bold: bool) -> bool {
-    if bold || source_size >= 12.5 || text.contains('@') {
+    if bold || source_size >= 12.5 || crate::translate::has_email_address(text) {
         return false;
     }
     let trimmed = text.trim();
@@ -630,7 +630,7 @@ pub(crate) fn prompt_line_is_full_holes(
 }
 
 fn line_skips_justification(text: &str) -> bool {
-    if text.contains('@') || text.to_ascii_lowercase().contains("et al") {
+    if crate::translate::has_email_address(text) || text.to_ascii_lowercase().contains("et al") {
         return true;
     }
     let chars: Vec<char> = text.chars().collect();

@@ -1360,7 +1360,9 @@ fn centered_prose_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -
     if upper_text.ends_with(['.', '?', '!', '。', '？', '！']) {
         return false;
     }
-    if upper_text.contains('@') || lower_text.contains('@') {
+    if crate::translate::has_email_address(upper_text)
+        || crate::translate::has_email_address(lower_text)
+    {
         return false;
     }
     if crate::translate::is_institution_line(upper_text)
@@ -2929,7 +2931,12 @@ fn release_body_wraps(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
             kept.iter()
                 .any(|(id, reason)| *id == glyph.id && reason == "figure")
         });
-        if !figure || is_panel_label(&lower.text) {
+        let table = !figure
+            && lower.glyphs.iter().any(|glyph| {
+                kept.iter()
+                    .any(|(id, reason)| *id == glyph.id && reason == "table")
+            });
+        if !(figure || table) || is_panel_label(&lower.text) {
             continue;
         }
         for upper in lines {
@@ -2944,6 +2951,9 @@ fn release_body_wraps(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
             if upper.glyphs.is_empty() || upper_kept * 2 > upper.glyphs.len() {
                 continue;
             }
+            if table && !table_body_wrap(upper, lower) {
+                continue;
+            }
             if continues_paragraph(upper, lower, 0.0) {
                 for glyph in &lower.glyphs {
                     release.insert(glyph.id);
@@ -2955,6 +2965,25 @@ fn release_body_wraps(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
     if !release.is_empty() {
         kept.retain(|(id, _)| !release.contains(id));
     }
+}
+
+/// `… recommendations across` / `all test conversations.` sits just above a
+/// table's top rule, so the grid claimed it. It is the body paragraph's last
+/// line: the same face and size as the line above, which does not end its
+/// sentence, and it starts lowercase. A table cell is smaller than the body.
+fn table_body_wrap(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
+    let open = !upper
+        .text
+        .trim_end()
+        .ends_with(['.', '?', '!', ':', '。', '？', '！', '：']);
+    let lowercase = lower
+        .text
+        .trim_start()
+        .starts_with(|ch: char| ch.is_lowercase());
+    open && lowercase
+        && upper.font == lower.font
+        && (upper.size - lower.size).abs() <= 0.3
+        && (upper.left - lower.left).abs() <= 2.0
 }
 
 /// Labels inside a cluster of boxes, or on an image, stay original.
@@ -5917,8 +5946,28 @@ pub(crate) fn numbered_item_body(text: &str) -> Option<&str> {
 }
 
 /// The words after a hanging number share one left edge with the lines below.
+/// A section heading's title after a dotted number (`2.4 Pipeline…`,
+/// `A.1.2 Setup`).
+fn section_number_body(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    let (number, rest) = text.split_once(' ')?;
+    let mut parts = number.trim_end_matches('.').split('.');
+    let head = parts.next()?;
+    let head_ok = (!head.is_empty() && head.len() <= 2 && head.bytes().all(|b| b.is_ascii_digit()))
+        || (head.len() == 1 && head.bytes().all(|b| b.is_ascii_uppercase()));
+    let tail: Vec<&str> = parts.collect();
+    let tail_ok = !tail.is_empty()
+        && tail.iter().all(|part| {
+            !part.is_empty() && part.len() <= 2 && part.bytes().all(|b| b.is_ascii_digit())
+        });
+    let rest = rest.trim_start();
+    (head_ok && tail_ok && rest.starts_with(char::is_alphabetic)).then_some(rest)
+}
+
 fn hanging_numbered_continuation(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
-    if numbered_item_body(&upper.text).is_none() || numbered_item_body(&lower.text).is_some() {
+    let numbered =
+        |text: &str| numbered_item_body(text).is_some() || section_number_body(text).is_some();
+    if !numbered(&upper.text) || numbered(&lower.text) {
         return false;
     }
     if starts_with_list_marker(&lower.text) {
@@ -5982,7 +6031,7 @@ fn stacked_short_items(upper: &VisualLine<'_>, lower: &VisualLine<'_>, measure: 
     }
     let trimmed = lower.text.trim_start();
     trimmed.starts_with(|ch: char| ch.is_ascii_uppercase() || ch.is_ascii_digit())
-        || trimmed.contains('@')
+        || crate::translate::has_email_address(trimmed)
         || trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
 }
@@ -14082,6 +14131,56 @@ mod tests {
                 .any(|text| text.contains("1.2.") && !text.contains("1.1.")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn a_body_tail_above_a_table_is_the_paragraph_not_a_cell() {
+        let upper = glyph(0, 70.9, 530.0, "recommendations across", false);
+        let tail = glyph(1, 70.9, 517.0, "all test conversations.", false);
+        let cell = glyph(2, 70.9, 517.0, "Model", false);
+        let line = |g: &Glyph, size: f32| VisualLine {
+            glyphs: vec![],
+            text: g.unicode.clone(),
+            page: 0,
+            y: g.matrix[5],
+            left: g.matrix[4],
+            right: g.matrix[4] + 100.0,
+            size,
+            font: g.font_name.clone(),
+            toc: false,
+            sole_on_baseline: true,
+        };
+        assert!(table_body_wrap(&line(&upper, 10.9), &line(&tail, 10.9)));
+        // A smaller cell row, or a capitalised header, stays in the table.
+        assert!(!table_body_wrap(&line(&upper, 10.9), &line(&tail, 8.0)));
+        assert!(!table_body_wrap(&line(&upper, 10.9), &line(&cell, 10.9)));
+        let mut closed = line(&upper, 10.9);
+        closed.text = "as shown below.".into();
+        assert!(!table_body_wrap(&closed, &line(&tail, 10.9)));
+    }
+
+    #[test]
+    fn a_numbered_heading_joins_its_hanging_wrap() {
+        // arXiv 2504.15476: `2.4 Pipeline: From Domain Signals to CRS` /
+        // `Training Data`. The wrap hangs under the title words.
+        let glyphs = vec![
+            block(0, 70.9, 432.5, 13.0, 10.9, "2.4"),
+            block(1, 89.0, 432.5, 3.0, 10.9, " "),
+            block(
+                2,
+                95.0,
+                432.5,
+                190.0,
+                10.9,
+                "Pipeline: From Domain Signals to CRS",
+            ),
+            block(3, 95.0, 419.0, 60.0, 10.9, "Training Data"),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
     }
 
     #[test]

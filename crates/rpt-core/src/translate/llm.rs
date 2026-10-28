@@ -301,12 +301,30 @@ fn post_chat(
 ) -> Result<String> {
     // DNS, TCP, TLS, request bytes, and response headers share this label.
     set_phase(phase, "connect");
-    let response = agent
+    let mut response = agent
         .post(url)
+        .config()
+        .http_status_as_error(false)
+        .build()
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
         .send_json(&body)
         .map_err(|err| http_error(err, api_key))?;
+    let status = response.status().as_u16();
+    if status >= 400 {
+        // The gateway's reason (`max_tokens too large`, `model busy`) is in
+        // the body. Without it a 400 reads the same as an upstream hiccup.
+        let text = response
+            .body_mut()
+            .with_config()
+            .limit(4096)
+            .read_to_string()
+            .unwrap_or_default();
+        return Err(Error::Translate(scrub_secrets(
+            &status_message(status, &text),
+            api_key,
+        )));
+    }
     set_phase(phase, "recv-body");
     let parsed: Value = response
         .into_body()
@@ -362,6 +380,17 @@ fn reasoning_spent_cap(parsed: &Value) -> bool {
 pub(crate) fn reply_token_cap(user: &str) -> u32 {
     let source_tokens = user.chars().count() / 4;
     (source_tokens * 3).clamp(512, 4096) as u32
+}
+
+/// `LLM HTTP status 400: <first 200 chars of the reply body>`.
+fn status_message(status: u16, body: &str) -> String {
+    let detail: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let detail: String = detail.chars().take(200).collect();
+    if detail.is_empty() {
+        format!("LLM HTTP status {status}")
+    } else {
+        format!("LLM HTTP status {status}: {detail}")
+    }
 }
 
 fn http_error(err: ureq::Error, api_key: &str) -> Error {
@@ -435,6 +464,19 @@ pub fn scrub_secrets(message: &str, secret: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_request_reports_the_gateway_reason() {
+        assert_eq!(status_message(400, ""), "LLM HTTP status 400");
+        assert_eq!(
+            status_message(400, "{\"error\":\n  \"bad   request\"}"),
+            "LLM HTTP status 400: {\"error\": \"bad request\"}"
+        );
+        assert_eq!(
+            status_message(502, &"x".repeat(500)).len(),
+            "LLM HTTP status 502: ".len() + 200
+        );
+    }
     use crate::translate::TranslateOptions;
     use std::io::{Read, Write};
     use std::net::TcpListener;
