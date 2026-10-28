@@ -18656,9 +18656,13 @@ fn compose_bold_run_in(
         if letters < 12 {
             continue;
         }
+        // The body follows the label on its line. A paragraph in the next
+        // column on the same baseline is not its body: joining it drew
+        // `a teacher LLM…` in the left column after `Domain Signal Encoding.`
         let hit = glyphs.iter().any(|glyph| {
             (glyph.matrix[5] - head_y).abs() <= 1.6
                 && glyph.matrix[4] > head_right - 0.5
+                && glyph.matrix[4] <= head_right + size * 3.0
                 && glyph.matrix[4] < body_x
         });
         if !hit {
@@ -38492,6 +38496,118 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             "first line at {:.1}, label ends at {:.1}",
             body.x,
             head_right
+        );
+    }
+
+    #[test]
+    fn a_paragraph_in_the_next_column_is_not_a_run_in_body() {
+        let mut glyphs = Vec::new();
+        let mut x = 72.0f32;
+        for (index, ch) in "Proactive compaction outperforms full-history execution."
+            .chars()
+            .enumerate()
+        {
+            let mut glyph = ink_glyph(index as u32, x, 400.0, 10.0, &ch.to_string());
+            glyph.font_name = "NimbusRomNo9L-Medi".into();
+            glyph.bbox = [x, 392.0, x + 5.2, 408.0];
+            glyphs.push(glyph);
+            x += 5.2;
+        }
+        let head_ids: Vec<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+        let body_at = glyphs.len() as u32;
+        x += 120.0;
+        for (index, ch) in "Under the setting, all evaluated methods continue."
+            .chars()
+            .enumerate()
+        {
+            let mut glyph = ink_glyph(body_at + index as u32, x, 400.0, 10.0, &ch.to_string());
+            glyph.font_name = "NimbusRomNo9L-Regu".into();
+            glyph.bbox = [x, 392.0, x + 4.4, 408.0];
+            glyphs.push(glyph);
+            x += 4.4;
+        }
+        if let Some(last) = glyphs.last_mut() {
+            last.bbox[2] = 540.0;
+        }
+        let body_ids: Vec<u32> = glyphs
+            .iter()
+            .skip(head_ids.len())
+            .map(|glyph| glyph.id)
+            .collect();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![crate::glyph::PageInfo {
+                index: 0,
+                object_id: "1 0".into(),
+                media_box: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            }],
+            glyphs,
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let head_text = "主动压缩优于完整历史执行。";
+        let body_text = "在该设定下，所评估的方法仍属于同一段。";
+        let font_for = |text: &str| {
+            let mut map = HashMap::new();
+            for (id, ch) in (1u16..).zip(text.chars()) {
+                map.insert(ch as u32, (id, 1000));
+            }
+            map.entry(' ' as u32).or_insert((400, 400));
+            SubsetFont {
+                bytes: Vec::new(),
+                units_per_em: 1000,
+                glyphs: map,
+                fallback: None,
+                notice: None,
+            }
+        };
+        let head_font = font_for(head_text);
+        let body_font = font_for(body_text);
+        let mut drawn = vec![
+            drawn_line(
+                0,
+                72.0,
+                400.0,
+                10.0,
+                Color::black(),
+                head_text,
+                &head_font,
+                "BOLD",
+                0.0,
+                &head_ids,
+                false,
+                280.0,
+            ),
+            drawn_line(
+                0,
+                72.0,
+                400.0,
+                10.0,
+                Color::black(),
+                body_text,
+                &body_font,
+                "REG",
+                0.0,
+                &body_ids,
+                false,
+                460.0,
+            ),
+        ];
+        let embedded = vec![("BOLD".into(), head_font), ("REG".into(), body_font)];
+        let before: Vec<(String, f32)> = drawn
+            .iter()
+            .map(|line| (line.text.clone(), line.x))
+            .collect();
+        reflow_bold_run_ins(&mut drawn, &extraction, &by_id, &embedded, &mut Vec::new());
+        let after: Vec<(String, f32)> = drawn
+            .iter()
+            .map(|line| (line.text.clone(), line.x))
+            .collect();
+        assert_eq!(
+            before, after,
+            "the next column was joined as the label's body"
         );
     }
 
