@@ -9364,6 +9364,20 @@ fn audit_display_glyph_changes(
             if line.text.trim().chars().count() <= 16 && share < 0.34 {
                 continue;
             }
+            // `Ikotun et al., 2023)、d(xi,cj) = ∥xi − cj∥，以及` redraws an
+            // inline formula verbatim inside a sentence. Every math glyph is
+            // still there, in order, so the equation did not change.
+            let mut owned: Vec<&Glyph> = line
+                .glyph_ids
+                .iter()
+                .filter(|id| math.contains(id))
+                .filter_map(|id| on_page.get(id).copied())
+                .collect();
+            owned.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+            let math_text: String = owned.iter().map(|glyph| glyph.unicode.as_str()).collect();
+            if han > 0 && math_text_kept(&math_text, &line.text) {
+                continue;
+            }
             notes.push((
                 Some(page),
                 format!(
@@ -9374,6 +9388,14 @@ fn audit_display_glyph_changes(
         }
     }
     notes
+}
+
+/// Every non-space character of `math` appears in `drawn`, in order.
+fn math_text_kept(math: &str, drawn: &str) -> bool {
+    let mut rest = drawn.chars();
+    math.chars()
+        .filter(|ch| !ch.is_whitespace())
+        .all(|ch| rest.by_ref().any(|other| other == ch))
 }
 
 /// A display equation: math-face glyphs (including newtx), an operator, and
@@ -49154,5 +49176,15 @@ q\n1 0 0 1 120.056 265.599 cm\n[]0 d 0 J 0.398 w 0 0 m 15.047 0 l S\nQ\n"
         assert!(text.contains("501.7 120.182"), "{text}");
         assert!(!text.contains("120.056 265.599"), "{text}");
         assert!(broken_qed_message(&bytes).is_none(), "{text}");
+    }
+
+    #[test]
+    fn math_text_kept_requires_math_chars_in_order() {
+        assert!(math_text_kept(
+            "x = softmax(z)",
+            "其中 x = softmax(z) 为输出"
+        ));
+        assert!(!math_text_kept("x = softmax(z)", "其中 softmax 为输出"));
+        assert!(!math_text_kept("a b", "b a"));
     }
 }

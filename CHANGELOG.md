@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Dotted section headings that wrap with a hanging indent are joined back into one heading.
+- Italic bullet items with a bolder lead stay whole; a bold lead over a roman body still splits.
+- A styled run-in stays with its paragraph when the paragraph continues into the next column (prompt boxes).
+- The display-glyph audit accepts translated lines that keep their math text in order (formula paragraphs).
+
 ### Fixed
 
 - Metric names with `@` (`Recall@k`, `NDCG@10`) are no longer taken for e-mail addresses. They made a body line look like an author column, so the English source was redrawn over the Chinese and the overlap fallback reverted whole paragraphs (arXiv 2504.15476: 2183 → 809 English-body glyphs; pages 5, 6, 7 clean).

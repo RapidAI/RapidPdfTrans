@@ -828,6 +828,16 @@ enum LabelEnd {
     Arrow,
 }
 
+/// Most letters of `glyphs` are in an italic face.
+fn italic_majority(glyphs: &[&Glyph]) -> bool {
+    let letters: Vec<&&Glyph> = glyphs.iter().filter(|glyph| prose_letter(glyph)).collect();
+    let italic = letters
+        .iter()
+        .filter(|glyph| crate::font::face_style(&glyph.font_name).italic)
+        .count();
+    !letters.is_empty() && italic * 2 > letters.len()
+}
+
 /// A styled label at the start of a line (`Definition 1.1.`, `Proof.`,
 /// `Ratings →`) and the sentence that follows it. Punctuation and a math
 /// letter inside the label do not end the run. The label keeps its own face
@@ -1961,7 +1971,23 @@ fn assemble(
         };
         let mut lines = para.iter();
         if let Some(first) = lines.next() {
-            if let Some((label, rest)) = styled_run_in(first) {
+            // `• Semantic signals (rᵢ): item review text…` is one list item.
+            // Splitting its bolder lead off an italic body seats the label
+            // apart from the wrapped body, and the two collide. A bold lead
+            // over a roman body still splits.
+            // A paragraph that continues at the top of the next column on
+            // the same page keeps its label too: the body is seated beside
+            // the label, so its second-column lines landed in the first one.
+            let next_column = para
+                .windows(2)
+                .any(|pair| pair[0].page == pair[1].page && pair[1].y > pair[0].y + 1.0);
+            let run_in = (!next_column)
+                .then(|| styled_run_in(first))
+                .flatten()
+                .filter(|(_, rest)| {
+                    !(starts_with_list_marker(&first.text) && italic_majority(rest))
+                });
+            if let Some((label, rest)) = run_in {
                 // "Definition 1.1." is bold and "Proof." is italic. The sentence
                 // after either label keeps the body face.
                 buf = line_text(&label);
@@ -4748,33 +4774,50 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
                 .last()
                 .is_some_and(|prev| centered_prose_continuation(prev, &line))
         });
-        let slot = hyphen_slot.or(list_slot).or(prose_slot).or_else(|| {
-            let mut best: Option<(usize, f32)> = None;
-            for (index, column) in columns.iter().enumerate() {
-                let Some(anchor) = column_anchor(column, line.page) else {
-                    continue;
-                };
-                let distance = (anchor - line.left).abs();
-                // A wrapped word can start a list-indented line and finish
-                // back on the column margin. That line sits to the right of
-                // the margin. A body line to the left of a centered title is
-                // a different column, even when a hyphen makes the gap look
-                // like an indent.
-                let indented = line.left + 1.0 >= anchor;
-                let fits = distance <= 28.0
-                    || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some());
-                if fits && best.is_none_or(|(_, previous)| distance < previous) {
-                    best = Some((index, distance));
-                }
-            }
-            best.map(|(index, _)| index).or_else(|| {
-                columns.iter().position(|column| {
-                    column.last().is_some_and(|prev| {
-                        hanging_pull(prev, &line) || right_aligned_display_wrap(prev, &line)
-                    })
-                })
+        // `2.4 Pipeline: From … CRS` / `Training Data`: the wrap hangs under
+        // the title words, which can be closer to another column's margin.
+        let heading_slot = columns.iter().position(|column| {
+            column.last().is_some_and(|prev| {
+                let size = prev.size.max(line.size).max(1.0);
+                let dy = prev.y - line.y;
+                prev.page == line.page
+                    && (size * 0.7..=size * 1.5).contains(&dy)
+                    && (prev.size - line.size).abs() <= size * 0.2
+                    && section_number_body(&prev.text).is_some()
+                    && hanging_numbered_continuation(prev, &line)
             })
         });
+        let slot = hyphen_slot
+            .or(heading_slot)
+            .or(list_slot)
+            .or(prose_slot)
+            .or_else(|| {
+                let mut best: Option<(usize, f32)> = None;
+                for (index, column) in columns.iter().enumerate() {
+                    let Some(anchor) = column_anchor(column, line.page) else {
+                        continue;
+                    };
+                    let distance = (anchor - line.left).abs();
+                    // A wrapped word can start a list-indented line and finish
+                    // back on the column margin. That line sits to the right of
+                    // the margin. A body line to the left of a centered title is
+                    // a different column, even when a hyphen makes the gap look
+                    // like an indent.
+                    let indented = line.left + 1.0 >= anchor;
+                    let fits = distance <= 28.0
+                        || (distance <= 64.0 && indented && soft_hyphen_stem(&line.text).is_some());
+                    if fits && best.is_none_or(|(_, previous)| distance < previous) {
+                        best = Some((index, distance));
+                    }
+                }
+                best.map(|(index, _)| index).or_else(|| {
+                    columns.iter().position(|column| {
+                        column.last().is_some_and(|prev| {
+                            hanging_pull(prev, &line) || right_aligned_display_wrap(prev, &line)
+                        })
+                    })
+                })
+            });
         if let Some(slot) = slot {
             columns[slot].push(line);
         } else {
