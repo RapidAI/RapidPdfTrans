@@ -605,7 +605,7 @@ pub fn translate_extraction(
         }
         if seg.text.trim().is_empty()
             || url_or_email_only(&seg.text)
-            || intentional_keep_kind(&seg.text).is_some()
+            || looks_like_formula_annotation(&seg.text)
             || formula_shard(seg, &extraction.glyphs, &glyph_at)
         {
             translated[i] = Some(seg.text.clone());
@@ -800,7 +800,7 @@ pub fn replay_extraction(
     for seg in &segments {
         if seg.glyph_ids.iter().any(|id| reference_ids.contains(id))
             || seg.text.trim().is_empty()
-            || intentional_keep_kind(&seg.text).is_some()
+            || looks_like_formula_annotation(&seg.text)
         {
             translated.push(Some(seg.text.clone()));
             continue;
@@ -2755,7 +2755,7 @@ fn gloss_echoed_words(segments: &[Segment], translated: &mut [String]) {
     for (segment, text) in segments.iter().zip(translated.iter_mut()) {
         let source = segment.text.trim();
         let current = text.trim();
-        if intentional_keep_kind(source).is_some() {
+        if looks_like_formula_annotation(source) {
             continue;
         }
         if !echoed_prose_word(source) || !source.eq_ignore_ascii_case(current) {
@@ -5044,7 +5044,7 @@ pub(crate) fn is_author_list(text: &str) -> bool {
 }
 
 fn settle_translation(source: &str, translated: &str) -> String {
-    if intentional_keep_kind(source).is_some() {
+    if looks_like_formula_annotation(source) {
         return source.to_string();
     }
     let translated = strip_spurious_subtitle(source, translated);
