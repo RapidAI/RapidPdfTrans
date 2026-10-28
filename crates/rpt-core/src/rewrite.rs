@@ -1358,7 +1358,8 @@ fn rewrite_translation_once(
     embed_base14_fonts(doc);
     let mut placed_shifts = stack_shifts.clone();
     placed_shifts.extend(listing_shifts.iter().cloned());
-    let audit = audit_layout(&drawn, extraction, &placed_shifts);
+    let mut audit = audit_layout(&drawn, extraction, &placed_shifts);
+    audit.extend(audit_kept_math_overlap(&drawn, extraction, &draw_ids));
     let mut colliding = colliding_drawn_ids(&drawn);
     colliding.extend(qa_failures(&drawn, &audit));
     for note in audit {
@@ -9311,6 +9312,88 @@ fn audit_layout(
     notes.extend(audit_line_gaps(drawn, extraction, shifts));
     notes.extend(audit_display_formulas(drawn, extraction, shifts));
     notes.extend(audit_display_glyph_changes(drawn, extraction));
+    notes
+}
+
+/// A translated line drawn over a math glyph still painted in the source
+/// (`(si,k, Gi,k)被添加`, `2K 次离线`). The draw-vs-draw check never saw
+/// it, because a seated hole is no draw. Each character's own box is tested,
+/// so the hole the line leaves for its formula is not a hit.
+fn audit_kept_math_overlap(
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    erased: &HashSet<u32>,
+) -> Vec<(Option<u32>, String)> {
+    // One segment's ids can ride on several of its lines. The glyph was
+    // redrawn when any of them carries its character.
+    let mut owner: HashMap<u32, String> = HashMap::new();
+    for line in drawn {
+        for id in &line.glyph_ids {
+            owner.entry(*id).or_default().push_str(&line.text);
+        }
+    }
+    let painted: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            !glyph.invisible && !glyph.unicode.trim().is_empty() && is_math_font(&glyph.font_name)
+        })
+        .filter(|glyph| {
+            !erased.contains(&glyph.id)
+                || owner
+                    .get(&glyph.id)
+                    .is_some_and(|text| !glyph.unicode.chars().all(|ch| text.contains(ch)))
+        })
+        .collect();
+    let mut notes = Vec::new();
+    for line in drawn {
+        if !line.text.chars().any(is_han_char) {
+            continue;
+        }
+        let chars: Vec<char> = line.text.chars().collect();
+        if line.widths.len() != chars.len() {
+            continue;
+        }
+        let size = line.size.max(1.0);
+        let (low, high) = (line.y - size * 0.1, line.y + size * 0.7);
+        let mut x = line.x;
+        let mut hit: Option<(char, &Glyph, f32)> = None;
+        for (index, ch) in chars.iter().enumerate() {
+            let width = line.widths[index];
+            let (left, right) = (x, x + width);
+            x += width + line.gaps.get(index).copied().unwrap_or(0.0);
+            if !is_han_char(*ch) {
+                continue;
+            }
+            for glyph in &painted {
+                if glyph.page_index != line.page {
+                    continue;
+                }
+                let gx0 = glyph.bbox[0].min(glyph.bbox[2]);
+                let gx1 = glyph.bbox[0].max(glyph.bbox[2]);
+                let gy0 = glyph.bbox[1].min(glyph.bbox[3]);
+                let gy1 = glyph.bbox[1].max(glyph.bbox[3]);
+                let wide = right.min(gx1) - left.max(gx0);
+                let tall = high.min(gy1) - low.max(gy0);
+                if wide > 1.5 && tall > size * 0.3 {
+                    hit = Some((*ch, glyph, wide));
+                    break;
+                }
+            }
+            if hit.is_some() {
+                break;
+            }
+        }
+        if let Some((ch, glyph, wide)) = hit {
+            notes.push((
+                Some(line.page),
+                format!(
+                    "math overlap {:.1}pt between {:?} of {:?} and kept math {:?} at y={:.1}",
+                    wide, ch, line.text, glyph.unicode, line.y
+                ),
+            ));
+        }
+    }
     notes
 }
 
@@ -44862,6 +44945,34 @@ ET",
             regions: Vec::new(),
             diagnostics: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_translation_over_a_kept_math_glyph_is_flagged() {
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![math_glyph(1, 112.0, 500.0, "G", true)],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut over = test_draw(80.0, 500.0, 10.0, "每个配对被添加", vec![]);
+        over.widths = vec![10.0; 7];
+        over.gaps = vec![0.0; 6];
+        let erased = HashSet::new();
+        let notes = audit_kept_math_overlap(&[over], &extraction, &erased);
+        assert!(
+            notes
+                .iter()
+                .any(|(_, note)| note.starts_with("math overlap")),
+            "{notes:?}"
+        );
+        // The line leaves a hole for the formula: no hit.
+        let mut around = test_draw(80.0, 500.0, 10.0, "每个配对被添加", vec![]);
+        around.widths = vec![10.0; 7];
+        around.gaps = vec![0.0, 0.0, 14.0, 0.0, 0.0, 0.0];
+        let notes = audit_kept_math_overlap(&[around], &extraction, &erased);
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     fn test_draw(x: f32, y: f32, size: f32, text: &str, glyph_ids: Vec<u32>) -> Drawn {

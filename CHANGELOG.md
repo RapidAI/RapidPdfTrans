@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The layout check reports `math overlap` when a translated character is drawn over a math glyph still painted in the source (`(si,k, Gi,k)被添加`). It is a note, not a failure, while its false-positive rate is measured.
 - A display formula's big CMEX delimiters no longer join the prose heading above them (`Defini(tion 3 (Fisher Infor)mation`), and a lone delimiter line no longer acts as a column margin that splits a hanging bullet.
 - Formula marks (`⊤`, `−1`) sitting most of an em below a prose line are no longer glued into its words (`Info⊤r)m−a1tion`).
 - Dotted section headings that wrap with a hanging indent are joined back into one heading.
