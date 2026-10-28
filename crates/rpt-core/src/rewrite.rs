@@ -10198,6 +10198,14 @@ fn audit_line_gaps(
         if closed_by_neighbor {
             continue;
         }
+        // A neighbour past where this line's own source ended is the next
+        // column or a boxed note beside it, not text after this line.
+        let source_right = page_glyphs
+            .iter()
+            .filter(|glyph| line.glyph_ids.contains(&glyph.id))
+            .map(|glyph| glyph_paint_right(glyph))
+            .fold(f32::MIN, f32::max);
+        let beyond_source = |x: f32| source_right > f32::MIN && x > source_right + em * 0.5;
         let mut next_x = f32::MAX;
         let mut next_math = false;
         let mut math_touches = false;
@@ -10212,7 +10220,7 @@ fn audit_line_gaps(
             }
             // The next column's paragraph is not text after this line. In a
             // narrow two-column page the gutter is only about two em.
-            if in_next_column(drawn, line, other) {
+            if in_next_column(drawn, line, other) || beyond_source(other.x) {
                 continue;
             }
             if other.x < next_x {
@@ -10260,7 +10268,7 @@ fn audit_line_gaps(
             if gx >= ink_right - 0.6 && gx <= ink_right + em * 0.55 {
                 math_touches = true;
             }
-            if gx > ink_right + em * 0.3 && gx < next_x {
+            if gx > ink_right + em * 0.3 && gx < next_x && !beyond_source(gx) {
                 next_x = gx;
                 next_math = true;
             }
@@ -49186,5 +49194,25 @@ q\n1 0 0 1 120.056 265.599 cm\n[]0 d 0 J 0.398 w 0 0 m 15.047 0 l S\nQ\n"
         ));
         assert!(!math_text_kept("x = softmax(z)", "其中 softmax 为输出"));
         assert!(!math_text_kept("a b", "b a"));
+    }
+
+    #[test]
+    fn a_neighbour_past_the_lines_own_source_is_not_a_gap() {
+        let mut gloss = test_draw(100.0, 400.0, 10.0, "每当", vec![1]);
+        gloss.widths = vec![10.0, 10.0];
+        gloss.cids = vec![1, 2];
+        gloss.gaps = vec![0.0];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: Vec::new(),
+            glyphs: vec![
+                math_glyph(1, 100.0, 400.0, "w", false),
+                math_glyph(9, 160.0, 400.0, "x", true),
+            ],
+            regions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let notes = audit_line_gaps(&[gloss], &extraction, &[]);
+        assert!(notes.is_empty(), "the next column was a hole: {notes:?}");
     }
 }

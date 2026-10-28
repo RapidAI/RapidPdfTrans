@@ -6,6 +6,7 @@
 - Italic bullet items with a bolder lead stay whole; a bold lead over a roman body still splits.
 - A styled run-in stays with its paragraph when the paragraph continues into the next column (prompt boxes).
 - The display-glyph audit accepts translated lines that keep their math text in order (formula paragraphs).
+- The in-line gap audit ignores neighbours past the line's own source extent (gutters, boxes in the next column).
 
 ### Fixed
 
