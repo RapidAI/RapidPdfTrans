@@ -4878,7 +4878,46 @@ pub(crate) fn intentional_keep_kind(source: &str) -> Option<&'static str> {
     if looks_like_display_math(source) {
         return Some("formula");
     }
+    if apa_author_line(source) {
+        return Some("references");
+    }
     None
+}
+
+/// `Shen, X., Chen, Z., Backes, M., Shen, Y., & Zhang, Y. (2024).` is the
+/// first line of an APA entry that a column break split from its title.
+/// Every name is `Surname, I.` and the line ends on the year.
+pub(crate) fn apa_author_line(source: &str) -> bool {
+    let text = source.trim().trim_end_matches('.');
+    let Some(open) = text.rfind('(') else {
+        return false;
+    };
+    if !text.ends_with(')') {
+        return false;
+    }
+    let year = text[open + 1..text.len() - 1].trim_end_matches(|ch: char| ch.is_ascii_lowercase());
+    if year.len() != 4 || !year.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let names = text[..open].replace('&', "");
+    let parts: Vec<&str> = names
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() < 2 || !parts.len().is_multiple_of(2) {
+        return false;
+    }
+    parts.chunks(2).all(|pair| {
+        let surname_ok = pair[0].chars().next().is_some_and(char::is_uppercase)
+            && pair[0].split_whitespace().count() <= 3;
+        let initials_ok = pair[1].split_whitespace().all(|word| {
+            word.split(['-', '.'])
+                .filter(|piece| !piece.is_empty())
+                .all(|piece| piece.chars().count() == 1 && piece.chars().all(char::is_uppercase))
+        });
+        surname_ok && initials_ok
+    })
 }
 
 /// `SWE-PolyBench` and `SWE-bench`. A hyphenated token whose part is an
@@ -6116,6 +6155,16 @@ fn prompt_for(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_apa_author_line_split_from_its_title_is_a_reference() {
+        assert!(apa_author_line(
+            "Shen, X., Chen, Z., Backes, M., Shen, Y., & Zhang, Y. (2024)."
+        ));
+        assert!(apa_author_line("Lee, J.-H. (2021a)."));
+        assert!(!apa_author_line("Results, as shown, improve (2024)."));
+        assert!(!apa_author_line("Smith, J. found the effect in 2024."));
+    }
+
     use super::*;
     use crate::color::Color;
     use crate::extract::{Extraction, COORDINATE_SPACE};

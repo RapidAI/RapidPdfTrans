@@ -23530,7 +23530,11 @@ fn bold_run_in_heading(
 
 fn bold_face(font: &str) -> bool {
     let face = font.rsplit('+').next().unwrap_or(font).to_ascii_lowercase();
-    face.contains("bold") || face.contains("-bd") || face.ends_with(".b") || face.contains("cmbx")
+    face.contains("bold")
+        || face.contains("-bd")
+        || face.ends_with(".b")
+        || face.contains("cmbx")
+        || crate::font::libertine_weight(font).0
 }
 
 fn block_source_text(

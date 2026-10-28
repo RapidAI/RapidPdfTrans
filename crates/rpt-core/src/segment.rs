@@ -1138,6 +1138,35 @@ fn ocr_rule_noise(text: &str) -> bool {
 /// A page of OCR with no sentence and several garbage tokens. `TOILETTE`
 /// and `PEFARTMENT` look like words; `POBUtfttCO` and `3jOV£9rOIit` do not.
 /// Two of those, and no sentence, means the page is the scan image.
+/// A born-digital page can embed a screenshot as a form figure that carries
+/// its own invisible text layer (`Goal prompt for GuideEvolve`). The pixels
+/// stay English, so painting that layer in Chinese stacked two texts on the
+/// figure. A scanned page has no visible text of its own and keeps its layer.
+fn detach_figure_text_layers(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
+    let mut visible: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for line in lines.iter() {
+        let count = line
+            .glyphs
+            .iter()
+            .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+            .count();
+        *visible.entry(line.page).or_default() += count;
+    }
+    let mut drop = std::collections::HashSet::new();
+    for line in lines.iter() {
+        if visible.get(&line.page).copied().unwrap_or(0) < 20 {
+            continue;
+        }
+        for glyph in &line.glyphs {
+            if glyph.invisible && matches!(glyph.source.kind, crate::glyph::SourceKind::FormXObject)
+            {
+                drop.insert(glyph.id);
+            }
+        }
+    }
+    drop_glyphs_as(lines, drop, "figure")
+}
+
 fn detach_junk_ocr_pages(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
     let mut pages: Vec<u32> = lines.iter().map(|line| line.page).collect();
     pages.sort_unstable();
@@ -1847,6 +1876,7 @@ fn assemble(
     kept.extend(detach_rule_noise(&mut lines));
     // A scanned cover whose OCR is `3jOV£9rOIit` has no sentence. Painting a
     // translation covers the photograph with gibberish. The image stays.
+    kept.extend(detach_figure_text_layers(&mut lines));
     kept.extend(detach_junk_ocr_pages(&mut lines));
     kept.extend(detach_low_quality_ocr(&mut lines, regions, pages));
     attach_markers(&mut lines);
@@ -14788,6 +14818,48 @@ mod tests {
             "{:?}",
             seg.kept
         );
+    }
+
+    #[test]
+    fn a_figure_text_layer_on_a_born_digital_page_is_not_translated() {
+        let mut glyphs = Vec::new();
+        let words = [
+            "The",
+            "method",
+            "improves",
+            "accuracy",
+            "on",
+            "every",
+            "benchmark",
+            "we",
+            "tried",
+        ];
+        let mut id = 0u32;
+        for row in 0..3 {
+            for (col, word) in words.iter().enumerate() {
+                glyphs.push(glyph(
+                    id,
+                    72.0 + col as f32 * 50.0,
+                    700.0 - row as f32 * 12.0,
+                    word,
+                    false,
+                ));
+                id += 1;
+            }
+        }
+        let mut hidden = glyph(
+            id,
+            72.0,
+            400.0,
+            "Complete Autonomy: unrestricted access",
+            false,
+        );
+        hidden.invisible = true;
+        hidden.source.kind = crate::glyph::SourceKind::FormXObject;
+        glyphs.push(hidden);
+        let segments = segment_glyphs(&glyphs);
+        assert!(segments.iter().all(|seg| !seg.glyph_ids.contains(&id)));
+        assert!(segments.iter().any(|seg| seg.text.contains("benchmark")));
     }
 
     #[test]

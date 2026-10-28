@@ -32,6 +32,7 @@ pub use cmap::CMap;
 pub use predefined::Predefined;
 #[cfg(test)]
 pub use subset::box_ttf;
+pub(crate) use subset::libertine_weight;
 #[allow(unused_imports)]
 pub use subset::load_cjk_font;
 pub use subset::{

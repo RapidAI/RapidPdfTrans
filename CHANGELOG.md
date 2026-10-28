@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Fixed
+- A figure's invisible text layer on a born-digital page is no longer painted in Chinese over the figure's English pixels (guide p10 overlap and tofu).
+- A justified column paragraph with an indented first line and short last line is no longer centered.
+- An APA author line split from its title (`Shen, X., … (2024).`) is kept as a reference.
+- Linux Libertine `TB`/`TI`/`TBI` faces are read as bold/italic, so bold run-in headings keep their weight.
 - A display equation that moves up with its shortened paragraph no longer leaves ghost `′ ˆ` shards and its fraction bar at the old position; wide fraction bars inside a display line move with it.
 - An `Appendix A.2.2 …` heading run into its first sentence now ends the bibliography instead of being kept as a reference entry.
 - A gateway HTTP 400 or 504 is retried like a 5xx; the pooled gateway returns 400 for transient upstream failures.

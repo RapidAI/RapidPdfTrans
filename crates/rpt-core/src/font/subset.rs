@@ -34,6 +34,22 @@ pub struct FaceStyle {
     pub italic: bool,
 }
 
+/// The Type 1 Linux Libertine and Biolinum set marks weight in a short
+/// suffix: `LinLibertineT` is regular, `TB` bold, `TI` italic, `TBI` both
+/// (`RKZODD+LinLibertineTB` is a bold run-in heading).
+pub(crate) fn libertine_weight(font_name: &str) -> (bool, bool) {
+    let face = font_name.rsplit('+').next().unwrap_or(font_name);
+    for family in ["LinLibertine", "LinBiolinum"] {
+        if let Some(rest) = face.strip_prefix(family) {
+            let rest = rest.strip_prefix(['T', 'O']).unwrap_or(rest);
+            if rest.len() <= 3 && rest.chars().all(|ch| ch.is_ascii_uppercase()) {
+                return (rest.contains('B'), rest.contains('I'));
+            }
+        }
+    }
+    (false, false)
+}
+
 pub fn face_style(font_name: &str) -> FaceStyle {
     let upper = font_name.to_ascii_uppercase();
     let serif = [
@@ -59,12 +75,16 @@ pub fn face_style(font_name: &str) -> FaceStyle {
     // Medium (NimbusRom-Medi, the usual LaTeX \textbf face) is not `bold`
     // here: a running header in that face must not be enlarged as a
     // subsection. `medium_weight` still selects the bold CJK face.
-    let bold = ["BOLD", "BLACK", "HEAVY", "SEMIBOLD", "DEMIBOLD", "CMBX"]
-        .iter()
-        .any(|needle| upper.contains(needle));
-    let italic = ["ITAL", "OBLIQUE", "CMTI"]
-        .iter()
-        .any(|needle| upper.contains(needle));
+    let (libertine_bold, libertine_italic) = libertine_weight(font_name);
+    let serif = serif || upper.contains("LIBERTINE");
+    let bold = libertine_bold
+        || ["BOLD", "BLACK", "HEAVY", "SEMIBOLD", "DEMIBOLD", "CMBX"]
+            .iter()
+            .any(|needle| upper.contains(needle));
+    let italic = libertine_italic
+        || ["ITAL", "OBLIQUE", "CMTI"]
+            .iter()
+            .any(|needle| upper.contains(needle));
     FaceStyle {
         serif,
         bold,
@@ -1430,6 +1450,15 @@ fn i16be(data: &[u8], at: usize) -> Option<i16> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_libertine_weight_suffix_is_read() {
+        assert_eq!(libertine_weight("RKZODD+LinLibertineTB"), (true, false));
+        assert_eq!(libertine_weight("QKFIIL+LinLibertineT"), (false, false));
+        assert_eq!(libertine_weight("LinLibertineTBI"), (true, true));
+        assert_eq!(libertine_weight("LinBiolinumTI"), (false, true));
+        assert!(face_style("RKZODD+LinLibertineTB").bold);
+    }
+
     use super::*;
 
     #[test]

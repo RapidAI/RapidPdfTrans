@@ -88,6 +88,21 @@ pub fn block_alignment(
     // Two full lines of a centered header share both edges, the same way a
     // justified column does. The margin keeps that column out: a body line
     // sits closer to the page edge than a title.
+    // A justified paragraph in a column (indented first line, full middle
+    // lines, short last line) shares the column midpoint on its full lines.
+    // A short line that still starts on the column's left edge is not
+    // centered, so the block is not either.
+    if let Some((col_left, col_right)) = column {
+        let full = lines.iter().any(|line| {
+            (line.left - col_left).abs() <= 2.5 && (line.right - col_right).abs() <= 2.5
+        });
+        let short_flush = lines
+            .iter()
+            .any(|line| (line.left - col_left).abs() <= 2.5 && line.right < col_right - size * 0.5);
+        if lines.len() >= 2 && full && short_flush {
+            return BlockAlign::Start;
+        }
+    }
     let page_centered = lines.len() <= 4
         && lines.iter().all(|line| {
             (mid(line) - page_mid).abs() <= tol
@@ -625,6 +640,18 @@ fn same_baseline_ink_hits(page: u32, glyphs: &[&Glyph]) -> Vec<OverlapHit> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_justified_column_paragraph_with_a_short_last_line_is_not_centered() {
+        let line = |left: f32, right: f32| AlignLine {
+            left,
+            right,
+            size: 9.0,
+        };
+        let lines = [line(316.6, 557.7), line(306.6, 557.7), line(306.6, 546.9)];
+        let align = block_alignment(&lines, [0.0, 0.0, 595.0, 842.0], Some((306.6, 557.7)));
+        assert!(matches!(align, BlockAlign::Start));
+    }
+
     use super::*;
     use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
     use crate::Color;
