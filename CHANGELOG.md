@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- An unchanged formula fragment made only of single letters and operator names (`exp ⟦0⟧ K⟦1⟧ exp ⟦2⟧`) stays formula ink, and an unmapped `∑` moves with its display formula, so the fraction no longer splits from its sum.
+
 - Reflow keeps a formula that opens a line and one that starts just inside the gap between slices, reserving the width the formula paints, so `{g_1, …, g_20}（框 2）` no longer draws text over the set.
 
 - A kept reference line ending at the column gutter no longer joins the display formula that starts the next column, so the reference stays put and the layout check stops reporting a split there. Big display parens join the formula they wrap, and a tall fraction keeps its denominator.

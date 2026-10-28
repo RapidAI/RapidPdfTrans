@@ -376,7 +376,10 @@ fn rewrite_translation_once(
         // `p_ij =` opens a display formula and split off it. Every letter is
         // in a math face, so it is formula ink. Redrawn as an unchanged line,
         // it moved with the paragraph above and split the formula by 16pt.
-        if segment.translated == segment.source && math_letters_only(segment, extraction, &by_id) {
+        if segment.translated == segment.source
+            && (math_letters_only(segment, extraction, &by_id)
+                || formula_words_only(segment, extraction, &by_id))
+        {
             for id in &segment.glyph_ids {
                 keep.entry(*id).or_insert_with(|| "formula".into());
                 symbol_shards.insert(*id);
@@ -25046,7 +25049,9 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
             glyph.page_index == page
                 && !used.contains(&glyph.id)
                 && !glyph.invisible
-                && !glyph.unicode.trim().is_empty()
+                // An unmapped `∑` has no text, but it is formula ink. Left
+                // out, it stayed while the fraction moved 9pt.
+                && (!glyph.unicode.trim().is_empty() || glyph.unmapped)
                 && away_from_text(glyph)
         })
         .collect();
@@ -29961,6 +29966,38 @@ fn math_letters_only(
         .filter(|glyph| glyph.unicode.chars().any(char::is_alphanumeric))
         .collect();
     !letters.is_empty() && letters.iter().all(|glyph| is_math_font(&glyph.font_name))
+}
+
+/// `exp ⟦0⟧ K⟦1⟧ exp ⟦2⟧` is the numerator and denominator of a fraction,
+/// and `), j = 1,...,K.` its tail. `exp` is set upright and `1` is a digit,
+/// so the math-face test missed them. Redrawn as text, the numerator fell
+/// 9pt onto the fraction bar while its big parentheses stayed.
+fn formula_words_only(
+    segment: &crate::translate::TranslatedSegment,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    const OPERATORS: [&str; 18] = [
+        "exp", "log", "ln", "lg", "sin", "cos", "tan", "max", "min", "arg", "lim", "sup", "inf",
+        "det", "dim", "deg", "mod", "Pr",
+    ];
+    let mut words = segment
+        .source
+        .split(|ch: char| !ch.is_alphabetic())
+        .filter(|word| !word.is_empty())
+        .peekable();
+    if words.peek().is_none()
+        || !words.all(|word| word.chars().count() == 1 || OPERATORS.contains(&word))
+    {
+        return false;
+    }
+    segment
+        .glyph_ids
+        .iter()
+        .filter_map(|id| by_id.get(id).and_then(|at| extraction.glyphs.get(*at)))
+        .any(|glyph| {
+            glyph.unicode.chars().any(char::is_alphabetic) && is_math_font(&glyph.font_name)
+        })
 }
 
 fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
@@ -40560,6 +40597,40 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         assert!(buf.text.starts_with("00\u{3000}"), "{:?}", buf.text);
         assert_eq!(buf.jobs.len(), 1);
         assert!(buf.holes[&0] > 40.0, "hole {}", buf.holes[&0]);
+    }
+
+    #[test]
+    fn an_upright_operator_with_math_letters_is_formula_ink() {
+        let mut e = math_glyph(1, 300.0, 560.0, "e", false);
+        e.font_name = "ZE+CMR10".into();
+        let k = math_glyph(2, 330.0, 560.0, "K", true);
+        let extraction = page_extraction(vec![e, k]);
+        let by_id = glyph_index(&extraction.glyphs);
+        let segment = |source: &str| crate::translate::TranslatedSegment {
+            id: 0,
+            page_index: 0,
+            glyph_ids: vec![1, 2],
+            source: source.into(),
+            translated: source.into(),
+        };
+        assert!(formula_words_only(
+            &segment("exp ⟦0⟧ K⟦1⟧ exp ⟦2⟧"),
+            &extraction,
+            &by_id
+        ));
+        assert!(formula_words_only(
+            &segment("), j = 1,...,K."),
+            &extraction,
+            &by_id
+        ));
+        assert!(!formula_words_only(
+            &segment("Keep K fixed"),
+            &extraction,
+            &by_id
+        ));
+        let plain = page_extraction(vec![math_glyph(1, 300.0, 560.0, "a", false)]);
+        let by_plain = glyph_index(&plain.glyphs);
+        assert!(!formula_words_only(&segment("a b"), &plain, &by_plain));
     }
 
     fn uniform_font(text: &str) -> SubsetFont {
