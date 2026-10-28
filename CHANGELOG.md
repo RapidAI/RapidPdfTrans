@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A kept reference line ending at the column gutter no longer joins the display formula that starts the next column, so the reference stays put and the layout check stops reporting a split there. Big display parens join the formula they wrap, and a tall fraction keeps its denominator.
+
 - A kept formula lead (`p_ij =`) now moves with the display formula beside it instead of staying behind when the formula is shifted.
 
 - The layout check reports `math overlap` when a translated character is drawn over a math glyph still painted in the source (`(si,k, Gi,k)被添加`). It is a note, not a failure, while its false-positive rate is measured.

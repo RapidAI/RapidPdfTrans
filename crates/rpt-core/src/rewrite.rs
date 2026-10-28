@@ -10072,9 +10072,19 @@ fn display_runs(
         }
         run.clear();
     };
-    for glyph in band {
+    // A band is gathered by baseline. Read it left to right, or a reference
+    // line in the left column interleaves with the formula in the right.
+    let mut band = band.to_vec();
+    band.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    for glyph in &band {
         if let Some(prev) = run.last() {
-            if glyph.matrix[4] - glyph_paint_right(prev) > prev.font_size.max(1.0) * 8.0 {
+            let gap = glyph.matrix[4] - glyph_paint_right(prev);
+            // `… Wu. 2026. In-` ends the left column and `p_ij =` starts the
+            // right one. They are not one display.
+            let gutter = gap > prev.font_size.max(1.0)
+                && is_math_font(&glyph.font_name)
+                && !run.iter().any(|glyph| is_math_font(&glyph.font_name));
+            if gap > prev.font_size.max(1.0) * 8.0 || gutter {
                 flush_run(&mut run, &mut notes);
                 word.clear();
             }
@@ -24833,6 +24843,16 @@ fn formula_line_span(line: &[&Glyph]) -> (f32, f32) {
     (left, right)
 }
 
+/// Eight or more letters and no math face: a run of words, not a formula.
+fn line_is_plain_prose(line: &[&Glyph]) -> bool {
+    !line.iter().any(|glyph| is_math_font(&glyph.font_name))
+        && line
+            .iter()
+            .filter(|glyph| glyph.unicode.chars().any(char::is_alphabetic))
+            .count()
+            >= 8
+}
+
 fn formula_horiz_gap(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
     if a1 < b0 {
         b0 - a1
@@ -25009,7 +25029,13 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
             // delimiter used to stay on the English baseline.
             let closing = matches!(glyph.unicode.trim(), ")" | "]" | "}");
             let limit = if closing { size * 4.0 } else { size * 2.5 };
-            formula_horiz_gap(gx0, gx1, lx0, lx1) < limit
+            let gap = formula_horiz_gap(gx0, gx1, lx0, lx1);
+            // A kept reference line ends at the gutter and `p_ij =` starts
+            // the next column. Joined, the reference moved with the formula.
+            if gap >= size && is_math_font(&glyph.font_name) && line_is_plain_prose(line) {
+                return false;
+            }
+            gap < limit
         });
         if let Some(line) = joined {
             line.push(glyph);
@@ -25017,8 +25043,47 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
             lines.push(vec![glyph]);
         }
     }
+    // Big parens on their own baseline (`exp(-d(x, c))`) come before the
+    // numerator they wrap. Placed first, they joined the line above and
+    // stayed there when the fraction moved. They join last, to the formula
+    // they span.
+    let (delimiters, mut lines): (Vec<_>, Vec<_>) = lines.into_iter().partition(|line| {
+        line.iter()
+            .all(|glyph| contains_ascii_upper(&glyph.font_name, "CMEX"))
+    });
     let mut clusters: Vec<Vec<&Glyph>> = Vec::new();
-    for line in lines {
+    let first_delimiter = lines.len();
+    lines.extend(delimiters);
+    for (at, line) in lines.into_iter().enumerate() {
+        if at >= first_delimiter {
+            let (lx0, lx1) = formula_line_span(&line);
+            let ly = line[0].matrix[5];
+            let size = line
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(1.0f32, f32::max);
+            // The wrapped glyphs lie between the two parens. The nearest
+            // of them in y names the formula.
+            let host = clusters
+                .iter()
+                .enumerate()
+                .filter_map(|(index, cluster)| {
+                    cluster
+                        .iter()
+                        .filter(|glyph| glyph.matrix[4] > lx0 && glyph.matrix[4] < lx1)
+                        .map(|glyph| (glyph.matrix[5] - ly).abs())
+                        .filter(|dy| *dy <= size * 1.5)
+                        .min_by(f32::total_cmp)
+                        .map(|dy| (index, dy))
+                })
+                .min_by(|left, right| left.1.total_cmp(&right.1))
+                .map(|(index, _)| index);
+            match host {
+                Some(index) => clusters[index].extend(line),
+                None => clusters.push(line),
+            }
+            continue;
+        }
         let size = line
             .iter()
             .map(|glyph| glyph.font_size)
@@ -25050,7 +25115,28 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
                     .iter()
                     .map(|glyph| glyph.matrix[5])
                     .fold(ly, f32::min);
-                top - bottom <= cluster_size * 2.05
+                if top - bottom <= cluster_size * 2.05 {
+                    return true;
+                }
+                // A tall numerator (`exp(-d(x, c))` with big parens) puts the
+                // denominator past 2em. It still sits inside the fraction's
+                // width, right under it, and the `=` of `p_ij =` is to its
+                // left, less than 1.5em above its baseline.
+                let cluster_bottom = cluster
+                    .iter()
+                    .map(|glyph| glyph.matrix[5])
+                    .fold(f32::MAX, f32::min);
+                lx0 >= cx0 - 0.5
+                    && lx1 <= cx1 + 0.5
+                    && cluster_bottom - ly <= cluster_size * 1.0
+                    && top - bottom <= cluster_size * 3.5
+                    && line.iter().any(|glyph| is_math_font(&glyph.font_name))
+                    && cluster.iter().any(|glyph| {
+                        glyph.unicode.trim() == "="
+                            && glyph_paint_right(glyph) < lx0
+                            && glyph.matrix[5] > ly + 0.5
+                            && glyph.matrix[5] < ly + size * 1.5
+                    })
             })
             .map(|(index, _)| index)
             .collect();
@@ -49433,6 +49519,49 @@ q\n1 0 0 1 108 94.002 cm\n[]0 d 0 J 0.398 w 0 0 m 143.462 0 l S\nQ\n"
             assert!(
                 ids.contains(&script),
                 "superscript {script} left the equation: {ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reference_line_ending_at_the_gutter_does_not_join_the_next_column_formula() {
+        let mut glyphs = Vec::new();
+        let mut id = 1u32;
+        let mut push = |x: f32, y: f32, text: &str, font: &str| {
+            let mut glyph = ink_glyph(id, x, y, 10.0, text);
+            glyph.font_name = font.into();
+            glyph.bbox = [x, y - 2.0, x + 5.0, y + 8.0];
+            glyph.advance = [5.0, 0.0];
+            id += 1;
+            glyphs.push(glyph);
+        };
+        for (index, ch) in "ShengyuZhangLinfengDong".chars().enumerate() {
+            push(
+                180.0 + index as f32 * 5.0,
+                561.2,
+                &ch.to_string(),
+                "NimbusRomNo9L-Regu",
+            );
+        }
+        push(309.6, 559.6, "p", "CMMI10");
+        push(325.4, 559.6, "=", "CMR10");
+        push(340.0, 559.6, "x", "CMMI10");
+        push(352.0, 559.6, "y", "CMMI10");
+        push(364.0, 559.6, "z", "CMMI10");
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let blocks = display_formula_blocks(&[], &extraction, 0);
+        assert!(!blocks.is_empty());
+        for block in &blocks {
+            assert!(
+                block.left > 300.0,
+                "reference joined the formula: {}",
+                block.left
             );
         }
     }
