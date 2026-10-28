@@ -8110,7 +8110,9 @@ fn clear_seated_formula_overlaps(
         // only the first line leaves `Bxn` inside the union.
         let mut atom_right: Option<f32> = None;
         for slot in &hosts {
-            if let Some(right) = bisected_math_atom_right(&lines[*slot], ink_left, ink_right) {
+            let atom = bisected_math_atom_right(&lines[*slot], ink_left, ink_right)
+                .or_else(|| trailing_math_letter_right(&lines[*slot], ink_left, ink_right));
+            if let Some(right) = atom {
                 atom_right = Some(atom_right.map_or(right, |have| have.max(right)));
             }
         }
@@ -8468,6 +8470,34 @@ fn bisected_math_atom_right(line: &Drawn, ink_left: f32, ink_right: f32) -> Opti
     }
     let right = char_origin(line, &chars, end) + line.widths[end];
     (right > start + 0.2).then_some(right)
+}
+
+/// Right edge of a lone Greek or math letter (`σ`) that ends the line inside
+/// the ink. It is the base of the formula seated there, not text after it.
+fn trailing_math_letter_right(line: &Drawn, ink_left: f32, ink_right: f32) -> Option<f32> {
+    let chars: Vec<char> = line.text.chars().collect();
+    if chars.len() < 2 || line.widths.len() != chars.len() {
+        return None;
+    }
+    let last = chars.len() - 1;
+    let ch = chars[last];
+    if !is_math_letter(ch) || !(chars[last - 1].is_whitespace() || is_han_char(chars[last - 1])) {
+        return None;
+    }
+    let origin = char_origin(line, &chars, last);
+    (origin >= ink_left - 0.5 && origin < ink_right + 0.7).then(|| {
+        // Seat the formula against the letter, not after the gap that was
+        // opened to clear it.
+        let unpushed = origin - line.gaps.get(last - 1).copied().unwrap_or(0.0);
+        unpushed + line.widths[last]
+    })
+}
+
+fn is_math_letter(ch: char) -> bool {
+    ch.is_alphabetic() && !ch.is_ascii() && !is_han_char(ch) && {
+        let code = ch as u32;
+        (0x0370..=0x03FF).contains(&code) || (0x1D400..=0x1D7FF).contains(&code)
+    }
 }
 
 fn shift_has(shift: &ListingShift, id: u32) -> bool {
@@ -10567,7 +10597,12 @@ fn reserve_formula_ink(lines: &mut [Drawn], shift: &mut ListingShift, extraction
         }
         // `Bx1 ∪` : this push used to leave `B` on the left of the union and
         // `x1` on the right. Move the formula past the atom instead.
-        if let Some(atom_right) = bisected_math_atom_right(line, ink_left, ink_right) {
+        // `和 σ` ends on the base letter of `σ²path`. The seated subscript is
+        // that letter's own formula, so it follows the letter. Pushing the
+        // letter past it painted `σ` over the next slice (`的降低`).
+        let atom = bisected_math_atom_right(line, ink_left, ink_right)
+            .or_else(|| trailing_math_letter_right(line, ink_left, ink_right));
+        if let Some(atom_right) = atom {
             let shift_by = atom_right + 1.0 - ink_left;
             if shift_by > 0.4 {
                 shift.dx += shift_by;
@@ -49214,5 +49249,19 @@ q\n1 0 0 1 120.056 265.599 cm\n[]0 d 0 J 0.398 w 0 0 m 15.047 0 l S\nQ\n"
         };
         let notes = audit_line_gaps(&[gloss], &extraction, &[]);
         assert!(notes.is_empty(), "the next column was a hole: {notes:?}");
+    }
+
+    #[test]
+    fn a_trailing_greek_base_letter_seats_its_formula_after_it() {
+        let mut line = test_draw(192.9, 274.8, 8.0, " 和 σ", vec![1]);
+        line.widths = vec![2.0, 8.0, 2.0, 5.0];
+        line.cids = vec![1; 4];
+        line.gaps = vec![0.0, 0.0, 6.0];
+        let right = trailing_math_letter_right(&line, 210.0, 230.0);
+        assert_eq!(right, Some(192.9 + 12.0 + 5.0));
+        let mut latin = line.clone();
+        latin.text = " 和 x".into();
+        assert!(trailing_math_letter_right(&latin, 210.0, 230.0).is_none());
+        assert!(trailing_math_letter_right(&line, 240.0, 260.0).is_none());
     }
 }

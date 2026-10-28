@@ -7,6 +7,7 @@
 - A styled run-in stays with its paragraph when the paragraph continues into the next column (prompt boxes).
 - The display-glyph audit accepts translated lines that keep their math text in order (formula paragraphs).
 - The in-line gap audit ignores neighbours past the line's own source extent (gutters, boxes in the next column).
+- A Greek base letter that ends a slice in front of its seated sub/superscript (`和 σ` + `²path`) seats the formula after the letter instead of pushing the letter over the next slice.
 
 ### Fixed
 
