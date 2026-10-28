@@ -351,6 +351,7 @@ fn rewrite_translation_once(
         keep.insert(*id, reason.clone());
     }
     let mut symbol_shards: HashSet<u32> = HashSet::new();
+    let mut formula_leads: HashSet<u32> = HashSet::new();
     for (index, segment) in report.segments.iter().enumerate() {
         if segment.glyph_ids.is_empty() {
             continue;
@@ -369,6 +370,17 @@ fn rewrite_translation_once(
             for id in &segment.glyph_ids {
                 keep.entry(*id).or_insert_with(|| "formula".into());
                 symbol_shards.insert(*id);
+            }
+            continue;
+        }
+        // `p_ij =` opens a display formula and split off it. Every letter is
+        // in a math face, so it is formula ink. Redrawn as an unchanged line,
+        // it moved with the paragraph above and split the formula by 16pt.
+        if segment.translated == segment.source && math_letters_only(segment, extraction, &by_id) {
+            for id in &segment.glyph_ids {
+                keep.entry(*id).or_insert_with(|| "formula".into());
+                symbol_shards.insert(*id);
+                formula_leads.insert(*id);
             }
             continue;
         }
@@ -1141,6 +1153,11 @@ fn rewrite_translation_once(
     // A full-width `•` from the CJK face is wider than the Latin bullet's
     // slot and ran into `计算方法`. Move it left so it ends before the words.
     clear_wide_bullets(&mut drawn);
+    // A formula lead moves exactly as the rest of its formula does.
+    let mates = formula_lead_mates(&formula_leads, extraction);
+    for shift in listing_shifts.iter_mut().chain(stack_shifts.iter_mut()) {
+        follow_formula_mates(shift, &mates);
+    }
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     // An unmapped `ℓ` never entered the line, so the translation was drawn
@@ -29753,6 +29770,62 @@ fn version_token(chars: &[char], start: usize) -> bool {
 
 /// A byline left in Latin is a name, not an untranslated body paragraph.
 /// Body prose the model echoed is `english-body`. Everything else is `unchanged`.
+/// The nearest glyph after each formula lead on its baseline, within 3em,
+/// that is not itself a lead: `p_ij =` → the fraction it opens.
+fn formula_lead_mates(leads: &HashSet<u32>, extraction: &Extraction) -> HashMap<u32, u32> {
+    let mut mates = HashMap::new();
+    for lead in extraction.glyphs.iter().filter(|g| leads.contains(&g.id)) {
+        let size = lead.font_size.max(1.0);
+        let right = glyph_paint_right(lead);
+        let mate = extraction
+            .glyphs
+            .iter()
+            .filter(|g| {
+                g.page_index == lead.page_index
+                    && !leads.contains(&g.id)
+                    && !g.invisible
+                    && g.matrix[4] >= right - 0.5
+                    && g.matrix[4] - right <= size * 3.0
+                    && (g.matrix[5] - lead.matrix[5]).abs() <= size * 0.6
+            })
+            .min_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+        if let Some(mate) = mate {
+            mates.insert(lead.id, mate.id);
+        }
+    }
+    mates
+}
+
+/// `p_ij =` rode a paragraph pull while its fraction did not, and the
+/// display formula split by 16pt. The lead joins a shift exactly when its mate
+/// is in it.
+fn follow_formula_mates(shift: &mut ListingShift, mates: &HashMap<u32, u32>) {
+    let carried: HashSet<u32> = shift.ids.iter().copied().collect();
+    shift
+        .ids
+        .retain(|id| mates.get(id).is_none_or(|mate| carried.contains(mate)));
+    for (lead, mate) in mates {
+        if carried.contains(mate) && !shift.ids.contains(lead) {
+            shift.ids.push(*lead);
+        }
+    }
+}
+
+/// Every letter of the segment is set in a math face (`p_ij =`).
+fn math_letters_only(
+    segment: &crate::translate::TranslatedSegment,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let letters: Vec<&Glyph> = segment
+        .glyph_ids
+        .iter()
+        .filter_map(|id| by_id.get(id).and_then(|at| extraction.glyphs.get(*at)))
+        .filter(|glyph| glyph.unicode.chars().any(char::is_alphanumeric))
+        .collect();
+    !letters.is_empty() && letters.iter().all(|glyph| is_math_font(&glyph.font_name))
+}
+
 fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
     // An affiliation (`Google AI Language`) stays in the original embedded
     // face. `unchanged` would blank it and redraw with the CJK subset.
@@ -30677,6 +30750,24 @@ fn pdf_num(value: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kept_formula_lead_moves_only_with_the_formula_beside_it() {
+        let mates: HashMap<u32, u32> = [(1, 2)].into_iter().collect();
+        let shift = |ids: Vec<u32>| ListingShift {
+            page: 0,
+            ids,
+            dx: 0.0,
+            dy: -16.0,
+            host_y: f32::NAN,
+        };
+        let mut carrying = shift(vec![2, 3]);
+        follow_formula_mates(&mut carrying, &mates);
+        assert!(carrying.ids.contains(&1));
+        let mut stray = shift(vec![1, 4]);
+        follow_formula_mates(&mut stray, &mates);
+        assert_eq!(stray.ids, vec![4]);
+    }
     use crate::extract::Extraction;
     use crate::extract::PdfDocument;
     use crate::font::box_ttf;
