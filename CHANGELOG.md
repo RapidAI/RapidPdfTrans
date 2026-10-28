@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Intentional formula keeps are not overwritten by `gloss_echoed_words` or `settle_translation` (so `(high)` stays Latin instead of becoming `处理`).
+
+- Short formula annotations (`(high)`, `from εeval`, `trajectory randomness`) stay glyph-identical so CJK width does not paint them through the body line under a display equation.
+
 - A paragraph in the right column is no longer pulled up onto the paragraph above it by a small math label in the left column (`(low)`); the vacant-gap hole closer now needs both blocks in one column. Fixes the GuideEvolve p4 throwback paragraphs that fell back to English.
 - Debug switches `RPT_DEBUG_OVERLAP`, `RPT_DEBUG_NO_FALLBACK` and `RPT_HOLE_DEBUG` print overlap pairs, skip the overlap fallback, and trace the column hole closer.
 - A figure's invisible text layer on a born-digital page is no longer painted in Chinese over the figure's English pixels (guide p10 overlap and tofu).

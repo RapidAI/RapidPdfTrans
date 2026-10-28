@@ -605,6 +605,7 @@ pub fn translate_extraction(
         }
         if seg.text.trim().is_empty()
             || url_or_email_only(&seg.text)
+            || intentional_keep_kind(&seg.text).is_some()
             || formula_shard(seg, &extraction.glyphs, &glyph_at)
         {
             translated[i] = Some(seg.text.clone());
@@ -797,7 +798,10 @@ pub fn replay_extraction(
     let mut cache_hits = 0usize;
     let mut seen = HashSet::new();
     for seg in &segments {
-        if seg.glyph_ids.iter().any(|id| reference_ids.contains(id)) || seg.text.trim().is_empty() {
+        if seg.glyph_ids.iter().any(|id| reference_ids.contains(id))
+            || seg.text.trim().is_empty()
+            || intentional_keep_kind(&seg.text).is_some()
+        {
             translated.push(Some(seg.text.clone()));
             continue;
         }
@@ -2751,6 +2755,9 @@ fn gloss_echoed_words(segments: &[Segment], translated: &mut [String]) {
     for (segment, text) in segments.iter().zip(translated.iter_mut()) {
         let source = segment.text.trim();
         let current = text.trim();
+        if intentional_keep_kind(source).is_some() {
+            continue;
+        }
         if !echoed_prose_word(source) || !source.eq_ignore_ascii_case(current) {
             continue;
         }
@@ -4878,6 +4885,9 @@ pub(crate) fn intentional_keep_kind(source: &str) -> Option<&'static str> {
     if looks_like_display_math(source) {
         return Some("formula");
     }
+    if looks_like_formula_annotation(source) {
+        return Some("formula");
+    }
     if apa_author_line(source) {
         return Some("references");
     }
@@ -4966,6 +4976,33 @@ fn looks_like_display_math(source: &str) -> bool {
     letters < 12 && marks >= 2 && source.chars().any(|ch| matches!(ch, '=' | '\\'))
 }
 
+/// Under-brace labels and high/low marks next to a display formula. Translating
+/// them to CJK changes their width and paints them through the body line.
+fn looks_like_formula_annotation(source: &str) -> bool {
+    let text = source.trim();
+    if text.is_empty() || text.chars().count() > 28 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    // `(high) proc` sits on the same baseline as `represents processing
+    // bias…`; keeping it English while that clause is Chinese overlaps.
+    // Bare `(high)` / `(low)` under a variance brace keep their source width.
+    if lower == "(high)" || lower == "(low)" || lower == "trajectory randomness" {
+        return true;
+    }
+    // `from ε`, `from εeval`, `from δproc` under variance braces.
+    if let Some(rest) = lower.strip_prefix("from ") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return false;
+        }
+        // Greek or mixed identifier, not an English clause.
+        return !rest.is_ascii()
+            || (rest.len() <= 12 && rest.chars().all(|ch| ch.is_ascii_alphanumeric()));
+    }
+    false
+}
+
 /// A byline of people, including `Ada Lovelace, Grace Hopper`.
 /// A comma list of products (`Ada, Go, Rust`) is not a byline: those tokens
 /// are single words, and a personal name here is at least two.
@@ -5007,6 +5044,9 @@ pub(crate) fn is_author_list(text: &str) -> bool {
 }
 
 fn settle_translation(source: &str, translated: &str) -> String {
+    if intentional_keep_kind(source).is_some() {
+        return source.to_string();
+    }
     let translated = strip_spurious_subtitle(source, translated);
     let translated = gloss_echoed_formula_words(source, &translated);
     restore_credit_names(source, &translated)
@@ -6529,6 +6569,13 @@ mod tests {
             Some("name")
         );
         assert_eq!(intentional_keep_kind("Method"), None);
+        assert_eq!(intentional_keep_kind("(high)"), Some("formula"));
+        assert_eq!(intentional_keep_kind("from εeval"), Some("formula"));
+        assert_eq!(
+            intentional_keep_kind("trajectory randomness"),
+            Some("formula")
+        );
+        assert_eq!(intentional_keep_kind("from the expert module"), None);
     }
 
     #[test]
