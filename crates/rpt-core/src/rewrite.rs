@@ -20588,7 +20588,16 @@ fn append_baseline_row(
                         continue;
                     }
                     let painted = left + shift.dx;
-                    if painted < gap_left - size * 0.4 || painted > gap_right + size * 1.3 {
+                    // The hole can open a few points inside the text before
+                    // it (`配对` ended 7pt into `(s_{i,k}, G_{i,k})`). The
+                    // formula still fills this gap, and dropping it here lost
+                    // the hole in the reflow.
+                    let painted_right =
+                        seated_ink_span(shift, extraction).map_or(painted, |(_, right)| right);
+                    let fills_gap = painted_right > gap_left + size && painted < gap_left;
+                    if (painted < gap_left - size * 0.4 && !fills_gap)
+                        || painted > gap_right + size * 1.3
+                    {
                         continue;
                     }
                     ids.extend(shift.ids.iter().copied());
@@ -20608,6 +20617,48 @@ fn append_baseline_row(
                         },
                     );
                 }
+            }
+        }
+        // `{g_1, …, g_20}（框 2）` opens the line with a formula. No slice
+        // sits before it, so the gap test above never saw it, and the
+        // reflow drew `（框` where the set was.
+        if slice_index == 0 {
+            let size = line.size.max(1.0);
+            let mut ids = Vec::new();
+            let mut anchor_y = line.y;
+            let mut source_left = line.x;
+            let mut span = (f32::MAX, f32::MIN);
+            for shift in shifts {
+                if claimed.contains(&shift.ids) || !shift_sits_on_line(shift, line) {
+                    continue;
+                }
+                let Some((painted, painted_right)) = seated_ink_span(shift, extraction) else {
+                    continue;
+                };
+                if painted >= line.x - size * 0.4 || painted_right < line.x - size * 1.3 {
+                    continue;
+                }
+                ids.extend(shift.ids.iter().copied());
+                span = (span.0.min(painted), span.1.max(painted_right));
+                source_left = cluster_left(shift, extraction);
+                anchor_y = shift_anchor(shift, extraction)
+                    .map(|glyph| glyph.matrix[5])
+                    .unwrap_or(line.y - shift.dy);
+                claimed.insert(shift.ids.clone());
+            }
+            if !ids.is_empty() {
+                // Packing `{g_1, …, g_20}` drops the spacing the source set
+                // the formula with, and the text after it then runs into
+                // the seated ink. Reserve what the formula paints.
+                let width = packed_ids_width(&ids, extraction, size).max(span.1 - span.0);
+                buf.emit_hole(
+                    width,
+                    HoleJob::Place {
+                        ids,
+                        left: source_left,
+                        anchor_y,
+                    },
+                );
             }
         }
         if chars.is_empty() {
@@ -40469,6 +40520,46 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             .map(|line| line.page)
             .collect();
         assert_eq!(marks, vec![1], "{marks:?}");
+    }
+
+    #[test]
+    fn a_formula_before_the_first_slice_keeps_its_hole() {
+        let text = "（框2）每个";
+        let chars = text.chars().count();
+        let line = Drawn {
+            page: 0,
+            x: 366.0,
+            y: 700.0,
+            size: 10.0,
+            color: Color::black(),
+            cids: vec![1; chars],
+            resource: "F1".into(),
+            skew: 0.0,
+            text: text.into(),
+            glyph_ids: vec![10],
+            widths: vec![10.0; chars],
+            gaps: vec![0.0; chars - 1],
+            supers: vec![false; chars],
+            sup_scale: 1.0,
+            sup_rise: 0.0,
+        };
+        let extraction = page_extraction(vec![
+            math_glyph(1, 306.0, 700.0, "g", true),
+            math_glyph(2, 352.0, 700.0, "}", true),
+        ]);
+        let shifts = vec![ListingShift {
+            page: 0,
+            ids: vec![1, 2],
+            dx: 0.0,
+            dy: 0.0,
+            host_y: 700.0,
+        }];
+        let font = uniform_font(text);
+        let mut buf = ReflowBuf::new();
+        append_baseline_row(&mut buf, &[&line], &extraction, &shifts, &font);
+        assert!(buf.text.starts_with("00\u{3000}"), "{:?}", buf.text);
+        assert_eq!(buf.jobs.len(), 1);
+        assert!(buf.holes[&0] > 40.0, "hole {}", buf.holes[&0]);
     }
 
     fn uniform_font(text: &str) -> SubsetFont {
