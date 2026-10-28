@@ -6441,6 +6441,18 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
         if dy < size * 0.08 || dy > size * 1.05 {
             continue;
         }
+        // A prose subscript drops well under half an em. Marks most of an em
+        // below a prose line (`⊤ −1` of the formula under `Definition 3`)
+        // belong to that formula, and gluing them in read `Info⊤r)m−a1tion`.
+        // A limit variable (`n` under a sum) still names its sentence.
+        if line.y < other.y
+            && !on_math
+            && dy > size * 0.5
+            && line.size < size * 0.85
+            && !line.text.chars().any(char::is_alphabetic)
+        {
+            continue;
+        }
         if line.left < other.left - size || line.right > other.right + size {
             continue;
         }
@@ -12656,6 +12668,31 @@ mod tests {
                     && text.contains('i')
                     && text.contains("quadrants")
             }),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn formula_marks_far_below_a_heading_do_not_join_its_words() {
+        let mut head = wide(
+            0,
+            72.0,
+            760.0,
+            "Definition 3 (Fisher Information Selection). Let",
+            240.0,
+            10.9,
+        );
+        head.font_name = "NimbusRomNo9L-Medi".into();
+        let mut top = wide(1, 180.0, 750.5, "\u{22a4}", 5.0, 8.0);
+        top.font_name = "CMSY8".into();
+        let mut inv = wide(2, 192.0, 752.6, "\u{2212}1", 10.0, 8.0);
+        inv.font_name = "CMSY8".into();
+        let mut eq = wide(3, 100.0, 745.0, "\u{39b}t = Id +", 60.0, 10.9);
+        eq.font_name = "CMMI10".into();
+        let segs = segment_glyphs(&[head, top, inv, eq]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Information Selection")),
             "{texts:?}"
         );
     }
