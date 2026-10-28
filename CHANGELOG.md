@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Fixed
+
+- A paragraph in the right column is no longer pulled up onto the paragraph above it by a small math label in the left column (`(low)`); the vacant-gap hole closer now needs both blocks in one column. Fixes the GuideEvolve p4 throwback paragraphs that fell back to English.
+- Debug switches `RPT_DEBUG_OVERLAP`, `RPT_DEBUG_NO_FALLBACK` and `RPT_HOLE_DEBUG` print overlap pairs, skip the overlap fallback, and trace the column hole closer.
 - A figure's invisible text layer on a born-digital page is no longer painted in Chinese over the figure's English pixels (guide p10 overlap and tofu).
 - A justified column paragraph with an indented first line and short last line is no longer centered.
 - An APA author line split from its title (`Shen, X., … (2024).`) is kept as a reference.

@@ -131,7 +131,24 @@ pub fn rewrite_translation(
     for round in 0..4 {
         let colliding = rewrite_translation_once(doc, extraction, &current, opts)?;
         let culprits = fallback_segments(&current, &colliding);
-        if culprits.is_empty() || round == 3 {
+        if std::env::var_os("RPT_DEBUG_OVERLAP").is_some() {
+            for (a, b) in &colliding {
+                let owner = |ids: &Vec<u32>| {
+                    current
+                        .segments
+                        .iter()
+                        .find(|s| ids.iter().any(|id| s.glyph_ids.contains(id)))
+                        .map(|s| s.source.chars().take(40).collect::<String>())
+                };
+                eprintln!(
+                    "rpt: overlap round {round}: {:?} x {:?}",
+                    owner(a),
+                    owner(b)
+                );
+            }
+        }
+        if culprits.is_empty() || round == 3 || std::env::var_os("RPT_DEBUG_NO_FALLBACK").is_some()
+        {
             break;
         }
         for index in culprits {
@@ -23241,6 +23258,7 @@ fn close_column_holes_with(
                 } else if same_baseline {
                     extra = 0.0;
                 } else if source_gap > reach
+                    && same_column
                     && !row_beside(&block, drawn)
                     && vacant_column_gap(prev, &block, page, extraction, drawn)
                 {
@@ -23368,6 +23386,17 @@ fn close_column_holes_with(
                         dy: applied,
                     });
                 }
+            }
+            if std::env::var_os("RPT_HOLE_DEBUG").is_some() {
+                let head: String = drawn[block.indices.first().copied().unwrap_or(0)]
+                    .text
+                    .chars()
+                    .take(12)
+                    .collect();
+                eprintln!(
+                    "hole p{page} top {:.0} bot {:.0} src {:.0}-{:.0} x {:.0}-{:.0} extra {extra:.1} applied {applied:.1} {head}",
+                    block.top, block.bottom, block.source_top, block.source_bottom, block.left, block.right
+                );
             }
             for index in &block.indices {
                 drawn[*index].y += applied;
@@ -32425,6 +32454,43 @@ mod tests {
             Some("，否则为 0。")
         );
         assert!(blocks.contains(&1), "the display equation was reflowed");
+    }
+
+    #[test]
+    fn a_label_in_the_other_column_does_not_pull_a_paragraph() {
+        // `（低）` is a math label in the left column. The next block in the
+        // page order is the right column's paragraph. The left column's
+        // words between them were absorbed by a left paragraph, so the gap
+        // looked vacant and the right paragraph rose onto the one above it.
+        let glyphs = vec![
+            ink_glyph(1, 59.0, 439.0, 9.0, "l"),
+            ink_glyph(2, 54.0, 484.0, 9.0, "U"),
+            ink_glyph(3, 100.0, 400.0, 9.0, "w"),
+            ink_glyph(4, 318.0, 370.0, 9.0, "T"),
+        ];
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs,
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let by_id = glyph_index(&extraction.glyphs);
+        let mut drawn = vec![
+            test_draw(54.0, 484.0, 9.0, "在这一概念", vec![2, 3]),
+            test_draw(59.0, 439.0, 9.0, "（低）", vec![1]),
+            test_draw(318.0, 370.0, 9.0, "该机制与传统", vec![4]),
+        ];
+        close_column_holes(&mut drawn, &extraction, &by_id);
+        let right_y = drawn
+            .iter()
+            .find(|item| item.text.starts_with('该'))
+            .unwrap()
+            .y;
+        assert!(
+            (right_y - 370.0).abs() < 0.5,
+            "the right column paragraph moved: {right_y}"
+        );
     }
 
     #[test]
