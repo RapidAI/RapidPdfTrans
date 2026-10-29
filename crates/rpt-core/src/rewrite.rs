@@ -12421,7 +12421,7 @@ struct NumberedItem {
 
 /// A `1` / `2` item whose wrapped lines share a hanging indent.
 fn numbered_hanging(ink: &[InkLine<'_>]) -> Option<NumberedItem> {
-    if ink.len() < 2 {
+    if ink.is_empty() {
         return None;
     }
     let mut glyphs = ink[0].glyphs.clone();
@@ -12431,6 +12431,9 @@ fn numbered_hanging(ink: &[InkLine<'_>]) -> Option<NumberedItem> {
     let mut marker_size = 1.0f32;
     let mut marker_x = ink[0].left;
     let mut text_x = None;
+    let mut text_size = 0.0f32;
+    let mut text_y = f32::NAN;
+    let mut marker_y = f32::NAN;
     for glyph in &glyphs {
         let token = glyph.unicode.trim();
         if token.is_empty() {
@@ -12443,6 +12446,7 @@ fn numbered_hanging(ink: &[InkLine<'_>]) -> Option<NumberedItem> {
             if marker.is_empty() {
                 marker_x = glyph.matrix[4];
                 marker_size = glyph.font_size.max(1.0);
+                marker_y = glyph.matrix[5];
                 marker_color = Some(glyph.fill_color.clone());
             }
             marker.push_str(token);
@@ -12452,6 +12456,8 @@ fn numbered_hanging(ink: &[InkLine<'_>]) -> Option<NumberedItem> {
             return None;
         }
         text_x = Some(glyph.matrix[4]);
+        text_size = glyph.font_size;
+        text_y = glyph.matrix[5];
         break;
     }
     let text_x = text_x?;
@@ -12459,10 +12465,23 @@ fn numbered_hanging(ink: &[InkLine<'_>]) -> Option<NumberedItem> {
     if digits == 0 || digits > 2 || marker_has_minor_number(&marker) {
         return None;
     }
-    let text_left = ink[1..]
-        .iter()
-        .map(|line| line.left)
-        .fold(f32::MAX, f32::min);
+    // `8 return π*_θ`: an algorithm step number is set smaller than its
+    // one line. It keeps that size instead of the body's.
+    // A raised footnote or affiliation mark (`²然而`) is not a step number.
+    let step = ink.len() == 1
+        && marker_size < text_size * 0.8
+        && (marker_y - text_y).abs() <= text_size * 0.12;
+    if ink.len() < 2 && !step {
+        return None;
+    }
+    let text_left = if step {
+        text_x
+    } else {
+        ink[1..]
+            .iter()
+            .map(|line| line.left)
+            .fold(f32::MAX, f32::min)
+    };
     let size = marker_size.max(1.0);
     if (text_left - text_x).abs() > (size * 0.55).max(4.0) {
         return None;
@@ -12472,7 +12491,7 @@ fn numbered_hanging(ink: &[InkLine<'_>]) -> Option<NumberedItem> {
         return None;
     }
     let marker_color = marker_color?;
-    let text_color = ink[1..]
+    let text_color = ink[if step { 0 } else { 1 }..]
         .iter()
         .flat_map(|line| line.glyphs.iter())
         .find(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
