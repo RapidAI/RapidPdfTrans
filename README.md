@@ -70,6 +70,8 @@ Set the key in the environment. An `api_key` field in options JSON is ignored.
 | `RPT_CJK_BOLD_FONT` | optional bold face; wins over the style | Bold of the selected family |
 | `RPT_CJK_SANS` | optional file for regular sans source text | the regular face |
 | `RPT_TRANSLATE_JOBS` | optional parallel requests | `4` (cap `8`) |
+| `RPT_MAX_TRANSLATE_SECS` | optional wall-time budget for all model calls of one document | unlimited |
+| `RPT_GATEWAY_DOWN_AFTER` | consecutive refusals (401/403/410/400 access denied) before no more requests are sent | `6` |
 | `RPT_CJK_SIZE_SCALE` | optional | `0.90` |
 | `RPT_CJK_LEADING` | optional | `1.60` |
 
@@ -115,6 +117,8 @@ Flags that exist on `rpt translate`:
 | `--glossary source=target` | Repeat for more than one term. A path to a CSV file (`src,tgt` or `source,target`, header optional) is read instead. Applied locally before the call. |
 | `--system-prompt TEXT` | Extra instructions appended to the system prompt. A path to an existing file is read; `@path` always reads a file. |
 | `--timeout-secs N` | Hard per-request deadline for DNS, connect, TLS, and the response body. Default `60`. A stalled call is abandoned and retried with backoff (four attempts). |
+| `--max-translate-secs N` | Wall-time budget for all model calls of the document. After it the rest keeps the source and the command exits 2. Default `RPT_MAX_TRANSLATE_SECS`, else unlimited. |
+| `--gateway-down-after N` | Stop sending after N consecutive refusals (401, 403, 410, 400 access denied). Default 6. |
 | `--progress text` | Stderr progress: `text` (default), `json` (one object per line), or `off`. Lines name the phase (`connect`, `recv-body`, `retry`) and the segment. A `waiting Ns` line is a stall. A `watchdog: aborting segment …` line names a batch that passed the deadline. Rewrite prints `rewriting` every five seconds, then `wrote`. |
 | `--translate-references` | Translate the bibliography. Default is to keep it. |
 | `--translate-figures` | Translate text inside figures. Default is the caption only. |
@@ -151,6 +155,13 @@ rpt: translation failed: no translator is configured and Google Translate is unr
 An explicit `RPT_TRANSLATOR=maclaw` with no key still reports that `RPT_LLM_API_KEY` is not set.
 
 ### Troubleshooting
+
+**Small hosts and flaky gateways (≤ 8 GiB RAM).** Run one or two documents at a time with `--jobs 2`, and set `--max-translate-secs` well below your watchdog (for a 3 h kill, `--max-translate-secs 7200`): layout and rewrite of a 97-page, 21 MB paper take about 15 minutes after translation and peak near 1.1 GiB RSS (translation itself stays near 100 MiB). Paragraphs left after the budget keep the source and the command exits 2 with the PDF written. A gateway that refuses with 401/403/410 or `400 Access denied` stops the job after `--gateway-down-after` refusals. The last stderr line (`rpt: summary …`) is printed even with `--progress off` and is meant for service logs.
+
+```bash
+rpt translate paper.pdf --output paper.zh.pdf --progress off --translate-tables \
+  --timeout-secs 105 --jobs 2 --max-translate-secs 7200
+```
 
 **Missing translator.** With nothing configured, RapidPdfTrans probes Google Translate. Export `RPT_LLM_API_KEY` before `rpt translate`, Python `save` / `translate`, C++ `save`, or `rpt_save` to use the LLM gateway instead. A key placed in options JSON is ignored.
 

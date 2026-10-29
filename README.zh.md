@@ -70,6 +70,8 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 | `RPT_CJK_BOLD_FONT` | 可选，粗体；优先于风格 | 所选风格的 Bold |
 | `RPT_CJK_SANS` | 可选，只替换常规无衬线源字体 | 常规字体 |
 | `RPT_TRANSLATE_JOBS` | 可选，并行请求数 | `4`（上限 `8`） |
+| `RPT_MAX_TRANSLATE_SECS` | 可选，单个文档所有模型调用的总时长预算（秒） | 不限 |
+| `RPT_GATEWAY_DOWN_AFTER` | 连续被拒（401/403/410/400 Access denied）多少次后不再发请求 | `6` |
 | `RPT_CJK_SIZE_SCALE` | 可选 | `0.90` |
 | `RPT_CJK_LEADING` | 可选 | `1.60` |
 
@@ -115,6 +117,8 @@ export RPT_LLM_API_KEY=...
 | `--glossary source=target` | 可重复。也可以是 CSV 文件（`src,tgt` 或 `source,target`，表头可省略）。调用前在本地替换。 |
 | `--system-prompt TEXT` | 追加到系统提示词。已存在的文件路径会读取文件；`@路径` 一定按文件读。 |
 | `--timeout-secs N` | 单次请求的硬截止时间，覆盖 DNS、连接、TLS 和响应体。默认 `60` 秒。卡住的调用会被放弃并按退避重试，最多四次。 |
+| `--max-translate-secs N` | 整个文档模型调用的总时长预算。用完后其余段落保留原文，退出码 2。默认读 `RPT_MAX_TRANSLATE_SECS`，否则不限。 |
+| `--gateway-down-after N` | 连续 N 次被拒（401、403、410、400 access denied）后停止发送。默认 6。 |
 | `--progress text` | 进度写到标准错误：`text`（默认）、`json`（每行一个对象）或 `off`。每行带阶段（`connect`、`recv-body`、`retry`）和段落。`waiting Ns` 是停住。`watchdog: aborting segment …` 点名已经超过截止时间的那一批。重写阶段每五秒打一行 `rewriting`，写完打 `wrote`。 |
 | `--translate-references` | 翻译参考文献。默认保留原文。 |
 | `--translate-figures` | 翻译图内文字。默认只翻译图注。 |
@@ -151,6 +155,13 @@ rpt: translation failed: no translator is configured and Google Translate is unr
 显式设置 `RPT_TRANSLATOR=maclaw` 但没有密钥时，仍会报告 `RPT_LLM_API_KEY` 未设置。
 
 ### 排错
+
+**小内存主机与不稳定网关（≤ 8 GiB）。** 同时只跑一到两个文档，用 `--jobs 2`，并把 `--max-translate-secs` 设得明显低于外部看门狗（3 小时强杀时用 `--max-translate-secs 7200`）：一篇 97 页、21 MB 的论文在翻译之后排版与重写约需 15 分钟，RSS 峰值约 1.1 GiB（翻译阶段约 100 MiB）。预算用完后剩下的段落保留原文，PDF 照常写出，退出码 2。网关以 401/403/410 或 `400 Access denied` 拒绝时，连续 `--gateway-down-after` 次后停止发送。最后一行 stderr（`rpt: summary …`）在 `--progress off` 时也会输出，供服务记录日志。
+
+```bash
+rpt translate paper.pdf --output paper.zh.pdf --progress off --translate-tables \
+  --timeout-secs 105 --jobs 2 --max-translate-secs 7200
+```
 
 **没有翻译器。** 什么都没配置时会探测 Google Translate。要改用 LLM 网关，在 `rpt translate`、Python 的 `save` / `translate`、C++ 的 `save` 或 `rpt_save` 之前导出 `RPT_LLM_API_KEY`。写在选项 JSON 里的密钥会被忽略。
 
