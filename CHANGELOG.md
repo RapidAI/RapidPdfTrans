@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.8 — 2026-10-29
+
+Tag `v0.1.8`. This changelog is the release note.
+
 - New document-level limits for flaky gateways. `--max-translate-secs N` (or `RPT_MAX_TRANSLATE_SECS`) caps the wall time of all model calls; after it no request is sent, the remaining paragraphs keep the source and `rpt` exits 2. A refusal a retry cannot fix (`401`, `402`, `403`, `404`, `410`, or a `400`/`429` whose body says access denied, overdue, quota, invalid key) is no longer retried, and after `--gateway-down-after N` (default 6, `RPT_GATEWAY_DOWN_AFTER`) consecutive refusals the job stops sending and finishes with the source kept (bad key on 4 pages: 4 s, 7 calls, exit 2). `409` is now retried like `502`.
 - `rpt translate` always ends with one stderr line, even with `--progress off`: `rpt: summary elapsed=… segments=… kept_source=… calls=… peak_rss=…MiB` (peak RSS is `VmHWM`).
 - A segment that reaches the report without a translation keeps its source with a diagnostic instead of failing the job (`segment N was not translated`); this was the last path that could still abandon a PDF after the `no translation for segment N` fix.

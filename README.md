@@ -245,7 +245,7 @@ go test ./...
 
 ## Prebuilt packages
 
-`.github/workflows/sdk.yml` archives the headers, the shared library, and the static library for each platform, with a CMake config and a Unix pkg-config file. `.github/workflows/wheels.yml` builds CPython 3.10+ abi3 wheels with cibuildwheel (one wheel per platform loads on CPython 3.10 and newer). Both workflows run on pull requests, `workflow_dispatch`, and tags `v*`. Pull requests upload build artifacts only. A tag whose name matches `workspace.package.version` in `Cargo.toml` (`v0.1.7` for version `0.1.7`) attaches the archives, wheels, and sdist to a GitHub Release and publishes the wheels and sdist to PyPI.
+`.github/workflows/sdk.yml` archives the headers, the shared library, and the static library for each platform, with a CMake config and a Unix pkg-config file. `.github/workflows/wheels.yml` builds CPython 3.10+ abi3 wheels with cibuildwheel (one wheel per platform loads on CPython 3.10 and newer). Both workflows run on pull requests, `workflow_dispatch`, and tags `v*`. Pull requests upload build artifacts only. A tag whose name matches `workspace.package.version` in `Cargo.toml` (`v0.1.8` for version `0.1.8`) attaches the archives, wheels, and sdist to a GitHub Release and publishes the wheels and sdist to PyPI.
 
 `.github/workflows/release-cli.yml` builds the `rpt` binary for Linux x86_64 and aarch64, glibc and musl, on `main`, on tags `v*`, and on `workflow_dispatch`. A tag whose name matches `workspace.package.version` attaches those tarballs to the GitHub Release. Pushes to `main` only upload artifacts.
 
