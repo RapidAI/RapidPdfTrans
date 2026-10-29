@@ -1386,7 +1386,12 @@ fn rewrite_translation_once(
     let mut placed_shifts = stack_shifts.clone();
     placed_shifts.extend(listing_shifts.iter().cloned());
     let mut audit = audit_layout(&drawn, extraction, &placed_shifts);
-    audit.extend(audit_kept_math_overlap(&drawn, extraction, &draw_ids));
+    audit.extend(audit_kept_math_overlap(
+        &drawn,
+        extraction,
+        &draw_ids,
+        &placed_shifts,
+    ));
     let mut colliding = colliding_drawn_ids(&drawn);
     colliding.extend(qa_failures(&drawn, &audit));
     for note in audit {
@@ -1443,6 +1448,17 @@ fn qa_failures(drawn: &[Drawn], notes: &[(Option<u32>, String)]) -> Vec<Collisio
 fn region_failure(message: &str) -> bool {
     message.starts_with("figure text translated")
         || message.starts_with("display equation glyph changed")
+        || math_overlap_failure(message)
+}
+
+/// Translated text drawn 3pt or more into a math glyph that stays on the
+/// page. Smaller touches are anti-aliasing at the edge of the hole.
+fn math_overlap_failure(message: &str) -> bool {
+    message
+        .strip_prefix("math overlap ")
+        .and_then(|rest| rest.split_once("pt "))
+        .and_then(|(wide, _)| wide.parse::<f32>().ok())
+        .is_some_and(|wide| wide >= 3.0)
 }
 
 /// The `(x, y)` at the end of an audit note.
@@ -3432,7 +3448,7 @@ fn absorb_set_braces(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) {
                 && is_math_font(&glyph.font_name)
         })
         .collect();
-    if braces.len() < 2 {
+    if braces.is_empty() {
         return;
     }
     let mut taken: HashSet<u32> = HashSet::default();
@@ -3475,6 +3491,23 @@ fn absorb_set_braces(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) {
             group.push(close.id);
             taken.insert(open.id);
             taken.insert(close.id);
+            continue;
+        }
+        // `∪ {i^{(t)}}`: the `{` already rode into the hole of `∪`. The
+        // `}` that touches the next hole closes it; left alone it stayed
+        // at the English x after the line moved.
+        if let Some(close) = close {
+            let opened = glyphs.iter().any(|glyph| {
+                glyph.unicode.trim() == "{"
+                    && used.contains(&glyph.id)
+                    && (glyph.matrix[5] - base).abs() < body * 0.15
+                    && glyph.matrix[4] < left
+                    && left - glyph.bbox[2].max(glyph.matrix[4]) <= body * 0.25
+            });
+            if opened {
+                group.push(close.id);
+                taken.insert(close.id);
+            }
         }
     }
 }
@@ -9418,13 +9451,15 @@ fn audit_kept_math_overlap(
     drawn: &[Drawn],
     extraction: &Extraction,
     erased: &HashSet<u32>,
+    shifts: &[ListingShift],
 ) -> Vec<(Option<u32>, String)> {
-    // One segment's ids can ride on several of its lines. The glyph was
-    // redrawn when any of them carries its character.
-    let mut owner: HashMap<u32, String> = HashMap::default();
-    for line in drawn {
-        for id in &line.glyph_ids {
-            owner.entry(*id).or_default().push_str(&line.text);
+    // A glyph a listing or stack shift moved is painted at its new place.
+    // Checking its source box flagged `}` of a hole that had already moved
+    // with its line.
+    let mut moved: HashMap<u32, (f32, f32)> = HashMap::default();
+    for shift in shifts {
+        for id in &shift.ids {
+            moved.entry(*id).or_insert((shift.dx, shift.dy));
         }
     }
     let painted: Vec<&Glyph> = extraction
@@ -9433,12 +9468,10 @@ fn audit_kept_math_overlap(
         .filter(|glyph| {
             !glyph.invisible && !glyph.unicode.trim().is_empty() && is_math_font(&glyph.font_name)
         })
-        .filter(|glyph| {
-            !erased.contains(&glyph.id)
-                || owner
-                    .get(&glyph.id)
-                    .is_some_and(|text| !glyph.unicode.chars().all(|ch| text.contains(ch)))
-        })
+        // An erased glyph is painted only where a shift put it. An erased
+        // `∼` whose line reads `~` was not drawn at all, and neither is the
+        // lost `}` of a hole; neither can cover the Chinese.
+        .filter(|glyph| !erased.contains(&glyph.id) || moved.contains_key(&glyph.id))
         .collect();
     let mut notes = Vec::new();
     for line in drawn {
@@ -9464,10 +9497,11 @@ fn audit_kept_math_overlap(
                 if glyph.page_index != line.page {
                     continue;
                 }
-                let gx0 = glyph.bbox[0].min(glyph.bbox[2]);
-                let gx1 = glyph.bbox[0].max(glyph.bbox[2]);
-                let gy0 = glyph.bbox[1].min(glyph.bbox[3]);
-                let gy1 = glyph.bbox[1].max(glyph.bbox[3]);
+                let (dx, dy) = moved.get(&glyph.id).copied().unwrap_or((0.0, 0.0));
+                let gx0 = glyph.bbox[0].min(glyph.bbox[2]) + dx;
+                let gx1 = glyph.bbox[0].max(glyph.bbox[2]) + dx;
+                let gy0 = glyph.bbox[1].min(glyph.bbox[3]) + dy;
+                let gy1 = glyph.bbox[1].max(glyph.bbox[3]) + dy;
                 let wide = right.min(gx1) - left.max(gx0);
                 let tall = high.min(gy1) - low.max(gy0);
                 if wide > 1.5 && tall > size * 0.3 {
@@ -9483,8 +9517,8 @@ fn audit_kept_math_overlap(
             notes.push((
                 Some(line.page),
                 format!(
-                    "math overlap {:.1}pt between {:?} of {:?} and kept math {:?} at y={:.1}",
-                    wide, ch, line.text, glyph.unicode, line.y
+                    "math overlap {:.1}pt between {:?} of {:?} and kept math {:?} at y={:.1} at ({:.2}, {:.2})",
+                    wide, ch, line.text, glyph.unicode, line.y, line.x, line.y
                 ),
             ));
         }
@@ -45646,7 +45680,7 @@ ET",
         over.widths = vec![10.0; 7];
         over.gaps = vec![0.0; 6];
         let erased = HashSet::default();
-        let notes = audit_kept_math_overlap(&[over], &extraction, &erased);
+        let notes = audit_kept_math_overlap(&[over], &extraction, &erased, &[]);
         assert!(
             notes
                 .iter()
@@ -45657,7 +45691,7 @@ ET",
         let mut around = test_draw(80.0, 500.0, 10.0, "每个配对被添加", vec![]);
         around.widths = vec![10.0; 7];
         around.gaps = vec![0.0, 0.0, 14.0, 0.0, 0.0, 0.0];
-        let notes = audit_kept_math_overlap(&[around], &extraction, &erased);
+        let notes = audit_kept_math_overlap(&[around], &extraction, &erased, &[]);
         assert!(notes.is_empty(), "{notes:?}");
     }
 
