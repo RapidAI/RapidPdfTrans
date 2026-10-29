@@ -5645,7 +5645,7 @@ fn needs_english_retry(source: &str, translated: &str) -> bool {
     // A reply that is mostly Chinese can still carry a whole English sentence.
     // One CJK character used to accept that reply, so the clause was painted
     // and coverage stayed complete.
-    if residual_english_clause(source, translated) {
+    if residual_english_clause(source, translated) || half_echoed_line(source, translated) {
         return true;
     }
     // The source sentence is still there, and the reply only added a short
@@ -5771,6 +5771,51 @@ fn strip_leading_marker(text: &str) -> String {
 /// sitting in a reply that already has Chinese. Names, code, and math lines
 /// are not clauses. A one-character prefix on the full English is not one
 /// either: that reply has almost no Chinese.
+/// `4.3 RQ3：Domain Signals Improve Active Selection` changed only the colon.
+/// Four or more source words in a row, half the line's letters, are still
+/// English in a reply that wrote no ideograph.
+fn half_echoed_line(source: &str, translated: &str) -> bool {
+    // Only full-width punctuation changed: no ideograph was written.
+    let han = |text: &str| {
+        text.chars()
+            .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+    };
+    if han(source) || han(translated) || translated.trim() == source.trim() {
+        return false;
+    }
+    let words: Vec<String> = source
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|ch: char| !ch.is_ascii_alphabetic())
+                .to_ascii_lowercase()
+        })
+        .collect();
+    let total: usize = words.iter().map(|word| word.len()).sum();
+    if total < 20 {
+        return false;
+    }
+    let flat: String = translated
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut best = 0usize;
+    for start in 0..words.len() {
+        let mut end = start;
+        while end < words.len()
+            && words[end].len() >= 2
+            && !words[end].chars().all(|ch| ch.is_ascii_uppercase())
+        {
+            end += 1;
+            if end - start >= 4 && flat.contains(&words[start..end].join(" ")) {
+                let letters: usize = words[start..end].iter().map(|word| word.len()).sum();
+                best = best.max(letters);
+            }
+        }
+    }
+    best * 2 >= total
+}
+
 pub(crate) fn residual_english_clause(source: &str, translated: &str) -> bool {
     if is_author_list(source) || is_institution_line(source) || url_or_email_only(source) {
         return false;
@@ -6988,6 +7033,18 @@ mod tests {
         let report =
             translate_extraction(&mut ex, &TranslateOptions::default(), &AlwaysEmpty).unwrap();
         assert_eq!(report.segments[0].translated, "Alpha one");
+    }
+
+    #[test]
+    fn a_half_translated_heading_is_retried() {
+        assert!(needs_english_retry(
+            "4.3 RQ3: Domain Signals Improve Active Selection",
+            "4.3 RQ3：Domain Signals Improve Active Selection"
+        ));
+        assert!(!needs_english_retry(
+            "4.3 RQ3: Domain Signals Improve Active Selection",
+            "4.3 RQ3：领域信号改进主动选择"
+        ));
     }
 
     #[test]

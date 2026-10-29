@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Retry a reply that only changed punctuation and kept four or more source words in a row (a half-translated heading).
 - A paragraph that runs from the bottom of the left column to the top of the right one is sent in reading order (left column first).
 - A display formula is not lifted over kept source text, such as an algorithm's `Input : Seed dataset` line.
 
