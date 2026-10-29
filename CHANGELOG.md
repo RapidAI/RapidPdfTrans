@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A formula cut across a reflowed line break is placed once, and a script that sits right after placed ink is no longer snapped onto an earlier hole (`2BK次` stays whole).
+- Scripts seat on non-ASCII letter bases such as π, which is then drawn from the source glyph (math italic).
+- A one-line algorithm step (`8 return π*`) keeps its small step number; raised footnote and affiliation marks are not treated as step numbers.
+
 - A translated line drawn over a paragraph kept in English now falls back too,
   so a fallback paragraph is never overprinted.
 - Formula fragments split off by the other column's lines rejoin their line;
