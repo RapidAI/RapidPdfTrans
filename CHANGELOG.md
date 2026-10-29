@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A translated line drawn over a paragraph kept in English now falls back too,
+  so a fallback paragraph is never overprinted.
+- Formula fragments split off by the other column's lines rejoin their line;
+  bar, tilde and dot accents sit on their base letter; a later formula on the
+  same line clears an earlier one's ink (`p̄_t = 1/|R_t| Σ p_j`).
+- A math letter whose scripts are one placeholder stays in the words, so
+  `return π*_θ` keeps the scripts after the letter.
+
 - Layout is now deterministic: internal hash maps use a fixed hasher, so the
   same input and replay give the same pages on every run.
 - Rewrite is much faster on long papers (97-page paper: 896s to about 175s;
