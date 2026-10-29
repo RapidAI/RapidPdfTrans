@@ -4716,6 +4716,17 @@ fn merge_spans_chain(left: &MergeSpan, right: &MergeSpan) -> bool {
     // A full line that already contains one is ordinary prose: the next
     // line of that paragraph is a normal lead, not the next paragraph.
     let hanging = narrow(left) || narrow(right);
+    // A bullet at the foot of the left column and the paragraph at the foot
+    // of the right one share several baselines but barely overlap in x.
+    // Side-by-side blocks are two columns, not one stacked paragraph.
+    if !hanging {
+        let x_overlap = left.right.min(right.right) - left.left.max(right.left);
+        let y_overlap = left.top.min(right.top) - left.bottom.max(right.bottom);
+        let narrower = (left.right - left.left).min(right.right - right.left);
+        if y_overlap > size * 2.0 && x_overlap < narrower * 0.4 {
+            return false;
+        }
+    }
     let gap = if left.bottom > right.top {
         left.bottom - right.top
     } else if right.bottom > left.top {

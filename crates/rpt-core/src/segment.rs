@@ -562,13 +562,13 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         // The last line of each column shares a baseline. The right piece is
         // `with 44,617 tables.`, `challenges:`, or the caption wrap
         // `columns.`, and the gutter is ~16pt, so it used to look like a
-        // justified tail of the left column. One column is about 20em, so a
-        // 24em span already includes the gutter.
+        // justified tail of the left column. One column is 18 to 20em, so a
+        // 22em span already includes the gutter (`across` | `obtain π.`).
         // `2.5 Data` sits 17.6pt past `self-attention`. A justified space on
         // that line is 10.9pt, so the gutter is not twice the next gap and
         // the heading was read as the tail of the left column.
         let two_column_tail = line.len() >= 40
-            && span >= size * 24.0
+            && span >= size * 22.0
             && left_w >= size * 16.0
             && right_w >= size * 3.0
             && gap >= size * 1.25
