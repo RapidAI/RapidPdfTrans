@@ -243,7 +243,7 @@ impl Extraction {
         Some(message)
     }
 
-    pub fn mark_rewritten(&mut self, id: u32, text: impl Into<String>) -> Result<()> {
+    pub fn mark_rewritten(&mut self, id: u32, text: impl Into<std::sync::Arc<str>>) -> Result<()> {
         coverage::mark(
             &mut self.glyphs,
             id,
@@ -271,7 +271,11 @@ impl Extraction {
         )
     }
 
-    pub fn mark_translated_pending(&mut self, id: u32, text: impl Into<String>) -> Result<()> {
+    pub fn mark_translated_pending(
+        &mut self,
+        id: u32,
+        text: impl Into<std::sync::Arc<str>>,
+    ) -> Result<()> {
         coverage::mark(
             &mut self.glyphs,
             id,

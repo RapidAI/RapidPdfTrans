@@ -36,11 +36,13 @@ pub struct GlyphSource {
 pub enum Disposition {
     #[default]
     Pending,
+    // The text is the whole segment translation. Every glyph of the segment
+    // shares one allocation, so a long paragraph is not copied per glyph.
     TranslatedPendingRewrite {
-        text: String,
+        text: std::sync::Arc<str>,
     },
     Rewritten {
-        text: String,
+        text: std::sync::Arc<str>,
     },
     KeptOriginal {
         reason: String,

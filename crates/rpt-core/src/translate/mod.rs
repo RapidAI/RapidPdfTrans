@@ -1189,6 +1189,7 @@ fn finish_report(
         texts[i] = text.clone();
         let kept = seg.glyph_ids.iter().any(|id| reference_ids.contains(id));
         if !kept {
+            let shared: std::sync::Arc<str> = text.as_str().into();
             for id in &seg.glyph_ids {
                 // An absorbed formula glyph can already be final. Marking it
                 // again aborts before the PDF is saved. Rewrite still blanks
@@ -1196,7 +1197,7 @@ fn finish_report(
                 if extraction.glyphs[by_id[id]].disposition.is_final() {
                     continue;
                 }
-                extraction.mark_translated_pending(*id, text.clone())?;
+                extraction.mark_translated_pending(*id, shared.clone())?;
             }
         }
         report_segments.push(TranslatedSegment {

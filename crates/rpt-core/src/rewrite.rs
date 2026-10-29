@@ -1321,12 +1321,13 @@ fn rewrite_translation_once(
             let residual = job_translates
                 && !crate::translate::short_part_list(&segment.source)
                 && crate::translate::residual_english_clause(&segment.source, &segment.translated);
+            let shared: std::sync::Arc<str> = segment.translated.as_str().into();
             for id in &segment.glyph_ids {
                 if !extraction.glyphs[by_id[id]].disposition.is_final() {
                     if residual {
                         extraction.mark_kept(*id, "english-body")?;
                     } else {
-                        extraction.mark_rewritten(*id, segment.translated.clone())?;
+                        extraction.mark_rewritten(*id, shared.clone())?;
                     }
                 }
             }

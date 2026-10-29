@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Layout is now deterministic: internal hash maps use a fixed hasher, so the
+  same input and replay give the same pages on every run.
+- Rewrite is much faster on long papers (97-page paper: 896s to about 175s;
+  2504.15476: 56s to 16s on replay), with pixel-identical output.
+- Peak memory during rewrite drops by about 23% (97-page paper: 1091MiB to
+  841MiB). Glyph dispositions share one copy of the segment translation.
+- A gateway that answers every call with the same client error (4xx) is
+  treated as down. The Google backend no longer retries refusals.
+
 ## 0.1.8 — 2026-10-29
 
 Tag `v0.1.8`. This changelog is the release note.
