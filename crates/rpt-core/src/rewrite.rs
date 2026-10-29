@@ -1393,6 +1393,13 @@ fn rewrite_translation_once(
         &placed_shifts,
     ));
     let mut colliding = colliding_drawn_ids(&drawn);
+    colliding.extend(drawn_over_kept_source(
+        &drawn,
+        extraction,
+        report,
+        &draw_ids,
+        &placed_shifts,
+    ));
     colliding.extend(qa_failures(&drawn, &audit));
     for note in audit {
         extraction.diagnostics.push(crate::glyph::Diagnostic {
@@ -1440,6 +1447,76 @@ fn qa_failures(drawn: &[Drawn], notes: &[(Option<u32>, String)]) -> Vec<Collisio
                 }
                 out.push((line.glyph_ids.clone(), Vec::new()));
             }
+        }
+    }
+    out
+}
+
+/// Drawn lines that paint over a source line kept as printed. A paragraph
+/// that fell back keeps its glyphs in place, and the translated paragraph
+/// before it can reflow down into that line. The drawn side falls back in
+/// the next round, so both read as source and nothing is overprinted.
+fn drawn_over_kept_source(
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    report: &TranslateReport,
+    erased: &HashSet<u32>,
+    shifts: &[ListingShift],
+) -> Vec<Collision> {
+    let kept_ids: HashSet<u32> = report
+        .segments
+        .iter()
+        .filter(|segment| segment.translated == segment.source)
+        .flat_map(|segment| segment.glyph_ids.iter().copied())
+        .collect();
+    if kept_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut moved: HashMap<u32, (f32, f32)> = HashMap::default();
+    for shift in shifts {
+        for id in &shift.ids {
+            moved.entry(*id).or_insert((shift.dx, shift.dy));
+        }
+    }
+    let kept: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            kept_ids.contains(&glyph.id)
+                && !glyph.invisible
+                && glyph.unicode.chars().any(char::is_alphanumeric)
+                && (!erased.contains(&glyph.id) || moved.contains_key(&glyph.id))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for line in drawn {
+        if line.glyph_ids.is_empty() || line.text.trim().chars().count() < 2 {
+            continue;
+        }
+        let own: HashSet<u32> = line.glyph_ids.iter().copied().collect();
+        let size = line.size.max(1.0);
+        let (left, right) = drawn_ink_span(line);
+        let (low, high) = (line.y - size * 0.1, line.y + size * 0.7);
+        let mut hits: Vec<u32> = Vec::new();
+        for glyph in &kept {
+            if glyph.page_index != line.page || own.contains(&glyph.id) {
+                continue;
+            }
+            let (dx, dy) = moved.get(&glyph.id).copied().unwrap_or((0.0, 0.0));
+            let gx0 = glyph.bbox[0].min(glyph.bbox[2]) + dx;
+            let gx1 = glyph.bbox[0].max(glyph.bbox[2]) + dx;
+            let gy0 = glyph.bbox[1].min(glyph.bbox[3]) + dy;
+            let gy1 = glyph.bbox[1].max(glyph.bbox[3]) + dy;
+            if right.min(gx1) - left.max(gx0) > 0.5 && high.min(gy1) - low.max(gy0) > size * 0.4 {
+                hits.push(glyph.id);
+            }
+        }
+        // One letter is a touch at a hole edge; a run is a covered line.
+        if hits.len() >= 3 {
+            if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+                eprintln!("over kept p{} ({:.1},{:.1}) {:?}", line.page, line.x, line.y, line.text);
+            }
+            out.push((line.glyph_ids.clone(), hits));
         }
     }
     out
