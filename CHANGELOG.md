@@ -10,6 +10,11 @@
   841MiB). Glyph dispositions share one copy of the segment translation.
 - A gateway that answers every call with the same client error (4xx) is
   treated as down. The Google backend no longer retries refusals.
+- A semicolon list of titles (film or paper names) left in English is counted
+  as names, not as an untranslated body paragraph.
+- Big delimiters, scripts and sum limits touching a moved display formula move
+  with it as whole segments. Prose from the other column is no longer joined
+  into a display line.
 
 ## 0.1.8 — 2026-10-29
 
