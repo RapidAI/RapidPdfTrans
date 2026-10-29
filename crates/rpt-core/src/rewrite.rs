@@ -4861,11 +4861,38 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
             stack: None,
         });
     }
+    // A paragraph that runs from the bottom of the left column to the top of
+    // the right one reads left column first. By y alone the right column's
+    // `and Zhou, 2025) …` came before the left column's `We extract …`.
+    let mut gutters: HashMap<u32, f32> = HashMap::default();
+    let mut pages: Vec<u32> = glyphs.iter().map(|glyph| glyph.page_index).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    for page in pages {
+        let on_page: Vec<&Glyph> = glyphs
+            .iter()
+            .copied()
+            .filter(|glyph| glyph.page_index == page)
+            .collect();
+        // Only a jump: the right piece sits wholly above the left one. An
+        // algorithm label (`Input`) shares its baselines with its content.
+        if let Some((left, right)) = column_gutter(&on_page, body) {
+            if right.bottom > left.top + body * 0.5 {
+                gutters.insert(page, right.left - 0.5);
+            }
+        }
+    }
+    let column = |token: &Token<'_>| {
+        gutters
+            .get(&token.page)
+            .is_some_and(|edge| token.x >= *edge)
+    };
     // Page 3's `where w` sits at the same height as page 2's noise-scale
     // line. Sorting by y alone weaves those two sentences into one line.
     tokens.sort_by(|left, right| {
         left.page
             .cmp(&right.page)
+            .then(column(left).cmp(&column(right)))
             .then(right.y.total_cmp(&left.y))
             .then(left.x.total_cmp(&right.x))
     });
@@ -4873,7 +4900,10 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
     let mut lines: Vec<Vec<Token<'_>>> = Vec::new();
     for token in tokens {
         if let Some(line) = lines.last_mut() {
-            if line[0].page == token.page && (line[0].y - token.y).abs() <= band {
+            if line[0].page == token.page
+                && column(&line[0]) == column(&token)
+                && (line[0].y - token.y).abs() <= band
+            {
                 line.push(token);
                 continue;
             }
@@ -23348,7 +23378,19 @@ fn lift_display_formulas(
                     && line.y > display_y + size * 0.45
                     && line.text.chars().any(is_han_char)
             });
-            if between {
+            // `Input : Seed dataset` is kept source between the algorithm
+            // title and `D = {…}`. Lifting the formula paints it over that line.
+            let kept_between = extraction.glyphs.iter().any(|glyph| {
+                glyph.page_index == page
+                    && !used.contains(&glyph.id)
+                    && !glyph.invisible
+                    && glyph.unicode.chars().any(char::is_alphanumeric)
+                    && glyph.matrix[5] < host_y - size * 0.4
+                    && glyph.matrix[5] > display_y + size * 0.45
+                    && glyph_paint_right(glyph) >= left - size * 6.0
+                    && glyph.matrix[4] <= right
+            });
+            if between || kept_between {
                 continue;
             }
             let mut source_bottom = f32::MAX;
