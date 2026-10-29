@@ -9,7 +9,7 @@
 //! fitted lines into the PDF, including bilingual page layouts. Both stay
 //! callable when no model is configured.
 
-use std::collections::HashMap;
+use crate::detmap::HashMap;
 
 use crate::font::SubsetFont;
 use crate::translate::verbatim_spans;
@@ -360,7 +360,7 @@ pub(crate) fn fit_cjk_block(
         font,
         metrics,
         None,
-        &HashMap::new(),
+        &HashMap::default(),
     )
 }
 
@@ -548,7 +548,7 @@ pub(crate) fn justify_gaps(
     font: &SubsetFont,
     justify: bool,
 ) -> Vec<f32> {
-    justify_gaps_holes(text, size, width, font, justify, &HashMap::new())
+    justify_gaps_holes(text, size, width, font, justify, &HashMap::default())
 }
 
 /// Like [`justify_gaps`], measuring a formula hole at its math width.
@@ -611,7 +611,7 @@ pub(crate) fn justify_wrapped_line(lines: &[String], index: usize) -> bool {
 /// The justification cap cannot square it, so the extra space would only
 /// pull the characters apart.
 pub(crate) fn prompt_line_is_full(text: &str, size: f32, width: f32, font: &SubsetFont) -> bool {
-    prompt_line_is_full_holes(text, size, width, font, &HashMap::new())
+    prompt_line_is_full_holes(text, size, width, font, &HashMap::default())
 }
 
 pub(crate) fn prompt_line_is_full_holes(
@@ -877,7 +877,14 @@ pub(crate) fn wrap_text(
     max_width: f32,
     font: &SubsetFont,
 ) -> Option<Vec<String>> {
-    wrap_text_holes(text, size, first_width, max_width, font, &HashMap::new())
+    wrap_text_holes(
+        text,
+        size,
+        first_width,
+        max_width,
+        font,
+        &HashMap::default(),
+    )
 }
 
 /// Wrap `text`. A formula hole (`NN` plus ideographic spaces) advances by the
@@ -1949,7 +1956,7 @@ pub(crate) fn pack_into_slots(
         boxes,
         font,
         snap_compounds,
-        &HashMap::new(),
+        &HashMap::default(),
     )
 }
 
@@ -2042,7 +2049,7 @@ pub(crate) fn pack_narrow_tail(
     spans: &[(f32, f32)],
     font: &SubsetFont,
 ) -> Option<Vec<String>> {
-    pack_narrow_tail_holes(text, size, indent, spans, font, &HashMap::new())
+    pack_narrow_tail_holes(text, size, indent, spans, font, &HashMap::default())
 }
 
 pub(crate) fn pack_narrow_tail_holes(
@@ -2376,7 +2383,7 @@ mod tests {
             greedy.len() >= 2 && tail + 1 < head,
             "fixture should be a short tail: {greedy:?}"
         );
-        let balanced = balance_lines(text, 10.0, 70.0, &font, &HashMap::new()).unwrap();
+        let balanced = balance_lines(text, 10.0, 70.0, &font, &HashMap::default()).unwrap();
         assert_eq!(balanced.len(), greedy.len(), "{balanced:?}");
         let longest = balanced
             .iter()
@@ -2398,7 +2405,7 @@ mod tests {
     }
 
     fn uniform_font(text: &str) -> SubsetFont {
-        let mut glyphs = std::collections::HashMap::new();
+        let mut glyphs = crate::detmap::HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars()) {
             glyphs.insert(ch as u32, (id, 1000));
         }
@@ -2412,7 +2419,7 @@ mod tests {
     }
 
     fn cover_font(text: &str) -> SubsetFont {
-        let mut glyphs = std::collections::HashMap::new();
+        let mut glyphs = crate::detmap::HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars()) {
             let advance = if ch.is_ascii_alphabetic() {
                 560
@@ -2495,7 +2502,7 @@ mod tests {
     #[test]
     fn a_citation_comma_hangs_when_a_formula_hole_disables_hanging() {
         let text = "采用残差连接[11]，随后进行";
-        let mut glyphs = std::collections::HashMap::new();
+        let mut glyphs = crate::detmap::HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars()) {
             let advance = if matches!(ch, '[' | ']' | '1') {
                 400
@@ -2511,7 +2518,7 @@ mod tests {
             fallback: None,
             notice: None,
         };
-        let mut holes = HashMap::new();
+        let mut holes = HashMap::default();
         holes.insert(0, 20.0);
         let lines = wrap_text_holes(text, 10.0, 80.0, 80.0, &font, &holes).expect("wrap");
         assert!(
@@ -2693,7 +2700,7 @@ mod tests {
     fn a_wrap_never_opens_on_the_relation_after_a_hole() {
         let text = "其中，当携带编辑的候选被选为获胜者时，00\u{3000} = 1。那些可采纳但输给更高分候选的候选取值为 01\u{3000} = 0。";
         let font = mixed_ascii_font(text);
-        let holes = std::collections::HashMap::from([(0usize, 12.0f32), (1usize, 12.0f32)]);
+        let holes = crate::detmap::HashMap::from_iter([(0usize, 12.0f32), (1usize, 12.0f32)]);
         for width in (60..400).step_by(3) {
             let lines = wrap_text_holes(text, 10.0, width as f32, width as f32, &font, &holes)
                 .expect("wrap");
@@ -2705,7 +2712,7 @@ mod tests {
     }
 
     fn mixed_ascii_font(text: &str) -> SubsetFont {
-        let mut glyphs = std::collections::HashMap::new();
+        let mut glyphs = crate::detmap::HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars()) {
             let advance = if ch.is_ascii() { 500 } else { 1000 };
             glyphs.insert(ch as u32, (id, advance));
@@ -3594,7 +3601,7 @@ mod tests {
         // when the line is already full. It has to come down with the last
         // ideograph. `实现` / `。` is the paragraph under equation (1).
         let text = "00\u{3000}矩阵乘法代码实现。";
-        let mut glyphs = HashMap::new();
+        let mut glyphs = HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars()) {
             glyphs.insert(ch as u32, (id, 1000));
         }
@@ -3605,7 +3612,7 @@ mod tests {
             fallback: None,
             notice: None,
         };
-        let mut holes = HashMap::new();
+        let mut holes = HashMap::default();
         holes.insert(0, 20.0);
         let fitted = fit_cjk_block_with(
             text,
@@ -3646,7 +3653,7 @@ mod tests {
     fn wrap_text_holes_does_not_leave_a_period_on_its_own_line() {
         let text = "00\u{3000}矩阵乘法代码实现。";
         let font = uniform_font(text);
-        let mut holes = HashMap::new();
+        let mut holes = HashMap::default();
         holes.insert(0, 20.0);
         let lines = wrap_text_holes(text, 10.0, 100.0, 100.0, &font, &holes).expect("wrap");
         assert!(
@@ -3663,7 +3670,7 @@ mod tests {
     #[test]
     fn a_formula_hole_uses_the_math_width_and_stays_inside_the_column() {
         let prose = "因为工作函数和扩展代价可以只用向量00　及其变换来表示。我们使用基于二次乘积的势函数，它是一个维向量，其坐标由数对与索引，其分量通过取和在各自坐标上的分量的乘积得到。该势函数项和函数与先前已知的势函数类似。";
-        let mut glyphs = HashMap::new();
+        let mut glyphs = HashMap::default();
         for (id, ch) in (1u16..).zip(prose.chars()) {
             let advance = if ch.is_ascii_digit() { 500 } else { 1000 };
             glyphs.insert(ch as u32, (id, advance));
@@ -3676,7 +3683,7 @@ mod tests {
             fallback: None,
             notice: None,
         };
-        let mut holes = HashMap::new();
+        let mut holes = HashMap::default();
         holes.insert(0, 9.6);
         let size = 10.0;
         let column = 220.0;
@@ -3736,7 +3743,7 @@ mod tests {
             fallback: None,
             notice: None,
         };
-        let mut wide_holes = HashMap::new();
+        let mut wide_holes = HashMap::default();
         wide_holes.insert(15, 70.0);
         let wide_lines =
             wrap_text_holes(wide, size, column, column, &wide_font, &wide_holes).expect("wide");

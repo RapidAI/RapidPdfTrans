@@ -10,7 +10,7 @@
 //! `loca`, and `hmtx` come from the `subsetter` crate. Shaping is one glyph
 //! per character. OpenType GSUB is not applied.
 
-use std::collections::HashMap;
+use crate::detmap::HashMap;
 
 use super::ttf::{build_cmap_subtable, checksum32, FontCmap};
 
@@ -481,7 +481,7 @@ fn subset_one_face(data: &[u8], index: u32, codepoints: &[u32]) -> Option<Subset
     wanted.sort_unstable();
     wanted.dedup();
     let mut remapper = subsetter::GlyphRemapper::new();
-    let mut glyphs = HashMap::new();
+    let mut glyphs = HashMap::default();
     for code in wanted {
         let Some(gid) = cmap.unicode_to_gid.get(&code).copied() else {
             continue;
@@ -827,11 +827,11 @@ pub fn load_cjk_font() -> Option<Vec<u8>> {
 
 /// Font files are re-read for every subset. Keep the bytes for the process.
 fn cached_font_bytes(path: &std::path::Path) -> Option<std::sync::Arc<Vec<u8>>> {
-    use std::collections::HashMap;
+    use crate::detmap::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, std::sync::Arc<Vec<u8>>>>> =
         OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::default()));
     let mut guard = cache.lock().ok()?;
     if let Some(hit) = guard.get(path) {
         return Some(std::sync::Arc::clone(hit));
@@ -900,7 +900,7 @@ fn read_tables(file: &[u8], directory: usize) -> Option<HashMap<Vec<u8>, &[u8]>>
         return None;
     }
     let n = u16be(file, directory + 4)? as usize;
-    let mut tables = HashMap::new();
+    let mut tables = HashMap::default();
     for i in 0..n {
         let rec = directory + 12 + i * 16;
         if rec + 16 > file.len() {

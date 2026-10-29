@@ -1043,7 +1043,7 @@ fn detach_border_rules(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
             }
         }
     }
-    let mut drop = std::collections::HashSet::new();
+    let mut drop = crate::detmap::HashSet::default();
     let mut columns: Vec<(u32, f32)> = Vec::new();
     let mut used = vec![false; edges.len()];
     for index in 0..edges.len() {
@@ -1141,7 +1141,7 @@ fn glyph_span_gap(left: &Glyph, right: &Glyph) -> f32 {
 
 /// OCR of a printed rule: a long string of `l` and `|` with no spaces.
 fn detach_rule_noise(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
-    let mut drop = std::collections::HashSet::new();
+    let mut drop = crate::detmap::HashSet::default();
     for line in lines.iter() {
         if !ocr_rule_noise(&line.text) {
             continue;
@@ -1182,7 +1182,7 @@ fn ocr_rule_noise(text: &str) -> bool {
 /// stay English, so painting that layer in Chinese stacked two texts on the
 /// figure. A scanned page has no visible text of its own and keeps its layer.
 fn detach_figure_text_layers(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
-    let mut visible: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    let mut visible: crate::detmap::HashMap<u32, usize> = crate::detmap::HashMap::default();
     for line in lines.iter() {
         let count = line
             .glyphs
@@ -1191,7 +1191,7 @@ fn detach_figure_text_layers(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, Strin
             .count();
         *visible.entry(line.page).or_default() += count;
     }
-    let mut drop = std::collections::HashSet::new();
+    let mut drop = crate::detmap::HashSet::default();
     for line in lines.iter() {
         if visible.get(&line.page).copied().unwrap_or(0) < 20 {
             continue;
@@ -1210,7 +1210,7 @@ fn detach_junk_ocr_pages(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> 
     let mut pages: Vec<u32> = lines.iter().map(|line| line.page).collect();
     pages.sort_unstable();
     pages.dedup();
-    let mut drop = std::collections::HashSet::new();
+    let mut drop = crate::detmap::HashSet::default();
     for page in pages {
         let page_lines: Vec<&VisualLine> = lines.iter().filter(|line| line.page == page).collect();
         if page_lines.is_empty() || page_has_prose(&page_lines) {
@@ -1436,7 +1436,7 @@ fn detach_low_quality_ocr(
     let mut pages_present: Vec<u32> = lines.iter().map(|line| line.page).collect();
     pages_present.sort_unstable();
     pages_present.dedup();
-    let mut drop = std::collections::HashSet::new();
+    let mut drop = crate::detmap::HashSet::default();
     for page in pages_present {
         let page_lines: Vec<usize> = lines
             .iter()
@@ -1833,14 +1833,14 @@ fn plain_word_case(chars: &[char]) -> bool {
 
 fn drop_glyphs(
     lines: &mut Vec<VisualLine<'_>>,
-    drop: std::collections::HashSet<u32>,
+    drop: crate::detmap::HashSet<u32>,
 ) -> Vec<(u32, String)> {
     drop_glyphs_as(lines, drop, "margin")
 }
 
 fn drop_glyphs_as(
     lines: &mut Vec<VisualLine<'_>>,
-    drop: std::collections::HashSet<u32>,
+    drop: crate::detmap::HashSet<u32>,
     reason: &str,
 ) -> Vec<(u32, String)> {
     if drop.is_empty() {
@@ -1960,7 +1960,7 @@ fn assemble(
     kept.extend(listing_glyphs(&lines));
     kept.extend(algorithm_glyphs(&lines));
     kept.extend(keep_low_prose_math(&lines));
-    let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let kept_ids: crate::detmap::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     if !kept_ids.is_empty() {
         lines.retain(|line| {
             line.glyphs
@@ -2295,7 +2295,7 @@ fn detach_toc_marks(lines: &mut Vec<VisualLine<'_>>) -> Vec<(u32, String)> {
             expanded.push(line);
             continue;
         }
-        let mark_ids: std::collections::HashSet<u32> =
+        let mark_ids: crate::detmap::HashSet<u32> =
             marks.iter().chain(scripts.iter()).copied().collect();
         for id in &marks {
             kept.push((*id, "toc".into()));
@@ -2742,7 +2742,7 @@ fn fonts_can_join(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
         line.glyphs
             .iter()
             .map(|glyph| font_family(&glyph.font_name))
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<crate::detmap::HashSet<_>>()
     };
     let left = families(upper);
     families(lower).iter().any(|family| left.contains(family))
@@ -2878,7 +2878,7 @@ fn interior_glyphs(lines: &[VisualLine<'_>], flags: &SegmentFlags) -> Vec<(u32, 
         return Vec::new();
     }
     let order = reading_order(lines);
-    let mut body_fonts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut body_fonts: crate::detmap::HashMap<u32, String> = crate::detmap::HashMap::default();
     let mut caption_line = vec![false; lines.len()];
     let mut kept = Vec::new();
     let mut claimed = vec![false; lines.len()];
@@ -2930,8 +2930,8 @@ fn interior_glyphs(lines: &[VisualLine<'_>], flags: &SegmentFlags) -> Vec<(u32, 
 /// The stem is still body prose, so that continuation is body prose too.
 /// A label that does not finish the word stays inside the drawing.
 fn release_hyphen_continuations(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
-    let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
-    let mut release = std::collections::HashSet::new();
+    let kept_ids: crate::detmap::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let mut release = crate::detmap::HashSet::default();
     for upper in lines {
         if soft_hyphen_stem(&upper.text).is_none() {
             continue;
@@ -2971,8 +2971,8 @@ fn release_hyphen_continuations(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, S
 /// A short line inside or just above a frame stays a figure label unless it
 /// is the next line of a body paragraph (`version. We write [N]…`).
 fn release_body_wraps(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
-    let kept_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
-    let mut release = std::collections::HashSet::new();
+    let kept_ids: crate::detmap::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let mut release = crate::detmap::HashSet::default();
     for lower in lines {
         let lower_kept = lower
             .glyphs
@@ -3052,8 +3052,8 @@ fn region_interiors(
     if !flags.skip_figures || regions.is_empty() {
         return Vec::new();
     }
-    let mut by_page: std::collections::HashMap<u32, Vec<&PaintedRegion>> =
-        std::collections::HashMap::new();
+    let mut by_page: crate::detmap::HashMap<u32, Vec<&PaintedRegion>> =
+        crate::detmap::HashMap::default();
     for region in regions {
         by_page.entry(region.page_index).or_default().push(region);
     }
@@ -3135,8 +3135,8 @@ fn figure_unions(regions: &[&PaintedRegion], page_w: f32, page_h: f32) -> Vec<Re
             }
         }
     }
-    let mut groups: std::collections::HashMap<usize, (Rect, bool, bool, usize)> =
-        std::collections::HashMap::new();
+    let mut groups: crate::detmap::HashMap<usize, (Rect, bool, bool, usize)> =
+        crate::detmap::HashMap::default();
     for (index, item) in items.iter().enumerate() {
         let root = find_root(&mut parent, index);
         let entry = groups.entry(root).or_insert((item.rect, false, false, 0));
@@ -4045,7 +4045,7 @@ fn toc_line_is_table_cell(line: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> bo
 }
 
 fn release_toc_titles(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
-    let mut titles = std::collections::HashSet::new();
+    let mut titles = crate::detmap::HashSet::default();
     for line in lines {
         if !line.toc || toc_line_is_table_cell(line, lines) {
             continue;
@@ -4063,7 +4063,7 @@ fn release_toc_titles(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
 /// (`a`, `b`, `*`, `†`) and sits directly below the grid or the note above.
 /// A wrapped note line in the same type continues its note.
 fn table_note_glyphs(lines: &[VisualLine<'_>], kept: &[(u32, String)]) -> Vec<(u32, String)> {
-    let table: std::collections::HashSet<u32> = kept
+    let table: crate::detmap::HashSet<u32> = kept
         .iter()
         .filter(|(_, reason)| reason == "table")
         .map(|(id, _)| *id)
@@ -4245,7 +4245,7 @@ fn ruled_table_rows(
     kept: &[(u32, String)],
     regions: &[PaintedRegion],
 ) -> Vec<(u32, String)> {
-    let table_ids: std::collections::HashSet<u32> = kept
+    let table_ids: crate::detmap::HashSet<u32> = kept
         .iter()
         .filter(|(_, reason)| reason == "table")
         .map(|(id, _)| *id)
@@ -4253,7 +4253,7 @@ fn ruled_table_rows(
     if table_ids.is_empty() {
         return Vec::new();
     }
-    let all_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let all_ids: crate::detmap::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     let rules: Vec<&PaintedRegion> = regions
         .iter()
         .filter(|region| {
@@ -4263,7 +4263,7 @@ fn ruled_table_rows(
         })
         .collect();
     let mut out = Vec::new();
-    let mut done = std::collections::HashSet::new();
+    let mut done = crate::detmap::HashSet::default();
     for seed in lines {
         if !seed
             .glyphs
@@ -4361,7 +4361,7 @@ fn worded_ruled_tables(
     kept: &[(u32, String)],
     regions: &[PaintedRegion],
 ) -> Vec<(u32, String)> {
-    let all_ids: std::collections::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
+    let all_ids: crate::detmap::HashSet<u32> = kept.iter().map(|(id, _)| *id).collect();
     let mut rules: Vec<&PaintedRegion> = regions
         .iter()
         .filter(|region| {
@@ -4468,7 +4468,7 @@ fn continues_caption(line: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> bool {
 }
 
 fn release_table_group_labels(lines: &[VisualLine<'_>], kept: &mut Vec<(u32, String)>) {
-    let mut release = std::collections::HashSet::new();
+    let mut release = crate::detmap::HashSet::default();
     for line in lines {
         // `(d) Following vs. ignoring summaries` is bold and sits under the
         // table caption on the same page. It is the figure's own title.
@@ -4539,8 +4539,8 @@ fn span_overlaps(left: f32, right: f32, line: &VisualLine<'_>) -> bool {
 }
 
 fn dominant_body_font(lines: &[VisualLine<'_>], page: u32) -> String {
-    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let mut fallback: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut counts: crate::detmap::HashMap<&str, usize> = crate::detmap::HashMap::default();
+    let mut fallback: crate::detmap::HashMap<&str, usize> = crate::detmap::HashMap::default();
     for line in lines.iter().filter(|line| line.page == page) {
         if !is_body_shape(line) {
             continue;
@@ -4691,7 +4691,7 @@ fn reading_order(lines: &[VisualLine<'_>]) -> Vec<usize> {
 
 fn margin_stamps(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
     let mut kept = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::detmap::HashSet::default();
     for line in lines {
         // A stamp that stayed on its own baseline: one or two large glyphs at the left edge.
         if line.left <= 56.0
@@ -4710,7 +4710,7 @@ fn margin_stamps(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
     // wide to match above, and the size-20 glyph raises the column-split gap so
     // the letter stays inside the paragraph. A real margin is many large glyphs
     // stacked on one x.
-    let mut by_page: std::collections::HashMap<u32, Vec<&Glyph>> = std::collections::HashMap::new();
+    let mut by_page: crate::detmap::HashMap<u32, Vec<&Glyph>> = crate::detmap::HashMap::default();
     for line in lines {
         for glyph in &line.glyphs {
             if stamp_glyph(glyph) {
@@ -4971,7 +4971,7 @@ fn find_reading_continuation(
     current: &[VisualLine<'_>],
     paragraphs: &[Vec<VisualLine<'_>>],
     used: &[bool],
-    floor: &std::collections::HashMap<u32, f32>,
+    floor: &crate::detmap::HashMap<u32, f32>,
     heads: &[ColumnHead],
 ) -> Option<usize> {
     if let Some(next) = find_column_continuation(current, paragraphs, used, heads) {
@@ -4986,8 +4986,8 @@ fn find_reading_continuation(
 /// Lowest body baseline on each page. A line that still has body text under
 /// it is not the end of the page, even after that lower paragraph was already
 /// taken into an earlier column.
-fn page_body_floor(paragraphs: &[Vec<VisualLine<'_>>]) -> std::collections::HashMap<u32, f32> {
-    let mut floor = std::collections::HashMap::new();
+fn page_body_floor(paragraphs: &[Vec<VisualLine<'_>>]) -> crate::detmap::HashMap<u32, f32> {
+    let mut floor = crate::detmap::HashMap::default();
     for para in paragraphs {
         if para.is_empty()
             || is_page_bridge(para)
@@ -5256,7 +5256,7 @@ fn closes_the_page(
     current: &[VisualLine<'_>],
     paragraphs: &[Vec<VisualLine<'_>>],
     used: &[bool],
-    floor: &std::collections::HashMap<u32, f32>,
+    floor: &crate::detmap::HashMap<u32, f32>,
 ) -> bool {
     let Some(upper) = current.last() else {
         return false;
@@ -5624,8 +5624,8 @@ fn column_anchor(column: &[VisualLine<'_>], page: u32) -> Option<f32> {
 
 /// Upper quartile of line widths on one page. A banner does not set it, and
 /// a stack of short address rows does not either when the page has body text.
-fn page_measures(lines: &[VisualLine<'_>]) -> std::collections::HashMap<u32, f32> {
-    let mut widths: std::collections::HashMap<u32, Vec<f32>> = std::collections::HashMap::new();
+fn page_measures(lines: &[VisualLine<'_>]) -> crate::detmap::HashMap<u32, f32> {
+    let mut widths: crate::detmap::HashMap<u32, Vec<f32>> = crate::detmap::HashMap::default();
     for line in lines {
         let width = line.right - line.left;
         if width > 1.0 {
@@ -8667,7 +8667,7 @@ mod tests {
             texts.iter().any(|text| text.contains("employ")),
             "a prose sentence was kept: {texts:?}"
         );
-        let kept: std::collections::HashSet<u32> =
+        let kept: crate::detmap::HashSet<u32> =
             full.kept.iter().map(|(glyph_id, _)| *glyph_id).collect();
         assert!(kept.contains(&o), "O was not kept with its base");
         assert!(
@@ -9491,7 +9491,7 @@ mod tests {
                 &extracted.regions,
                 &extracted.pages,
             );
-            let by_id: std::collections::HashMap<u32, &crate::glyph::Glyph> = extracted
+            let by_id: crate::detmap::HashMap<u32, &crate::glyph::Glyph> = extracted
                 .glyphs
                 .iter()
                 .map(|glyph| (glyph.id, glyph))
@@ -9754,13 +9754,13 @@ mod tests {
                 &extracted.regions,
                 &extracted.pages,
             );
-            let kept: std::collections::HashSet<u32> = seg
+            let kept: crate::detmap::HashSet<u32> = seg
                 .kept
                 .iter()
                 .filter(|(_, reason)| reason == "table" || reason == "figure")
                 .map(|(id, _)| *id)
                 .collect();
-            let caption_ids: std::collections::HashSet<u32> = seg
+            let caption_ids: crate::detmap::HashSet<u32> = seg
                 .segments
                 .iter()
                 .filter(|item| {
@@ -9771,8 +9771,8 @@ mod tests {
                 })
                 .flat_map(|item| item.glyph_ids.iter().copied())
                 .collect();
-            let mut by_page: std::collections::HashMap<u32, Vec<&crate::glyph::Glyph>> =
-                std::collections::HashMap::new();
+            let mut by_page: crate::detmap::HashMap<u32, Vec<&crate::glyph::Glyph>> =
+                crate::detmap::HashMap::default();
             for glyph in &extracted.glyphs {
                 by_page.entry(glyph.page_index).or_default().push(glyph);
             }
@@ -10441,7 +10441,7 @@ mod tests {
             ..crate::extract::ExtractOptions::default()
         });
         let seg = segment_with(&extraction.glyphs, &SegmentFlags::default());
-        let kept: std::collections::HashSet<u32> = seg.kept.iter().map(|(id, _)| *id).collect();
+        let kept: crate::detmap::HashSet<u32> = seg.kept.iter().map(|(id, _)| *id).collect();
         let mono: Vec<_> = extraction
             .glyphs
             .iter()
@@ -10539,7 +10539,7 @@ mod tests {
             "abstract lines should join across the margin stamp: {}",
             &abstract_seg.text[..abstract_seg.text.len().min(180)]
         );
-        let margin_ids: std::collections::HashSet<u32> = seg
+        let margin_ids: crate::detmap::HashSet<u32> = seg
             .kept
             .iter()
             .filter(|(_, reason)| reason == "margin")
@@ -10585,7 +10585,7 @@ mod tests {
                 ..crate::extract::ExtractOptions::default()
             });
             let seg = segment_glyphs(&extraction.glyphs);
-            let by_id: std::collections::HashMap<u32, &crate::glyph::Glyph> = extraction
+            let by_id: crate::detmap::HashMap<u32, &crate::glyph::Glyph> = extraction
                 .glyphs
                 .iter()
                 .map(|glyph| (glyph.id, glyph))
@@ -10604,7 +10604,7 @@ mod tests {
 
     fn mixed_bold_run_in(
         ids: &[u32],
-        by_id: &std::collections::HashMap<u32, &crate::glyph::Glyph>,
+        by_id: &crate::detmap::HashMap<u32, &crate::glyph::Glyph>,
     ) -> Option<String> {
         let mut glyphs: Vec<&crate::glyph::Glyph> =
             ids.iter().filter_map(|id| by_id.get(id).copied()).collect();
@@ -10724,7 +10724,7 @@ mod tests {
                 .any(|text| text.contains("Proposition 1.27") && !text.contains("elements")),
             "proposition label should split: {texts:?}"
         );
-        let by_id: std::collections::HashMap<u32, &crate::glyph::Glyph> = extraction
+        let by_id: crate::detmap::HashMap<u32, &crate::glyph::Glyph> = extraction
             .glyphs
             .iter()
             .map(|glyph| (glyph.id, glyph))
@@ -13878,7 +13878,7 @@ mod tests {
         assert!(seg.segments.iter().any(|item| {
             item.text.contains("generated # Auto") || item.text.contains("by # Auto")
         }));
-        let intro_pages: std::collections::HashSet<u32> = intro
+        let intro_pages: crate::detmap::HashSet<u32> = intro
             .glyph_ids
             .iter()
             .filter_map(|id| {

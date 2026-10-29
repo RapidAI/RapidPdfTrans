@@ -23,7 +23,7 @@ mod prompt;
 mod protect;
 mod references;
 
-use std::collections::{HashMap, HashSet};
+use crate::detmap::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
@@ -622,7 +622,7 @@ pub fn translate_extraction(
                 .then(|| seg.text.clone())
         })
         .collect();
-    let mut cache: HashMap<String, String> = HashMap::new();
+    let mut cache: HashMap<String, String> = HashMap::default();
     let mut calls = 0usize;
     let mut cache_hits = 0usize;
 
@@ -856,14 +856,14 @@ pub fn replay_extraction(
     opts: &TranslateOptions,
     saved: &[TranslatedSegment],
 ) -> Result<TranslateReport> {
-    let mut saved_map: HashMap<String, String> = HashMap::new();
+    let mut saved_map: HashMap<String, String> = HashMap::default();
     for item in saved {
         remember_saved(&mut saved_map, &item.source, &item.translated)?;
     }
     let (segments, reference_ids) = prepare_segments(extraction, opts)?;
     let mut translated: Vec<Option<String>> = Vec::with_capacity(segments.len());
     let mut cache_hits = 0usize;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for seg in &segments {
         if seg.glyph_ids.iter().any(|id| reference_ids.contains(id))
             || seg.text.trim().is_empty()
@@ -1122,7 +1122,7 @@ fn prepare_segments(
     let reference_ids = if opts.skip_references {
         references::reference_glyph_ids(&extraction.glyphs)
     } else {
-        HashSet::new()
+        HashSet::default()
     };
     for id in &reference_ids {
         extraction.mark_kept(*id, "references")?;
@@ -1310,7 +1310,7 @@ fn plan_unique_batches(
     translated: &[Option<String>],
     batch_size: usize,
 ) -> Vec<Vec<usize>> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut unique = Vec::new();
     for (i, seg) in segments.iter().enumerate() {
         if translated[i].is_some() {
@@ -2874,7 +2874,7 @@ fn roman_token(text: &str) -> bool {
 }
 
 fn shared_gloss(pairs: &[(&str, &str)], word: &str) -> Option<String> {
-    let mut sets: Vec<std::collections::HashSet<String>> = Vec::new();
+    let mut sets: Vec<crate::detmap::HashSet<String>> = Vec::new();
     for (source, translated) in pairs {
         if source.trim().eq_ignore_ascii_case(word) || source.split_whitespace().count() > 14 {
             continue;
@@ -2906,10 +2906,10 @@ fn shared_gloss(pairs: &[(&str, &str)], word: &str) -> Option<String> {
     (longest.len() == 1).then(|| longest.into_iter().next().unwrap())
 }
 
-fn han_substrings(text: &str) -> std::collections::HashSet<String> {
-    let mut subs = std::collections::HashSet::new();
+fn han_substrings(text: &str) -> crate::detmap::HashSet<String> {
+    let mut subs = crate::detmap::HashSet::default();
     let mut run = String::new();
-    let flush = |run: &str, subs: &mut std::collections::HashSet<String>| {
+    let flush = |run: &str, subs: &mut crate::detmap::HashSet<String>| {
         let chars: Vec<char> = run.chars().collect();
         for start in 0..chars.len() {
             for end in start + 2..=chars.len() {
@@ -6839,7 +6839,7 @@ mod tests {
         let report = finish_report(
             &mut ex,
             &segments,
-            &HashSet::new(),
+            &HashSet::default(),
             vec![Some("势函数 µ(G) = min ⟦0⟧ 成立。".into())],
             0,
             0,
@@ -7250,7 +7250,7 @@ mod tests {
         let left = "This book contains many examples of source code both in numbered listings and in line with normal text. In both cases, source code is formatted in a fixed-width font like this";
         let right =
             " to separate it from ordinary text. Sometimes code is also in bold to highlight";
-        let mut saved = HashMap::new();
+        let mut saved = HashMap::default();
         saved.insert(
             left.to_string(),
             "本书包含许多源代码示例，既在编号列表中，也穿插在正常文本中。在这两种情况下，源代码都使用像这样的等宽字体格式。".to_string(),
@@ -7274,7 +7274,7 @@ mod tests {
             translation_flaw(source, saved_text),
             "the extra stop is a flaw"
         );
-        let mut saved = HashMap::new();
+        let mut saved = HashMap::default();
         saved.insert(source.to_string(), saved_text.to_string());
         assert_eq!(lookup_saved(source, &saved).as_deref(), Some(saved_text));
     }
@@ -8751,7 +8751,7 @@ mod tests {
             ..single_opts
         };
         let isolated = IsolatedTranslator {
-            inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
+            inflight: std::sync::Mutex::new(crate::detmap::HashSet::default()),
             overlapped: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             leaked_context: AtomicUsize::new(0),
@@ -9248,7 +9248,7 @@ mod tests {
     }
 
     struct IsolatedTranslator {
-        inflight: std::sync::Mutex<std::collections::HashSet<u32>>,
+        inflight: std::sync::Mutex<crate::detmap::HashSet<u32>>,
         overlapped: AtomicUsize,
         peak: AtomicUsize,
         leaked_context: AtomicUsize,
@@ -9393,7 +9393,7 @@ mod tests {
 
     #[test]
     fn replay_matches_a_sentence_that_only_gained_a_space() {
-        let mut saved = HashMap::new();
+        let mut saved = HashMap::default();
         saved.insert("a ⟦12⟧⟦11⟧px b".to_string(), "译文".to_string());
         let hit = lookup_saved("a ⟦12⟧⟦11⟧ px b", &saved).expect("space-only match");
         assert_eq!(hit, "译文");

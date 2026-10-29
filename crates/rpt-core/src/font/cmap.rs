@@ -4,7 +4,7 @@
 //! including multi-character UTF-16BE destinations), `cidchar`, and `cidrange`.
 //! Character codes are 1–4 bytes, selected by the codespace (longest match).
 
-use std::collections::HashMap;
+use crate::detmap::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct CodeSpace {

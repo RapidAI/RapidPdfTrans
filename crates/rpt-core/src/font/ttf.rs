@@ -6,7 +6,7 @@
 //! a panic. Format 0, 4, 6, and 12 subtables are read. TTC collections use
 //! the first font that contains a Unicode cmap.
 
-use std::collections::HashMap;
+use crate::detmap::HashMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct FontCmap {

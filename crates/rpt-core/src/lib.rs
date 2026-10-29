@@ -40,6 +40,7 @@ pub mod translate;
 
 mod color;
 mod content;
+mod detmap;
 mod font;
 mod geom;
 mod overlap;

@@ -7,7 +7,7 @@
 //! next section heading (`Appendix`, `附录`, `A. Proofs`, …). Those glyphs
 //! are `kept_original` with reason `references`.
 
-use std::collections::{HashMap, HashSet};
+use crate::detmap::{HashMap, HashSet};
 
 use crate::extract::PdfDocument;
 use crate::glyph::Glyph;
@@ -146,7 +146,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
     let placed = place(&segments, glyphs);
     let order = reading_order(&placed);
     let tops = page_tops(&placed);
-    let mut selected: HashSet<usize> = HashSet::new();
+    let mut selected: HashSet<usize> = HashSet::default();
     let mut in_refs = false;
     let mut refs_x: Option<f32> = None;
     let mut refs_page: Option<u32> = None;
@@ -229,7 +229,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
         }
     }
 
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::default();
     for seg_index in &selected {
         ids.extend(segments[*seg_index].glyph_ids.iter().copied());
     }
@@ -245,7 +245,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
 /// Text-showing operators whose bytes must stay identical when references are kept.
 pub fn reference_stream_spans(glyphs: &[Glyph]) -> Vec<StreamSpan> {
     let ids = reference_glyph_ids(glyphs);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut spans = Vec::new();
     for glyph in glyphs {
         if !ids.contains(&glyph.id) {
@@ -314,7 +314,7 @@ fn place(segments: &[Segment], glyphs: &[Glyph]) -> Vec<Placed> {
 }
 
 fn page_tops(placed: &[Placed]) -> HashMap<u32, f32> {
-    let mut tops = HashMap::new();
+    let mut tops = HashMap::default();
     for line in placed {
         let slot = tops.entry(line.page).or_insert(line.y);
         if line.y > *slot {
@@ -340,7 +340,7 @@ fn reading_order(placed: &[Placed]) -> Vec<usize> {
                 .total_cmp(&placed[a].y)
                 .then(placed[a].x.total_cmp(&placed[b].x))
         });
-        let mut consumed = HashSet::new();
+        let mut consumed = HashSet::default();
         let mut ceiling = f32::INFINITY;
         for barrier in &barriers {
             emit_band(
@@ -459,7 +459,7 @@ fn is_running_header(placed: &[Placed], tops: &HashMap<u32, f32>, line: &Placed)
 fn expand_mates(glyphs: &[Glyph], ids: &mut HashSet<u32>) {
     // Seeds by page, sorted by baseline. Testing every glyph against every
     // seed was quadratic and took minutes on a long bibliography.
-    let mut seeds: HashMap<u32, (Vec<&Glyph>, f32)> = HashMap::new();
+    let mut seeds: HashMap<u32, (Vec<&Glyph>, f32)> = HashMap::default();
     for glyph in glyphs.iter().filter(|glyph| ids.contains(&glyph.id)) {
         let entry = seeds.entry(glyph.page_index).or_insert((Vec::new(), 1.0));
         entry.0.push(glyph);

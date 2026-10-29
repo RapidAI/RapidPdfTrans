@@ -20,7 +20,7 @@ mod ttf;
 mod type1;
 mod widths;
 
-use std::collections::HashMap;
+use crate::detmap::HashMap;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
@@ -429,7 +429,7 @@ fn load_simple_encoding(
     } else {
         BaseEncoding::WinAnsi
     };
-    let mut names: HashMap<u32, String> = HashMap::new();
+    let mut names: HashMap<u32, String> = HashMap::default();
     let enc_obj = dict.get(b"Encoding").ok();
     let Some(enc_obj) = enc_obj else {
         let simple = if symbolic && !base_name.contains("Symbol") {
@@ -658,8 +658,8 @@ fn load_type3(
         .and_then(|o| dict_of(doc, o))
         .map(|d| Resources::from_dict(doc, d))
         .unwrap_or_default();
-    let mut procs = HashMap::new();
-    let mut name_to_bytes: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut procs = HashMap::default();
+    let mut name_to_bytes: HashMap<String, Vec<u8>> = HashMap::default();
     if let Some(charprocs) = dict.get(b"CharProcs").ok().and_then(|o| dict_of(doc, o)) {
         for (name, obj) in charprocs.iter() {
             let name = String::from_utf8_lossy(name).into_owned();

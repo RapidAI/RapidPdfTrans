@@ -6,7 +6,7 @@
 //! (`data/glyphlist.txt`, BSD), then `uniXXXX` / `uXXXXXX` forms. `.notdef`
 //! and unknown names stay unmapped.
 
-use std::collections::HashMap;
+use crate::detmap::HashMap;
 use std::sync::OnceLock;
 
 use super::encoding_tables::{
@@ -139,7 +139,7 @@ fn unicode_from_hex_groups(hex: &str) -> Option<String> {
 fn agl() -> &'static HashMap<String, String> {
     static AGL: OnceLock<HashMap<String, String>> = OnceLock::new();
     AGL.get_or_init(|| {
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         for line in include_str!("../../data/glyphlist.txt").lines() {
             if line.is_empty() || line.starts_with('#') {
                 continue;

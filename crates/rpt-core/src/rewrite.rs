@@ -17,7 +17,8 @@
 //! does not call a model. Bilingual page layouts are composed here from the
 //! two PDFs.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::detmap::{HashMap, HashSet};
+use std::collections::BTreeMap;
 
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
@@ -276,9 +277,9 @@ fn rewrite_translation_once(
     };
     let overlay = matches!(opts.mode, OutputMode::Bilingual(BilingualLayout::Overlay));
     let by_id = glyph_index(&extraction.glyphs);
-    let mut keep: HashMap<u32, String> = HashMap::new();
-    let mut non_text: HashMap<u32, String> = HashMap::new();
-    let mut rewrite_ids: HashSet<u32> = HashSet::new();
+    let mut keep: HashMap<u32, String> = HashMap::default();
+    let mut non_text: HashMap<u32, String> = HashMap::default();
+    let mut rewrite_ids: HashSet<u32> = HashSet::default();
 
     for glyph in &extraction.glyphs {
         if glyph.disposition.is_final() {
@@ -299,9 +300,9 @@ fn rewrite_translation_once(
     let mut connective_stamps: Vec<ConnectiveStamp> = Vec::new();
     // An echoed column that shares a TJ with a translation. The operator is
     // blanked for the translation; these glyphs are painted back in place.
-    let mut paint_original: HashSet<u32> = HashSet::new();
+    let mut paint_original: HashSet<u32> = HashSet::default();
     let owners = operator_owners(&extraction.glyphs);
-    let mut toc_redraw: HashSet<u32> = HashSet::new();
+    let mut toc_redraw: HashSet<u32> = HashSet::default();
     // Two credit columns often share one text operator. Each column is its
     // own segment. Blank the operator when every visible glyph in it belongs
     // to a segment that will be drawn.
@@ -350,8 +351,8 @@ fn rewrite_translation_once(
         }
         keep.insert(*id, reason.clone());
     }
-    let mut symbol_shards: HashSet<u32> = HashSet::new();
-    let mut formula_leads: HashSet<u32> = HashSet::new();
+    let mut symbol_shards: HashSet<u32> = HashSet::default();
+    let mut formula_leads: HashSet<u32> = HashSet::default();
     for (index, segment) in report.segments.iter().enumerate() {
         if segment.glyph_ids.is_empty() {
             continue;
@@ -730,7 +731,7 @@ fn rewrite_translation_once(
     }
 
     let heading_wraps = if overlay {
-        HashMap::new()
+        HashMap::default()
     } else {
         find_heading_wraps(&planned, report, extraction, &by_id)
     };
@@ -743,9 +744,9 @@ fn rewrite_translation_once(
     // is redrawn as one flow and still needs those characters.
     let subentry_chars = subentry_font_chars(report, extraction, &by_id);
     let mut drawn = Vec::new();
-    let mut succeeded: HashSet<u32> = HashSet::new();
+    let mut succeeded: HashSet<u32> = HashSet::default();
     let mut embedded: Vec<(String, SubsetFont)> = Vec::new();
-    let mut font_styles: HashMap<String, FaceStyle> = HashMap::new();
+    let mut font_styles: HashMap<String, FaceStyle> = HashMap::default();
     // A leader row can be dots and a page number with no title glyph in
     // that operator. Those marks are not companions of the title, but the
     // subset still has to draw them once the page number blanks the line.
@@ -836,7 +837,7 @@ fn rewrite_translation_once(
             }
         }
     } else {
-        let mut groups: HashMap<FaceStyle, Vec<(usize, String)>> = HashMap::new();
+        let mut groups: HashMap<FaceStyle, Vec<(usize, String)>> = HashMap::default();
         for (index, text) in &planned {
             let glyphs: Vec<&Glyph> = report.segments[*index]
                 .glyph_ids
@@ -853,7 +854,7 @@ fn rewrite_translation_once(
                 .push((*index, text.clone()));
         }
         let mut slot = 0u32;
-        let mut font_notices: HashSet<String> = HashSet::new();
+        let mut font_notices: HashSet<String> = HashSet::default();
         for (style, group) in groups {
             let chars = cover_with_fallbacks(
                 group
@@ -953,7 +954,7 @@ fn rewrite_translation_once(
                     &mut succeeded,
                     &mut drawn,
                     &mut keep,
-                    &HashMap::new(),
+                    &HashMap::default(),
                     &mut heading_shifts,
                     &mut stack_shifts,
                 );
@@ -1474,7 +1475,7 @@ fn record_unfitted_line_warnings(extraction: &mut Extraction) {
 
 fn snapshot_pages(doc: &mut Document) -> Vec<PageSnap> {
     let ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
-    let mut cloned_forms = HashMap::new();
+    let mut cloned_forms = HashMap::default();
     ids.into_iter()
         .map(|id| {
             let mut snap = snap_page(doc, id);
@@ -1702,7 +1703,7 @@ fn pages_root(doc: &Document) -> Result<ObjectId> {
 
 fn inherited_box(doc: &Document, page_id: ObjectId) -> Option<[f32; 4]> {
     let mut id = page_id;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         if !seen.insert(id) {
             return None;
@@ -1722,7 +1723,7 @@ fn inherited_box(doc: &Document, page_id: ObjectId) -> Option<[f32; 4]> {
 
 fn inherited_rotate(doc: &Document, page_id: ObjectId) -> i32 {
     let mut id = page_id;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         if !seen.insert(id) {
             return 0;
@@ -2260,7 +2261,7 @@ fn pack_connective_stamps(
             group.push(order[cursor]);
             cursor += 1;
         }
-        let mut stamp_ids = HashSet::new();
+        let mut stamp_ids = HashSet::default();
         for slot in &group {
             stamp_ids.extend(stamps[*slot].glyph_ids.iter().copied());
         }
@@ -2289,7 +2290,7 @@ fn pack_connective_stamps(
         if cuts.is_empty() {
             continue;
         }
-        let mut dx_of: HashMap<u32, f32> = HashMap::new();
+        let mut dx_of: HashMap<u32, f32> = HashMap::default();
         for glyph in &extraction.glyphs {
             if glyph.page_index != page || stamp_ids.contains(&glyph.id) || glyph.invisible {
                 continue;
@@ -2310,8 +2311,8 @@ fn pack_connective_stamps(
         }
         // A span is one show operator. Moving some of its glyphs blanks the
         // rest. Shift a span only when every glyph in it moves by the same dx.
-        let mut seen: HashSet<(u32, u16, usize, usize)> = HashSet::new();
-        let mut by_dx: HashMap<i32, Vec<u32>> = HashMap::new();
+        let mut seen: HashSet<(u32, u16, usize, usize)> = HashSet::default();
+        let mut by_dx: HashMap<i32, Vec<u32>> = HashMap::default();
         for glyph in &extraction.glyphs {
             if glyph.page_index != page || !dx_of.contains_key(&glyph.id) {
                 continue;
@@ -2393,7 +2394,7 @@ fn pack_connective_stamps(
                     host_y: anchor,
                 });
             }
-            let mut split_groups: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+            let mut split_groups: HashMap<(i32, i32), Vec<u32>> = HashMap::default();
             for (id, sdx, sdy) in split {
                 let bucket = ((sdx * 10.0).round() as i32, (sdy * 10.0).round() as i32);
                 split_groups.entry(bucket).or_default().push(id);
@@ -2732,9 +2733,9 @@ pub(crate) fn two_sided_stack_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u3
         return Vec::new();
     }
     let mut stacks = Vec::new();
-    let mut used: HashSet<u32> = HashSet::new();
+    let mut used: HashSet<u32> = HashSet::default();
     let link_x = body * 2.2;
-    let mut by_base: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut by_base: HashMap<usize, Vec<usize>> = HashMap::default();
     for (base, index) in pool {
         by_base.entry(base).or_default().push(index);
     }
@@ -2753,7 +2754,7 @@ pub(crate) fn two_sided_stack_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u3
                 parent[right] = left;
             }
         }
-        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::default();
         for (index, member) in members.iter().enumerate() {
             groups
                 .entry(find_root(&mut parent, index))
@@ -3645,7 +3646,7 @@ fn script_atoms(glyphs: &[&Glyph], body: f32, used: &HashSet<u32>) -> Vec<Vec<u3
             }
         }
     }
-    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::default();
     for (index, script) in scripts.iter().enumerate() {
         clusters
             .entry(find_root(&mut parent, index))
@@ -3820,14 +3821,14 @@ fn citation_mark_text(text: &str) -> bool {
 /// read as inline math the holes missed and stayed English. A hole that
 /// opens a bracket takes the glyphs up to its closer on the same baseline.
 fn close_open_brackets(glyphs: &[&Glyph], mut groups: Vec<Vec<u32>>, body: f32) -> Vec<Vec<u32>> {
-    let mut owner: HashMap<u32, usize> = HashMap::new();
+    let mut owner: HashMap<u32, usize> = HashMap::default();
     for (index, group) in groups.iter().enumerate() {
         for id in group {
             owner.insert(*id, index);
         }
     }
-    let mut absorbed: HashSet<usize> = HashSet::new();
-    let mut taken: HashSet<u32> = HashSet::new();
+    let mut absorbed: HashSet<usize> = HashSet::default();
+    let mut taken: HashSet<u32> = HashSet::default();
     for index in 0..groups.len() {
         if absorbed.contains(&index) {
             continue;
@@ -4043,11 +4044,11 @@ pub(crate) fn merge_stacked_paragraphs(
     claim_orphan_operators(&mut segments, glyphs, &by_id);
     // The words beside a binomial are often a different segment. The stack
     // is only two-sided when those words are in the same slice.
-    let mut page_ids: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut page_ids: HashMap<u32, Vec<u32>> = HashMap::default();
     for glyph in glyphs {
         page_ids.entry(glyph.page_index).or_default().push(glyph.id);
     }
-    let mut page_stacks: HashMap<u32, Vec<Vec<u32>>> = HashMap::new();
+    let mut page_stacks: HashMap<u32, Vec<Vec<u32>>> = HashMap::default();
     for (page, ids) in &page_ids {
         let owned: Vec<&Glyph> = ids.iter().filter_map(|id| glyphs.get(by_id[id])).collect();
         // A heading is a few large glyphs. `representative_size` follows
@@ -4102,7 +4103,7 @@ pub(crate) fn merge_stacked_paragraphs(
             }
         }
     }
-    let mut grouped: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut grouped: HashMap<u32, Vec<usize>> = HashMap::default();
     for (index, marked) in keep.iter().enumerate() {
         if *marked {
             let page = segments[index].page_index;
@@ -4139,8 +4140,8 @@ pub(crate) fn merge_stacked_paragraphs(
             chains.push(chain);
         }
     }
-    let mut replaced: HashMap<usize, crate::segment::Segment> = HashMap::new();
-    let mut drop = HashSet::new();
+    let mut replaced: HashMap<usize, crate::segment::Segment> = HashMap::default();
+    let mut drop = HashSet::default();
     for chain in chains {
         if chain.is_empty() {
             continue;
@@ -4356,7 +4357,7 @@ fn absorb_orphan_glyphs(
         return;
     }
     let in_chain: HashSet<usize> = chain.iter().copied().collect();
-    let mut outside: HashSet<u32> = HashSet::new();
+    let mut outside: HashSet<u32> = HashSet::default();
     for (index, segment) in segments.iter().enumerate() {
         if !in_chain.contains(&index) {
             outside.extend(segment.glyph_ids.iter().copied());
@@ -4575,7 +4576,7 @@ fn merge_spans_chain(left: &MergeSpan, right: &MergeSpan) -> bool {
 }
 
 fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body: f32) -> String {
-    let mut cluster_of: HashMap<u32, usize> = HashMap::new();
+    let mut cluster_of: HashMap<u32, usize> = HashMap::default();
     for (index, ids) in stacks.iter().enumerate() {
         for id in ids {
             cluster_of.insert(*id, index);
@@ -4628,7 +4629,7 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
         stack: Option<usize>,
     }
     let mut tokens: Vec<Token<'_>> = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for glyph in glyphs {
         if stack_delimiter(glyph) {
             continue;
@@ -5028,7 +5029,7 @@ fn display_math_face(name: &str) -> bool {
 }
 
 fn operator_owners(glyphs: &[Glyph]) -> HashMap<(u32, u16, usize, usize), Vec<u32>> {
-    let mut owners: HashMap<(u32, u16, usize, usize), Vec<u32>> = HashMap::new();
+    let mut owners: HashMap<(u32, u16, usize, usize), Vec<u32>> = HashMap::default();
     for glyph in glyphs {
         let Some(span) = span_of(&glyph.source) else {
             continue;
@@ -5481,8 +5482,8 @@ fn commit_toc_operators(
     embedded: &[(String, SubsetFont)],
     font_styles: &HashMap<String, FaceStyle>,
 ) {
-    let mut blocked = HashSet::new();
-    let mut returning_marks = HashSet::new();
+    let mut blocked = HashSet::default();
+    let mut returning_marks = HashSet::default();
     for ids in owners.values() {
         let live: Vec<u32> = ids
             .iter()
@@ -5548,7 +5549,7 @@ fn commit_toc_operators(
         by_id,
         embedded,
     ));
-    let mut live_ops = HashSet::new();
+    let mut live_ops = HashSet::default();
     for glyph in &extraction.glyphs {
         if succeeded.contains(&glyph.id) && !keep.contains_key(&glyph.id) {
             if let Some(span) = span_of(&glyph.source) {
@@ -5561,7 +5562,7 @@ fn commit_toc_operators(
     // Those glyph ids are in `succeeded`. Drawing them again from the toc
     // disposition stacks a second italic number on the line.
     let runs = toc_page_number_runs(extraction, toc_redraw, succeeded);
-    let mut placed = HashSet::new();
+    let mut placed = HashSet::default();
     for run in &runs {
         // The source puts the page number one gap after the title. Only a
         // part row, whose dots already end at the number, keeps that number
@@ -6313,7 +6314,7 @@ fn preserve_unpainted_siblings(
         .iter()
         .flat_map(|item| item.glyph_ids.iter().copied())
         .collect();
-    let mut rescue = HashSet::new();
+    let mut rescue = HashSet::default();
     let mut groups: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
     for ids in owners.values() {
         let live: Vec<u32> = ids
@@ -6529,7 +6530,7 @@ fn blank_operators(
     spans: &[Span],
     extraction: &Extraction,
 ) -> std::result::Result<(), String> {
-    let mut grouped: HashMap<ObjectId, Vec<(usize, usize)>> = HashMap::new();
+    let mut grouped: HashMap<ObjectId, Vec<(usize, usize)>> = HashMap::default();
     for span in spans {
         grouped
             .entry(span.object_id)
@@ -6737,7 +6738,7 @@ fn find_heading_wraps(
         .iter()
         .filter_map(|(index, _)| heading_line(*index, report, extraction, by_id))
         .collect();
-    let mut column_count: HashMap<(u32, i32), usize> = HashMap::new();
+    let mut column_count: HashMap<(u32, i32), usize> = HashMap::default();
     for line in &lines {
         let key = (line.page, (line.left / 4.0).round() as i32);
         *column_count.entry(key).or_default() += 1;
@@ -6746,8 +6747,8 @@ fn find_heading_wraps(
         .iter()
         .map(|(index, text)| (*index, text.as_str()))
         .collect();
-    let mut taken_hosts = HashSet::new();
-    let mut wraps = HashMap::new();
+    let mut taken_hosts = HashSet::default();
+    let mut wraps = HashMap::default();
     for cont in &lines {
         let source = cont.source.trim_start();
         let Some(first) = source.chars().next() else {
@@ -6851,7 +6852,7 @@ fn heading_wrap_page_ids(
     extraction: &Extraction,
     succeeded: &HashSet<u32>,
 ) -> HashSet<u32> {
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::default();
     for wrap in wraps.values() {
         let joined = wrap.extra_ids.iter().any(|id| succeeded.contains(id));
         if !joined {
@@ -7557,8 +7558,8 @@ fn plan_formula_echoes(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
 ) -> FormulaEchoPlan {
-    let mut grouped: HashSet<u32> = HashSet::new();
-    let mut groups_by_segment: HashMap<usize, Vec<Vec<u32>>> = HashMap::new();
+    let mut grouped: HashSet<u32> = HashSet::default();
+    let mut groups_by_segment: HashMap<usize, Vec<Vec<u32>>> = HashMap::default();
     for (index, segment) in report.segments.iter().enumerate() {
         let glyphs: Vec<&Glyph> = segment
             .glyph_ids
@@ -7581,8 +7582,8 @@ fn plan_formula_echoes(
         }
     }
     let mut holds: Vec<(u32, String)> = Vec::new();
-    let mut edits: HashMap<usize, Vec<FormulaEdit>> = HashMap::new();
-    let mut consumed: HashSet<u32> = HashSet::new();
+    let mut edits: HashMap<usize, Vec<FormulaEdit>> = HashMap::default();
+    let mut consumed: HashSet<u32> = HashSet::default();
     for (index, groups) in &groups_by_segment {
         let segment = &report.segments[*index];
         let glyphs: Vec<&Glyph> = segment
@@ -7664,7 +7665,7 @@ fn plan_formula_echoes(
                 }
             }
         }
-        let mut parts: HashMap<usize, Vec<&Glyph>> = HashMap::new();
+        let mut parts: HashMap<usize, Vec<&Glyph>> = HashMap::default();
         for (at, glyph) in pieces.iter().enumerate() {
             parts
                 .entry(find_root(&mut parent, at))
@@ -8075,7 +8076,7 @@ fn clear_seated_formula_overlaps(
             .unwrap_or(0.0);
         left_x.total_cmp(&right_x)
     });
-    let mut claimed: HashSet<(u32, i32)> = HashSet::new();
+    let mut claimed: HashSet<(u32, i32)> = HashSet::default();
     for index in order {
         let Some((member_y, member_size)) = extraction.glyphs.iter().find_map(|glyph| {
             shift_has(&shifts[index], glyph.id).then_some((glyph.matrix[5], glyph.font_size))
@@ -8705,8 +8706,8 @@ fn drop_overflow_tail_in(lines: &mut Vec<Drawn>, source_right: &dyn Fn(&[u32]) -
             .reverse()
             .then(lines[left.0].x.total_cmp(&lines[right.0].x))
     });
-    let mut cursors: HashMap<usize, f32> = HashMap::new();
-    let mut moved: HashSet<usize> = HashSet::new();
+    let mut cursors: HashMap<usize, f32> = HashMap::default();
+    let mut moved: HashSet<usize> = HashSet::default();
     let mut parked = Vec::new();
     for (index, next, column_left) in moves {
         if let Some(mark) = peel_leading_closer(&mut lines[index]) {
@@ -9346,7 +9347,7 @@ fn audit_kept_math_overlap(
 ) -> Vec<(Option<u32>, String)> {
     // One segment's ids can ride on several of its lines. The glyph was
     // redrawn when any of them carries its character.
-    let mut owner: HashMap<u32, String> = HashMap::new();
+    let mut owner: HashMap<u32, String> = HashMap::default();
     for line in drawn {
         for id in &line.glyph_ids {
             owner.entry(*id).or_default().push_str(&line.text);
@@ -9659,7 +9660,7 @@ fn display_operator_name(word: &str) -> bool {
 /// sit on them. Prose around the equation is not included.
 fn display_equation_line_ids(glyphs: &[&Glyph]) -> HashSet<u32> {
     if glyphs.len() < 4 {
-        return HashSet::new();
+        return HashSet::default();
     }
     let body = prose_body_size(glyphs).max(1.0);
     let mut ordered: Vec<&Glyph> = glyphs
@@ -9686,7 +9687,7 @@ fn display_equation_line_ids(glyphs: &[&Glyph]) -> HashSet<u32> {
         }
         lines.push(vec![glyph]);
     }
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::default();
     for line in &lines {
         if line.len() < 4 || !glyphs_are_display(line) {
             continue;
@@ -9758,7 +9759,7 @@ fn display_equation_line_ids(glyphs: &[&Glyph]) -> HashSet<u32> {
 /// copy (`φ(X) = ν(X)`, `Cov…`) overlaps the source. The line stays original.
 fn unholed_formula_line_ids(glyphs: &[&Glyph], display: &HashSet<u32>) -> HashSet<u32> {
     if glyphs.len() < 4 {
-        return HashSet::new();
+        return HashSet::default();
     }
     let body = prose_body_size(glyphs).max(1.0);
     let groups = placeholder_groups(glyphs, body);
@@ -9787,7 +9788,7 @@ fn unholed_formula_line_ids(glyphs: &[&Glyph], display: &HashSet<u32>) -> HashSe
         }
         lines.push(vec![glyph]);
     }
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::default();
     for line in &lines {
         let loose: Vec<&Glyph> = line
             .iter()
@@ -10479,11 +10480,11 @@ struct GapIndex<'a> {
 
 impl<'a> GapIndex<'a> {
     fn new(drawn: &[Drawn], extraction: &'a Extraction, shifts: &[ListingShift]) -> Self {
-        let mut on_page: HashMap<u32, Vec<&Glyph>> = HashMap::new();
+        let mut on_page: HashMap<u32, Vec<&Glyph>> = HashMap::default();
         for glyph in &extraction.glyphs {
             on_page.entry(glyph.page_index).or_default().push(glyph);
         }
-        let mut by_glyph = HashMap::new();
+        let mut by_glyph = HashMap::default();
         for shift in shifts {
             for id in &shift.ids {
                 by_glyph
@@ -10817,7 +10818,7 @@ fn extend_ink_across_formula_tail(
     shift: &ListingShift,
     extraction: &Extraction,
 ) -> (f32, f32) {
-    extend_ink_across_tail_except(ink_left, ink_right, shift, extraction, &HashSet::new())
+    extend_ink_across_tail_except(ink_left, ink_right, shift, extraction, &HashSet::default())
 }
 
 fn extend_ink_across_tail_except(
@@ -11391,7 +11392,7 @@ fn place_segments(
                 succeeded.extend(wrap.extra_ids.iter().copied());
                 drawn.extend(lines);
                 if extra.abs() > 0.4 {
-                    let mut own_ids = HashSet::new();
+                    let mut own_ids = HashSet::default();
                     own_ids.extend(segment.glyph_ids.iter().copied());
                     own_ids.extend(wrap.extra_ids.iter().copied());
                     shifts.push(SubentryShift {
@@ -12465,7 +12466,7 @@ fn subentry_font_chars(
     by_id: &HashMap<u32, usize>,
 ) -> String {
     let mut chars = Vec::new();
-    for run in find_subentry_runs(report, extraction, by_id, &HashSet::new()) {
+    for run in find_subentry_runs(report, extraction, by_id, &HashSet::default()) {
         for item in &run.items {
             chars.extend(item.title.chars());
             chars.extend(item.page.chars());
@@ -12562,7 +12563,7 @@ fn reflow_inline_subentries(
         let Some((flow, flow_size)) = flow_subentry(&run, embedded, font_styles, metrics) else {
             continue;
         };
-        let mut own_ids: HashSet<u32> = HashSet::new();
+        let mut own_ids: HashSet<u32> = HashSet::default();
         for item in &run.items {
             own_ids.extend(item.title_ids.iter().copied());
             own_ids.extend(item.page_ids.iter().copied());
@@ -12702,7 +12703,7 @@ fn find_subentry_runs(
     if bullets.is_empty() {
         // A contents row with no bullet still keeps an italic page number
         // beside its title (`Implementing a prompt template … 32`).
-        let mut seg_of: HashMap<u32, usize> = HashMap::new();
+        let mut seg_of: HashMap<u32, usize> = HashMap::default();
         for (index, segment) in report.segments.iter().enumerate() {
             for id in &segment.glyph_ids {
                 seg_of.insert(*id, index);
@@ -12712,7 +12713,7 @@ fn find_subentry_runs(
         share_subentry_column(&mut runs);
         return runs;
     }
-    let mut seg_of: HashMap<u32, usize> = HashMap::new();
+    let mut seg_of: HashMap<u32, usize> = HashMap::default();
     for (index, segment) in report.segments.iter().enumerate() {
         for id in &segment.glyph_ids {
             seg_of.insert(*id, index);
@@ -12720,9 +12721,28 @@ fn find_subentry_runs(
     }
     let count = report.segments.len();
     let mut parent: Vec<usize> = (0..count).collect();
-    let mut bullet_roots: HashSet<usize> = HashSet::new();
+    let mut bullet_roots: HashSet<usize> = HashSet::default();
+    // Segments with a glyph on each page, in index order. A bullet only
+    // looks at its own page; scanning every segment per bullet was quadratic
+    // in the document.
+    let mut on_page: HashMap<u32, Vec<usize>> = HashMap::default();
+    for (index, segment) in report.segments.iter().enumerate() {
+        let mut pages: Vec<u32> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(|id| extraction.glyphs.get(by_id[id]).map(|g| g.page_index))
+            .collect();
+        pages.sort_unstable();
+        pages.dedup();
+        for page in pages {
+            on_page.entry(page).or_default().push(index);
+        }
+    }
     for bullet in &bullets {
-        let near: Vec<usize> = segments_near_bullet(bullet, report, extraction, by_id)
+        let candidates = on_page
+            .get(&bullet.page_index)
+            .map_or(&[][..], Vec::as_slice);
+        let near: Vec<usize> = segments_near_bullet(bullet, candidates, report, extraction, by_id)
             .into_iter()
             .filter(|index| !skip.contains(index))
             .collect();
@@ -12737,6 +12757,24 @@ fn find_subentry_runs(
     }
     // A wrapped tail (`model` under `core object`) shares the indent and the
     // next baseline. A section heading is further left and stays out.
+    // [`segments_share_subentry`] is false unless both segments sit on one
+    // page and neither spans pages, so only same-page pairs are compared.
+    let box_page: Vec<Option<u32>> = report
+        .segments
+        .iter()
+        .map(|segment| {
+            if segment_spans_pages(segment, extraction, by_id) {
+                return None;
+            }
+            segment_box(segment, extraction, by_id).map(|b| b.0)
+        })
+        .collect();
+    let mut same_page: HashMap<u32, Vec<usize>> = HashMap::default();
+    for (index, page) in box_page.iter().enumerate() {
+        if let Some(page) = page {
+            same_page.entry(*page).or_default().push(index);
+        }
+    }
     let mut grew = true;
     while grew {
         grew = false;
@@ -12744,7 +12782,10 @@ fn find_subentry_runs(
             if skip.contains(&left) || !bullet_component(&parent, &bullet_roots, left) {
                 continue;
             }
-            for right in 0..count {
+            let Some(page) = box_page[left] else {
+                continue;
+            };
+            for &right in &same_page[&page] {
                 if left == right || skip.contains(&right) || same_root(&parent, left, right) {
                     continue;
                 }
@@ -12760,7 +12801,7 @@ fn find_subentry_runs(
             }
         }
     }
-    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::default();
     for index in 0..count {
         if skip.contains(&index) || !bullet_component(&parent, &bullet_roots, index) {
             continue;
@@ -12768,7 +12809,7 @@ fn find_subentry_runs(
         let root = find_root(&mut parent, index);
         groups.entry(root).or_default().push(index);
     }
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     let mut runs = Vec::new();
     for mut indices in groups.into_values() {
         // A 27pt chapter index can sit inside the gap window of the row
@@ -12808,7 +12849,7 @@ fn find_subentry_runs(
 /// Front matter sits further left (`preface` vs `Engines`); it keeps its
 /// own column. Odd and even pages differ in the source and stay apart.
 fn share_subentry_column(runs: &mut [SubentryRun]) {
-    let mut by_page: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut by_page: HashMap<u32, Vec<usize>> = HashMap::default();
     for (index, run) in runs.iter().enumerate() {
         by_page.entry(run.page).or_default().push(index);
     }
@@ -12884,12 +12925,14 @@ fn is_subentry_bullet(glyph: &Glyph) -> bool {
 
 fn segments_near_bullet(
     bullet: &Glyph,
+    candidates: &[usize],
     report: &TranslateReport,
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
 ) -> Vec<usize> {
     let mut hits = Vec::new();
-    for (index, segment) in report.segments.iter().enumerate() {
+    for &index in candidates {
+        let segment = &report.segments[index];
         let near = segment.glyph_ids.iter().any(|id| {
             extraction.glyphs.get(by_id[id]).is_some_and(|glyph| {
                 glyph.page_index == bullet.page_index
@@ -13430,7 +13473,7 @@ fn build_subentry_run(
         return None;
     }
     let page = {
-        let mut counts: HashMap<u32, usize> = HashMap::new();
+        let mut counts: HashMap<u32, usize> = HashMap::default();
         for glyph in &glyphs {
             *counts.entry(glyph.page_index).or_default() += 1;
         }
@@ -15071,7 +15114,7 @@ fn mention_omitted_stacks(text: &str, glyphs: &[&Glyph]) -> String {
         x: f32,
     }
     let mut marks = Vec::new();
-    let mut mentioned = HashSet::new();
+    let mut mentioned = HashSet::default();
     let mut index = 0usize;
     while index < chars.len() {
         if chars[index] != '⟦' {
@@ -15154,7 +15197,7 @@ fn expand_stack_placeholders(
     let completed = mention_omitted_stacks(text, glyphs);
     let text = completed.as_str();
     if !text.contains('⟦') || !font.has(0x3000) || !font.has(u32::from(b'0')) {
-        return (text.to_string(), HashMap::new());
+        return (text.to_string(), HashMap::default());
     }
     let body = prose_body_size(glyphs);
     let mut stacks = placeholder_groups(glyphs, body);
@@ -15163,10 +15206,10 @@ fn expand_stack_placeholders(
     // translation keeps matching.
     absorb_ordered_pair_head(glyphs, body, &mut stacks);
     if stacks.is_empty() {
-        return (text.to_string(), HashMap::new());
+        return (text.to_string(), HashMap::default());
     }
     let by_id = glyph_index_refs(glyphs);
-    let mut holes = HashMap::new();
+    let mut holes = HashMap::default();
     let mut out = String::new();
     let mut rest = text;
     while let Some(start) = rest.find('⟦') {
@@ -15508,7 +15551,7 @@ fn lift_stack_placeholders(
     // the formula's ink clears that line.
     open_leading_under_stacks(lines, &holes, &stacks, glyphs);
     let mut shifts = Vec::with_capacity(holes.len());
-    let mut per_line: HashMap<usize, Vec<(usize, usize, usize, bool)>> = HashMap::new();
+    let mut per_line: HashMap<usize, Vec<(usize, usize, usize, bool)>> = HashMap::default();
     for (line_index, start, end, index, duplicate) in &holes {
         let line = &lines[*line_index];
         let chars: Vec<char> = line.text.chars().collect();
@@ -17433,7 +17476,7 @@ fn is_toc_mark_glyph(glyph: &Glyph) -> bool {
 }
 
 fn contents_page_indexes(extraction: &Extraction) -> Vec<u32> {
-    let mut counts: HashMap<u32, usize> = HashMap::new();
+    let mut counts: HashMap<u32, usize> = HashMap::default();
     for glyph in &extraction.glyphs {
         if is_toc_mark_glyph(glyph) {
             *counts.entry(glyph.page_index).or_default() += 1;
@@ -17860,7 +17903,7 @@ fn committed_credit_ids(
 ) -> HashSet<u32> {
     let claimed: HashSet<u32> = claim.iter().copied().collect();
     let by_id = glyph_index(&extraction.glyphs);
-    let mut blocked: HashSet<(u32, u16, usize, usize)> = HashSet::new();
+    let mut blocked: HashSet<(u32, u16, usize, usize)> = HashSet::default();
     for id in &claimed {
         let Some(glyph) = by_id.get(id).map(|&index| &extraction.glyphs[index]) else {
             continue;
@@ -18383,7 +18426,7 @@ fn hang_kept_author_marks(
             right,
         });
     }
-    let mut assigned: HashMap<usize, Vec<&Glyph>> = HashMap::new();
+    let mut assigned: HashMap<usize, Vec<&Glyph>> = HashMap::default();
     for mark in &marks {
         let mut best: Option<(usize, f32)> = None;
         for host in &hosts {
@@ -18421,7 +18464,7 @@ fn hang_kept_author_marks(
         .values()
         .flat_map(|group| group.iter().map(|mark| mark.id))
         .collect();
-    let mut dropped: HashSet<u32> = HashSet::new();
+    let mut dropped: HashSet<u32> = HashSet::default();
     for group in assigned.values() {
         for mark in group {
             let Some(span) = span_of(&mark.source) else {
@@ -18548,7 +18591,7 @@ fn reflow_bold_run_ins(
     if drawn.is_empty() {
         return;
     }
-    let mut groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::default();
     for (index, line) in drawn.iter().enumerate() {
         if line.text.trim().is_empty() {
             continue;
@@ -18562,7 +18605,7 @@ fn reflow_bold_run_ins(
         groups.entry(key).or_default().push(index);
     }
     let keys: Vec<Vec<u32>> = groups.keys().cloned().collect();
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     // drop indices, replacement lines, body glyph ids, slide, first baseline
     type Plan = (Vec<usize>, Vec<Drawn>, Vec<u32>, f32, f32);
     let mut plans: Vec<Plan> = Vec::new();
@@ -18604,7 +18647,7 @@ fn reflow_bold_run_ins(
             }
         }
     }
-    let mut drop = HashSet::new();
+    let mut drop = HashSet::default();
     let mut added = Vec::new();
     for (indices, lines, _, _, _) in plans {
         drop.extend(indices);
@@ -19241,7 +19284,7 @@ fn reflow_split_paragraphs(
     if drawn.len() < 2 {
         return;
     }
-    let mut groups: HashMap<(u32, Vec<u32>), Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<(u32, Vec<u32>), Vec<usize>> = HashMap::default();
     for (index, line) in drawn.iter().enumerate() {
         if plain_trim(&line.text).is_empty() {
             continue;
@@ -19269,7 +19312,7 @@ fn reflow_split_paragraphs(
             .then(y_band(left.source_top).cmp(&y_band(right.source_top)))
             .then(left.head_left.total_cmp(&right.head_left))
     });
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     let mut plans = Vec::new();
     let mut index = 0usize;
     while index < pieces.len() {
@@ -19324,8 +19367,8 @@ fn reflow_split_paragraphs(
     if plans.is_empty() {
         return;
     }
-    let mut drop = HashSet::new();
-    let mut insert_at: HashMap<usize, Vec<Drawn>> = HashMap::new();
+    let mut drop = HashSet::default();
+    let mut insert_at: HashMap<usize, Vec<Drawn>> = HashMap::default();
     for mut plan in plans {
         apply_reflow_holes(&plan.old, &mut plan.lines, &plan.jobs, shifts, extraction);
         let at = plan.drop.iter().copied().min().unwrap_or(0);
@@ -20049,7 +20092,7 @@ impl ReflowBuf {
             text: String::new(),
             flags: Vec::new(),
             jobs: Vec::new(),
-            holes: HashMap::new(),
+            holes: HashMap::default(),
         }
     }
 
@@ -20235,7 +20278,7 @@ fn join_reflow_text(
                 .source_size
                 .max(pieces[chain[order - 1]].source_size)
                 .max(1.0);
-            let mut owned = HashSet::new();
+            let mut owned = HashSet::default();
             for index in pieces[chain[order - 1]]
                 .indices
                 .iter()
@@ -20332,10 +20375,9 @@ fn preserve_hole_width(
     shifts: &[ListingShift],
     fallback: f32,
 ) -> f32 {
-    let Some(shift) = shifts
-        .iter()
-        .find(|shift| preserve_shift_matches(shift, line.y, old_x, extraction, &HashSet::new()))
-    else {
+    let Some(shift) = shifts.iter().find(|shift| {
+        preserve_shift_matches(shift, line.y, old_x, extraction, &HashSet::default())
+    }) else {
         return fallback.max(line.size.max(1.0) * 0.35);
     };
     packed_ids_width(&shift.ids, extraction, line.size.max(1.0))
@@ -20473,7 +20515,7 @@ fn seated_shift_ids(
     chain: &[usize],
     shifts: &[ListingShift],
 ) -> HashSet<u32> {
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::default();
     for slot in chain {
         for index in &pieces[*slot].indices {
             let line = &drawn[*index];
@@ -20553,7 +20595,7 @@ fn append_baseline_row(
             slices.push(line);
         }
     }
-    let mut claimed = HashSet::new();
+    let mut claimed = HashSet::default();
     for (slice_index, line) in slices.iter().enumerate() {
         let mut chars: Vec<char> = plain_trim(&line.text).chars().collect();
         let mut char_flags = vec![false; chars.len()];
@@ -21089,7 +21131,7 @@ fn apply_reflow_holes(
         reseat_paragraph_holes(old, lines, shifts, extraction);
         return;
     }
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     for (job, (y, x)) in jobs.iter().zip(marks) {
         match job {
             HoleJob::Preserve { old_y, old_x } => {
@@ -21251,7 +21293,7 @@ fn reseat_paragraph_holes(
     if old_holes.is_empty() || old_holes.len() != new_holes.len() {
         return;
     }
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     for shift in shifts.iter_mut() {
         if !shift.host_y.is_finite() {
             continue;
@@ -21342,7 +21384,7 @@ fn reflow_prompt_continuations(
     if drawn.is_empty() {
         return;
     }
-    let mut groups: HashMap<(u32, Vec<u32>), Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<(u32, Vec<u32>), Vec<usize>> = HashMap::default();
     for (index, line) in drawn.iter().enumerate() {
         if line.text.trim().is_empty() {
             continue;
@@ -21397,8 +21439,8 @@ fn reflow_prompt_continuations(
     if chains.is_empty() {
         return;
     }
-    let mut drop = HashSet::new();
-    let mut id_override: HashMap<usize, Vec<u32>> = HashMap::new();
+    let mut drop = HashSet::default();
+    let mut id_override: HashMap<usize, Vec<u32>> = HashMap::default();
     let mut inserts: Vec<(usize, Vec<Drawn>)> = Vec::new();
     for chain in chains {
         let Some((at, lines, ids)) =
@@ -21420,7 +21462,7 @@ fn reflow_prompt_continuations(
     if inserts.is_empty() {
         return;
     }
-    let mut pending: HashMap<usize, Vec<Drawn>> = HashMap::new();
+    let mut pending: HashMap<usize, Vec<Drawn>> = HashMap::default();
     for (at, lines) in inserts {
         pending.entry(at).or_default().extend(lines);
     }
@@ -21845,8 +21887,8 @@ fn tuck_trailing_formulas(
         .flat_map(|line| line.glyph_ids.iter().copied())
         .collect();
     let mut shifts: Vec<ListingShift> = Vec::new();
-    let mut claimed: HashSet<u32> = HashSet::new();
-    let mut on_page: HashMap<u32, Vec<&Glyph>> = HashMap::new();
+    let mut claimed: HashSet<u32> = HashSet::default();
+    let mut on_page: HashMap<u32, Vec<&Glyph>> = HashMap::default();
     for glyph in &extraction.glyphs {
         on_page.entry(glyph.page_index).or_default().push(glyph);
     }
@@ -22085,7 +22127,7 @@ fn clause_sits_on_kept_formula(
     if block.right - block.left > size * 8.0 {
         return false;
     }
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     for index in &block.indices {
         used.extend(drawn[*index].glyph_ids.iter().copied());
     }
@@ -22439,7 +22481,7 @@ fn clear_atom_of_han(line: &Drawn, left: f32, right: f32) -> f32 {
 }
 
 fn yield_to_standing_math(drawn: &mut [Drawn], extraction: &Extraction, shifts: &[ListingShift]) {
-    let mut delta: HashMap<u32, (f32, f32)> = HashMap::new();
+    let mut delta: HashMap<u32, (f32, f32)> = HashMap::default();
     for shift in shifts {
         for id in &shift.ids {
             delta.insert(*id, (shift.dx, shift.dy));
@@ -22545,7 +22587,7 @@ fn claim_orphan_scripts(
     let mut clearances: Vec<(usize, usize, f32)> = Vec::new();
     // Each page's equation letters, gathered once. Scanning the whole
     // document for every small glyph took minutes on a long article.
-    let mut bases: HashMap<u32, Vec<&Glyph>> = HashMap::new();
+    let mut bases: HashMap<u32, Vec<&Glyph>> = HashMap::default();
     for base in extraction.glyphs.iter().filter(|base| formula_base(base)) {
         bases.entry(base.page_index).or_default().push(base);
     }
@@ -22708,7 +22750,7 @@ fn seat_orphan_script(
 /// Open a gap after the base token so the next glyph starts past the script,
 /// then move the overflow onto the next wrap of the same paragraph.
 fn reserve_script_clearance(drawn: &mut [Drawn], seats: &[(usize, usize, f32)]) {
-    let mut want: HashMap<(usize, usize), f32> = HashMap::new();
+    let mut want: HashMap<(usize, usize), f32> = HashMap::default();
     for &(line, token_end, right) in seats {
         let slot = want.entry((line, token_end)).or_insert(right);
         if right > *slot {
@@ -23135,7 +23177,7 @@ fn baselines_hit_kept_formula(
         return false;
     }
     let size = size.max(1.0);
-    let mut ink_ids = HashSet::new();
+    let mut ink_ids = HashSet::default();
     let mut top = f32::MIN;
     let mut bottom = f32::MAX;
     for line in ink {
@@ -23208,7 +23250,7 @@ fn complete_display_line(
     mut left: f32,
     mut right: f32,
 ) -> (Vec<u32>, f32, f32) {
-    let mut ids: HashSet<u32> = HashSet::new();
+    let mut ids: HashSet<u32> = HashSet::default();
     let mut grew = true;
     while grew {
         grew = false;
@@ -23366,7 +23408,7 @@ fn close_column_holes_with(
     pages.dedup();
     for page in pages {
         let toc = PageToc::new(extraction, page);
-        let mut groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
+        let mut groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::default();
         for (index, line) in drawn.iter().enumerate() {
             if line.page != page || line.text.trim().is_empty() {
                 continue;
@@ -23403,11 +23445,11 @@ fn close_column_holes_with(
         blocks.extend(display_formula_blocks(drawn, extraction, page));
         let slots = listing_slots(&blocks, extraction);
         blocks.sort_by(|left, right| right.top.total_cmp(&left.top));
-        let mut used_ids = HashSet::new();
+        let mut used_ids = HashSet::default();
         for line in drawn.iter().filter(|line| line.page == page) {
             used_ids.extend(line.glyph_ids.iter().copied());
         }
-        let mut claimed_quotes = HashSet::new();
+        let mut claimed_quotes = HashSet::default();
         let mut shift = 0.0f32;
         let mut prev: Option<ColumnBlock> = None;
         // Footnote rules claimed on this page. Later lines see them at the
@@ -24140,7 +24182,7 @@ fn shift_listing_arrows(
         }
         flush(&line);
     }
-    let mut moves: HashMap<ObjectId, Vec<(usize, f32)>> = HashMap::new();
+    let mut moves: HashMap<ObjectId, Vec<(usize, f32)>> = HashMap::default();
     for line in drawn {
         let glyphs: Vec<&Glyph> = line
             .glyph_ids
@@ -24561,8 +24603,8 @@ fn heading_leaves_display_below(
         return false;
     }
     let reach = size * 8.0;
-    let mut math_bands: HashMap<i32, usize> = HashMap::new();
-    let mut letter_bands: HashMap<i32, usize> = HashMap::new();
+    let mut math_bands: HashMap<i32, usize> = HashMap::default();
+    let mut letter_bands: HashMap<i32, usize> = HashMap::default();
     for glyph in &extraction.glyphs {
         if glyph.page_index != page || glyph.invisible || glyph.unicode.trim().is_empty() {
             continue;
@@ -24611,7 +24653,7 @@ fn heading_pull_crosses_script(
     let lo = src.min(dest);
     let hi = src.max(dest);
     let page = drawn[block.indices[0]].page;
-    let mut own = HashSet::new();
+    let mut own = HashSet::default();
     for index in &block.indices {
         own.extend(drawn[*index].glyph_ids.iter().copied());
     }
@@ -24970,7 +25012,7 @@ fn attach_equation_tags(clusters: &mut Vec<Vec<&Glyph>>) {
             if math < 3 {
                 return false;
             }
-            let mut bands: HashMap<i32, usize> = HashMap::new();
+            let mut bands: HashMap<i32, usize> = HashMap::default();
             for glyph in cluster.iter() {
                 let band = (glyph.matrix[5] * 2.0).round() as i32;
                 *bands.entry(band).or_default() += 1;
@@ -25027,7 +25069,7 @@ fn column_body_margin(extraction: &Extraction, page: u32, size: f32) -> Option<f
 /// drawn baseline and is seated with its line; this is the formula that
 /// does not, such as equation (1).
 fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<ColumnBlock> {
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     let mut baselines = Vec::new();
     for line in drawn {
         if line.page != page {
@@ -25265,7 +25307,7 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
 }
 
 fn listing_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<ColumnBlock> {
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     for line in drawn {
         if line.page == page {
             used.extend(line.glyph_ids.iter().copied());
@@ -25298,7 +25340,7 @@ fn listing_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -> Vec<Co
         }
         lines.push(vec![glyph]);
     }
-    let mut claimed = HashSet::new();
+    let mut claimed = HashSet::default();
     let blocks = lines
         .into_iter()
         .map(|line| {
@@ -25425,7 +25467,7 @@ fn reposition_listings(
         return Ok(());
     }
     let by_id = glyph_index(&extraction.glyphs);
-    let mut by_page: HashMap<u32, Vec<&ListingShift>> = HashMap::new();
+    let mut by_page: HashMap<u32, Vec<&ListingShift>> = HashMap::default();
     for shift in shifts {
         by_page.entry(shift.page).or_default().push(shift);
     }
@@ -25535,14 +25577,14 @@ fn shift_footnote_rules(
     if rules.is_empty() {
         return Ok(());
     }
-    let mut by_page: HashMap<u32, Vec<(f32, f32, f32, f32)>> = HashMap::new();
+    let mut by_page: HashMap<u32, Vec<(f32, f32, f32, f32)>> = HashMap::default();
     for rule in rules {
         by_page
             .entry(rule.page)
             .or_default()
             .push((rule.x0, rule.x1, rule.y, rule.dy));
     }
-    let mut streams: HashMap<u32, HashSet<ObjectId>> = HashMap::new();
+    let mut streams: HashMap<u32, HashSet<ObjectId>> = HashMap::default();
     for glyph in &extraction.glyphs {
         let Some(page_rules) = by_page.get(&glyph.page_index) else {
             continue;
@@ -25596,7 +25638,7 @@ fn shift_formula_rules(
         return Ok(());
     }
     let by_id = glyph_index(&extraction.glyphs);
-    let mut pending: HashMap<ObjectId, Vec<FormulaBox>> = HashMap::new();
+    let mut pending: HashMap<ObjectId, Vec<FormulaBox>> = HashMap::default();
     for shift in shifts {
         if shift.dx.abs() < 0.3 && shift.dy.abs() < 0.3 {
             continue;
@@ -25605,7 +25647,7 @@ fn shift_formula_rules(
         let mut y0 = f32::MAX;
         let mut x1 = f32::MIN;
         let mut y1 = f32::MIN;
-        let mut streams = HashSet::new();
+        let mut streams = HashSet::default();
         let mut count = 0u32;
         for id in &shift.ids {
             let Some(glyph) = by_id
@@ -25757,7 +25799,7 @@ fn shift_hairlines(
     let mut cm: Option<CmHandle> = None;
     let mut nums: Vec<(usize, usize, f32)> = Vec::new();
     let mut subs: Vec<HairSub> = Vec::new();
-    let mut edits: HashMap<usize, HairEdit> = HashMap::new();
+    let mut edits: HashMap<usize, HairEdit> = HashMap::default();
 
     for token in &tokens {
         match &token.kind {
@@ -26153,7 +26195,7 @@ fn blank_rules_on_erased_text(
             ));
         }
     }
-    let mut by_stream: HashMap<ObjectId, PageCover> = HashMap::new();
+    let mut by_stream: HashMap<ObjectId, PageCover> = HashMap::default();
     for glyph in glyphs {
         let Some(span) = span_of(&glyph.source) else {
             continue;
@@ -26554,7 +26596,7 @@ fn blank_orphan_hairlines(
     qed_notes: &mut Vec<(Option<u32>, String)>,
 ) -> Result<()> {
     let by_id = glyph_index(&extraction.glyphs);
-    let mut moved: HashMap<u32, (f32, f32)> = HashMap::new();
+    let mut moved: HashMap<u32, (f32, f32)> = HashMap::default();
     for shift in shifts {
         if shift.dx.abs() < 0.3 && shift.dy.abs() < 0.3 {
             continue;
@@ -26600,7 +26642,7 @@ fn blank_orphan_hairlines(
     if ink.is_empty() {
         return Ok(());
     }
-    let mut streams = HashSet::new();
+    let mut streams = HashSet::default();
     for id in erased {
         if let Some(glyph) = by_id
             .get(id)
@@ -26852,7 +26894,7 @@ fn reposition_stacks(
         return Ok(());
     }
     let by_id = glyph_index(&extraction.glyphs);
-    let mut by_page: HashMap<u32, Vec<&ListingShift>> = HashMap::new();
+    let mut by_page: HashMap<u32, Vec<&ListingShift>> = HashMap::default();
     for shift in shifts {
         by_page.entry(shift.page).or_default().push(shift);
     }
@@ -27288,7 +27330,7 @@ fn in_hole_marker(chars: &[char], index: usize) -> bool {
 fn sink_math_subscripts(lines: &mut Vec<Drawn>, glyphs: &[&Glyph], font: &SubsetFont) {
     let body = prose_body_size(glyphs).max(1.0);
     let baselines = body_baselines(glyphs, body);
-    let mut sunk_digits = HashSet::new();
+    let mut sunk_digits = HashSet::default();
     for glyph in glyphs {
         let text = glyph.unicode.trim();
         let mut chars = text.chars();
@@ -27480,7 +27522,7 @@ fn raise_sunk_subscripts(lines: &mut [Drawn]) {
 /// sits under a later word. Put it back on the single letter it came from.
 fn reseat_orphan_subscripts(lines: &mut [Drawn]) {
     let mut seats = Vec::new();
-    let mut claimed: HashSet<(usize, i32)> = HashSet::new();
+    let mut claimed: HashSet<(usize, i32)> = HashSet::default();
     for index in 0..lines.len() {
         let marks: Vec<char> = lines[index]
             .text
@@ -29194,7 +29236,7 @@ fn embed_and_draw(
     if drawn.is_empty() {
         return Ok(());
     }
-    let mut font_ids: HashMap<String, ObjectId> = HashMap::new();
+    let mut font_ids: HashMap<String, ObjectId> = HashMap::default();
     for (name, font) in fonts {
         // BaseFont is the cache key in PDFium and several pdf.js builds. Two
         // subsets both named RPTCJK paint with whichever program loaded first.
@@ -29210,7 +29252,7 @@ fn embed_and_draw(
             );
         }
     }
-    let mut by_page: HashMap<u32, Vec<&Drawn>> = HashMap::new();
+    let mut by_page: HashMap<u32, Vec<&Drawn>> = HashMap::default();
     for line in drawn {
         by_page.entry(line.page).or_default().push(line);
     }
@@ -29419,7 +29461,7 @@ fn attach_fonts(
 fn merged_resources(doc: &Document, page_id: ObjectId) -> Dictionary {
     let mut chain = Vec::new();
     let mut current = Some(page_id);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(id) = current {
         if !seen.insert(id) || chain.len() > 32 {
             break;
@@ -29915,7 +29957,7 @@ fn version_token(chars: &[char], start: usize) -> bool {
 /// The nearest glyph after each formula lead on its baseline, within 3em,
 /// that is not itself a lead: `p_ij =` → the fraction it opens.
 fn formula_lead_mates(leads: &HashSet<u32>, extraction: &Extraction) -> HashMap<u32, u32> {
-    let mut mates = HashMap::new();
+    let mut mates = HashMap::default();
     for lead in extraction.glyphs.iter().filter(|g| leads.contains(&g.id)) {
         let size = lead.font_size.max(1.0);
         let right = glyph_paint_right(lead);
@@ -30362,8 +30404,8 @@ fn retarget_link_annotations(
         if links.is_empty() {
             continue;
         }
-        let mut updates: HashMap<ObjectId, [f32; 4]> = HashMap::new();
-        let mut drop_ids: HashSet<ObjectId> = HashSet::new();
+        let mut updates: HashMap<ObjectId, [f32; 4]> = HashMap::default();
+        let mut drop_ids: HashSet<ObjectId> = HashSet::default();
         let mut clones: Vec<ObjectId> = Vec::new();
         for cluster in cluster_links(&links) {
             match place_cluster(&cluster, page.index, extraction, drawn, rewritten) {
@@ -31337,7 +31379,7 @@ mod tests {
     }
 
     fn song_font(text: &str) -> SubsetFont {
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars()) {
             let advance = if is_cjk_body(ch) || matches!(ch, '，' | '。' | '、') {
                 1000
@@ -33578,7 +33620,7 @@ mod tests {
         let body = super::prose_body_size(&refs);
         let groups = super::placeholder_groups(&refs, body);
         assert_eq!(groups.len(), 2, "scripts were not two holes: {groups:?}");
-        let mut codes = std::collections::HashMap::new();
+        let mut codes = crate::detmap::HashMap::default();
         for (gid, ch) in (1u16..).zip("前词后0123456789　".chars()) {
             codes.insert(ch as u32, (gid, 1000u16));
         }
@@ -34720,7 +34762,7 @@ mod tests {
         }
         glyphs.push(ink_glyph(20, 90.0, 397.0, 6.0, "1"));
         let refs: Vec<&Glyph> = glyphs.iter().collect();
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         map.insert('e' as u32, (1, 600));
         map.insert('1' as u32, (2, 500));
         map.insert('，' as u32, (3, 1000));
@@ -34847,7 +34889,7 @@ mod tests {
     #[test]
     fn a_subentry_wrap_keeps_a_latin_word_intact() {
         let text = "The Model Context Protocol";
-        let mut glyphs = std::collections::HashMap::new();
+        let mut glyphs = crate::detmap::HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars().chain("310".chars())) {
             glyphs.insert(ch as u32, (id, 600));
         }
@@ -35428,7 +35470,7 @@ mod tests {
 
     #[test]
     fn a_missing_name_mark_or_bullet_uses_a_covered_stand_in() {
-        let mut glyphs = HashMap::new();
+        let mut glyphs = HashMap::default();
         for (index, ch) in "中文e■→Mly1".chars().enumerate() {
             glyphs.insert(ch as u32, (index as u16, 500));
         }
@@ -35447,7 +35489,7 @@ mod tests {
         assert_eq!(substitute_covered("y\u{2081}", &font), "y1");
         assert_eq!(coverage_fallbacks('✅'), &['✓', '*']);
         assert_eq!(coverage_fallbacks('👽'), &['•', '*']);
-        let mut icons = HashMap::new();
+        let mut icons = HashMap::default();
         for (index, ch) in "已杀死•✓×*file".chars().enumerate() {
             icons.insert(ch as u32, (index as u16, 500));
         }
@@ -35465,7 +35507,7 @@ mod tests {
 
     #[test]
     fn a_ring_tilde_or_caron_uses_a_covered_stand_in() {
-        let mut glyphs = HashMap::new();
+        let mut glyphs = HashMap::default();
         for (index, ch) in "部分工作*~dx".chars().enumerate() {
             glyphs.insert(ch as u32, (index as u16, 500));
         }
@@ -35535,7 +35577,7 @@ mod tests {
 
     #[test]
     fn a_chapter_number_between_han_stays_ascii_and_is_not_a_superscript() {
-        let mut glyphs = HashMap::new();
+        let mut glyphs = HashMap::default();
         for (index, ch) in "第4章构建".chars().enumerate() {
             glyphs.insert(ch as u32, (index as u16, 1000));
         }
@@ -35770,8 +35812,8 @@ mod tests {
             diagnostics: Vec::new(),
         };
         let mut drawn = vec![line];
-        let mut succeeded = HashSet::new();
-        let mut keep = HashMap::from([(3, "formula".into())]);
+        let mut succeeded = HashSet::default();
+        let mut keep = HashMap::from_iter([(3, "formula".into())]);
         let shifts = claim_orphan_scripts(&mut drawn, &extraction, &mut succeeded, &mut keep);
         assert!(
             succeeded.contains(&3),
@@ -36187,7 +36229,7 @@ mod tests {
         let at2 = seated.find("⟦2⟧").expect(&seated);
         assert!(at0 < at1 && at1 < at2, "{seated}");
         assert_eq!(mention_omitted_stacks("q⟦0⟧⟦1⟧⟦2⟧", &refs), "q⟦0⟧⟦1⟧⟦2⟧");
-        let mut codes = std::collections::HashMap::new();
+        let mut codes = crate::detmap::HashMap::default();
         for (gid, ch) in (1u16..).zip("获得分布q的参数。0123456789　".chars()) {
             codes.insert(ch as u32, (gid, 1000u16));
         }
@@ -36351,7 +36393,7 @@ mod tests {
             groups.len() >= 2,
             "two scripts should be atoms, body {body}: {groups:?}"
         );
-        let mut keep = HashMap::new();
+        let mut keep = HashMap::default();
         for id in &groups[0] {
             keep.insert(*id, "formula-stay".into());
         }
@@ -37636,7 +37678,7 @@ mod tests {
         example.gaps = vec![0.0; example_count.saturating_sub(1)];
         let mut drawn = vec![host, example];
         let mut shifts = Vec::new();
-        lift_display_formulas(&mut drawn, &extraction, &mut shifts, &HashSet::new());
+        lift_display_formulas(&mut drawn, &extraction, &mut shifts, &HashSet::default());
         let dys: Vec<f32> = (2..=8)
             .map(|id| {
                 shifts
@@ -38609,7 +38651,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let body_text =
             "k-服务器问题与许多其他在线问题密切相关，例如分页问题对应于度量空间的特殊情况。";
         let font_for = |text: &str| {
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             for (id, ch) in (1u16..).zip(text.chars()) {
                 map.insert(ch as u32, (id, 1000));
             }
@@ -38746,7 +38788,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let body_text =
             "k-服务器问题与许多其他在线问题密切相关，例如分页问题对应于度量空间的特殊情况。";
         let font_for = |text: &str| {
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             for (id, ch) in (1u16..).zip(text.chars()) {
                 map.insert(ch as u32, (id, 1000));
             }
@@ -38898,7 +38940,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let head_text = "主动压缩优于完整历史执行。";
         let body_text = "在该设定下，所评估的方法仍属于同一段。";
         let font_for = |text: &str| {
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             for (id, ch) in (1u16..).zip(text.chars()) {
                 map.insert(ch as u32, (id, 1000));
             }
@@ -39010,7 +39052,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let head_text = "主动压缩优于完整历史执行。";
         let body_text = "在该设定下，所评估的方法仍属于同一段。";
         let font_for = |text: &str| {
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             for (id, ch) in (1u16..).zip(text.chars()) {
                 map.insert(ch as u32, (id, 1000));
             }
@@ -39697,7 +39739,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let by_id = glyph_index(&extraction.glyphs);
         let head_text = "引理 4.1.";
         let font_for = |text: &str| {
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             for (id, ch) in (1u16..).zip(text.chars()) {
                 map.insert(ch as u32, (id, 1000));
             }
@@ -39889,7 +39931,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         };
         let by_id = glyph_index(&extraction.glyphs);
         let font_for = |text: &str| {
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             for (id, ch) in (1u16..).zip(text.chars()) {
                 map.insert(ch as u32, (id, 1000));
             }
@@ -40043,7 +40085,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let by_id = glyph_index(&extraction.glyphs);
         let head_text = "随机化k-服务器";
         let font_for = |text: &str| {
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             for (id, ch) in (1u16..).zip(text.chars()) {
                 map.insert(ch as u32, (id, 1000));
             }
@@ -40197,7 +40239,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
         let body_text =
             "k-服务器问题的另一个研究方向涉及随机化算法，并且在均匀度量上可以实现竞争比。";
         let font_for = |text: &str| {
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             for (id, ch) in (1u16..).zip(text.chars()) {
                 map.insert(ch as u32, (id, 1000));
             }
@@ -40412,7 +40454,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
     #[test]
     fn a_citation_stays_on_the_line_with_the_following_cjk() {
         let text = "见(Rashid et al.,2025)上评估AutoCompact分别取得通过率";
-        let mut glyphs = HashMap::new();
+        let mut glyphs = HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars()) {
             glyphs.insert(ch as u32, (id, 1000));
         }
@@ -40436,7 +40478,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             "a short citation line must not be letter-spaced: {gaps:?}"
         );
         let cjk = "中文正文需要两端对齐";
-        let mut cjk_glyphs = HashMap::new();
+        let mut cjk_glyphs = HashMap::default();
         for (id, ch) in (1u16..).zip(cjk.chars()) {
             cjk_glyphs.insert(ch as u32, (id, 1000));
         }
@@ -40456,7 +40498,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             "pure CJK slack should spread across every ideograph gap: {cjk_gaps:?}"
         );
         let mixed = "中文(Rashid)后续";
-        let mut mixed_glyphs = HashMap::new();
+        let mut mixed_glyphs = HashMap::default();
         for (id, ch) in (1u16..).zip(mixed.chars()) {
             mixed_glyphs.insert(ch as u32, (id, 1000));
         }
@@ -40482,7 +40524,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
 
     #[test]
     fn latin_words_are_not_split_across_lines() {
-        let mut glyphs = HashMap::new();
+        let mut glyphs = HashMap::default();
         for (id, ch) in (1u16..).zip("包括SelfCompact、SWE-Compressor和变体".chars()) {
             glyphs.insert(ch as u32, (id, 1000));
         }
@@ -40634,7 +40676,7 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
     }
 
     fn uniform_font(text: &str) -> SubsetFont {
-        let mut glyphs = HashMap::new();
+        let mut glyphs = HashMap::default();
         for (id, ch) in (1u16..).zip(text.chars()) {
             glyphs.insert(ch as u32, (id, 1000));
         }
@@ -40954,8 +40996,8 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             sup_rise: 0.0,
             glyph_ids: vec![1],
         }];
-        let mut succeeded = HashSet::from([1]);
-        let mut keep = HashMap::from([(2, "name".into()), (3, "unchanged".into())]);
+        let mut succeeded = HashSet::from_iter([1]);
+        let mut keep = HashMap::from_iter([(2, "name".into()), (3, "unchanged".into())]);
         super::seat_author_columns(
             &mut drawn,
             &mut succeeded,
@@ -41097,8 +41139,8 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             sup_rise: 0.0,
             glyph_ids: vec![9],
         }];
-        let mut succeeded = HashSet::new();
-        let mut keep = HashMap::from([(1, "unchanged".into()), (2, "unchanged".into())]);
+        let mut succeeded = HashSet::default();
+        let mut keep = HashMap::from_iter([(1, "unchanged".into()), (2, "unchanged".into())]);
         super::adopt_unchanged_body_lines(
             &mut drawn,
             &mut succeeded,
@@ -41181,8 +41223,8 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             sup_rise: 0.0,
             glyph_ids: vec![9],
         }];
-        let mut succeeded = HashSet::new();
-        let mut keep = HashMap::from([(1, "unchanged".into())]);
+        let mut succeeded = HashSet::default();
+        let mut keep = HashMap::from_iter([(1, "unchanged".into())]);
         super::adopt_unchanged_body_lines(
             &mut drawn,
             &mut succeeded,
@@ -41405,8 +41447,8 @@ q\n1 0 0 1 501.7 120.182 cm\n[]0 d 0 J 0.398 w 0 0 m 0 6.725 l S\nQ\n";
             sup_rise: 0.0,
             glyph_ids: vec![1],
         }];
-        let mut succeeded = HashSet::from([1]);
-        let mut keep = HashMap::from([(2, "unchanged".into()), (3, "unchanged".into())]);
+        let mut succeeded = HashSet::from_iter([1]);
+        let mut keep = HashMap::from_iter([(2, "unchanged".into()), (3, "unchanged".into())]);
         let by_id = glyph_index(&extraction.glyphs);
         super::hang_kept_author_marks(
             &mut drawn,
@@ -43601,7 +43643,7 @@ ET",
             &placed[0],
             &[1],
             &[("F1".into(), font)],
-            &HashMap::new(),
+            &HashMap::default(),
         );
         let text_left = painted
             .iter()
@@ -45298,7 +45340,7 @@ ET",
         let mut over = test_draw(80.0, 500.0, 10.0, "每个配对被添加", vec![]);
         over.widths = vec![10.0; 7];
         over.gaps = vec![0.0; 6];
-        let erased = HashSet::new();
+        let erased = HashSet::default();
         let notes = audit_kept_math_overlap(&[over], &extraction, &erased);
         assert!(
             notes
@@ -45685,13 +45727,13 @@ ET",
             diagnostics: Vec::new(),
         };
         let mut drawn = Vec::new();
-        let mut succeeded = HashSet::new();
-        let mut keep = HashMap::from([(1, "unchanged".into())]);
+        let mut succeeded = HashSet::default();
+        let mut keep = HashMap::from_iter([(1, "unchanged".into())]);
         let shifts = vec![SubentryShift {
             page: 0,
             below_y: 508.0,
             delta: -12.0,
-            own_ids: HashSet::new(),
+            own_ids: HashSet::default(),
         }];
         shift_kept_chapter_indexes(
             &mut drawn,
@@ -45700,7 +45742,7 @@ ET",
             &shifts,
             &extraction,
             &[("F1".into(), font)],
-            &HashMap::new(),
+            &HashMap::default(),
         );
         assert_eq!(
             drawn.len(),
@@ -45748,13 +45790,13 @@ ET",
                 page: 0,
                 below_y: 500.0,
                 delta: -12.0,
-                own_ids: HashSet::new(),
+                own_ids: HashSet::default(),
             },
             SubentryShift {
                 page: 0,
                 below_y: 400.0,
                 delta: -12.0,
-                own_ids: HashSet::from([7]),
+                own_ids: HashSet::from_iter([7]),
             },
         ];
         apply_subentry_shifts(&mut drawn, &shifts);
@@ -47584,7 +47626,7 @@ ET",
             &mut body,
         );
         let text = "最接近的工作方向是将这一循环自动化：由提议者重写运行框架，若编辑提高了基准分数就保留，这继承了其机制与风险，并在下一页继续写完这一段。";
-        let mut cmap = std::collections::HashMap::new();
+        let mut cmap = crate::detmap::HashMap::default();
         for (cid, ch) in (1u16..).zip(text.chars()) {
             cmap.insert(ch as u32, (cid, 1000));
         }
@@ -47614,7 +47656,7 @@ ET",
             "F",
             0.0,
             CjkMeasure::resolve(0.90, 1.60),
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("body crosses the page");
         let first = drawn
@@ -47679,7 +47721,7 @@ ET",
         }
         let text =
             "定义：其中一个词元大致对应一个词。例如模型可以处理很多词元并且在下一页继续写完。";
-        let mut cmap = std::collections::HashMap::new();
+        let mut cmap = crate::detmap::HashMap::default();
         for (cid, ch) in (1u16..).zip(text.chars()) {
             cmap.insert(ch as u32, (cid, 1000));
         }
@@ -47707,7 +47749,7 @@ ET",
             "F",
             0.0,
             CjkMeasure::resolve(0.90, 1.60),
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("callout crosses the page");
         let label = drawn
@@ -47812,7 +47854,7 @@ ET",
             );
         }
         let text = "请注意，在完整的《白鲸》文本上运行代码可能会比较昂贵。提供的 MobyDickFileNameIsLong 文件很短所以这一段还要继续写完几行说明。";
-        let mut cmap = std::collections::HashMap::new();
+        let mut cmap = crate::detmap::HashMap::default();
         for (cid, ch) in (1u16..).zip(text.chars()) {
             cmap.insert(ch as u32, (cid, 1000));
         }

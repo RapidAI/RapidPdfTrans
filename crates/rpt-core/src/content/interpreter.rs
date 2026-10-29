@@ -5,7 +5,7 @@
 //! and unmapped glyphs. Form XObjects, annotation appearances, and Type3
 //! char procs are visited with their own resources and matrices.
 
-use std::collections::{HashMap, HashSet};
+use crate::detmap::{HashMap, HashSet};
 
 use lopdf::{Document, Object, ObjectId};
 
@@ -239,7 +239,7 @@ impl<'a> Machine<'a> {
             tlm: Matrix::IDENTITY,
             path: Path::Empty,
             fonts: Vec::new(),
-            font_cache: HashMap::new(),
+            font_cache: HashMap::default(),
             glyphs: Vec::new(),
             regions: Vec::new(),
             diagnostics: Vec::new(),
@@ -1122,7 +1122,7 @@ fn appearance_matrix(rect: Rect, bbox: Rect, form_matrix: Matrix) -> Matrix {
 fn page_resources(doc: &Document, page_id: ObjectId) -> Resources {
     let mut chain = Vec::new();
     let mut current = Some(page_id);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(id) = current {
         if !seen.insert(id) || chain.len() > 32 {
             break;
@@ -1148,7 +1148,7 @@ fn page_resources(doc: &Document, page_id: ObjectId) -> Resources {
 }
 
 fn inherited_rect(doc: &Document, mut id: ObjectId, key: &[u8]) -> Option<Rect> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         if !seen.insert(id) {
             return None;
@@ -1168,7 +1168,7 @@ fn inherited_rect(doc: &Document, mut id: ObjectId, key: &[u8]) -> Option<Rect> 
 }
 
 fn inherited_int(doc: &Document, mut id: ObjectId, key: &[u8]) -> Option<i32> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         if !seen.insert(id) {
             return None;

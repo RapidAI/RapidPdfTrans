@@ -3,7 +3,7 @@
 //! Widths are stored in glyph-space units (1000 = 1 em for a standard font
 //! matrix). The caller applies `/FontMatrix`.
 
-use std::collections::HashMap;
+use crate::detmap::HashMap;
 
 use lopdf::{Document, Object};
 
@@ -20,7 +20,7 @@ impl WidthMap {
     pub fn constant(default: f32) -> Self {
         Self {
             default,
-            exact: HashMap::new(),
+            exact: HashMap::default(),
             ranges: Vec::new(),
         }
     }
@@ -39,7 +39,7 @@ impl WidthMap {
 
     /// Simple-font `/Widths` from `first` through `last`, plus `/MissingWidth`.
     pub fn from_simple(first: u32, widths: &[f32], missing: f32) -> Self {
-        let mut exact = HashMap::new();
+        let mut exact = HashMap::default();
         for (i, w) in widths.iter().enumerate() {
             exact.insert(first + i as u32, *w);
         }
@@ -112,7 +112,7 @@ impl Default for VerticalMap {
         Self {
             default_w1: 880.0,
             default_vy: -1000.0,
-            exact: HashMap::new(),
+            exact: HashMap::default(),
             ranges: Vec::new(),
         }
     }
