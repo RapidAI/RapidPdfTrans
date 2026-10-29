@@ -1451,14 +1451,17 @@ fn region_failure(message: &str) -> bool {
         || math_overlap_failure(message)
 }
 
-/// Translated text drawn 3pt or more into a math glyph that stays on the
-/// page. Smaller touches are anti-aliasing at the edge of the hole.
+/// Translated text drawn 3pt or more into a math glyph that stays at its
+/// source place. Smaller touches are anti-aliasing at the edge of the hole.
+/// A hole that moved with its line is a reflow fault; the English fallback
+/// reflows the same holes and draws no better.
 fn math_overlap_failure(message: &str) -> bool {
-    message
-        .strip_prefix("math overlap ")
-        .and_then(|rest| rest.split_once("pt "))
-        .and_then(|(wide, _)| wide.parse::<f32>().ok())
-        .is_some_and(|wide| wide >= 3.0)
+    message.contains(" and kept math ")
+        && message
+            .strip_prefix("math overlap ")
+            .and_then(|rest| rest.split_once("pt "))
+            .and_then(|(wide, _)| wide.parse::<f32>().ok())
+            .is_some_and(|wide| wide >= 3.0)
 }
 
 /// The `(x, y)` at the end of an audit note.
@@ -9517,8 +9520,15 @@ fn audit_kept_math_overlap(
             notes.push((
                 Some(line.page),
                 format!(
-                    "math overlap {:.1}pt between {:?} of {:?} and kept math {:?} at y={:.1} at ({:.2}, {:.2})",
-                    wide, ch, line.text, glyph.unicode, line.y, line.x, line.y
+                    "math overlap {:.1}pt between {:?} of {:?} and {} math {:?} at y={:.1} at ({:.2}, {:.2})",
+                    wide,
+                    ch,
+                    line.text,
+                    if moved.contains_key(&glyph.id) { "moved" } else { "kept" },
+                    glyph.unicode,
+                    line.y,
+                    line.x,
+                    line.y
                 ),
             ));
         }
@@ -31661,6 +31671,17 @@ mod tests {
         glyph.bbox = [x, y - size * 0.2, right, y + size * 0.8];
         glyph.advance = [(right - x).max(0.0), 0.0];
         glyph
+    }
+
+    #[test]
+    fn only_a_wide_overlap_with_unmoved_math_fails_the_region() {
+        let note = |wide: &str, kind: &str| {
+            format!("math overlap {wide}pt between '码' of \"解码器\" and {kind} math \"x\" at y=236.4 at (108.00, 236.40)")
+        };
+        assert!(region_failure(&note("4.5", "kept")));
+        assert!(!region_failure(&note("2.2", "kept")));
+        assert!(!region_failure(&note("8.0", "moved")));
+        assert_eq!(note_position(&note("4.5", "kept")), Some((108.0, 236.4)));
     }
 
     #[test]

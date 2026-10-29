@@ -19,6 +19,13 @@
   letter instead of becoming its own segment, and set braces in the symbol face
   around a hole join it as a pair (`R_0 = {i^{(1)}}`, `{r_i}` no longer lose a
   brace).
+- The math-overlap check looks at a moved formula glyph where it was moved
+  to, and no longer counts erased glyphs as painted. On the six held-out
+  papers its notes drop from 46 to 2. Translated text that runs 3pt or more
+  into math left at its source place now sends that paragraph to the
+  overlap fallback (the source is kept), like other region failures.
+- A lone `}` closes the hole after the one that took its `{`
+  (`R_t ∪ {i^{(t)}}`, `F(x, {W_i})`).
 
 ## 0.1.8 — 2026-10-29
 
