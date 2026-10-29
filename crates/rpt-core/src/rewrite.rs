@@ -1320,6 +1320,7 @@ fn rewrite_translation_once(
             // That is not a sentence the model forgot.
             let residual = job_translates
                 && !crate::translate::short_part_list(&segment.source)
+                && !crate::translate::title_list(&segment.source)
                 && crate::translate::residual_english_clause(&segment.source, &segment.translated);
             let shared: std::sync::Arc<str> = segment.translated.as_str().into();
             for id in &segment.glyph_ids {

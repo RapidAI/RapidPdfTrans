@@ -4951,7 +4951,7 @@ pub(crate) fn intentional_keep_kind(source: &str) -> Option<&'static str> {
     if source.is_empty() {
         return None;
     }
-    if is_author_list(source) || is_institution_line(source) {
+    if is_author_list(source) || is_institution_line(source) || title_list(source) {
         return Some("name");
     }
     // `SWE-PolyBench` is a benchmark. The model glossed it as 软件工程多基准.
@@ -9504,6 +9504,39 @@ pub(crate) fn short_part_list(text: &str) -> bool {
             .all(|part| part.split_whitespace().count() <= 6)
 }
 
+/// `My Dinner with Andre; Before Sunrise; The Breakfast Club; …`: a list of
+/// titles or names split by semicolons. A model keeps proper titles in their
+/// original language, so a reply that leaves them in Latin is not a missed
+/// English sentence.
+pub(crate) fn title_list(text: &str) -> bool {
+    let parts: Vec<&str> = text
+        .trim_end_matches(['.', ' '])
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() < 4 || parts.iter().any(|part| part.split_whitespace().count() > 8) {
+        return false;
+    }
+    let small = [
+        "a", "an", "the", "and", "or", "of", "in", "on", "with", "vs.", "vs", "to", "for", "at",
+    ];
+    let words: Vec<&str> = parts
+        .iter()
+        .flat_map(|part| part.split_whitespace())
+        .collect();
+    let titled = words
+        .iter()
+        .filter(|word| {
+            word.chars()
+                .next()
+                .is_some_and(|c| c.is_uppercase() || c.is_ascii_digit())
+                || small.contains(&word.to_lowercase().as_str())
+        })
+        .count();
+    titled * 10 >= words.len() * 9
+}
+
 /// `…, Am Fasanengarten 5, 76131 Karlsruhe, Germany`: a postal address.
 /// Kept in Latin it is an affiliation, not an English body paragraph.
 pub(crate) fn is_postal_address(text: &str) -> bool {
@@ -9523,6 +9556,16 @@ pub(crate) fn is_postal_address(text: &str) -> bool {
 
 #[cfg(test)]
 mod short_part_list_tests {
+    #[test]
+    fn a_semicolon_list_of_titles_is_not_an_english_sentence() {
+        assert!(super::title_list(
+            "My Dinner with Andre; Before Sunrise; The Breakfast Club; Clerks; Tucker and Dale vs. Evil; Behind the Mask: The Rise of Leslie Vernon."
+        ));
+        assert!(!super::title_list(
+            "We train the model; it converges quickly; the loss drops; results improve on all sets."
+        ));
+    }
+
     #[test]
     fn a_byline_or_an_address_is_a_short_part_list() {
         assert!(super::short_part_list(
