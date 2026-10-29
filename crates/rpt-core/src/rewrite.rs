@@ -6537,6 +6537,17 @@ fn blank_operators(
             .or_default()
             .push((span.start, span.end));
     }
+    // Glyphs by the operator that shows them, in extraction order. Looking
+    // them up per range scanned every glyph of the document each time.
+    let mut by_operator: HashMap<(&str, usize, usize), Vec<&Glyph>> = HashMap::default();
+    for glyph in &extraction.glyphs {
+        if let Some(object) = glyph.source.object_id.as_deref() {
+            by_operator
+                .entry((object, glyph.source.byte_start, glyph.source.byte_end))
+                .or_default()
+                .push(glyph);
+        }
+    }
     for (id, ranges) in grouped {
         let plain = {
             let object = doc
@@ -6555,16 +6566,10 @@ fn blank_operators(
             if end > bytes.len() || start >= end {
                 return Err("operator range is outside the content stream".into());
             }
-            let glyphs: Vec<&Glyph> = extraction
-                .glyphs
-                .iter()
-                .filter(|glyph| {
-                    glyph.source.object_id.as_deref() == Some(id_string.as_str())
-                        && glyph.source.byte_start == start
-                        && glyph.source.byte_end == end
-                })
-                .collect();
-            if let Some(held) = hold_show_advance(&bytes[start..end], &glyphs) {
+            let glyphs: &[&Glyph] = by_operator
+                .get(&(id_string.as_str(), start, end))
+                .map_or(&[][..], Vec::as_slice);
+            if let Some(held) = hold_show_advance(&bytes[start..end], glyphs) {
                 bytes[start..end].copy_from_slice(&held);
             } else {
                 for byte in &mut bytes[start..end] {
@@ -23958,9 +23963,8 @@ fn listing_slots(blocks: &[ColumnBlock], extraction: &Extraction) -> Vec<Listing
             .iter()
             .filter_map(|id| {
                 extraction
-                    .glyphs
-                    .iter()
-                    .find(|glyph| glyph.id == *id && crate::segment::mono_face(&glyph.font_name))
+                    .glyph(*id)
+                    .filter(|glyph| crate::segment::mono_face(&glyph.font_name))
             })
             .collect();
         glyphs.sort_by(|left, right| {
