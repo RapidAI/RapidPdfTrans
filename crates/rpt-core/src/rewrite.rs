@@ -3002,6 +3002,7 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     absorb_radicals(glyphs, body, &mut groups);
     absorb_attached_scripts(glyphs, body, &mut groups);
     absorb_formula_parens(glyphs, body, &mut groups);
+    absorb_set_braces(glyphs, body, &mut groups);
     absorb_unclosed_formula_tail(glyphs, body, &mut groups);
     absorb_math_accents(glyphs, body, &mut groups);
     fuse_script_groups(glyphs, body, &mut groups);
@@ -3412,6 +3413,68 @@ fn absorb_formula_parens(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) 
         if let Some((index, _)) = best {
             groups[index].push(glyph.id);
             used.insert(glyph.id);
+        }
+    }
+}
+
+/// `{i^{(1)}}`: set braces in the symbol face that touch both ends of one
+/// hole join it as a pair. One brace alone stays where it is, so a hole that
+/// already holds the `{` of `F(x, {W_i})` does not also take the `}`.
+fn absorb_set_braces(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]) {
+    let used: HashSet<u32> = groups.iter().flatten().copied().collect();
+    let by_id = glyph_index_refs(glyphs);
+    let braces: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| {
+            !used.contains(&glyph.id)
+                && matches!(glyph.unicode.trim(), "{" | "}")
+                && is_math_font(&glyph.font_name)
+        })
+        .collect();
+    if braces.len() < 2 {
+        return;
+    }
+    let mut taken: HashSet<u32> = HashSet::default();
+    for group in groups.iter_mut() {
+        let members: Vec<&Glyph> = group
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|at| glyphs[*at]))
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let left = members
+            .iter()
+            .map(|item| item.matrix[4])
+            .fold(f32::MAX, f32::min);
+        let right = members
+            .iter()
+            .map(|item| item.bbox[2].max(item.matrix[4]))
+            .fold(f32::MIN, f32::max);
+        let base = members
+            .iter()
+            .filter(|item| item.font_size >= body * 0.85)
+            .map(|item| item.matrix[5])
+            .next()
+            .unwrap_or(members[0].matrix[5]);
+        let near = |glyph: &&Glyph, open: bool| {
+            !taken.contains(&glyph.id)
+                && (glyph.matrix[5] - base).abs() < body * 0.15
+                && if open {
+                    glyph.unicode.trim() == "{"
+                        && (left - glyph.bbox[2].max(glyph.matrix[4])).abs() <= body * 0.25
+                } else {
+                    glyph.unicode.trim() == "}" && (glyph.matrix[4] - right).abs() <= body * 0.25
+                }
+        };
+        let open = braces.iter().find(|glyph| near(glyph, true));
+        let close = braces.iter().find(|glyph| near(glyph, false));
+        if let (Some(open), Some(close)) = (open, close) {
+            group.push(open.id);
+            group.push(close.id);
+            taken.insert(open.id);
+            taken.insert(close.id);
         }
     }
 }
@@ -31564,6 +31627,28 @@ mod tests {
         glyph.bbox = [x, y - size * 0.2, right, y + size * 0.8];
         glyph.advance = [(right - x).max(0.0), 0.0];
         glyph
+    }
+
+    #[test]
+    fn set_braces_join_a_hole_only_as_a_pair() {
+        let make = |id, x: f32, text: &str| {
+            let mut glyph = ink_glyph(id, x, 100.0, 10.0, text);
+            glyph.font_name = if text == "i" { "CMMI10" } else { "CMSY10" }.into();
+            glyph.bbox[2] = x + 4.5;
+            glyph
+        };
+        let glyphs = [
+            make(1, 100.0, "{"),
+            make(2, 105.0, "i"),
+            make(3, 110.0, "}"),
+        ];
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let mut groups = vec![vec![2]];
+        absorb_set_braces(&refs, 10.0, &mut groups);
+        assert_eq!(groups, vec![vec![2, 1, 3]]);
+        let mut groups = vec![vec![1, 2]];
+        absorb_set_braces(&refs, 10.0, &mut groups);
+        assert_eq!(groups, vec![vec![1, 2]], "a lone closing brace stays out");
     }
 
     #[test]

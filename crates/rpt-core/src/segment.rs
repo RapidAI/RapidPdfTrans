@@ -6448,12 +6448,21 @@ fn attach_math_scripts(lines: &mut Vec<VisualLine<'_>>) {
 
 fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
     let line = &lines[index];
-    if !is_math_script(line) {
+    // `i^{(1)}` in roman digits has no math-font glyph. It is still a script
+    // when it is smaller than a line and sits on that line's math letter.
+    let numeral = !is_math_script(line) && is_numeral_script(line);
+    if !is_math_script(line) && !numeral {
         return None;
     }
     let mut best: Option<(usize, f32)> = None;
     for (other_index, other) in lines.iter().enumerate() {
         if other_index == index || other.page != line.page || is_math_script(other) {
+            continue;
+        }
+        if numeral
+            && (line.size >= other.size.max(1.0) * 0.85
+                || !script_sits_on_math(line, other, other.size.max(1.0)))
+        {
             continue;
         }
         let letters = other
@@ -6526,6 +6535,17 @@ fn is_math_mark(text: &str) -> bool {
         && text
             .chars()
             .all(|ch| ('\u{0300}'..='\u{036f}').contains(&ch)))
+}
+
+/// `(1)`, `2`, `(t+1)` minus letters: a short run of digits, brackets and
+/// signs with at least one digit.
+fn is_numeral_script(line: &VisualLine<'_>) -> bool {
+    (1..=6).contains(&line.glyphs.len())
+        && line.text.chars().any(|ch| ch.is_ascii_digit())
+        && line
+            .text
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch.is_whitespace() || "()[]+−-,′".contains(ch))
 }
 
 fn is_math_script(line: &VisualLine<'_>) -> bool {

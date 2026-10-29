@@ -15,6 +15,10 @@
 - Big delimiters, scripts and sum limits touching a moved display formula move
   with it as whole segments. Prose from the other column is no longer joined
   into a display line.
+- A roman-digit script such as the `(1)` of `i^{(1)}` stays on its math
+  letter instead of becoming its own segment, and set braces in the symbol face
+  around a hole join it as a pair (`R_0 = {i^{(1)}}`, `{r_i}` no longer lose a
+  brace).
 
 ## 0.1.8 — 2026-10-29
 
