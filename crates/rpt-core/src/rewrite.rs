@@ -7902,14 +7902,20 @@ fn plan_formula_echoes(
             let echo = formula_echo_text(&run, body);
             // `p̄_t`: the `¯t` is already its own hole and seats onto the
             // `p` in the words. It does not make that letter a formula.
-            let scripts: Vec<u32> = if lone_letter {
+            let all_scripts = if lone_letter {
                 scripts_on_math_letter(run[0], extraction, body)
-                    .into_iter()
-                    .filter(|id| !grouped.contains(id))
-                    .collect()
             } else {
                 Vec::new()
             };
+            // `return π⟦0⟧` with `⟦0⟧` = `∗θ`: the letter is the base its
+            // hole seats on. Holding it as well drew `θ∗` before `π`.
+            if !all_scripts.is_empty() && all_scripts.iter().all(|id| grouped.contains(id)) {
+                continue;
+            }
+            let scripts: Vec<u32> = all_scripts
+                .into_iter()
+                .filter(|id| !grouped.contains(id))
+                .collect();
             if lone_letter {
                 // `k` inside `k = 12` stays in the words. A trailing `α` at the
                 // end of the line is the glyph itself.
