@@ -1162,6 +1162,10 @@ fn rewrite_translation_once(
     for shift in listing_shifts.iter_mut().chain(stack_shifts.iter_mut()) {
         follow_formula_mates(shift, &mates);
     }
+    // A big `(` from CMEX is its own segment and its box sits above the
+    // numerator it wraps. The pull took `exp −d(x,c)` and left the paren
+    // 9pt off. A math delimiter that touches a moved glyph moves with it.
+    carry_touching_delimiters(extraction, &mut listing_shifts, &mut stack_shifts);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     // An unmapped `ℓ` never entered the line, so the translation was drawn
@@ -25139,6 +25143,26 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
             if gap >= size && is_math_font(&glyph.font_name) && line_is_plain_prose(line) {
                 return false;
             }
+            // `the bad, and the ugly.` ends the left column on the baseline of
+            // `Ikotun et al., 2023), d(x,c)` in the right one. Prose an em or
+            // more from the prose end of a line is the other column.
+            if gap >= size && !is_math_font(&glyph.font_name) {
+                let edge = if gx1 <= lx0 {
+                    line.iter()
+                        .min_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]))
+                } else {
+                    line.iter()
+                        .max_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]))
+                };
+                if line_is_plain_prose(line)
+                    || edge.is_some_and(|edge| {
+                        !is_math_font(&edge.font_name)
+                            && edge.unicode.chars().any(char::is_alphabetic)
+                    })
+                {
+                    return false;
+                }
+            }
             gap < limit
         });
         if let Some(line) = joined {
@@ -29989,6 +30013,132 @@ fn formula_lead_mates(leads: &HashSet<u32>, extraction: &Extraction) -> HashMap<
 /// `p_ij =` rode a paragraph pull while its fraction did not, and the
 /// display formula split by 16pt. The lead joins a shift exactly when its mate
 /// is in it.
+fn carry_touching_delimiters(
+    extraction: &Extraction,
+    listing_shifts: &mut [ListingShift],
+    stack_shifts: &mut [ListingShift],
+) {
+    let mut shifted: HashSet<(u32, u32)> = HashSet::default();
+    for shift in listing_shifts.iter().chain(stack_shifts.iter()) {
+        for id in &shift.ids {
+            shifted.insert((shift.page, *id));
+        }
+    }
+    // A glyph drawn as part of the translation is `Rewritten`. Only kept
+    // source glyphs can join a moved formula.
+    let mut free: HashMap<u32, Vec<&Glyph>> = HashMap::default();
+    for glyph in &extraction.glyphs {
+        if !shifted.contains(&(glyph.page_index, glyph.id))
+            && !matches!(glyph.disposition, Disposition::Rewritten { .. })
+            // `F(x, {W_i})` inside a translated sentence: the sentence
+            // draws its own `)`. Carrying the source one paints it twice.
+            && !matches!(&glyph.disposition, Disposition::TranslatedPendingRewrite { text } if text.chars().any(is_han_char))
+            && !glyph.unicode.trim().is_empty()
+        {
+            free.entry(glyph.page_index).or_default().push(glyph);
+        }
+    }
+    let by_id = glyph_index(&extraction.glyphs);
+    // Glyphs of one segment share one translation allocation. A kept piece
+    // joins a moved formula only when its whole segment ends up moved:
+    // `(1)` beside `i`, `j=1` under `∑`. A subscript of an unmoved line
+    // (`PE_(pos,2i+1)`) stays with its line.
+    let segment_of = |glyph: &Glyph| match &glyph.disposition {
+        Disposition::TranslatedPendingRewrite { text } => {
+            Some(std::sync::Arc::as_ptr(text) as *const u8 as usize)
+        }
+        _ => None,
+    };
+    let mut members: HashMap<usize, Vec<u32>> = HashMap::default();
+    for glyph in &extraction.glyphs {
+        if let Some(key) = segment_of(glyph) {
+            members.entry(key).or_default().push(glyph.id);
+        }
+    }
+    let overlaps = |a: &Glyph, b: &Glyph| a.bbox[1] < b.bbox[3] && a.bbox[3] > b.bbox[1];
+    let closer = |glyph: &Glyph| glyph.unicode.chars().all(|ch| ")]}⟩".contains(ch));
+    for shift in listing_shifts.iter_mut().chain(stack_shifts.iter_mut()) {
+        let Some(candidates) = free.get(&shift.page) else {
+            continue;
+        };
+        let mut scripts: HashSet<u32> = HashSet::default();
+        let mut carried: Vec<&Glyph> = Vec::new();
+        let mut moved: Vec<&Glyph> = shift
+            .ids
+            .iter()
+            .filter_map(|id| by_id.get(id).and_then(|at| extraction.glyphs.get(*at)))
+            .collect();
+        if moved.is_empty() {
+            continue;
+        }
+        loop {
+            let mut grew = false;
+            for glyph in candidates {
+                if shifted.contains(&(glyph.page_index, glyph.id)) {
+                    continue;
+                }
+                let [x0, _, x1, _] = glyph.bbox;
+                let size = glyph.font_size.max(1.0);
+                // `i⁽¹⁾`, `(−d(x,c))`: the glyph starts where a moved glyph
+                // ends, on an overlapping band. A script or a delimiter is
+                // part of that run, so it takes the same pull.
+                let after = moved
+                    .iter()
+                    .find(|other| (x0 - other.bbox[2]).abs() <= 0.6 && overlaps(glyph, other));
+                let before_moved = moved
+                    .iter()
+                    .any(|other| (other.bbox[0] - x1).abs() <= 0.6 && overlaps(glyph, other));
+                let delimiter = glyph.unicode.chars().all(|ch| "()[]{}⟨⟩|‖∥".contains(ch))
+                    && !glyph.unicode.is_empty();
+                let script = after.is_some_and(|other| {
+                    glyph.font_size < other.font_size * 0.85
+                        || (scripts.contains(&other.id)
+                            && (glyph.font_size - other.font_size).abs() < 0.1)
+                });
+                let touching =
+                    after.is_some() && (script || (delimiter && (before_moved || closer(glyph))));
+                // `j=1` under `∑`: a limit centred on a moved big operator.
+                let centre = (x0 + x1) / 2.0;
+                let limit = moved.iter().any(|other| {
+                    let tall = other.bbox[3] - other.bbox[1];
+                    tall > 1.3 * (glyph.bbox[3] - glyph.bbox[1])
+                        && glyph.font_size < other.font_size
+                        && centre > other.bbox[0] - 1.0
+                        && centre < other.bbox[2] + 1.0
+                        && (glyph.bbox[3] <= other.bbox[1] + 1.0
+                            || glyph.bbox[1] >= other.bbox[3] - 1.0)
+                        && (other.bbox[1] - glyph.bbox[3]).max(glyph.bbox[1] - other.bbox[3])
+                            <= 2.0 * size
+                });
+                if !(touching || limit) {
+                    continue;
+                }
+                if script || limit {
+                    scripts.insert(glyph.id);
+                }
+                shifted.insert((glyph.page_index, glyph.id));
+                moved.push(glyph);
+                carried.push(glyph);
+                grew = true;
+            }
+            if !grew {
+                break;
+            }
+        }
+        let moving: HashSet<u32> = moved.iter().map(|glyph| glyph.id).collect();
+        for glyph in carried {
+            let whole = segment_of(glyph)
+                .and_then(|key| members.get(&key))
+                .is_some_and(|ids| ids.iter().all(|id| moving.contains(id)));
+            if whole {
+                shift.ids.push(glyph.id);
+            } else {
+                shifted.remove(&(glyph.page_index, glyph.id));
+            }
+        }
+    }
+}
+
 fn follow_formula_mates(shift: &mut ListingShift, mates: &HashMap<u32, u32>) {
     let carried: HashSet<u32> = shift.ids.iter().copied().collect();
     shift
@@ -31414,6 +31564,70 @@ mod tests {
         glyph.bbox = [x, y - size * 0.2, right, y + size * 0.8];
         glyph.advance = [(right - x).max(0.0), 0.0];
         glyph
+    }
+
+    #[test]
+    fn a_limit_and_a_script_follow_the_moved_formula_only_as_whole_segments() {
+        use std::sync::Arc;
+        let display: Arc<str> = "H = − p log p".into();
+        let limit: Arc<str> = "j=1".into();
+        let script: Arc<str> = "(1)".into();
+        let pending =
+            |text: &Arc<str>| Disposition::TranslatedPendingRewrite { text: text.clone() };
+        let mut glyphs = Vec::new();
+        // `∑` 12pt tall, `j=1` 8pt centred under it.
+        let mut sum = ink_glyph(1, 100.0, 400.0, 12.0, "∑");
+        sum.font_name = "CMEX10".into();
+        sum.bbox = [100.0, 396.0, 112.0, 410.0];
+        sum.disposition = pending(&display);
+        glyphs.push(sum);
+        for (i, ch) in ["j", "=", "1"].iter().enumerate() {
+            let mut g = ink_glyph(2 + i as u32, 101.0 + 3.0 * i as f32, 388.0, 6.0, ch);
+            g.font_name = "CMMI8".into();
+            g.bbox = [101.0 + 3.0 * i as f32, 387.0, 104.0 + 3.0 * i as f32, 393.0];
+            g.disposition = pending(&limit);
+            glyphs.push(g);
+        }
+        // `x` then a superscript `(1)` that touches it, and another `(1)`
+        // whose segment also owns a glyph that does not move.
+        let mut x = ink_glyph(10, 200.0, 400.0, 10.0, "x");
+        x.font_name = "CMMI10".into();
+        x.bbox = [200.0, 398.0, 205.0, 408.0];
+        x.disposition = pending(&display);
+        glyphs.push(x);
+        for (i, ch) in ["(", "1", ")"].iter().enumerate() {
+            let mut g = ink_glyph(11 + i as u32, 205.0 + 3.0 * i as f32, 404.0, 6.0, ch);
+            g.font_name = "CMR8".into();
+            g.bbox = [205.0 + 3.0 * i as f32, 403.0, 208.0 + 3.0 * i as f32, 410.0];
+            g.disposition = pending(&script);
+            glyphs.push(g);
+        }
+        let partial: Arc<str> = "y(2) z".into();
+        let mut y = ink_glyph(20, 300.0, 400.0, 10.0, "y");
+        y.font_name = "CMMI10".into();
+        y.bbox = [300.0, 398.0, 305.0, 408.0];
+        y.disposition = pending(&display);
+        glyphs.push(y);
+        let mut sup = ink_glyph(21, 305.0, 404.0, 6.0, "2");
+        sup.font_name = "CMR8".into();
+        sup.bbox = [305.0, 403.0, 308.0, 410.0];
+        sup.disposition = pending(&partial);
+        glyphs.push(sup);
+        let mut z = ink_glyph(22, 400.0, 300.0, 10.0, "z");
+        z.disposition = pending(&partial);
+        glyphs.push(z);
+        let extraction = page_extraction(glyphs);
+        let mut listing = vec![ListingShift {
+            page: 0,
+            ids: vec![1, 10, 20],
+            dx: 0.0,
+            dy: -9.0,
+            host_y: f32::NAN,
+        }];
+        carry_touching_delimiters(&extraction, &mut listing, &mut []);
+        let mut ids = listing[0].ids.clone();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3, 4, 10, 11, 12, 13, 20]);
     }
 
     fn page_extraction(glyphs: Vec<Glyph>) -> Extraction {
