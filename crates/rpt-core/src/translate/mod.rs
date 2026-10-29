@@ -16,6 +16,7 @@
 
 mod backend;
 mod google;
+mod guard;
 mod llm;
 mod progress;
 mod prompt;
@@ -133,6 +134,15 @@ pub struct TranslateOptions {
     /// Hard per-request deadline for DNS, connect, TLS, and the body.
     /// A stalled call is abandoned and retried. `0` is raised to 1. Default 60.
     pub timeout_secs: u64,
+    /// Wall-clock budget for all model calls of one document. Once it is
+    /// spent, no new request is sent: the remaining paragraphs keep their
+    /// source and the CLI exits 2. `None` reads `RPT_MAX_TRANSLATE_SECS`,
+    /// then means unlimited.
+    pub max_translate_secs: Option<u64>,
+    /// Consecutive refusals (`401`, `403`, `410`, `400 access denied`, ...)
+    /// after which the gateway is treated as down and no further request is
+    /// sent. `0` reads `RPT_GATEWAY_DOWN_AFTER`, then 6.
+    pub gateway_down_after: usize,
     /// Extra instructions appended to the built-in system prompt.
     pub system_prompt: Option<String>,
     /// Stderr progress. The library default is off.
@@ -246,6 +256,8 @@ impl Default for TranslateOptions {
             jobs: 0,
             temperature: 0.0,
             timeout_secs: 60,
+            max_translate_secs: None,
+            gateway_down_after: 0,
             system_prompt: None,
             progress: ProgressMode::Off,
             max_tokens: None,
@@ -372,6 +384,12 @@ impl TranslateOptions {
         }
         if let Some(t) = value.get("timeout_secs").and_then(|v| v.as_u64()) {
             opts.timeout_secs = t.max(1);
+        }
+        if let Some(t) = value.get("max_translate_secs").and_then(|v| v.as_u64()) {
+            opts.max_translate_secs = Some(t);
+        }
+        if let Some(n) = value.get("gateway_down_after").and_then(|v| v.as_u64()) {
+            opts.gateway_down_after = n as usize;
         }
         if let Some(v) = string_field(&value, &["system_prompt", "systemPrompt"]) {
             opts.system_prompt = Some(v);
@@ -588,6 +606,8 @@ pub fn translate_extraction(
 ) -> Result<TranslateReport> {
     crate::font::CjkStyle::resolve(opts.cjk_style.as_deref()).map_err(Error::Options)?;
     let jobs = opts.resolved_jobs()?;
+    let guard = guard::Guarded::new(translator, opts);
+    let translator: &dyn Translator = &guard;
     let (segments, reference_ids) = prepare_segments(extraction, opts)?;
     let shielded: Vec<protect::Shielded> = segments
         .iter()
@@ -727,6 +747,11 @@ pub fn translate_extraction(
     // longer budget, and asks differently: alone, then with the stricter
     // fallback prompt, then sentence by sentence.
     for round in 0..LEFTOVER_ROUNDS {
+        // A spent document budget or a gateway that refuses every call
+        // would only add sleeps and instant failures here.
+        if guard.halted().is_some() {
+            break;
+        }
         if round > 0 {
             std::thread::sleep(leftover_backoff(round));
         }
@@ -748,6 +773,12 @@ pub fn translate_extraction(
         }
     }
     progress.emit_done();
+    if let Some(reason) = guard.halted() {
+        extraction.diagnostics.push(Diagnostic {
+            page_index: None,
+            message: format!("stopped sending translation requests: {reason}"),
+        });
+    }
     // A paragraph the leftover rounds did translate is no longer kept as
     // source. Only the ones still in English are reported.
     let recovered: HashSet<(u32, String)> = segments
@@ -1133,9 +1164,22 @@ fn finish_report(
         .collect();
     let mut texts: Vec<String> = Vec::with_capacity(segments.len());
     for (i, seg) in segments.iter().enumerate() {
-        let text = translated[i]
-            .clone()
-            .ok_or_else(|| Error::Translate(format!("segment {} was not translated", seg.id)))?;
+        let text = match translated[i].clone() {
+            Some(text) => text,
+            None => {
+                // Every path above should have filled this. If one did not,
+                // keep the source rather than abandon the whole PDF.
+                let preview: String = seg.text.chars().take(80).collect();
+                extraction.diagnostics.push(Diagnostic {
+                    page_index: Some(seg.page_index),
+                    message: format!(
+                        "{UNTRANSLATED_PREFIX} because segment {} was not translated: {preview}",
+                        seg.id
+                    ),
+                });
+                seg.text.clone()
+            }
+        };
         texts.push(text);
     }
     gloss_echoed_words(segments, &mut texts);
@@ -8938,6 +8982,118 @@ mod tests {
                 .any(|seg| seg.source.starts_with(stem) && seg.translated.contains('译')));
         }
         assert_eq!(untranslated_paragraphs(&doc.diagnostics), 1);
+    }
+
+    #[test]
+    fn failed_segments_keep_the_source_with_tables_and_parallel_jobs() {
+        for (jobs, batch_size) in [(1, 1), (2, 1), (2, 3), (2, 8)] {
+            let opts = TranslateOptions {
+                batch_size,
+                jobs,
+                context_window: 0,
+                skip_tables: false,
+                ..TranslateOptions::default()
+            };
+            let mut doc = extraction_from_lines(&[
+                "Beta two",
+                "Alpha one",
+                "Gamma three",
+                "Alpha one",
+                "Delta four",
+                "Alpha five",
+            ]);
+            let report = translate_extraction(&mut doc, &opts, &FailAlpha)
+                .unwrap_or_else(|err| panic!("jobs={jobs} batch={batch_size}: {err}"));
+            assert!(report
+                .segments
+                .iter()
+                .filter(|seg| seg.source.contains("Alpha"))
+                .all(|seg| seg.translated == seg.source));
+            assert!(report
+                .segments
+                .iter()
+                .any(|seg| seg.translated.contains("译Delta")));
+            assert!(
+                untranslated_paragraphs(&doc.diagnostics) >= 2,
+                "jobs={jobs}"
+            );
+        }
+    }
+
+    struct Refuse(std::sync::atomic::AtomicUsize);
+
+    impl Translator for Refuse {
+        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(Error::Translate(
+                "LLM HTTP status 400: {\"error\":\"Access denied: account overdue\"}".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn a_gateway_that_refuses_every_call_is_not_hammered() {
+        let lines: Vec<String> = (0..40)
+            .map(|i| format!("Paragraph number {i} here"))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let opts = TranslateOptions {
+            batch_size: 1,
+            jobs: 2,
+            context_window: 0,
+            gateway_down_after: 3,
+            ..TranslateOptions::default()
+        };
+        let mut doc = extraction_from_lines(&refs);
+        let refuse = Refuse(Default::default());
+        let report = translate_extraction(&mut doc, &opts, &refuse).unwrap();
+        assert!(report
+            .segments
+            .iter()
+            .all(|seg| seg.translated == seg.source));
+        let calls = refuse.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(calls <= 3 + 2, "calls={calls}");
+        assert!(doc.diagnostics.iter().any(|d| d
+            .message
+            .starts_with("stopped sending translation requests")));
+        assert!(untranslated_paragraphs(&doc.diagnostics) >= 1);
+    }
+
+    struct SlowTimeout;
+
+    impl Translator for SlowTimeout {
+        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Err(Error::Translate("timeout: global".into()))
+        }
+    }
+
+    #[test]
+    fn the_document_budget_bounds_a_stalling_gateway() {
+        let lines: Vec<String> = (0..60)
+            .map(|i| format!("Sentence {i} of the body."))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let opts = TranslateOptions {
+            batch_size: 1,
+            jobs: 2,
+            context_window: 0,
+            max_translate_secs: Some(1),
+            ..TranslateOptions::default()
+        };
+        let mut doc = extraction_from_lines(&refs);
+        let started = std::time::Instant::now();
+        let report = translate_extraction(&mut doc, &opts, &SlowTimeout).unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(6),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(report.segments.len(), 60);
+        assert!(doc
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("budget of 1s spent")));
     }
 
     #[test]

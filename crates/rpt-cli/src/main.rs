@@ -74,6 +74,15 @@ enum Command {
         /// Per-request timeout in seconds. A stalled call is retried with backoff. Default 60.
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
+        /// Wall-clock budget in seconds for all model calls of the document.
+        /// After it, no request is sent: the rest keeps the source and the
+        /// command exits 2. Default `RPT_MAX_TRANSLATE_SECS`, else unlimited.
+        #[arg(long)]
+        max_translate_secs: Option<u64>,
+        /// Stop sending after this many consecutive refusals (401, 403, 410,
+        /// 400 access denied). Default `RPT_GATEWAY_DOWN_AFTER`, else 6.
+        #[arg(long)]
+        gateway_down_after: Option<usize>,
         /// Stderr progress: `text` (default), `json`, or `off`.
         #[arg(long, default_value = "text")]
         progress: String,
@@ -160,6 +169,8 @@ fn main() -> ExitCode {
             glossary,
             system_prompt,
             timeout_secs,
+            max_translate_secs,
+            gateway_down_after,
             progress,
             translate_references,
             translate_figures,
@@ -228,7 +239,8 @@ fn main() -> ExitCode {
             if let Err(err) = CjkStyle::resolve(cjk_style.as_deref()) {
                 return fail(err);
             }
-            run_translate(
+            let started = std::time::Instant::now();
+            let code = run_translate(
                 &path,
                 replay.as_deref(),
                 TranslateOptions {
@@ -252,6 +264,8 @@ fn main() -> ExitCode {
                     jobs: jobs.unwrap_or(0),
                     output_mode,
                     timeout_secs,
+                    max_translate_secs,
+                    gateway_down_after: gateway_down_after.unwrap_or(0),
                     system_prompt,
                     progress,
                     ..TranslateOptions::default()
@@ -264,9 +278,42 @@ fn main() -> ExitCode {
                 detail,
                 glyphs,
                 strict,
-            )
+            );
+            print_summary(started);
+            code
         }
     }
+}
+
+/// Counts from the last translate run, for the closing stderr line.
+static RUN_COUNTS: std::sync::Mutex<Option<(usize, usize, usize)>> = std::sync::Mutex::new(None);
+
+/// Peak resident set size in KiB (`VmHWM`), where `/proc` has it.
+fn peak_rss_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+}
+
+/// One line on stderr at the end of every translate run, even with
+/// `--progress off`, so a service can log how the job went.
+fn print_summary(started: std::time::Instant) {
+    let counts = RUN_COUNTS.lock().ok().and_then(|guard| *guard);
+    let (segments, kept, calls) = match counts {
+        Some((segments, kept, calls)) => {
+            (segments.to_string(), kept.to_string(), calls.to_string())
+        }
+        None => ("-".into(), "-".into(), "-".into()),
+    };
+    let peak = peak_rss_kib()
+        .map(|kib| format!("{}MiB", kib / 1024))
+        .unwrap_or_else(|| "-".into());
+    eprintln!(
+        "rpt: summary elapsed={:.1}s segments={segments} kept_source={kept} calls={calls} peak_rss={peak}",
+        started.elapsed().as_secs_f64()
+    );
 }
 
 fn run_extract(path: &PathBuf, compact: bool, options: &str) -> ExitCode {
@@ -343,6 +390,13 @@ fn run_translate(
             client.endpoint().to_string(),
         )
     };
+    if let Ok(mut slot) = RUN_COUNTS.lock() {
+        *slot = Some((
+            report.segments.len(),
+            rpt_core::translate::untranslated_paragraphs(&extraction.diagnostics),
+            report.calls,
+        ));
+    }
     let mut layout_failure: Option<String> = None;
     let mut warnings: Vec<String> = Vec::new();
     let mut untranslated: Option<String> = None;

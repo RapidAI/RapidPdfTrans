@@ -403,6 +403,9 @@ fn http_error(err: ureq::Error, api_key: &str) -> Error {
 
 fn request_retryable(err: &Error) -> bool {
     let msg = err.to_string();
+    if crate::translate::guard::gateway_refused(&msg) {
+        return false;
+    }
     http_status_retryable(err) || msg.to_ascii_lowercase().contains("timeout")
 }
 
@@ -410,7 +413,7 @@ fn http_status_retryable(err: &Error) -> bool {
     let msg = err.to_string();
     // The pooled gateway passes an upstream hiccup through as 400; the same
     // batch succeeds on the next call (guide p1 lost eight paragraphs).
-    ["400", "500", "502", "503", "504", "429"]
+    ["400", "409", "429", "500", "502", "503", "504"]
         .iter()
         .any(|code| msg.contains(&format!("HTTP status {code}")))
         || connection_dropped(&msg)
