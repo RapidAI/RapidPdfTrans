@@ -15817,6 +15817,7 @@ fn lift_stack_placeholders(
         let line = &lines[*line_index];
         let chars: Vec<char> = line.text.chars().collect();
         let hole = char_origin(line, &chars, *start);
+        let mut cut_start = *start;
         if !*duplicate {
             let (anchor_x, anchor_y) = stack_anchor(&stacks[*index], glyphs, body);
             if !anchor_x.is_finite() {
@@ -15825,10 +15826,19 @@ fn lift_stack_placeholders(
             // A hat or subscript whose base stayed in the words (`q`⟦hat x⟧,
             // `detQ`⟦hat)∗⟧) would otherwise start at the hole, to the right
             // of that letter. Keep the fragment's offset from the letter.
-            let dx = seat_script_on_base(&stacks[*index], glyphs, body, line, &chars, *start)
-                .unwrap_or(hole - anchor_x);
+            let seat = seat_script_on_base(&stacks[*index], glyphs, body, line, &chars, *start);
+            let dx = seat.map_or(hole - anchor_x, |(dx, _, _)| dx);
             let mut ids = stacks[*index].clone();
             ids.extend(identifier_connectors(&stacks[*index], glyphs, body));
+            // `return π⟦∗θ⟧`: the text face draws `π` upright. A base that
+            // is not ASCII travels with its scripts as the source glyph and
+            // leaves its slot in the words blank.
+            if let Some((_, base_id, base_index)) = seat {
+                if !chars[base_index].is_ascii() {
+                    ids.push(base_id);
+                    cut_start = base_index;
+                }
+            }
             shifts.push(ListingShift {
                 page: line.page,
                 ids,
@@ -15840,7 +15850,7 @@ fn lift_stack_placeholders(
         per_line
             .entry(*line_index)
             .or_default()
-            .push((*start, *end, *index, *duplicate));
+            .push((cut_start, *end, *index, *duplicate));
     }
     let mut rebuilt = Vec::with_capacity(lines.len());
     for (line_index, line) in lines.iter().enumerate() {
@@ -15954,7 +15964,8 @@ fn preceding_base_index(chars: &[char], hole_start: usize) -> Option<usize> {
     if chars[index].is_whitespace() {
         index = index.checked_sub(1)?;
     }
-    chars[index].is_ascii_alphabetic().then_some(index)
+    // `π⟦∗θ⟧` seats on a Greek base as well as on `p`.
+    (chars[index].is_alphabetic() && !is_han_char(chars[index])).then_some(index)
 }
 
 /// Hats, primes, and subscripts with no body letter of their own. `≤ µ(Q̂)`
@@ -15998,7 +16009,7 @@ fn seat_script_on_base(
     line: &Drawn,
     chars: &[char],
     hole_start: usize,
-) -> Option<f32> {
+) -> Option<(f32, u32, usize)> {
     let by_id = glyph_index_refs(glyphs);
     let members: Vec<&Glyph> = ids
         .iter()
@@ -16035,7 +16046,11 @@ fn seat_script_on_base(
             && glyph.matrix[4] >= left - body * 1.15
             && glyph.matrix[4] <= right + body * 0.35
     })?;
-    Some(char_origin(line, chars, base_index) - base.matrix[4])
+    Some((
+        char_origin(line, chars, base_index) - base.matrix[4],
+        base.id,
+        base_index,
+    ))
 }
 
 fn slice_drawn(line: &Drawn, chars: &[char], start: usize, end: usize, x: f32) -> Drawn {
