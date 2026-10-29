@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A number with more ink after it on its row (a table cell) is no longer seated as an inline page number, so the cell's digits are no longer stacked.
 - Retry a reply that only changed punctuation and kept four or more source words in a row (a half-translated heading).
 - A paragraph that runs from the bottom of the left column to the top of the right one is sent in reading order (left column first).
 - A display formula is not lifted over kept source text, such as an algorithm's `Input : Seed dataset` line.

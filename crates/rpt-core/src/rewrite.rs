@@ -27379,6 +27379,33 @@ fn drawn_ink_right(item: &Drawn) -> f32 {
 /// gap after the words. A leader-dot row keeps its source x and only follows
 /// the title vertically. Front matter, chapters, and sections all sit inline;
 /// the source does not park those numbers on a right edge.
+fn ink_after_number(extraction: &Extraction, page: u32, y: f32, left: f32, size: f32) -> bool {
+    let mut row: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == page
+                && (glyph.matrix[5] - y).abs() <= 1.6
+                && glyph.matrix[4] >= left - 0.5
+                && !glyph.unicode.trim().is_empty()
+        })
+        .collect();
+    row.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+    let mut last = left;
+    for glyph in row {
+        let x = glyph.matrix[4];
+        let numeric = glyph
+            .unicode
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, ',' | '.' | ' '));
+        if x - last > size * 1.2 || !numeric {
+            return true;
+        }
+        last = x;
+    }
+    false
+}
+
 fn seat_inline_page_numbers(
     drawn: &mut [Drawn],
     extraction: &Extraction,
@@ -27399,6 +27426,12 @@ fn seat_inline_page_numbers(
         };
         let page = drawn[index].page;
         let size = drawn[index].size.max(1.0);
+        // `10,006   2,001` is a table row. A page number ends its row; a
+        // cell has more ink after it. Seating each digit after the row label
+        // stacked the cells.
+        if ink_after_number(extraction, page, source_y, source_left, size) {
+            continue;
+        }
         let Some((title_ids, title_source_right)) =
             title_before_number(drawn, extraction, by_id, page, source_y, source_left)
         else {
