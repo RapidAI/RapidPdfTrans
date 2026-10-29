@@ -8296,6 +8296,7 @@ fn clear_seated_formula_overlaps(
         left_x.total_cmp(&right_x)
     });
     let mut claimed: HashSet<(u32, i32)> = HashSet::default();
+    let mut runs: Vec<(u32, f32, f32)> = Vec::new();
     for index in order {
         let Some((member_y, member_size)) = extraction.glyphs.iter().find_map(|glyph| {
             shift_has(&shifts[index], glyph.id).then_some((glyph.matrix[5], glyph.font_size))
@@ -8315,11 +8316,24 @@ fn clear_seated_formula_overlaps(
                 && line.text.chars().any(is_han_char)
                 && text_runs_through_ink(line, ink_left, ink_right)
         }) else {
+            runs.push((shifts[index].page, seated_y, ink_right));
             continue;
         };
         let body = lines[line_index].size.max(member_size).max(1.0);
-        let hole = nearest_hole_origin(&lines[line_index], ink_left, body)
-            .or_else(|| trailing_hole_origin(&lines[line_index], ink_left, ink_right, body));
+        // `BK` packed as two atoms: `K` runs on from `B`. Snapping it to a
+        // hole drew it on top of `B`.
+        let runs_on = runs.iter().any(|(page, y, right)| {
+            *page == shifts[index].page
+                && (*y - seated_y).abs() <= body * 0.3
+                && ink_left >= *right - 0.5
+                && ink_left <= *right + body * 0.3
+        });
+        let hole = if runs_on {
+            None
+        } else {
+            nearest_hole_origin(&lines[line_index], ink_left, body)
+                .or_else(|| trailing_hole_origin(&lines[line_index], ink_left, ink_right, body))
+        };
         if let Some(hole_x) = hole {
             let key = (shifts[index].page, (hole_x * 4.0).round() as i32);
             if claimed.insert(key) {
@@ -8370,6 +8384,7 @@ fn clear_seated_formula_overlaps(
                 push_text_clear_of_ink(&mut lines[slot], ink_left, ink_right, 1.0);
             }
         }
+        runs.push((page, seated_y, ink_right));
     }
 }
 
@@ -20978,6 +20993,14 @@ fn append_baseline_row(
                 .any(|have: &Vec<u32>| ids.iter().any(|id| have.contains(id))),
             HoleJob::Preserve { .. } => true,
         });
+        // A line cut into `2` and `次离线…` around one hole offers the same
+        // seated `BK` to both slices. Placed twice, the second slot moved
+        // `B` onto `次` and left `K` alone in the first.
+        for (_, _, job) in &inserts {
+            if let HoleJob::Place { ids, .. } = job {
+                claimed.insert(ids.clone());
+            }
+        }
         inserts.sort_by_key(|(at, _, _)| *at);
         let mut cursor = 0usize;
         for (at, _width, job) in inserts {
