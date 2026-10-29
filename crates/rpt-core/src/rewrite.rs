@@ -1514,7 +1514,10 @@ fn drawn_over_kept_source(
         // One letter is a touch at a hole edge; a run is a covered line.
         if hits.len() >= 3 {
             if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
-                eprintln!("over kept p{} ({:.1},{:.1}) {:?}", line.page, line.x, line.y, line.text);
+                eprintln!(
+                    "over kept p{} ({:.1},{:.1}) {:?}",
+                    line.page, line.x, line.y, line.text
+                );
             }
             out.push((line.glyph_ids.clone(), hits));
         }
@@ -3693,7 +3696,25 @@ fn absorb_math_accents(glyphs: &[&Glyph], body: f32, groups: &mut Vec<Vec<u32>>)
 }
 
 fn is_math_accent_char(text: &str) -> bool {
-    matches!(text.trim(), "\u{f8f8}" | "\u{02C6}" | "\u{0302}")
+    // Hats, bars, tildes, dots and the vector arrow sit over a base letter.
+    matches!(
+        text.trim(),
+        "\u{f8f8}"
+            | "\u{02C6}"
+            | "\u{0302}"
+            | "\u{00AF}"
+            | "\u{02C9}"
+            | "\u{0304}"
+            | "\u{02DC}"
+            | "\u{0303}"
+            | "\u{02D9}"
+            | "\u{0307}"
+            | "\u{00A8}"
+            | "\u{0308}"
+            | "\u{02C7}"
+            | "\u{030C}"
+            | "\u{20D7}"
+    )
 }
 
 /// A subscript digit drawn in the roman face (`i_1`) sits just outside the
@@ -7879,8 +7900,13 @@ fn plan_formula_echoes(
                 extend_formula_run(&run, &glyphs, &segment.translated, body)
             };
             let echo = formula_echo_text(&run, body);
-            let scripts = if lone_letter {
+            // `p̄_t`: the `¯t` is already its own hole and seats onto the
+            // `p` in the words. It does not make that letter a formula.
+            let scripts: Vec<u32> = if lone_letter {
                 scripts_on_math_letter(run[0], extraction, body)
+                    .into_iter()
+                    .filter(|id| !grouped.contains(id))
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -11616,6 +11642,7 @@ fn place_segments(
                     match lift_stack_placeholders(&mut lines, &glyphs, font, &text) {
                         Some(shifts) => {
                             let body = prose_body_size(&glyphs);
+                            let mut seated_right: Vec<(u32, f32, f32)> = Vec::new();
                             for mut shift in shifts {
                                 // `th` of `(ℓ+1)th` was glued into `connect`
                                 // because the ell never joined that line.
@@ -11640,7 +11667,25 @@ fn place_segments(
                                 // Neighbors absorbed after the hole was measured
                                 // stick past the reserved gap. Push the following
                                 // text out from under that ink.
+                                // `1/|R_t| ∑ ⟦j∈R_t p_j⟧`: the sum joined the
+                                // first hole after both were placed, and its
+                                // ink ran over the next hole on the line.
+                                if let (Some((left, _)), Some(&(page, host_y, right))) =
+                                    (seated_ink_span(&shift, extraction), seated_right.last())
+                                {
+                                    let size = body.max(1.0);
+                                    if page == shift.page
+                                        && (host_y - shift.host_y).abs() <= size * 0.45
+                                        && left < right + 1.0
+                                        && left > right - size * 3.0
+                                    {
+                                        shift.dx += right + 1.0 - left;
+                                    }
+                                }
                                 reserve_formula_ink(&mut lines, &mut shift, extraction);
+                                if let Some((_, right)) = seated_ink_span(&shift, extraction) {
+                                    seated_right.push((shift.page, shift.host_y, right));
+                                }
                                 for id in &shift.ids {
                                     keep.remove(id);
                                 }
@@ -15951,9 +15996,20 @@ fn seat_script_on_base(
         .iter()
         .map(|glyph| glyph.bbox[2].max(glyph.matrix[4]))
         .fold(f32::MIN, f32::max);
+    let low = members
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MAX, f32::min);
+    let high = members
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MIN, f32::max);
+    // The `p` of `applying` on the line above is not the base of `¯t`.
     let base = glyphs.iter().copied().find(|glyph| {
         !ids.contains(&glyph.id)
             && glyph.unicode.trim() == letter
+            && glyph.matrix[5] >= low - body * 0.6
+            && glyph.matrix[5] <= high + body * 0.6
             && glyph.font_size > body * 0.75
             && glyph.matrix[4] >= left - body * 1.15
             && glyph.matrix[4] <= right + body * 0.35

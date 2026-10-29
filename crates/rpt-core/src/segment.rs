@@ -58,8 +58,75 @@ pub fn segment_placed(
     regions: &[PaintedRegion],
     pages: &[PageInfo],
 ) -> Segmentation {
-    let lines = raw_lines(glyphs);
+    let lines = rejoin_formula_fragments(raw_lines(glyphs));
     assemble(lines, flags, regions, pages)
+}
+
+/// Reading order sorts both columns by baseline. A subscript of the other
+/// column between two baselines of an inline formula
+/// (`p̄_t = 1/|R_t| ∑_{j∈R_t} p_j is computed`) ends the line there, and the
+/// rest of the sentence became its own segment. A piece that starts in math
+/// on this line's baseline, right where this line stopped in math, rejoins it.
+fn rejoin_formula_fragments(lines: Vec<Vec<&Glyph>>) -> Vec<Vec<&Glyph>> {
+    let mut out: Vec<Vec<&Glyph>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let Some(first) = line.first().copied() else {
+            out.push(line);
+            continue;
+        };
+        let mut joined = false;
+        if math_font_glyph(first) {
+            let (left, right) = (
+                line.iter().map(|g| glyph_left(g)).fold(f32::MAX, f32::min),
+                line.iter().map(|g| glyph_right(g)).fold(f32::MIN, f32::max),
+            );
+            let start = out.len().saturating_sub(4);
+            for index in (start..out.len()).rev() {
+                let host = &out[index];
+                if host.len() < 8 || host[0].page_index != first.page_index {
+                    continue;
+                }
+                let Some((anchor, size)) = body_anchor(host) else {
+                    continue;
+                };
+                let host_left = host.iter().map(|g| glyph_left(g)).fold(f32::MAX, f32::min);
+                let host_right = host.iter().map(|g| glyph_right(g)).fold(f32::MIN, f32::max);
+                let last = host
+                    .iter()
+                    .max_by(|a, b| glyph_right(a).total_cmp(&glyph_right(b)))
+                    .copied();
+                let inside = left >= host_left - 1.0 && left <= host_right + size * 2.0;
+                let close = line
+                    .iter()
+                    .all(|g| (g.matrix[5] - anchor).abs() <= size * 0.5);
+                let after_math = last.is_some_and(math_font_glyph);
+                let script_inside =
+                    right <= host_right + 0.5 && line.iter().all(|g| g.font_size < size * 0.85);
+                // Nothing in between may share this x range: that would be a
+                // line of the same column, not the other column's mark.
+                let clear = out[index + 1..].iter().all(|other| {
+                    let o_left = other.iter().map(|g| glyph_left(g)).fold(f32::MAX, f32::min);
+                    let o_right = other
+                        .iter()
+                        .map(|g| glyph_right(g))
+                        .fold(f32::MIN, f32::max);
+                    o_right < host_left.min(left) || o_left > host_right.max(right)
+                });
+                if inside && close && clear && (after_math || script_inside) {
+                    let host = &mut out[index];
+                    host.extend(line.iter().copied());
+                    host.sort_by(|a, b| glyph_left(a).total_cmp(&glyph_left(b)));
+                    joined = true;
+                    break;
+                }
+                break;
+            }
+        }
+        if !joined {
+            out.push(line);
+        }
+    }
+    out
 }
 
 fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
