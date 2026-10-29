@@ -39,6 +39,9 @@ pub(crate) fn gateway_refused(msg: &str) -> bool {
         "forbidden",
         "account disabled",
         "suspended",
+        "billing",
+        "daily limit exceeded",
+        "resource_exhausted",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -53,6 +56,20 @@ pub(crate) struct Guarded<'a> {
     refusals: AtomicUsize,
     down: AtomicBool,
     last_refusal: Mutex<String>,
+    /// The last client error (`HTTP status 4xx` with its body) and how many
+    /// calls in a row returned exactly it. A gateway that answers every call
+    /// with the same 4xx is down whatever its wording says.
+    last_client_error: Mutex<(String, usize)>,
+}
+
+/// `HTTP status 4xx` other than the transient 408, 409, and 429.
+fn client_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    let Some(pos) = lower.find("http status 4") else {
+        return false;
+    };
+    let code = &lower[pos + "http status ".len()..];
+    !["408", "409", "429"].iter().any(|c| code.starts_with(c))
 }
 
 fn env_number(name: &str) -> Option<u64> {
@@ -81,6 +98,7 @@ impl<'a> Guarded<'a> {
             refusals: AtomicUsize::new(0),
             down: AtomicBool::new(false),
             last_refusal: Mutex::new(String::new()),
+            last_client_error: Mutex::new((String::new(), 0)),
         }
     }
 
@@ -115,11 +133,28 @@ impl Translator for Guarded<'_> {
         match self.inner.complete(system, user) {
             Ok(text) => {
                 self.refusals.store(0, Ordering::Relaxed);
+                if let Ok(mut last) = self.last_client_error.lock() {
+                    *last = (String::new(), 0);
+                }
                 Ok(text)
             }
             Err(err) => {
                 let msg = err.to_string();
-                if gateway_refused(&msg) {
+                let repeated = client_error(&msg)
+                    && self.last_client_error.lock().is_ok_and(|mut last| {
+                        if last.0 == msg {
+                            last.1 += 1;
+                        } else {
+                            *last = (msg.clone(), 1);
+                        }
+                        last.1 >= 2
+                    });
+                if !client_error(&msg) {
+                    if let Ok(mut last) = self.last_client_error.lock() {
+                        *last = (String::new(), 0);
+                    }
+                }
+                if gateway_refused(&msg) || repeated {
                     if let Ok(mut last) = self.last_refusal.lock() {
                         *last = msg.chars().take(120).collect();
                     }
@@ -182,5 +217,42 @@ mod tests {
         assert!(!gateway_refused("LLM HTTP status 400: upstream error"));
         assert!(!gateway_refused("LLM HTTP status 502"));
         assert!(!gateway_refused("timeout: global"));
+        assert!(gateway_refused("Google HTTP status 403"));
+    }
+
+    struct Same(&'static str, AtomicUsize);
+
+    impl Translator for Same {
+        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Err(Error::Translate(self.0.into()))
+        }
+    }
+
+    #[test]
+    fn the_same_client_error_on_every_call_counts_as_a_refusal() {
+        let opts = TranslateOptions {
+            gateway_down_after: 3,
+            ..TranslateOptions::default()
+        };
+        let same = Same(
+            "LLM HTTP status 400: {\"msg\":\"plan expired\"}",
+            AtomicUsize::new(0),
+        );
+        let guard = Guarded::new(&same, &opts);
+        for _ in 0..10 {
+            let _ = guard.complete("s", "u");
+        }
+        // The first sighting does not count; the next three trip the guard.
+        assert_eq!(same.1.load(Ordering::SeqCst), 4);
+        assert!(guard.halted().is_some());
+
+        let hiccup = Same("LLM HTTP status 502", AtomicUsize::new(0));
+        let guard = Guarded::new(&hiccup, &opts);
+        for _ in 0..10 {
+            let _ = guard.complete("s", "u");
+        }
+        assert_eq!(hiccup.1.load(Ordering::SeqCst), 10);
+        assert!(guard.halted().is_none());
     }
 }

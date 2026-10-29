@@ -945,6 +945,9 @@ fn split_separator(text: &str, expected: usize) -> Option<Vec<String>> {
 
 fn google_retryable(err: &Error) -> bool {
     let msg = err.to_string().to_ascii_lowercase();
+    if crate::translate::guard::gateway_refused(&msg) {
+        return false;
+    }
     ["429", "500", "502", "503"]
         .iter()
         .any(|code| msg.contains(&format!("http status {code}")))
