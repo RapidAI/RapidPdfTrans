@@ -12778,11 +12778,11 @@ fn find_subentry_runs(
     let mut grew = true;
     while grew {
         grew = false;
-        for left in 0..count {
+        for (left, page) in box_page.iter().enumerate() {
             if skip.contains(&left) || !bullet_component(&parent, &bullet_roots, left) {
                 continue;
             }
-            let Some(page) = box_page[left] else {
+            let Some(page) = *page else {
                 continue;
             };
             for &right in &same_page[&page] {
