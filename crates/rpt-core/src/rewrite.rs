@@ -5363,6 +5363,14 @@ fn is_footnote_symbol(text: &str) -> bool {
 const AUTHOR_MARK_CHARS: &str = "*∗†‡§¶";
 
 fn is_math_font(name: &str) -> bool {
+    // `STIXGeneral-Regular` and `STIXTwoText` set the body of a paper. Read
+    // as math, every paragraph in that face stayed in English. The italic
+    // face sets the variables and still counts.
+    if (contains_ascii_upper(name, "STIXGENERAL") || contains_ascii_upper(name, "STIXTWOTEXT"))
+        && !contains_ascii_upper(name, "ITALIC")
+    {
+        return false;
+    }
     // Called for many glyph pairs, so match without allocating.
     [
         "CMMI", "CMSY", "CMEX", "MSAM", "MSBM", "STIX", "SYMBOL", "MATH",
@@ -51002,5 +51010,16 @@ q\n1 0 0 1 120.056 265.599 cm\n[]0 d 0 J 0.398 w 0 0 m 15.047 0 l S\nQ\n"
         latin.text = " 和 x".into();
         assert!(trailing_math_letter_right(&latin, 210.0, 230.0).is_none());
         assert!(trailing_math_letter_right(&line, 240.0, 260.0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod stix_text_faces {
+    #[test]
+    fn stix_text_faces_are_not_math() {
+        assert!(!super::is_math_font("ARMSJG+STIXGeneral-Regular"));
+        assert!(!super::is_math_font("HEYAUV+STIXGeneral-Bold"));
+        assert!(super::is_math_font("STIXGeneral-Italic"));
+        assert!(super::is_math_font("STIXTwoMath-Regular"));
     }
 }
