@@ -1171,6 +1171,7 @@ fn rewrite_translation_once(
     // 9pt off. A math delimiter that touches a moved glyph moves with it.
     carry_touching_delimiters(extraction, &mut listing_shifts, &mut stack_shifts);
     carry_hanging_operators(extraction, &mut listing_shifts, &mut stack_shifts);
+    follow_display_rows(&drawn, extraction, &mut stack_shifts);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     // An unmapped `ℓ` never entered the line, so the translation was drawn
@@ -24235,6 +24236,13 @@ fn lift_display_formulas(
                     line_ids.push(glyph.id);
                 }
             }
+            // `ε_EV := 2^{−ℓ_EV},` and `(20)` are the rest of this display.
+            // Left behind, a gap of four lines opened inside the equation.
+            line_ids.extend(display_rows_below(
+                extraction, &used, page, display_y, size, left, right,
+            ));
+            line_ids.sort_unstable();
+            line_ids.dedup();
             let stamped: HashSet<u32> = drawn
                 .iter()
                 .filter(|line| line.page == page && (line.y - display_y).abs() <= size * 0.5)
@@ -24314,9 +24322,174 @@ fn lift_display_formulas(
     raise_content_below_lifts(drawn, extraction, shifts, &lifts, succeeded);
 }
 
+/// `ε_AT := exp[…],` rose with the shorter paragraph above it. `ε_EV :=
+/// 2^{−ℓ_EV},` and `(20)` under it are kept source and stayed, so the
+/// display split four lines apart. Kept rows of the same display take the
+/// moved row's shift.
+fn follow_display_rows(drawn: &[Drawn], extraction: &Extraction, shifts: &mut Vec<ListingShift>) {
+    let mut taken: HashSet<(u32, u32)> = drawn
+        .iter()
+        .flat_map(|line| line.glyph_ids.iter().map(move |id| (line.page, *id)))
+        .collect();
+    for shift in shifts.iter() {
+        taken.extend(shift.ids.iter().map(|id| (shift.page, *id)));
+    }
+    let mut pushed = Vec::new();
+    for shift in shifts.iter() {
+        let glyphs: Vec<&Glyph> = shift
+            .ids
+            .iter()
+            .filter_map(|id| extraction.glyph(*id))
+            .filter(|glyph| glyph.page_index == shift.page)
+            .collect();
+        let size = glyphs.iter().map(|g| g.font_size).fold(1.0f32, f32::max);
+        if shift.dy.abs() < size * 0.45 || !glyphs.iter().any(|g| g.unicode.contains('=')) {
+            continue;
+        }
+        let full: Vec<f32> = glyphs
+            .iter()
+            .filter(|g| g.font_size >= size * 0.84)
+            .map(|g| g.matrix[5])
+            .collect();
+        let Some(source_y) = full
+            .iter()
+            .copied()
+            .max_by_key(|y| full.iter().filter(|other| (*other - y).abs() < 0.5).count())
+        else {
+            continue;
+        };
+        // One row: a stacked fraction is not followed by `(20)`.
+        if full.iter().any(|y| (y - source_y).abs() > size * 0.85) {
+            continue;
+        }
+        let left = glyphs.iter().map(|g| g.matrix[4]).fold(f32::MAX, f32::min);
+        let right = glyphs
+            .iter()
+            .map(|g| glyph_paint_right(g))
+            .fold(left, f32::max);
+        if right - left < size * 4.0 {
+            continue;
+        }
+        let used: HashSet<u32> = taken
+            .iter()
+            .filter(|(page, _)| *page == shift.page)
+            .map(|(_, id)| *id)
+            .collect();
+        let ids = display_rows_below(extraction, &used, shift.page, source_y, size, left, right);
+        let ids: Vec<u32> = ids
+            .into_iter()
+            .filter(|id| taken.insert((shift.page, *id)))
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        pushed.push(ListingShift {
+            page: shift.page,
+            ids,
+            dx: shift.dx,
+            dy: shift.dy,
+            host_y: f32::NAN,
+        });
+    }
+    shifts.extend(pushed);
+}
+
 /// The block under a lifted display keeps the source gap. An equation that
 /// shares its baseline with a heading is inline, and the paragraph under it
 /// stays put. Rewritten prose is not shifted, or the English is painted again.
+/// Kept rows that continue a lifted display: each next row down within
+/// two and a half ems, under the display's span, with nothing drawn on
+/// it or between, holding `=` or an equation number. The number `(20)`
+/// at the right margin between the rows rides too.
+#[allow(clippy::too_many_arguments)]
+fn display_rows_below(
+    extraction: &Extraction,
+    used: &HashSet<u32>,
+    page: u32,
+    display_y: f32,
+    size: f32,
+    left: f32,
+    right: f32,
+) -> Vec<u32> {
+    let mut ids = Vec::new();
+    let mut row_y = display_y;
+    let mut low_y = display_y;
+    loop {
+        let next = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.page_index == page
+                    && !glyph.invisible
+                    && !glyph.unicode.trim().is_empty()
+                    && glyph.font_size >= size * 0.84
+                    && glyph.matrix[5] < row_y - size * 0.8
+                    && glyph.matrix[5] >= row_y - size * 2.5
+                    && glyph.matrix[4] >= left - size * 4.0
+                    && glyph.matrix[4] <= right
+            })
+            .map(|glyph| glyph.matrix[5])
+            .fold(f32::MIN, f32::max);
+        if next == f32::MIN {
+            break;
+        }
+        let row: Vec<&Glyph> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.page_index == page
+                    && !glyph.invisible
+                    && !glyph.unicode.trim().is_empty()
+                    && (glyph.matrix[5] - next).abs() <= size * 0.5
+                    && glyph.matrix[4] >= left - size * 4.0
+                    && glyph.matrix[4] <= right
+            })
+            .collect();
+        let kept = row.iter().all(|glyph| !used.contains(&glyph.id));
+        let equation = row.iter().any(|glyph| glyph.unicode.contains('='));
+        // Prose between the rows in the source ends the display.
+        let crossed = extraction.glyphs.iter().any(|glyph| {
+            glyph.page_index == page
+                && used.contains(&glyph.id)
+                && glyph.unicode.chars().any(char::is_alphabetic)
+                && !is_math_font(&glyph.font_name)
+                && glyph.matrix[5] < row_y - size * 0.5
+                && glyph.matrix[5] > next + size * 0.5
+                && glyph.matrix[4] < right
+                && glyph_paint_right(glyph) > left
+        });
+        if !kept || !equation || crossed {
+            break;
+        }
+        let (row_ids, _, _) = complete_display_line(extraction, page, next, size, left, right);
+        ids.extend(row_ids.into_iter().filter(|id| !used.contains(id)));
+        ids.extend(row.iter().map(|glyph| glyph.id));
+        low_y = next;
+        row_y = next;
+    }
+    if low_y == display_y {
+        return ids;
+    }
+    // `(20)` sits at the margin somewhere between the first and last row.
+    for glyph in &extraction.glyphs {
+        if glyph.page_index == page
+            && !glyph.invisible
+            && !used.contains(&glyph.id)
+            && !glyph.unicode.trim().is_empty()
+            && glyph.matrix[5] < display_y + size * 0.5
+            && glyph.matrix[5] > low_y - size * 0.5
+            && glyph.matrix[4] > right
+            && glyph
+                .unicode
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || "().".contains(ch))
+        {
+            ids.push(glyph.id);
+        }
+    }
+    ids
+}
+
 fn raise_content_below_lifts(
     drawn: &mut [Drawn],
     extraction: &Extraction,
