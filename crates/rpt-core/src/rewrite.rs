@@ -1915,6 +1915,8 @@ struct MathSpan {
     structural: bool,
     /// Alphabetic glyphs. A multi-line paragraph is prose, not a formula shard.
     letters: usize,
+    /// Glyphs in a math face.
+    math: usize,
     /// Left edge of the topmost baseline. An indent here starts a paragraph.
     head_left: f32,
     /// Left edge of the segment. Continuation lines sit on this margin.
@@ -1950,10 +1952,21 @@ fn math_block_segments(
             .iter()
             .filter_map(|id| extraction.glyphs.get(by_id[id]))
             .collect();
-        let Some(span) = math_span(&glyphs) else {
+        let Some(mut span) = math_span(&glyphs) else {
             spans.push(None);
             continue;
         };
+        // A paragraph drawn around ⟦N⟧ holds the formula, and `4 The
+        // potential…` is a numbered heading. Neither is a line of plain words.
+        if segment.translated.contains('⟦')
+            || segment.source.contains('⟦')
+            || segment
+                .source
+                .trim_start()
+                .starts_with(|ch: char| ch.is_ascii_digit())
+        {
+            span.math = span.math.max(1);
+        }
         // A paragraph drawn around ⟦N⟧ is not itself a seed. A display
         // equation on the other side still reaches the heading by walking
         // through that paragraph. Stopping at the placeholder paints the
@@ -2764,6 +2777,7 @@ fn math_span(glyphs: &[&Glyph]) -> Option<MathSpan> {
         size: body,
         structural: stacked || shard,
         letters,
+        math,
         head_left,
         margin_left: left,
     })
@@ -5262,7 +5276,12 @@ fn prose_paragraph(span: &MathSpan) -> bool {
     // chain through to the display, or the heading is painted onto it.
     // A stacked symbol inside a long paragraph does not make the paragraph
     // a formula. Chaining through it kept the column in English.
-    span.letters > 120 || (!span.structural && span.letters > 30)
+    // `and that the final key length obeys` is one line of words with no
+    // math glyph. Chaining it into the display under it kept it in English.
+    let one_line = span.top - span.bottom <= span.size * 0.5;
+    span.letters > 120
+        || (!span.structural && span.letters > 30)
+        || (!span.structural && span.math == 0 && one_line && span.letters >= 20)
 }
 
 /// A sentence that contains a symbol (`edge ij with c > 0`) is body text.
@@ -32919,6 +32938,7 @@ mod tests {
             size: 10.0,
             structural: true,
             letters: 8,
+            math: 0,
             head_left: 72.0,
             margin_left: 72.0,
         };
@@ -32932,6 +32952,7 @@ mod tests {
             size: 10.0,
             structural: false,
             letters: 200,
+            math: 0,
             head_left: 72.0,
             margin_left: 72.0,
         };
@@ -32945,6 +32966,7 @@ mod tests {
             size: 10.0,
             structural: false,
             letters: 12,
+            math: 0,
             head_left: 72.0,
             margin_left: 72.0,
         };
@@ -32958,6 +32980,7 @@ mod tests {
             size: 10.0,
             structural: false,
             letters: 44,
+            math: 0,
             head_left: 72.0,
             margin_left: 72.0,
         };
