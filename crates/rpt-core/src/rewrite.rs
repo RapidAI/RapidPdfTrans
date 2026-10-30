@@ -2941,7 +2941,9 @@ pub(crate) fn two_sided_stack_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u3
                 .iter()
                 .map(|&index| glyphs[index].matrix[4])
                 .fold(f32::MIN, f32::max);
-            if right - left > body * 3.0 {
+            if right - left > body * 3.0
+                && !bare_wide_fraction(&above, &below, glyphs, baseline, body, left, right)
+            {
                 continue;
             }
             // A product sitting just to the right (`q_i k_i`) shares the
@@ -3089,6 +3091,37 @@ fn index_span(glyphs: &[&Glyph], indexes: &[usize]) -> (f32, f32) {
         right = right.max(glyph.bbox[2].max(glyph.matrix[4]));
     }
     (left, right)
+}
+
+/// `C(Ω→Ω) / M(Ω→f)` inline: a numerator over a denominator of about the
+/// same span, with no word on the baseline between them. A subscript run
+/// in prose always has its base letters on the baseline.
+fn bare_wide_fraction(
+    above: &[usize],
+    below: &[usize],
+    glyphs: &[&Glyph],
+    baseline: f32,
+    body: f32,
+    left: f32,
+    right: f32,
+) -> bool {
+    if above.len() < 3 || below.len() < 3 || right - left > body * 12.0 {
+        return false;
+    }
+    let (above_left, above_right) = index_span(glyphs, above);
+    let (below_left, below_right) = index_span(glyphs, below);
+    let shared = above_right.min(below_right) - above_left.max(below_left);
+    let narrow = (above_right - above_left).min(below_right - below_left);
+    if narrow <= 0.0 || shared < narrow * 0.6 {
+        return false;
+    }
+    !glyphs.iter().any(|glyph| {
+        glyph.font_size > body * 0.84
+            && (glyph.matrix[5] - baseline).abs() <= body * 0.30
+            && glyph.matrix[4] >= left
+            && glyph.matrix[4] <= right
+            && !glyph.unicode.trim().is_empty()
+    })
 }
 
 /// `\binom{k}{2}`: one glyph over one glyph, and no baseline letter between
