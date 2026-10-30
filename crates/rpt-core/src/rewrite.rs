@@ -9283,6 +9283,59 @@ fn drop_overflow_tail_in(lines: &mut Vec<Drawn>, source_right: &dyn Fn(&[u32]) -
 /// A one-character `，` left at the overflow x sits in the margin. Move it
 /// to the ink that ends on its left (the formula). A closer already against
 /// that ink, such as `。` after `⟩`, stays.
+/// `(n+15 15)，`: only the numerator sits in the comma's band, and the
+/// `)` that closes the binomial stands lower. Seated after `n+15`, the
+/// comma was painted under the `)`. Follow kept math whose box touches
+/// the edge and reaches into the line, up to the mark at `limit`.
+#[allow(clippy::too_many_arguments)]
+fn grow_through_touching_math(
+    extraction: &Extraction,
+    lines: &[Drawn],
+    shifts: &[ListingShift],
+    page: u32,
+    y: f32,
+    em: f32,
+    mut edge: f32,
+    limit: f32,
+) -> f32 {
+    for _ in 0..4 {
+        let mut grown = edge;
+        for glyph in &extraction.glyphs {
+            if glyph.page_index != page
+                || glyph.invisible
+                || glyph.unicode.trim().is_empty()
+                || !is_math_font(&glyph.font_name)
+            {
+                continue;
+            }
+            let repositioned = shifts
+                .iter()
+                .any(|shift| shift.page == page && shift.ids.contains(&glyph.id));
+            if !repositioned && lines.iter().any(|line| line.glyph_ids.contains(&glyph.id)) {
+                continue;
+            }
+            let (dx, dy) = glyph_shift(glyph, shifts);
+            let left = glyph.bbox[0].min(glyph.bbox[2]) + dx;
+            let right = glyph_paint_right(glyph) + dx;
+            let bottom = glyph.bbox[1].min(glyph.bbox[3]) + dy;
+            let top = glyph.bbox[1].max(glyph.bbox[3]) + dy;
+            if left <= edge + 1.0
+                && right > grown
+                && right <= limit + em * 0.3
+                && top > y
+                && bottom < y + em * 0.7
+            {
+                grown = right;
+            }
+        }
+        if grown <= edge {
+            break;
+        }
+        edge = grown;
+    }
+    edge
+}
+
 fn tuck_stranded_closers(lines: &mut [Drawn], extraction: &Extraction, shifts: &[ListingShift]) {
     for index in 0..lines.len() {
         let chars: Vec<char> = lines[index]
@@ -9334,6 +9387,10 @@ fn tuck_stranded_closers(lines: &mut [Drawn], extraction: &Extraction, shifts: &
             if right <= x + em * 0.2 {
                 ink_right = ink_right.max(right);
             }
+        }
+        if ink_right.is_finite() {
+            ink_right =
+                grow_through_touching_math(extraction, lines, shifts, page, y, em, ink_right, x);
         }
         if !ink_right.is_finite() || ink_right <= 0.0 {
             continue;
