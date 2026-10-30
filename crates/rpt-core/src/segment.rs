@@ -6563,6 +6563,36 @@ fn prose_word_counts(glyphs: &[&Glyph]) -> (usize, usize) {
         }
         word.clear();
     };
+    // `ε_AT` spells `at` in its subscript. A script is not a prose word.
+    // The body is the most common size. A larger `→` in `my dog is hairy →`
+    // made the whole bullet look like scripts.
+    let body = {
+        let mut counts: HashMap<i32, usize> = HashMap::default();
+        for glyph in &ordered {
+            *counts
+                .entry((glyph.font_size * 10.0).round() as i32)
+                .or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|&(size, count)| (count, size))
+            .map_or(1.0, |(size, _)| size as f32 / 10.0)
+    };
+    // `[MASK]` in small caps sits on the baseline. A script is off it.
+    let baseline = {
+        let mut counts: HashMap<i32, usize> = HashMap::default();
+        for glyph in ordered.iter().filter(|g| g.font_size >= body * 0.84) {
+            *counts.entry(glyph.matrix[5].round() as i32).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|&(y, count)| (count, y))
+            .map(|(y, _)| y as f32)
+    };
+    let script = |glyph: &Glyph| {
+        glyph.font_size < body * 0.84
+            && baseline.is_some_and(|y| (glyph.matrix[5] - y).abs() > body * 0.15)
+    };
     for glyph in ordered {
         if let Some(prev) = previous {
             if word_space(prev, glyph) {
@@ -6570,7 +6600,7 @@ fn prose_word_counts(glyphs: &[&Glyph]) -> (usize, usize) {
             }
         }
         previous = Some(glyph);
-        if math_font_glyph(glyph) {
+        if math_font_glyph(glyph) || script(glyph) {
             flush(&mut word, &mut function_words, &mut content_words);
             continue;
         }

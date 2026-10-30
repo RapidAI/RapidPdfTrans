@@ -4416,6 +4416,23 @@ pub(crate) fn merge_stacked_paragraphs(
             spans[index] = None;
         }
     }
+    // `ε_AT := exp[−m_X kl(…)],` under `… verification bounds` is a display
+    // equation of its own. Chained into the paragraph above, it became that
+    // paragraph's last line, so the paragraph no longer fit its column and
+    // stayed English. Only a segment that holds a stack joins a stacked
+    // paragraph as a formula.
+    for (index, segment) in segments.iter().enumerate() {
+        if spans[index].is_some_and(|span| !span.stacked) {
+            let owned: Vec<&Glyph> = segment
+                .glyph_ids
+                .iter()
+                .filter_map(|id| glyphs.get(by_id[id]))
+                .collect();
+            if crate::segment::display_equation_glyphs(&owned) {
+                spans[index] = None;
+            }
+        }
+    }
     let mut keep = vec![false; segments.len()];
     let mut queue = Vec::new();
     for (index, span) in spans.iter().enumerate() {
@@ -23993,16 +24010,71 @@ fn lift_display_formulas(
                 clusters.push(vec![glyph]);
             }
         }
+        // A tall bracket or a prime above the baseline seeds its own cluster
+        // when it is met first, and the formula's left part then starts
+        // another. Clusters that share a band and touch are one display.
+        let mut merged = true;
+        while merged {
+            merged = false;
+            'outer: for first in 0..clusters.len() {
+                for second in first + 1..clusters.len() {
+                    let band = |cluster: &Vec<&Glyph>| {
+                        let low = cluster.iter().map(|g| g.matrix[5]).fold(f32::MAX, f32::min);
+                        let high = cluster.iter().map(|g| g.matrix[5]).fold(f32::MIN, f32::max);
+                        let left = cluster.iter().map(|g| g.matrix[4]).fold(f32::MAX, f32::min);
+                        let right = cluster
+                            .iter()
+                            .map(|g| glyph_paint_right(g))
+                            .fold(f32::MIN, f32::max);
+                        let size = cluster.iter().map(|g| g.font_size).fold(1.0f32, f32::max);
+                        (low, high, left, right, size)
+                    };
+                    let (low_a, high_a, left_a, right_a, size_a) = band(&clusters[first]);
+                    let (low_b, high_b, left_b, right_b, size_b) = band(&clusters[second]);
+                    let size = size_a.max(size_b);
+                    let vertical = low_a <= high_b + size * 0.5 && low_b <= high_a + size * 0.5;
+                    let horizontal =
+                        left_a <= right_b + size * 4.0 && left_b <= right_a + size * 4.0;
+                    if vertical && horizontal {
+                        let taken = clusters.remove(second);
+                        clusters[first].extend(taken);
+                        merged = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
         for cluster in clusters {
             let size = cluster
                 .iter()
                 .map(|glyph| glyph.font_size)
                 .fold(1.0f32, f32::max)
                 .max(1.0);
-            let display_y = cluster
+            // `exp[−m_X kl(Q + δ ∥ Q + δ + δ′)]` draws its tall brackets and
+            // the prime above the baseline. The display sits on the baseline
+            // most full-size glyphs share; the highest glyph lifted only the
+            // brackets and left the formula behind.
+            let mut baselines: Vec<f32> = cluster
                 .iter()
+                .filter(|glyph| glyph.font_size >= size * 0.84)
                 .map(|glyph| glyph.matrix[5])
-                .fold(f32::MIN, f32::max);
+                .collect();
+            baselines.sort_by(|a, b| a.total_cmp(b));
+            let display_y = baselines
+                .iter()
+                .copied()
+                .max_by_key(|y| {
+                    baselines
+                        .iter()
+                        .filter(|other| (*other - y).abs() < 0.5)
+                        .count()
+                })
+                .unwrap_or_else(|| {
+                    cluster
+                        .iter()
+                        .map(|glyph| glyph.matrix[5])
+                        .fold(f32::MIN, f32::max)
+                });
             let left = cluster
                 .iter()
                 .map(|glyph| glyph.matrix[4])
@@ -24096,6 +24168,12 @@ fn lift_display_formulas(
             // moves by one dy.
             let (mut line_ids, line_left, line_right) =
                 complete_display_line(extraction, page, display_y, size, left, right);
+            // The brackets and the prime of this display ride with it.
+            for glyph in &cluster {
+                if !line_ids.contains(&glyph.id) {
+                    line_ids.push(glyph.id);
+                }
+            }
             let stamped: HashSet<u32> = drawn
                 .iter()
                 .filter(|line| line.page == page && (line.y - display_y).abs() <= size * 0.5)
@@ -31228,6 +31306,28 @@ fn carry_hanging_operators(
     }
 }
 
+/// A letter takes a limit only inside `lim`, `max`, `min`, `sup`, or
+/// `inf`. The `x` of `exp[` is not one: `−ℓ_EV` on the row under it was
+/// lifted with it. A non-letter host (`∑`, `∫`, `⋃`) always may.
+fn limit_host(host: &Glyph, moved: &[&Glyph]) -> bool {
+    if !host.unicode.chars().any(|ch| ch.is_alphabetic()) {
+        return true;
+    }
+    let size = host.font_size.max(1.0);
+    let mut word: Vec<&&Glyph> = moved
+        .iter()
+        .filter(|other| {
+            (other.matrix[5] - host.matrix[5]).abs() <= size * 0.2
+                && (other.font_size - host.font_size).abs() < 0.1
+                && (other.matrix[4] - host.matrix[4]).abs() <= size * 3.0
+        })
+        .collect();
+    word.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+    let text: String = word.iter().map(|g| g.unicode.as_str()).collect();
+    ["lim", "max", "min", "sup", "inf"]
+        .iter()
+        .any(|op| text.contains(op))
+}
 fn carry_touching_delimiters(
     extraction: &Extraction,
     listing_shifts: &mut [ListingShift],
@@ -31305,7 +31405,12 @@ fn carry_touching_delimiters(
                     .any(|other| (other.bbox[0] - x1).abs() <= 0.6 && overlaps(glyph, other));
                 let delimiter = glyph.unicode.chars().all(|ch| "()[]{}⟨⟩|‖∥".contains(ch))
                     && !glyph.unicode.is_empty();
+                // `2^{−ℓ_EV}` on the row under `exp[` starts where `e`
+                // ends, and the font boxes overlap. A script of the moved
+                // run sits within an em of that run's baseline.
                 let script = after.is_some_and(|other| {
+                    (glyph.matrix[5] - other.matrix[5]).abs() <= other.font_size * 0.9
+                }) && after.is_some_and(|other| {
                     glyph.font_size < other.font_size * 0.85
                         || (scripts.contains(&other.id)
                             && (glyph.font_size - other.font_size).abs() < 0.1)
@@ -31314,9 +31419,13 @@ fn carry_touching_delimiters(
                     after.is_some() && (script || (delimiter && (before_moved || closer(glyph))));
                 // `j=1` under `∑`: a limit centred on a moved big operator.
                 let centre = (x0 + x1) / 2.0;
+                // A tall `[` is not `∑`: `2^{−ℓ_EV}` on the next row sat
+                // under the bracket of `exp[` and was lifted with it.
                 let limit = moved.iter().any(|other| {
                     let tall = other.bbox[3] - other.bbox[1];
-                    tall > 1.3 * (glyph.bbox[3] - glyph.bbox[1])
+                    !other.unicode.chars().all(|ch| "()[]{}⟨⟩|‖∥".contains(ch))
+                        && limit_host(other, &moved)
+                        && tall > 1.3 * (glyph.bbox[3] - glyph.bbox[1])
                         && glyph.font_size < other.font_size
                         && centre > other.bbox[0] - 1.0
                         && centre < other.bbox[2] + 1.0
