@@ -2340,7 +2340,7 @@ fn listing_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
     let prose = mono_prose_block(lines);
     let mut kept = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if prose[index] || !listing_line(line) {
+        if prose[index] || !(listing_line(line) || labelled_code_line(line)) {
             continue;
         }
         for glyph in &line.glyphs {
@@ -2348,6 +2348,36 @@ fn listing_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
         }
     }
     kept
+}
+
+/// `Lean: bellRenyiBudget` is a one-word label, a colon and a monospace
+/// identifier. The identifier is code, and the label names its language.
+/// Translating it gave `Lean: 真实` for the identifier `real`.
+fn labelled_code_line(line: &VisualLine<'_>) -> bool {
+    let glyphs: Vec<&Glyph> = line
+        .glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    let Some(colon) = glyphs.iter().position(|glyph| glyph.unicode.trim() == ":") else {
+        return false;
+    };
+    let label = &glyphs[..colon];
+    let code = &glyphs[colon + 1..];
+    let label_letters: usize = label.iter().map(|glyph| letter_count(glyph)).sum();
+    let label_word = (2..=10).contains(&label_letters)
+        && label.len() == label_letters
+        && label.iter().all(|glyph| !mono_face(&glyph.font_name))
+        && !line.text[..line.text.find(':').unwrap_or(0)]
+            .trim()
+            .contains(' ');
+    let code_letters: usize = code.iter().map(|glyph| letter_count(glyph)).sum();
+    label_word
+        && code_letters >= 3
+        && code
+            .iter()
+            .all(|glyph| mono_face(&glyph.font_name) || letter_count(glyph) == 0)
 }
 
 fn listing_line(line: &VisualLine<'_>) -> bool {
@@ -7608,6 +7638,36 @@ mod tests {
     use super::*;
     use crate::color::Color;
     use crate::glyph::{Disposition, Glyph, GlyphSource, SourceKind};
+
+    #[test]
+    fn a_language_label_and_a_mono_identifier_are_code() {
+        let make = |text: &str, faces: &[&str]| -> Vec<Glyph> {
+            text.chars()
+                .zip(faces.iter().cycle())
+                .enumerate()
+                .map(|(index, (ch, face))| {
+                    let mut g = glyph(
+                        index as u32,
+                        400.0 + index as f32 * 6.0,
+                        300.0,
+                        &ch.to_string(),
+                        false,
+                    );
+                    g.font_name = (*face).into();
+                    g
+                })
+                .collect()
+        };
+        let mut faces = vec!["CMCSC10"; 4];
+        faces.push("CMR8");
+        faces.extend(std::iter::repeat_n("CMTT8", 4));
+        let code = make("Lean:real", &faces);
+        assert!(labelled_code_line(&visual_line(code.iter().collect())));
+        let mut prose_faces = vec!["CMR10"; 5];
+        prose_faces.extend(std::iter::repeat_n("CMR10", 4));
+        let prose = make("Note:real", &prose_faces);
+        assert!(!labelled_code_line(&visual_line(prose.iter().collect())));
+    }
 
     fn glyph(id: u32, x: f32, y: f32, text: &str, unmapped: bool) -> Glyph {
         Glyph {

@@ -25695,7 +25695,13 @@ fn column_block(
         .fold(1.0f32, f32::max);
     let mut source_ys: Vec<f32> = source_glyphs
         .iter()
-        .filter(|glyph| glyph.font_size > body * 0.84 && !is_math_accent_char(glyph.unicode.trim()))
+        .filter(|glyph| {
+            glyph.font_size > body * 0.84
+                && !is_math_accent_char(glyph.unicode.trim())
+                && !source_glyphs.iter().any(|other| {
+                    !is_math_font(&other.font_name) && hangs_onto_baseline(glyph, other.matrix[5])
+                })
+        })
         .map(|glyph| glyph.matrix[5])
         .collect();
     if source_ys.is_empty() {
@@ -25714,6 +25720,18 @@ fn column_block(
         size,
         listing: false,
     })
+}
+
+/// A radical (`√` in CMSY) hangs from its origin: the origin sits near the
+/// top of the sign, more than half an em above the words, while the ink
+/// reaches down to their baseline. Its origin is not a baseline.
+fn hangs_onto_baseline(glyph: &Glyph, baseline: f32) -> bool {
+    let size = glyph.font_size.max(1.0);
+    is_math_font(&glyph.font_name)
+        && glyph.matrix[5] - baseline > size * 0.55
+        && glyph.matrix[5] - baseline <= size
+        && glyph.bbox[1] <= baseline + size * 0.8
+        && glyph.bbox[1] < glyph.matrix[5] - size * 0.1
 }
 
 fn formula_glyph_span(glyph: &Glyph) -> (f32, f32) {
@@ -29913,7 +29931,14 @@ fn script_baseline_host(index: usize, groups: &[Vec<&Glyph>]) -> Option<usize> {
             continue;
         }
         let dy = (y - group_anchor_y(other)).abs();
-        if dy < size * 0.08 || dy > size * 0.55 {
+        // A radical's origin sits about an em above the words its ink reaches.
+        let hangs_into = script
+            && y > group_anchor_y(other)
+            && dy <= size
+            && group
+                .iter()
+                .all(|glyph| hangs_onto_baseline(glyph, group_anchor_y(other)));
+        if dy < size * 0.08 || (dy > size * 0.55 && !hangs_into) {
             continue;
         }
         let (other_left, other_right) = group_span(other);
@@ -35848,6 +35873,15 @@ mod tests {
             (plain_width - 4.0).abs() < 0.2,
             "trailing advance was reserved as hole padding: {plain_width:.2}"
         );
+    }
+
+    #[test]
+    fn a_hanging_radical_does_not_raise_the_column_baseline() {
+        let mut root = ink_glyph(2, 389.7, 256.2, 9.96, "\u{221A}");
+        root.font_name = "GLYJBV+CMSY10".into();
+        root.bbox = [389.7, 254.2, 398.0, 264.2];
+        assert!(super::hangs_onto_baseline(&root, 247.3));
+        assert!(!super::hangs_onto_baseline(&root, 255.0));
     }
 
     #[test]
