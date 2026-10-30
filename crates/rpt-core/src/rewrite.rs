@@ -8598,6 +8598,10 @@ fn clear_seated_formula_overlaps(
         left_x.total_cmp(&right_x)
     });
     let mut claimed: HashSet<(u32, i32)> = HashSet::default();
+    let prose: HashSet<u32> = lines
+        .iter()
+        .flat_map(|line| line.glyph_ids.iter().copied())
+        .collect();
     let mut runs: Vec<(u32, f32, f32)> = Vec::new();
     for index in order {
         let Some((member_y, member_size)) = extraction.glyphs.iter().find_map(|glyph| {
@@ -8610,8 +8614,11 @@ fn clear_seated_formula_overlaps(
         else {
             continue;
         };
+        // `直至 |R| = B` : the `= B` beside the source formula is prose the
+        // translation redraws. Counting it as the formula's tail pushed the
+        // redrawn `= B` to its source x and the line past the column.
         (ink_left, ink_right) =
-            extend_ink_across_formula_tail(ink_left, ink_right, &shifts[index], extraction);
+            extend_ink_across_tail_except(ink_left, ink_right, &shifts[index], extraction, &prose);
         let Some(line_index) = lines.iter().position(|line| {
             line.page == shifts[index].page
                 && (line.y - seated_y).abs() <= line.size.max(member_size).max(1.0) * 0.45
@@ -8648,8 +8655,13 @@ fn clear_seated_formula_overlaps(
                 if (new_dx - shifts[index].dx).abs() > 0.5 {
                     shifts[index].dx = new_dx;
                     if let Some((left, right)) = seated_ink_span(&shifts[index], extraction) {
-                        (ink_left, ink_right) =
-                            extend_ink_across_formula_tail(left, right, &shifts[index], extraction);
+                        (ink_left, ink_right) = extend_ink_across_tail_except(
+                            left,
+                            right,
+                            &shifts[index],
+                            extraction,
+                            &prose,
+                        );
                     }
                 }
             }
@@ -11530,6 +11542,7 @@ fn formula_tail_glyph(glyph: &Glyph) -> bool {
 /// Glyphs painted on this baseline just past the seated cluster. They are
 /// still part of the formula (`1},` after `{0,`) and the next word must
 /// start after them.
+#[cfg(test)]
 fn extend_ink_across_formula_tail(
     ink_left: f32,
     ink_right: f32,
