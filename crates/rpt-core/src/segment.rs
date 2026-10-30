@@ -6591,9 +6591,53 @@ pub(crate) fn display_equation_glyphs(glyphs: &[&Glyph]) -> bool {
     if variance_clause(glyphs) {
         return false;
     }
+    // `another. Let C = (X, Y` ends a sentence before the formula starts.
+    // A displayed equation has no prose word closed by a period.
+    if closes_a_sentence(glyphs) {
+        return false;
+    }
     // `Attention(Q, K, V) = softmax(...)` has no function word. `where head_i
     // = Attention(Q W^Q_i, ...)` is still that equation: one lead-in word.
     function_words == 0 || (function_words <= 1 && content_words <= 3)
+}
+
+/// A lowercase word of four letters or more, set in the text face, then a
+/// period and a capitalized word: `another. Let`.
+fn closes_a_sentence(glyphs: &[&Glyph]) -> bool {
+    let mut ordered = glyphs.to_vec();
+    ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let mut run = 0usize;
+    let mut after_period = false;
+    for glyph in &ordered {
+        let text = glyph.unicode.trim();
+        if after_period {
+            if text.is_empty() {
+                continue;
+            }
+            if !math_font_glyph(glyph)
+                && text
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+            {
+                return true;
+            }
+            after_period = false;
+        }
+        if math_font_glyph(glyph) {
+            run = 0;
+            continue;
+        }
+        if text == "." {
+            after_period = run >= 4;
+            run = 0;
+        } else if !text.is_empty() && text.chars().all(|ch| ch.is_ascii_lowercase()) {
+            run += text.chars().count();
+        } else {
+            run = 0;
+        }
+    }
+    false
 }
 
 /// `has mean 0 and variance d_k`. The words are the sentence; the product
@@ -6957,14 +7001,20 @@ fn next_formula_shard(lines: &[VisualLine<'_>], index: usize) -> Option<usize> {
     if !left.glyphs.iter().any(|glyph| body_glyph(glyph)) {
         return None;
     }
-    let next = (index + 1..lines.len().min(index + 8)).find(|&other| {
-        let right = &lines[other];
-        right.page == left.page
-            && !right.glyphs.is_empty()
-            && right.glyphs.iter().any(|glyph| body_glyph(glyph))
-            && (right.y - left.y).abs() <= size * 0.45
-            && right.left >= left.right - 1.0
-    })?;
+    // The shard is the nearest piece to the right on the baseline. Lines
+    // are not kept in reading order, so `) denote …` can sit many entries
+    // away from `Let C = (X, Y`.
+    let next = (0..lines.len())
+        .filter(|&other| {
+            let right = &lines[other];
+            other != index
+                && right.page == left.page
+                && !right.glyphs.is_empty()
+                && right.glyphs.iter().any(|glyph| body_glyph(glyph))
+                && (right.y - left.y).abs() <= size * 0.45
+                && right.left >= left.right - 1.0
+        })
+        .min_by(|a, b| lines[*a].left.total_cmp(&lines[*b].left).then(a.cmp(b)))?;
     let right = &lines[next];
     // Equation (1) is already a display equation. Bridging its fraction
     // hole pulls `)V` and the transpose into the segment, and the formula
