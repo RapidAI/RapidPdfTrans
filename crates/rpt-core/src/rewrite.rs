@@ -7996,6 +7996,24 @@ fn leading_formula_pieces(ids: &[u32], glyphs: &[&Glyph], body: f32) -> Vec<u32>
     extra
 }
 
+/// Another glyph of the segment drawn by `glyph`'s show operator is a
+/// letter of the prose.
+fn shares_prose_operator(glyph: &Glyph, glyphs: &[&Glyph]) -> bool {
+    let Some(span) = span_of(&glyph.source) else {
+        return false;
+    };
+    glyphs.iter().any(|other| {
+        other.id != glyph.id
+            && !formula_piece(other)
+            && other.unicode.chars().any(|ch| ch.is_alphabetic())
+            && span_of(&other.source).is_some_and(|theirs| {
+                theirs.object_id == span.object_id
+                    && theirs.start == span.start
+                    && theirs.end == span.end
+            })
+    })
+}
+
 fn plan_formula_echoes(
     report: &TranslateReport,
     extraction: &Extraction,
@@ -8134,6 +8152,18 @@ fn plan_formula_echoes(
                 }
                 extend_formula_run(&run, &glyphs, &segment.translated, body)
             };
+            // `p_B(θ) and the window`: the `)` is drawn by the same show
+            // operator as `and the window satisfy`. Holding it kept that whole
+            // operator, and the English stayed under the Chinese line. A
+            // glyph that shares its operator with words stays in the words,
+            // and so does the rest of its run: a lone held `θ` stayed at the
+            // English place, under the rewrapped line.
+            if run
+                .iter()
+                .any(|glyph| shares_prose_operator(glyph, &glyphs))
+            {
+                continue;
+            }
             let echo = formula_echo_text(&run, body);
             // `p̄_t`: the `¯t` is already its own hole and seats onto the
             // `p` in the words. It does not make that letter a formula.
