@@ -1116,6 +1116,10 @@ fn rewrite_translation_once(
     // and left ℓth on the old baseline, or the letter stayed inside 索引.
     // Carry the letter and its superscript with that line, then blank the source.
     carry_unmapped_atoms(&drawn, &y_before, extraction, &mut stack_shifts);
+    // A `∏` hanging inside a seated formula is that formula's ink. Claim it
+    // before the overlap pass, or that pass pushes the text clear of the
+    // operator at its English spot.
+    carry_hanging_operators(extraction, &mut listing_shifts, &mut stack_shifts);
     // Reflow rebuilds the line after the hole was measured, and the seated
     // formula can land on 且. Snap it back onto the ideographic hole and
     // push the following character clear of the ink.
@@ -3149,11 +3153,11 @@ fn bridge_formula_groups(glyphs: &[&Glyph], body: f32, groups: &mut Vec<Vec<u32>
             let Some((ya, _, ra)) = span(&groups[a]) else {
                 continue;
             };
-            for b in 0..groups.len() {
+            for (b, group) in groups.iter().enumerate() {
                 if a == b {
                     continue;
                 }
-                let Some((yb, lb, _)) = span(&groups[b]) else {
+                let Some((yb, lb, _)) = span(group) else {
                     continue;
                 };
                 if (ya - yb).abs() >= body * 0.1 || lb < ra - 0.3 || lb - ra > body * 4.0 {
@@ -30611,7 +30615,7 @@ fn carry_hanging_operators(
         shift
             .ids
             .iter()
-            .all(|id| glyph_of(id).is_some_and(|glyph| operator(glyph)))
+            .all(|id| glyph_of(id).is_some_and(operator))
     };
     let mut held: HashSet<u32> = listing_shifts
         .iter()
