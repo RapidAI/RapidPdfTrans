@@ -1297,6 +1297,9 @@ fn rewrite_translation_once(
         &rule_shifts,
         &mut qed_notes,
     )?;
+    // `每个项目的查询数` is wider than `Queries per item`, and the kept `K`
+    // after it stays at its source x. Fit the line in front of the atom.
+    fit_before_kept_math(&mut drawn, extraction, &draw_ids);
     if !draw_ids.is_empty() && !embedded.is_empty() {
         embed_and_draw(doc, extraction, &drawn, &embedded)?;
         retarget_link_annotations(doc, extraction, &drawn, &draw_ids);
@@ -9609,6 +9612,45 @@ fn audit_layout(
     notes.extend(audit_display_formulas(drawn, extraction, shifts));
     notes.extend(audit_display_glyph_changes(drawn, extraction));
     notes
+}
+
+/// A line that runs into a math glyph kept on its baseline, right of its
+/// start, is narrowed in front of it. Up to a fifth is taken from the size;
+/// a wider overrun is left for the overlap check.
+fn fit_before_kept_math(drawn: &mut [Drawn], extraction: &Extraction, erased: &HashSet<u32>) {
+    for line in drawn.iter_mut() {
+        if !line.text.chars().any(is_han_char) || line.widths.is_empty() {
+            continue;
+        }
+        let size = line.size.max(1.0);
+        let width: f32 = line.widths.iter().sum::<f32>() + line.gaps.iter().sum::<f32>();
+        let right = line.x + width;
+        let limit = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.page_index == line.page
+                    && !glyph.invisible
+                    && !erased.contains(&glyph.id)
+                    && is_math_font(&glyph.font_name)
+                    && !glyph.unicode.trim().is_empty()
+                    && (glyph.matrix[5] - line.y).abs() <= size * 0.3
+            })
+            .map(|glyph| glyph.bbox[0].min(glyph.bbox[2]))
+            .filter(|left| *left > line.x + size && *left < right)
+            .fold(f32::MAX, f32::min);
+        if limit == f32::MAX {
+            continue;
+        }
+        let scale = (limit - size * 0.15 - line.x) / width;
+        if !(0.8..1.0).contains(&scale) {
+            continue;
+        }
+        line.size *= scale;
+        for value in line.widths.iter_mut().chain(line.gaps.iter_mut()) {
+            *value *= scale;
+        }
+    }
 }
 
 /// A translated line drawn over a math glyph still painted in the source
