@@ -23351,6 +23351,44 @@ fn carry_formula_with_line(drawn: &[Drawn], y_before: &[f32], shifts: &mut [List
 /// `，否则为 0。` sits on `ϕ(a)=ϕ(a)`; closing the hole above the clause
 /// lifts it off that formula. A paragraph that redraws its own math is
 /// not this case: those glyphs are already in the block.
+/// `if no incident occurs,` and `min(U, 0), otherwise.` are the rows of a
+/// `cases` display whose brace and `U_adj =` stay kept source. Pulled up as
+/// text, the rows left the brace and the label 30pt below. A short drawn row
+/// with kept math ink in its band is part of that display and keeps its place.
+/// The caller only asks for a row set in from the paragraph above: `d_ff =
+/// 2048.` at the column edge is a tucked tail, not a display row.
+fn row_of_kept_display(
+    block: &ColumnBlock,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    page: u32,
+) -> usize {
+    let size = block.size.max(1.0);
+    if block.right - block.left > size * 20.0 {
+        return 0;
+    }
+    let mut used = HashSet::default();
+    for line in drawn.iter().filter(|line| line.page == page) {
+        used.extend(line.glyph_ids.iter().copied());
+    }
+    let low = block.source_bottom - size * 1.2;
+    let high = block.source_top + size * 1.2;
+    extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == page
+                && !used.contains(&glyph.id)
+                && !glyph.invisible
+                && is_math_font(&glyph.font_name)
+                && glyph.matrix[5] >= low
+                && glyph.matrix[5] <= high
+                && glyph.matrix[4] > block.left - size * 12.0
+                && glyph.matrix[4] < block.right
+        })
+        .count()
+}
+
 fn clause_sits_on_kept_formula(
     block: &ColumnBlock,
     drawn: &[Drawn],
@@ -25162,8 +25200,12 @@ fn close_column_holes_with(
             // `，否则为 0。` is the roman tail of `ϕ(a)=ϕ(a)`. Pulling that
             // tail closed a hole and left the formula on the old baseline.
             // The pull still applies to the paragraph under the formula.
-            let clause =
-                shift.abs() > 0.4 && clause_sits_on_kept_formula(&block, drawn, extraction, page);
+            let clause = shift.abs() > 0.4
+                && (clause_sits_on_kept_formula(&block, drawn, extraction, page)
+                    || (prev
+                        .as_ref()
+                        .is_some_and(|above| block.left > above.left + block.size.max(1.0) * 6.0)
+                        && row_of_kept_display(&block, drawn, extraction, page) >= 2));
             // The LaTeX footnote rule sits a few points above `*同等贡献`.
             // It introduces that note, so it moves with the note instead of
             // pinning every later line against the English rule.
