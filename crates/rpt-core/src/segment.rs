@@ -7,6 +7,7 @@
 //! Figure interiors and table cells are not segments. A table caption and
 //! its column header are. Unmapped glyphs stay out of every segment.
 
+use crate::detmap::{HashMap, HashSet};
 use crate::geom::Rect;
 use crate::glyph::{Glyph, PageInfo, PaintedRegion};
 
@@ -59,7 +60,97 @@ pub fn segment_placed(
     pages: &[PageInfo],
 ) -> Segmentation {
     let lines = rejoin_formula_fragments(raw_lines(glyphs));
-    assemble(lines, flags, regions, pages)
+    if flags.skip_tables {
+        return assemble(lines, flags, regions, pages);
+    }
+    // The cells a table run would keep. Translated, one segment must not
+    // run across two of them.
+    let keep_flags = SegmentFlags {
+        skip_figures: flags.skip_figures,
+        skip_tables: true,
+    };
+    let cells: HashSet<u32> = assemble(lines.clone(), &keep_flags, regions, pages)
+        .kept
+        .into_iter()
+        .filter(|(_, reason)| reason == "table")
+        .map(|(id, _)| id)
+        .collect();
+    let mut out = assemble(lines, flags, regions, pages);
+    split_table_cells(&mut out.segments, glyphs, &cells);
+    out
+}
+
+/// `Mean   Through.` heads two columns of one table row. Read as one
+/// segment, `平均吞吐。` was drawn across both cells. A one-line table
+/// segment is cut where the gap is wider than a word space, so each cell is
+/// translated and fitted on its own.
+fn split_table_cells(segments: &mut Vec<Segment>, glyphs: &[Glyph], cells: &HashSet<u32>) {
+    let by_id: HashMap<u32, &Glyph> = glyphs.iter().map(|glyph| (glyph.id, glyph)).collect();
+    let mut out: Vec<Segment> = Vec::with_capacity(segments.len());
+    let mut split_any = false;
+    for segment in segments.drain(..) {
+        let members: Vec<&Glyph> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(|id| by_id.get(id).copied())
+            .collect();
+        let inked: Vec<&Glyph> = members
+            .iter()
+            .copied()
+            .filter(|glyph| !glyph.unicode.trim().is_empty())
+            .collect();
+        let size = representative_size(&inked).max(1.0);
+        let one_line = inked.len() >= 2
+            && inked
+                .iter()
+                .all(|glyph| (glyph.matrix[5] - inked[0].matrix[5]).abs() <= size * 0.3);
+        let in_table = inked.iter().all(|glyph| cells.contains(&glyph.id));
+        if !one_line || !in_table || members.len() != segment.glyph_ids.len() {
+            out.push(segment);
+            continue;
+        }
+        let mut ordered = members.clone();
+        ordered.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+        let mut pieces: Vec<Vec<&Glyph>> = vec![Vec::new()];
+        let mut right: Option<f32> = None;
+        for glyph in ordered {
+            if glyph.unicode.trim().is_empty() {
+                pieces.last_mut().unwrap().push(glyph);
+                continue;
+            }
+            if right.is_some_and(|edge| glyph_left(glyph) - edge > size * 0.6) {
+                pieces.push(Vec::new());
+            }
+            pieces.last_mut().unwrap().push(glyph);
+            right = Some(glyph_right(glyph));
+        }
+        pieces.retain(|piece| piece.iter().any(|glyph| !glyph.unicode.trim().is_empty()));
+        if pieces.len() < 2 {
+            out.push(segment);
+            continue;
+        }
+        split_any = true;
+        for mut piece in pieces {
+            while piece
+                .last()
+                .is_some_and(|glyph| glyph.unicode.trim().is_empty())
+            {
+                piece.pop();
+            }
+            out.push(Segment {
+                id: segment.id,
+                page_index: segment.page_index,
+                glyph_ids: piece.iter().map(|glyph| glyph.id).collect(),
+                text: line_text(&piece).trim().to_string(),
+            });
+        }
+    }
+    if split_any {
+        for (index, segment) in out.iter_mut().enumerate() {
+            segment.id = index as u32;
+        }
+    }
+    *segments = out;
 }
 
 /// Reading order sorts both columns by baseline. A subscript of the other
