@@ -21554,7 +21554,15 @@ fn shift_inserts(
     extraction: &Extraction,
     shifts: &[ListingShift],
 ) -> Vec<(usize, usize, HoleJob)> {
-    if chars.is_empty() || line.widths.len() != chars.len() {
+    // `…因此 ` keeps its trailing space in `widths`, so the trimmed chars
+    // are one shorter. The indices still line up when only the end was
+    // trimmed. Bailing out lost `ε_EV` seated after `因此`, and every later
+    // hole of the paragraph took its neighbour's formula.
+    let leading_kept = line.text.starts_with(&chars.iter().collect::<String>());
+    if chars.is_empty()
+        || line.widths.len() < chars.len()
+        || (line.widths.len() != chars.len() && !leading_kept)
+    {
         return Vec::new();
     }
     let size = line.size.max(1.0);
