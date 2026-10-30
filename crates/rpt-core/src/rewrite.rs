@@ -29119,6 +29119,27 @@ fn reseat_orphan_subscripts(lines: &mut [Drawn]) {
         let y = lines[index].y;
         let size = lines[index].size.max(0.5);
         let ids = lines[index].glyph_ids.clone();
+        // `W1x` was seated under `W` when the digit sank. `W` is not a lone
+        // letter (`x` follows), so the search below moved `1` onto `y`.
+        let tucked_right = x + lines[index].widths.first().copied().unwrap_or(0.0) * 0.55;
+        let on_letter = lines.iter().enumerate().any(|(host_index, host)| {
+            let chars: Vec<char> = host.text.chars().collect();
+            host_index != index
+                && host.page == page
+                && host.size >= size * 1.2
+                && ids.iter().any(|id| host.glyph_ids.contains(id))
+                && (host.y - y - host.size * 0.24).abs() <= host.size * 0.06
+                && host.widths.len() == chars.len()
+                && (0..chars.len()).any(|slot| {
+                    chars[slot].is_ascii_alphabetic()
+                        && (char_origin(host, &chars, slot) + host.widths[slot] - tucked_right)
+                            .abs()
+                            <= size * 0.15
+                })
+        });
+        if on_letter {
+            continue;
+        }
         #[allow(clippy::type_complexity)]
         let mut best: Option<(f32, f32, f32, f32, (usize, i32))> = None;
         for (host_index, host) in lines.iter().enumerate() {
