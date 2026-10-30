@@ -1130,6 +1130,20 @@ fn snap_line_compounds(
                 index += 1;
                 continue;
             }
+            // `当前块` / `，而`: pulling `块` up must not leave its comma
+            // behind. The comma comes along and hangs.
+            let mut pulled = pulled;
+            while pulled < upcoming.len() && !break_before(upcoming[pulled]) {
+                pulled += 1;
+            }
+            if pulled > after.len() - before.len() {
+                let mut grown = slot[0].clone();
+                grown.extend(upcoming[after.len() - before.len()..pulled].iter());
+                lines[index] = grown;
+                lines[index + 1] = upcoming[pulled..].iter().collect();
+                index += 1;
+                continue;
+            }
             lines[index] = slot[0].clone();
             lines[index + 1] = upcoming[pulled..].iter().collect();
         } else if after.len() < before.len() {
@@ -2706,6 +2720,29 @@ mod tests {
                 .expect("wrap");
             assert!(
                 lines.iter().all(|line| !line.trim_start().starts_with('=')),
+                "{width}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrap_never_opens_on_a_closer_after_a_hole() {
+        let text = "而解决其中一部分可能会简化另一部分。令 C = 00\u{3000})表示先前的上下文，U = 01\u{3000}表示当前块，而其中 02\u{3000}，其中 03\u{3000} 是一个推理片段。";
+        let font = mixed_ascii_font(text);
+        let holes = crate::detmap::HashMap::from_iter([
+            (0usize, 60.0f32),
+            (1usize, 40.0f32),
+            (2usize, 80.0f32),
+            (3usize, 30.0f32),
+        ]);
+        for width in (100..400).step_by(1) {
+            let lines = wrap_text_holes(text, 10.0, width as f32, width as f32, &font, &holes)
+                .expect("wrap");
+            assert!(
+                lines
+                    .iter()
+                    .skip(1)
+                    .all(|line| !line.trim_start().starts_with([')', '，'])),
                 "{width}: {lines:?}"
             );
         }
