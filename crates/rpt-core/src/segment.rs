@@ -4392,7 +4392,13 @@ fn algorithm_step(text: &str) -> Option<AlgorithmLine> {
     for key in [
         "Require:", "Ensure:", "Input:", "Output:", "Data:", "Result:",
     ] {
-        if text.starts_with(key) {
+        // `Input :` sets the colon apart in some algorithm styles.
+        let word = &key[..key.len() - 1];
+        if text.starts_with(key)
+            || text.strip_prefix(word).is_some_and(|rest| {
+                rest.trim_start_matches(' ').starts_with(':') && rest.starts_with(' ')
+            })
+        {
             return Some(AlgorithmLine::Key);
         }
     }
@@ -4430,7 +4436,19 @@ fn algorithm_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
         keys: usize,
         plain: usize,
         lines: usize,
+        // The last step number, and how many steps ran on from the one
+        // before (`2 foreach`, `3`, `4`, … `11 return S`).
+        last: Option<u32>,
+        run: usize,
     }
+    let step_number = |text: &str| -> Option<u32> {
+        let digits: String = text
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse().ok()
+    };
     let mut steps: Vec<(&VisualLine<'_>, AlgorithmLine)> = lines
         .iter()
         .filter_map(|line| algorithm_step(&line.text).map(|kind| (line, kind)))
@@ -4453,6 +4471,13 @@ fn algorithm_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
                 block.keys += usize::from(kind == AlgorithmLine::Key);
                 block.plain += usize::from(kind == AlgorithmLine::Plain);
                 block.lines += 1;
+                let number = step_number(&line.text);
+                if number.is_some() && number == block.last.map(|last| last + 1) {
+                    block.run += 1;
+                }
+                if number.is_some() {
+                    block.last = number;
+                }
             }
             None => blocks.push(Block {
                 page: line.page,
@@ -4465,12 +4490,15 @@ fn algorithm_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
                 keys: usize::from(kind == AlgorithmLine::Key),
                 plain: usize::from(kind == AlgorithmLine::Plain),
                 lines: 1,
+                last: step_number(&line.text),
+                run: 0,
             }),
         }
     }
     let mut out = Vec::new();
     for block in blocks.iter().filter(|block| {
-        block.lines >= 3 && (block.numbered >= 2 || (block.keys >= 1 && block.plain >= 2))
+        block.lines >= 3
+            && (block.numbered >= 2 || (block.keys >= 1 && block.plain >= 2) || block.run >= 6)
     }) {
         for line in lines {
             let inside = line.page == block.page
