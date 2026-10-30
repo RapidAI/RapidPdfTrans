@@ -26624,7 +26624,18 @@ fn attach_equation_tags(clusters: &mut Vec<Vec<&Glyph>>) {
                 .max_by_key(|(_, count)| *count)
                 .map(|(band, _)| band as f32 * 0.5)
                 .unwrap_or(tag_y);
-            if (tag_y - base).abs() > size * 0.55 {
+            // `(1)` of a fraction sits on the axis, between the numerator
+            // and denominator rows; the busiest row is one of those.
+            let low = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[5])
+                .fold(f32::MAX, f32::min);
+            let high = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[5])
+                .fold(f32::MIN, f32::max);
+            let spanned = high - low > size * 0.8 && tag_y > low && tag_y < high;
+            if (tag_y - base).abs() > size * 0.55 && !spanned {
                 return false;
             }
             let right = cluster
@@ -27349,6 +27360,13 @@ fn form_ident() -> FormMtx {
     }
 }
 
+/// No rotation or shear, so a user-space step maps back to local space by
+/// dividing by the scale. A rule drawn under the page-wide `cm` moves
+/// through its own coordinates instead of the shared matrix.
+fn form_upright(m: FormMtx) -> bool {
+    m.b.abs() < 0.02 && m.c.abs() < 0.02 && m.a > 0.05 && m.d > 0.05
+}
+
 fn form_is_ident(m: FormMtx) -> bool {
     (m.a - 1.0).abs() < 0.02
         && m.b.abs() < 0.02
@@ -27462,6 +27480,10 @@ fn shift_hairlines(
                         });
                         ctm = form_concat(ctm, applied);
                     }
+                    // Text drawn under the same `cm` would move with it: the
+                    // page-wide `1 0 0 1 72 769.89 cm` carried a whole table
+                    // 103pt up when a fraction bar under it was shifted.
+                    "BT" => cm = None,
                     "m" if nums.len() >= 2 => {
                         let x = &nums[nums.len() - 2];
                         let y = &nums[nums.len() - 1];
@@ -27527,12 +27549,12 @@ fn shift_hairlines(
                                         x: handle.tx + hit.4,
                                         y: handle.ty + hit.5,
                                     });
-                                } else if form_is_ident(ctm) {
+                                } else if form_upright(ctm) {
                                     edits.entry(n[0].0).or_insert(HairEdit {
                                         x_at: (n[0].0, n[0].1),
                                         y_at: (n[1].0, n[1].1),
-                                        x: x + hit.4,
-                                        y: y + hit.5,
+                                        x: x + hit.4 / ctm.a,
+                                        y: y + hit.5 / ctm.d,
                                     });
                                 }
                             }
@@ -27620,6 +27642,7 @@ fn path_operator(name: &[u8]) -> Option<&'static str> {
         b"re" => "re",
         b"cm" => "cm",
         b"Tm" => "Tm",
+        b"BT" => "BT",
         b"m" => "m",
         b"l" => "l",
         b"c" => "c",
@@ -27689,15 +27712,15 @@ fn note_hairline(
         });
         return;
     }
-    if !form_is_ident(ctm) {
+    if !form_upright(ctm) {
         return;
     }
     for pt in pts {
         edits.entry(pt.x_at.0).or_insert(HairEdit {
             x_at: pt.x_at,
             y_at: pt.y_at,
-            x: pt.lx + dx,
-            y: pt.ly + dy,
+            x: pt.lx + dx / ctm.a,
+            y: pt.ly + dy / ctm.d,
         });
     }
 }
@@ -27740,7 +27763,7 @@ fn note_ruled_line(
         });
         return;
     }
-    if !form_is_ident(ctm) {
+    if !form_upright(ctm) {
         return;
     }
     for pt in pts {
@@ -27748,7 +27771,7 @@ fn note_ruled_line(
             x_at: pt.x_at,
             y_at: pt.y_at,
             x: pt.lx,
-            y: pt.ly + dy,
+            y: pt.ly + dy / ctm.d,
         });
     }
 }
