@@ -28928,6 +28928,7 @@ fn sink_math_subscripts(lines: &mut Vec<Drawn>, glyphs: &[&Glyph], font: &Subset
             continue;
         }
         let sink_set: HashSet<usize> = sink.iter().copied().collect();
+        let first_extra = extra.len();
         for index in &sink {
             let sub_size = (line.size * 0.62).max(0.5);
             let text = chars[*index].to_string();
@@ -29013,6 +29014,22 @@ fn sink_math_subscripts(lines: &mut Vec<Drawn>, glyphs: &[&Glyph], font: &Subset
             vec![false; kept.len()]
         };
         line.gaps = gaps;
+        // Each earlier digit left the line, so the letters after it moved
+        // left. `f4` was tucked at the x it had before, and the digit landed
+        // on `和`. Seat every digit on its letter where that letter is now.
+        let drawn_chars: Vec<char> = line.text.chars().collect();
+        for (offset, index) in sink.iter().enumerate() {
+            let Some(letter) = kept.iter().position(|kept| *kept + 1 == *index) else {
+                continue;
+            };
+            if line.widths.len() != drawn_chars.len() {
+                continue;
+            }
+            let letter_right = char_origin(line, &drawn_chars, letter) + line.widths[letter];
+            let script = &mut extra[first_extra + offset];
+            let sub_w = script.widths.first().copied().unwrap_or(0.0);
+            script.x = (letter_right - sub_w * 0.55).max(line.x);
+        }
     }
     lines.extend(extra);
 }
@@ -29036,6 +29053,23 @@ fn raise_sunk_subscripts(lines: &mut [Drawn]) {
         let y = lines[index].y;
         let size = lines[index].size.max(0.5);
         let ids = &lines[index].glyph_ids;
+        // `f3 和 f5` wrapped onto the next line, and the digit already sits
+        // a script drop under its own `f` there. Lifting it to the line
+        // above put `3` on `性`.
+        let seated = lines.iter().enumerate().any(|(other, host)| {
+            let dy = host.y - y;
+            other != index
+                && host.page == page
+                && host.size >= size * 1.2
+                && ids.iter().any(|id| host.glyph_ids.contains(id))
+                && dy > host.size * 0.12
+                && dy <= host.size * 0.30
+                && x >= host.x - 1.0
+                && x <= line_ink_right(host) + 1.0
+        });
+        if seated {
+            continue;
+        }
         let mut best: Option<(f32, f32, f32)> = None;
         for (other, host) in lines.iter().enumerate() {
             if other == index || host.page != page || host.size < size * 1.2 {
