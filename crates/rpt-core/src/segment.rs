@@ -2156,6 +2156,7 @@ fn assemble(
     let notes = table_note_glyphs(&lines, &kept);
     kept.extend(notes);
     kept.extend(margin_stamps(&lines));
+    let caps = drop_caps(&lines);
     release_hyphen_continuations(&lines, &mut kept);
     // A theorem frame is a box, so a short wrap (`version. We write…`,
     // `to x + y = z.`) was kept as a figure label. It is the next line of
@@ -2289,6 +2290,21 @@ fn assemble(
         kept.extend(seg.glyph_ids.iter().map(|id| (*id, "contact".to_string())));
         false
     });
+    // The drop cap is the first letter of the paragraph beside it, and the
+    // translation says it (`无人驾驶` for `U` + `NMANNED`). It joins that
+    // paragraph's glyphs, so it is erased with them, and the text stays as
+    // the extractor read it.
+    for (cap, host) in caps {
+        let Some(seg) = segments
+            .iter_mut()
+            .find(|seg| seg.glyph_ids.contains(&host))
+        else {
+            continue;
+        };
+        let at = seg.glyph_ids.iter().position(|id| *id == host).unwrap_or(0);
+        seg.glyph_ids.insert(at, cap);
+        kept.retain(|(id, _)| *id != cap);
+    }
     for (id, seg) in segments.iter_mut().enumerate() {
         seg.id = id as u32;
     }
@@ -4924,6 +4940,49 @@ fn reading_order(lines: &[VisualLine<'_>]) -> Vec<usize> {
             .then(lines[*a].left.total_cmp(&lines[*b].left))
     });
     order
+}
+
+/// `U` of `UNMANNED aerial vehicles…` is a drop cap: one capital letter with
+/// the body lines starting just right of it, inside its height. A margin
+/// stamp has no body beside it. Kept as a stamp, `U` stayed in front of
+/// `无人驾驶` and the wrapped line ran through it.
+/// The first glyph of the topmost body line beside a drop cap.
+fn drop_cap_host(cap: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> Option<u32> {
+    let [glyph] = cap.glyphs.as_slice() else {
+        return None;
+    };
+    if !glyph.unicode.trim().chars().all(|ch| ch.is_uppercase()) || glyph.unicode.trim().is_empty()
+    {
+        return None;
+    }
+    let top = glyph.bbox[1].max(glyph.bbox[3]);
+    let bottom = glyph.bbox[1].min(glyph.bbox[3]);
+    let right = glyph.bbox[0].max(glyph.bbox[2]);
+    lines
+        .iter()
+        .filter(|line| {
+            line.page == cap.page
+                && line.size <= cap.size * 0.6
+                && line.glyphs.len() >= 8
+                && line.y >= bottom - 1.0
+                && line.y <= top
+                && line.left >= right - 1.0
+                && line.left <= right + cap.size * 0.5
+        })
+        .max_by(|a, b| a.y.total_cmp(&b.y))
+        .and_then(|line| line.glyphs.first().map(|glyph| glyph.id))
+}
+
+/// Drop caps and the first glyph of the body line each one opens.
+fn drop_caps(lines: &[VisualLine<'_>]) -> Vec<(u32, u32)> {
+    lines
+        .iter()
+        .filter(|line| line.left <= 56.0 && line.size >= 14.0)
+        .filter_map(|line| {
+            let host = drop_cap_host(line, lines)?;
+            Some((line.glyphs[0].id, host))
+        })
+        .collect()
 }
 
 fn margin_stamps(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
