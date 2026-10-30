@@ -9370,8 +9370,10 @@ fn seat_leading_closers(lines: &mut Vec<Drawn>, extraction: &Extraction, shifts:
         let size = lines[index].size.max(1.0);
         let y = lines[index].y;
         let x = lines[index].x;
-        let has_left = left_ink_before(lines, index, extraction, shifts, x, y, size).is_some();
-        if !has_left {
+        let Some(ink) = left_ink_before(lines, index, extraction, shifts, x, y, size) else {
+            continue;
+        };
+        if ink_sits_on_other_baseline(lines, index, extraction, shifts, ink, size) {
             continue;
         }
         if let Some(mark) = peel_leading_closer(&mut lines[index]) {
@@ -9379,6 +9381,65 @@ fn seat_leading_closers(lines: &mut Vec<Drawn>, extraction: &Extraction, shifts:
         }
     }
     lines.extend(parked);
+}
+
+/// `(n+15 15)` straddles two lines. Its `)` ends where `。对每轮` on the line
+/// above begins, but the binomial is centred on the line below, after
+/// `前因子`. The kept math ending at `ink` belongs to the drawn baseline
+/// nearest its middle. Only that baseline seats a closer against it.
+/// `ink` is the edge `left_ink_before` found. The cluster runs from three
+/// ems left of it up to the mark.
+fn ink_sits_on_other_baseline(
+    lines: &[Drawn],
+    index: usize,
+    extraction: &Extraction,
+    shifts: &[ListingShift],
+    ink: f32,
+    size: f32,
+) -> bool {
+    let page = lines[index].page;
+    let y = lines[index].y;
+    let mut low = f32::MAX;
+    let mut high = f32::MIN;
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != page || glyph.invisible || glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        let repositioned = shifts
+            .iter()
+            .any(|shift| shift.page == page && shift.ids.contains(&glyph.id));
+        if !repositioned && lines.iter().any(|line| line.glyph_ids.contains(&glyph.id)) {
+            continue;
+        }
+        let (dx, dy) = glyph_shift(glyph, shifts);
+        let right = glyph_paint_right(glyph) + dx;
+        let left = glyph.bbox[0].min(glyph.bbox[2]) + dx;
+        // `，` after the binomial finds only `n` in its band; the `)` it
+        // follows reaches the mark too. Take every math glyph up to it.
+        if right > lines[index].x + size * 0.3 || left < ink - size * 3.0 {
+            continue;
+        }
+        let bottom = glyph.bbox[1].min(glyph.bbox[3]) + dy;
+        let top = glyph.bbox[1].max(glyph.bbox[3]) + dy;
+        if top < y - size * 1.5 || bottom > y + size * 1.5 {
+            continue;
+        }
+        low = low.min(bottom);
+        high = high.max(top);
+    }
+    if low > high {
+        return false;
+    }
+    let middle = (low + high) / 2.0;
+    let own = (middle - (y + size * 0.3)).abs();
+    lines.iter().enumerate().any(|(other, line)| {
+        other != index
+            && line.page == page
+            && (line.y - y).abs() > size * 0.5
+            && (line.y - y).abs() < size * 1.8
+            && line.text.chars().any(is_han_char)
+            && (middle - (line.y + line.size.max(1.0) * 0.3)).abs() + size * 0.15 < own
+    })
 }
 
 /// Right edge of drawn text or a kept formula on this baseline, within 8em
