@@ -1166,6 +1166,7 @@ fn rewrite_translation_once(
     // numerator it wraps. The pull took `exp −d(x,c)` and left the paren
     // 9pt off. A math delimiter that touches a moved glyph moves with it.
     carry_touching_delimiters(extraction, &mut listing_shifts, &mut stack_shifts);
+    carry_hanging_operators(extraction, &mut listing_shifts, &mut stack_shifts);
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     // An unmapped `ℓ` never entered the line, so the translation was drawn
@@ -3110,11 +3111,92 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     fuse_script_groups(glyphs, body, &mut groups);
     union_shared_members(&mut groups);
     absorb_interposed_digits(glyphs, body, &mut groups);
+    bridge_formula_groups(glyphs, body, &mut groups);
     // Every caller sees the same holes. The unholed-math check used to see
     // `g_t(` without its `ℓ)` and kept the sentence in English.
     let mut groups = close_open_brackets(glyphs, groups, body);
     sort_placeholder_groups(glyphs, body, &mut groups);
     groups
+}
+
+/// `p(c₁,c₂,…) = ∏ₜ p(cₜ | c₍<ₜ₎)` became `⟦1⟧ = t p⟦2⟧`: the `=` and the
+/// math-italic `t p` between two holes were left as prose, and the holes
+/// were seated apart. Two holes on one baseline with only math-font glyphs
+/// and operators between them are one formula.
+fn bridge_formula_groups(glyphs: &[&Glyph], body: f32, groups: &mut Vec<Vec<u32>>) {
+    let by_id = glyph_index_refs(glyphs);
+    let span = |group: &Vec<u32>| -> Option<(f32, f32, f32)> {
+        let full: Vec<&Glyph> = group
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|index| glyphs[*index]))
+            .filter(|glyph| glyph.font_size > body * 0.75)
+            .collect();
+        let first = full.first()?;
+        let left = group
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|index| glyph_ink_left(glyphs[*index])))
+            .fold(f32::MAX, f32::min);
+        let right = group
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|index| glyph_ink_right(glyphs[*index])))
+            .fold(f32::MIN, f32::max);
+        Some((first.matrix[5], left, right))
+    };
+    loop {
+        let members: HashSet<u32> = groups.iter().flatten().copied().collect();
+        let mut merge: Option<(usize, usize, Vec<u32>)> = None;
+        'outer: for a in 0..groups.len() {
+            let Some((ya, _, ra)) = span(&groups[a]) else {
+                continue;
+            };
+            for b in 0..groups.len() {
+                if a == b {
+                    continue;
+                }
+                let Some((yb, lb, _)) = span(&groups[b]) else {
+                    continue;
+                };
+                if (ya - yb).abs() >= body * 0.1 || lb < ra - 0.3 || lb - ra > body * 4.0 {
+                    continue;
+                }
+                let between: Vec<&Glyph> = glyphs
+                    .iter()
+                    .copied()
+                    .filter(|glyph| {
+                        !members.contains(&glyph.id)
+                            && !glyph.unicode.trim().is_empty()
+                            && (glyph.matrix[5] - ya).abs() < body * 0.5
+                            && glyph.matrix[4] >= ra - 0.3
+                            && glyph_ink_right(glyph) <= lb + 0.3
+                    })
+                    .collect();
+                if between.is_empty() || between.len() > 6 {
+                    continue;
+                }
+                let relation = between.iter().any(|glyph| {
+                    matches!(
+                        glyph.unicode.trim(),
+                        "=" | "+" | "−" | "<" | ">" | "≤" | "≥" | "≈" | "≡" | "×" | "·" | "∝"
+                    )
+                });
+                let mathy = between.iter().all(|glyph| {
+                    is_math_font(&glyph.font_name)
+                        || glyph.unicode.trim().chars().all(|ch| !ch.is_alphanumeric())
+                });
+                if relation && mathy {
+                    merge = Some((a, b, between.iter().map(|glyph| glyph.id).collect()));
+                    break 'outer;
+                }
+            }
+        }
+        let Some((a, b, between)) = merge else {
+            break;
+        };
+        let mut moved = groups[b].clone();
+        moved.extend(between);
+        groups[a].extend(moved);
+        groups.remove(b);
+    }
 }
 
 /// `−6/ + 12`: `−` and `/` are math glyphs and `6` is a prose digit set
@@ -21388,6 +21470,38 @@ fn append_chars_with_holes(
     }
 }
 
+/// A CMEX `∏` hangs from above the baseline of the formula it belongs to,
+/// so it looks like math in the gap of the line above. That formula is a
+/// hole of this paragraph and carries the operator; a second hole for it
+/// left a blank before `。` and pushed the text into the formula.
+fn hangs_inside_owned_formula(
+    glyph: &Glyph,
+    extraction: &Extraction,
+    owned: &HashSet<u32>,
+) -> bool {
+    if !glyph.unicode.trim().is_empty() || !glyph.font_name.to_ascii_uppercase().contains("CMEX") {
+        return false;
+    }
+    let size = glyph.font_size.max(1.0);
+    let x = glyph.matrix[4];
+    let y = glyph.matrix[5];
+    let flank = |left: bool| {
+        extraction.glyphs.iter().any(|other| {
+            owned.contains(&other.id)
+                && other.page_index == glyph.page_index
+                && other.font_size > size * 0.75
+                && y >= other.matrix[5] - size * 0.2
+                && y <= other.matrix[5] + size
+                && if left {
+                    other.matrix[4] < x && x - other.matrix[4] <= size * 2.5
+                } else {
+                    other.matrix[4] > x && other.matrix[4] - x <= size * 2.5
+                }
+        })
+    };
+    flank(true) && flank(false)
+}
+
 fn gap_math_clusters(
     prev: &BodyPiece,
     next: &BodyPiece,
@@ -21407,6 +21521,7 @@ fn gap_math_clusters(
                 && !seated.contains(&glyph.id)
                 && mathish_glyph(glyph)
                 && glyph_in_piece_gap(glyph, prev, next, size, column_left)
+                && !hangs_inside_owned_formula(glyph, extraction, owned)
         })
         .collect();
     if picked.is_empty() {
@@ -30474,6 +30589,84 @@ fn formula_lead_mates(leads: &HashSet<u32>, extraction: &Extraction) -> HashMap<
 /// `p_ij =` rode a paragraph pull while its fraction did not, and the
 /// display formula split by 16pt. The lead joins a shift exactly when its mate
 /// is in it.
+/// `= ∏ₜ p(…)`: the CMEX `∏` has no unicode, so it never joined the hole.
+/// The hole moved and the operator stood at the English spot, over the
+/// translation. An unmapped operator set between two glyphs of a moved
+/// formula, hanging from just above its baseline, moves with it.
+fn carry_hanging_operators(
+    extraction: &Extraction,
+    listing_shifts: &mut [ListingShift],
+    stack_shifts: &mut [ListingShift],
+) {
+    let by_id = glyph_index(&extraction.glyphs);
+    let operator = |glyph: &Glyph| {
+        !glyph.invisible
+            && glyph.unicode.trim().is_empty()
+            && glyph.font_name.to_ascii_uppercase().contains("CMEX")
+    };
+    let glyph_of = |id: &u32| by_id.get(id).and_then(|at| extraction.glyphs.get(*at));
+    // A shift made of unmapped operators alone was a lone carry
+    // (`carry_unmapped_atoms`). The formula around the operator claims it.
+    let lone = |shift: &ListingShift| {
+        shift
+            .ids
+            .iter()
+            .all(|id| glyph_of(id).is_some_and(|glyph| operator(glyph)))
+    };
+    let mut held: HashSet<u32> = listing_shifts
+        .iter()
+        .chain(stack_shifts.iter())
+        .filter(|shift| !lone(shift))
+        .flat_map(|shift| shift.ids.iter().copied())
+        .collect();
+    let mut claimed: Vec<u32> = Vec::new();
+    for shift in listing_shifts.iter_mut().chain(stack_shifts.iter_mut()) {
+        if lone(shift) {
+            continue;
+        }
+        let moved: Vec<&Glyph> = shift.ids.iter().filter_map(glyph_of).collect();
+        let Some(body) = moved.iter().map(|glyph| glyph.font_size).reduce(f32::max) else {
+            continue;
+        };
+        let body = body.max(1.0);
+        let mut add = Vec::new();
+        for glyph in &extraction.glyphs {
+            if glyph.page_index != shift.page || held.contains(&glyph.id) || !operator(glyph) {
+                continue;
+            }
+            let x = glyph.matrix[4];
+            let y = glyph.matrix[5];
+            let on_line = |other: &&Glyph| {
+                other.font_size > body * 0.75
+                    && y >= other.matrix[5] - body * 0.2
+                    && y <= other.matrix[5] + body
+            };
+            let before = moved
+                .iter()
+                .any(|other| on_line(other) && other.matrix[4] < x);
+            let after = moved.iter().any(|other| {
+                on_line(other) && other.matrix[4] > x && other.matrix[4] - x <= body * 2.5
+            });
+            if before && after {
+                add.push(glyph.id);
+            }
+        }
+        for id in add {
+            held.insert(id);
+            claimed.push(id);
+            shift.ids.push(id);
+        }
+    }
+    if claimed.is_empty() {
+        return;
+    }
+    for shift in listing_shifts.iter_mut().chain(stack_shifts.iter_mut()) {
+        if lone(shift) {
+            shift.ids.retain(|id| !claimed.contains(id));
+        }
+    }
+}
+
 fn carry_touching_delimiters(
     extraction: &Extraction,
     listing_shifts: &mut [ListingShift],

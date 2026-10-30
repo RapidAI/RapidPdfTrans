@@ -613,6 +613,7 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             || header_word)
             && !current.is_empty()
             && !crumb
+            && !formula_bridge(&current, glyph, gap, hard)
         {
             parts.push(std::mem::take(&mut current));
         }
@@ -622,6 +623,26 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
         parts.push(current);
     }
     parts
+}
+
+/// `= ∏_t p(c_t | c_<t)`: the unmapped CMEX operator leaves an em-wide
+/// hole after `=`, and its limit `t` sits off the baseline. A line that
+/// stops on a relation or operator and resumes in a math font is one
+/// formula, not two columns. The hard gap still splits.
+fn formula_bridge(current: &[&Glyph], next: &Glyph, gap: f32, hard: f32) -> bool {
+    let Some(last) = current.last() else {
+        return false;
+    };
+    // A raised next glyph is a superscript (`∈ ℝ^{d×k}`), not the rest of
+    // the formula after an unmapped operator (`= ∏_t p`).
+    let raised = next.matrix[5] > last.matrix[5] + 0.15 * last.font_size.max(1.0);
+    gap <= hard
+        && !raised
+        && math_font_glyph(next)
+        && matches!(
+            last.unicode.trim(),
+            "=" | "+" | "−" | "-" | "<" | ">" | "≤" | "≥" | "≈" | "∈" | "×" | "·" | "≡" | "∝"
+        )
 }
 
 /// `Trigger Optimization Context`: two to six title-case words, no sentence
