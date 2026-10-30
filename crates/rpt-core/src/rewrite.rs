@@ -16667,6 +16667,47 @@ fn ys_spread(src: &[f32], count: usize) -> Vec<f32> {
     ys
 }
 
+/// A paragraph that wraps around a table or figure inset has upper lines
+/// that stop where other ink starts on the same baseline. The source's last
+/// lines may run under the inset at full width, but the translation reflows,
+/// so a full-width line would land on the inset. The block keeps the right
+/// edge of the lines beside it.
+fn inset_right(
+    extraction: &Extraction,
+    glyphs: &[&Glyph],
+    ink: &[InkLine<'_>],
+    spans: &[(f32, f32)],
+    page: u32,
+    size: f32,
+) -> Option<f32> {
+    if ink.len() < 3 {
+        return None;
+    }
+    let block_right = spans
+        .iter()
+        .map(|(_, right)| *right)
+        .fold(f32::MIN, f32::max);
+    let own: HashSet<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+    let mut rights = Vec::new();
+    for (line, (_, right)) in ink.iter().zip(spans).take(ink.len() - 1) {
+        if *right > block_right - size * 4.0 {
+            continue;
+        }
+        let beside = extraction.glyphs.iter().any(|glyph| {
+            glyph.page_index == page
+                && !own.contains(&glyph.id)
+                && !glyph.unicode.trim().is_empty()
+                && (glyph.matrix[5] - line.y).abs() <= size * 0.6
+                && glyph.bbox[0].min(glyph.bbox[2]) > right + size * 0.5
+                && glyph.bbox[0].min(glyph.bbox[2]) < block_right
+        });
+        if beside {
+            rights.push(*right);
+        }
+    }
+    (rights.len() >= 2).then(|| rights.iter().copied().fold(f32::MIN, f32::max))
+}
+
 fn layout_segment(
     glyphs: &[&Glyph],
     text: &str,
@@ -16982,6 +17023,11 @@ fn layout_segment(
         let clearance = limit - source_size * 0.35;
         if clearance > block_left + source_size * 4.0 {
             block_right = block_right.min(clearance);
+        }
+    }
+    if let Some(limit) = inset_right(extraction, glyphs, &ink, &spans, page, source_size) {
+        if limit > block_left + source_size * 12.0 {
+            block_right = block_right.min(limit);
         }
     }
     let scale = scale_for_heading(level, source_size, metrics);
@@ -19433,6 +19479,22 @@ fn compose_bold_run_in(
         .iter()
         .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
         .fold(head_right, f32::max);
+    // The body was laid out left of an inset (a table beside the
+    // paragraph). Its source tail runs under the inset at full width, but
+    // the joined lines must keep the drawn measure.
+    let drawn_right = groups
+        .get(&body_key)
+        .into_iter()
+        .flatten()
+        .map(|index| drawn_ink_span(&drawn[*index]).1)
+        .fold(f32::MIN, f32::max);
+    let body_draws = groups.get(&body_key).map_or(0, |indices| indices.len());
+    let column_right =
+        if body_draws >= 3 && drawn_right > head_right && drawn_right < column_right - size * 4.0 {
+            drawn_right
+        } else {
+            column_right
+        };
     let width = column_right - head_left;
     if width < size * 8.0 {
         return None;
@@ -24104,6 +24166,7 @@ fn close_column_holes_with(
         // few points of `extra` are its own superscript, not a hole.
         let mut hold_scripts = false;
         let mut placed_lines: Vec<PlacedListing> = Vec::new();
+        let mut placed_blocks: Vec<(f32, f32, f32, f32)> = Vec::new();
         for block in blocks {
             // A column page number sits to the right of its title. It is not
             // the next paragraph, and treating it as one used to drop the
@@ -24315,6 +24378,26 @@ fn close_column_holes_with(
                     });
                 }
             }
+            // The pull is measured from the previous block, but an earlier
+            // block in the same column can end lower: a paragraph beside a
+            // table is longer than the table cell drawn after it. The pull
+            // stops above every block already placed over this one.
+            if let (true, Some(prev)) = (applied > 0.4 && !block.listing, prev.as_ref()) {
+                let lowest = placed_blocks
+                    .iter()
+                    .filter(|(left, right, _, source_bottom)| {
+                        *left < block.right
+                            && *right > block.left
+                            && *source_bottom > block.source_top
+                    })
+                    .map(|(_, _, bottom, _)| *bottom)
+                    .fold(prev.bottom, f32::min);
+                let deeper = prev.bottom - lowest;
+                if deeper > 0.4 {
+                    applied = (applied - deeper).max(0.0);
+                    shift = applied;
+                }
+            }
             if std::env::var_os("RPT_HOLE_DEBUG").is_some() {
                 let head: String = drawn[block.indices.first().copied().unwrap_or(0)]
                     .text
@@ -24371,6 +24454,12 @@ fn close_column_holes_with(
             // pull a clause left for the paragraph under a kept formula.
             placed.top += applied;
             placed.bottom += applied;
+            placed_blocks.push((
+                placed.left,
+                placed.right,
+                placed.bottom,
+                placed.source_bottom,
+            ));
             prev = Some(placed);
         }
         seat_listing_annotations(drawn, extraction, by_id, &placed_lines);

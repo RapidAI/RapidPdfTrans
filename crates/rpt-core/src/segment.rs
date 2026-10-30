@@ -585,6 +585,25 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             && right_w >= size * 0.8
             && gap >= size
             && gap + 0.05 >= largest;
+        // A wrapped caption beside the paragraph (`videos.` | `LongLive.`)
+        // sits 1.4pt off the paragraph's baseline, one em away. Both sides
+        // are wide and the right piece keeps its own baseline, so it is the
+        // next column and not a sub- or superscript.
+        let offset_column = off_baseline
+            && gap >= size * 0.9
+            && left_w >= size * 12.0
+            && right_w >= size * 4.0
+            && {
+                let rest: Vec<&&Glyph> = line[index..]
+                    .iter()
+                    .filter(|item| !item.unicode.trim().is_empty())
+                    .collect();
+                let same = rest
+                    .iter()
+                    .filter(|item| (item.matrix[5] - glyph.matrix[5]).abs() <= size * 0.1)
+                    .count();
+                rest.len() >= 8 && same * 10 >= rest.len() * 9
+            };
         // `conversa-` then `data.` 1.4em later: a word broken at the line end
         // is not followed by another word of the same line. That tail is the
         // next column's last line.
@@ -700,6 +719,7 @@ fn split_columns(line: Vec<&Glyph>) -> Vec<Vec<&Glyph>> {
             || lone_mark
             || gutter_digit
             || stray_column_fragment
+            || offset_column
             || hyphen_break
             || header_word)
             && !current.is_empty()
