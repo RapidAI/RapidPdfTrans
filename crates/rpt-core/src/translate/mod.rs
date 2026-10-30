@@ -5848,7 +5848,8 @@ pub(crate) fn residual_english_clause(source: &str, translated: &str) -> bool {
         return false;
     }
     let flat = squeeze_words(translated);
-    let words: Vec<&str> = source.split_whitespace().collect();
+    let unquoted = drop_quoted_spans(source);
+    let words: Vec<&str> = unquoted.split_whitespace().collect();
     let mut start = 0;
     while start < words.len() {
         let mut letters = 0usize;
@@ -5884,6 +5885,43 @@ pub(crate) fn residual_english_clause(source: &str, translated: &str) -> bool {
         start += 1;
     }
     false
+}
+
+/// `The exact search string was: ’abs:((medical OR mri …))’` quotes a
+/// literal the model copies on purpose. A clause inside quotes is not a
+/// sentence it forgot to translate.
+fn drop_quoted_spans(text: &str) -> String {
+    let quote = |ch: char| matches!(ch, '\'' | '"' | '‘' | '’' | '“' | '”');
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let opens =
+            quote(chars[i]) && (i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(');
+        if opens {
+            // `’abs:((… ”magnetic resonance” …))’` nests double quotes inside
+            // single ones. Only the matching mark closes the span.
+            let closer = match chars[i] {
+                '‘' | '’' => '’',
+                '“' | '”' => '”',
+                other => other,
+            };
+            let close = (i + 1..chars.len()).find(|&j| {
+                chars[j] == closer
+                    && chars
+                        .get(j + 1)
+                        .is_none_or(|next| next.is_whitespace() || next.is_ascii_punctuation())
+            });
+            if let Some(close) = close {
+                out.push(' ');
+                i = close + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 fn squeeze_words(text: &str) -> String {
@@ -6883,6 +6921,14 @@ mod tests {
             Some("name")
         );
         assert_eq!(intentional_keep_kind("Method"), None);
+        let search = "The exact search string was: ’abs:((medical OR mri OR ”magnetic \
+                      resonance” OR computed tomography OR ultrasound OR pathology OR xray))’. \
+                      Conference proceedings were searched.";
+        assert!(!residual_english_clause(
+            search,
+            "确切的检索字符串为：’abs:((medical OR mri OR ”magnetic resonance” OR computed \
+             tomography OR ultrasound OR pathology OR xray))’。会议论文集也被检索。"
+        ));
         let prose = "full benchmark and 45.3 on LingLan-Hard, compared with 60.8 and 31.4, \
                      respectively, for the original Qwen3-14B baseline Yang et al. (2025). \
                      Among the external baselines";
