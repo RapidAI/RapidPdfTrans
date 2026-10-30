@@ -21001,10 +21001,18 @@ fn join_reflow_text(
 ) -> (String, Vec<bool>, Vec<HoleJob>, HashMap<usize, f32>) {
     let mut buf = ReflowBuf::new();
     let seated = seated_shift_ids(drawn, pieces, chain, shifts);
+    let painted: HashSet<u32> = drawn
+        .iter()
+        .flat_map(|line| line.glyph_ids.iter().copied())
+        .collect();
     let column_left = chain
         .iter()
         .map(|slot| pieces[*slot].column_left)
         .fold(f32::MAX, f32::min);
+    let column_right = chain
+        .iter()
+        .map(|slot| pieces[*slot].column_right)
+        .fold(f32::MIN, f32::max);
     for (order, slot) in chain.iter().enumerate() {
         let piece = &pieces[*slot];
         if order > 0 {
@@ -21027,7 +21035,8 @@ fn join_reflow_text(
                 size,
                 &seated,
                 &owned,
-                column_left,
+                &painted,
+                (column_left, column_right),
             ) {
                 buf.emit_hole(
                     packed_ids_width(&cluster.ids, extraction, size),
@@ -21742,7 +21751,8 @@ fn gap_math_clusters(
     size: f32,
     seated: &HashSet<u32>,
     owned: &HashSet<u32>,
-    column_left: f32,
+    painted: &HashSet<u32>,
+    column: (f32, f32),
 ) -> Vec<MathCluster> {
     let mut picked: Vec<&Glyph> = extraction
         .glyphs
@@ -21753,7 +21763,7 @@ fn gap_math_clusters(
                 && !owned.contains(&glyph.id)
                 && !seated.contains(&glyph.id)
                 && mathish_glyph(glyph)
-                && glyph_in_piece_gap(glyph, prev, next, size, column_left)
+                && glyph_in_piece_gap(glyph, prev, next, size, column)
                 && !hangs_inside_owned_formula(glyph, extraction, owned)
         })
         .collect();
@@ -21780,6 +21790,42 @@ fn gap_math_clusters(
             clusters.push(vec![glyph]);
         }
     }
+    // `kl` and `ln` in `kl(a‖b) := a ln(a/b)` are upright text no translated
+    // line paints. Left out of the hole, they sat under `其中` and the
+    // formula's tail. Grow each cluster through such glyphs that touch it on
+    // its baseline; a kept code name with no math beside it stays put.
+    for cluster in clusters.iter_mut() {
+        loop {
+            let left = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[4])
+                .fold(f32::MAX, f32::min);
+            let right = cluster
+                .iter()
+                .map(|glyph| glyph_ink_right(glyph))
+                .fold(f32::MIN, f32::max);
+            let baseline = cluster
+                .iter()
+                .map(|glyph| glyph.matrix[5])
+                .fold(f32::MIN, f32::max);
+            let Some(more) = extraction.glyphs.iter().find(|glyph| {
+                glyph.page_index == prev.page
+                    && !glyph.invisible
+                    && !glyph.unicode.trim().is_empty()
+                    && !painted.contains(&glyph.id)
+                    && !owned.contains(&glyph.id)
+                    && !seated.contains(&glyph.id)
+                    && (glyph.matrix[5] - baseline).abs() <= size * 0.3
+                    && glyph.matrix[4] >= left - size * 0.6
+                    && glyph.matrix[4] <= right + size * 0.6
+                    && glyph_in_piece_gap(glyph, prev, next, size, column)
+                    && !cluster.iter().any(|member| member.id == glyph.id)
+            }) else {
+                break;
+            };
+            cluster.push(more);
+        }
+    }
     let mut built = Vec::new();
     for cluster in clusters {
         let left = cluster
@@ -21802,8 +21848,28 @@ fn gap_math_clusters(
                     .then(right.matrix[4].total_cmp(&left.matrix[4]))
             })
             .unwrap_or(cluster[0]);
+        // `a‖b` inside `kl(a‖b)` was already seated by the crumb's own
+        // layout. Placing the rest of the formula without it stacked the two.
+        let baseline = cluster
+            .iter()
+            .map(|glyph| glyph.matrix[5])
+            .fold(f32::MIN, f32::max);
+        let mut ids: Vec<u32> = cluster.iter().map(|glyph| glyph.id).collect();
+        for glyph in &extraction.glyphs {
+            if glyph.page_index == prev.page
+                && !glyph.invisible
+                && seated.contains(&glyph.id)
+                && !owned.contains(&glyph.id)
+                && !ids.contains(&glyph.id)
+                && (glyph.matrix[5] - baseline).abs() <= size * 0.45
+                && glyph.matrix[4] > left
+                && glyph_ink_right(glyph) < right
+            {
+                ids.push(glyph.id);
+            }
+        }
         built.push(MathCluster {
-            ids: cluster.iter().map(|glyph| glyph.id).collect(),
+            ids,
             left,
             anchor_y: anchor.matrix[5],
         });
@@ -21844,7 +21910,7 @@ fn glyph_in_piece_gap(
     prev: &BodyPiece,
     next: &BodyPiece,
     size: f32,
-    column_left: f32,
+    (column_left, column_right): (f32, f32),
 ) -> bool {
     let y = glyph.matrix[5];
     let x = glyph.matrix[4];
@@ -21863,7 +21929,9 @@ fn glyph_in_piece_gap(
         && x >= column_left - size;
     let suffix = (y - prev.source_bottom).abs() <= size * 0.8
         && x > prev.tail_right + size * 0.15
-        && x < prev.column_right + size;
+        // The paragraph's column, not the piece's own box: a lone `where`
+        // spans 54-79 and `kl(a‖b) := …` after it runs to the column edge.
+        && x < prev.column_right.max(column_right) + size;
     prefix || suffix
 }
 
