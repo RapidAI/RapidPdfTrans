@@ -11857,6 +11857,12 @@ fn place_segments(
         match layout_segment(
             &glyphs, &text, font, extraction, bilingual, resource, skew, metrics,
         ) {
+            Some(lines) if cell_cannot_fit(&lines, &glyphs, extraction) => {
+                for id in &segment.glyph_ids {
+                    keep.insert(*id, "table".into());
+                }
+                continue;
+            }
             Some(mut lines) => {
                 if text.contains('⟦') {
                     match lift_stack_placeholders(&mut lines, &glyphs, font, &text) {
@@ -18096,6 +18102,88 @@ fn fit_contents_stack(drawn: &mut [Drawn], extraction: &Extraction) {
             }
         }
     }
+}
+
+/// A one-line label with other text on its baseline close by is a table
+/// cell (`Mean`, `Through.`). A translation that wraps, shrinks, or runs
+/// onto the next cell's ink cannot fit there. The source cell stays.
+fn cell_cannot_fit(lines: &[Drawn], glyphs: &[&Glyph], extraction: &Extraction) -> bool {
+    let inked: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| !glyph.unicode.trim().is_empty() && !glyph.invisible)
+        .collect();
+    let Some(first) = inked.first() else {
+        return false;
+    };
+    let mut sizes: Vec<f32> = inked.iter().map(|glyph| glyph.font_size).collect();
+    sizes.sort_by(|a, b| a.total_cmp(b));
+    let size = sizes[sizes.len() / 2].max(1.0);
+    let base = first.matrix[5];
+    if inked
+        .iter()
+        .any(|glyph| (glyph.matrix[5] - base).abs() > size * 0.3)
+    {
+        return false;
+    }
+    let left = inked
+        .iter()
+        .map(|glyph| glyph.bbox[0].min(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min);
+    let right = inked
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+        .fold(f32::MIN, f32::max);
+    if right - left > size * 12.0 {
+        return false;
+    }
+    let own: HashSet<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+    let mut prev_right = f32::MIN;
+    let mut next_left = f32::MAX;
+    for glyph in &extraction.glyphs {
+        if glyph.page_index != first.page_index
+            || own.contains(&glyph.id)
+            || glyph.invisible
+            || !glyph.unicode.chars().any(char::is_alphanumeric)
+            || (glyph.matrix[5] - base).abs() > size * 0.3
+        {
+            // A bullet or leader dots between contents entries is not a
+            // neighboring cell.
+            continue;
+        }
+        let g_left = glyph.bbox[0].min(glyph.bbox[2]);
+        let g_right = glyph.bbox[0].max(glyph.bbox[2]);
+        if g_left >= right - 0.5 {
+            next_left = next_left.min(g_left);
+        } else if g_right <= left + 0.5 {
+            prev_right = prev_right.max(g_right);
+        }
+    }
+    // Cells are apart by more than a word space. A word or symbol right
+    // against the label is the same sentence, not the next cell.
+    let gap_next = next_left - right;
+    let gap_prev = left - prev_right;
+    if gap_next < size * 0.6 || gap_prev < size * 0.6 {
+        return false;
+    }
+    let near_next = gap_next <= size * 3.0;
+    let near_prev = gap_prev <= size * 3.0;
+    if !near_next && !near_prev {
+        return false;
+    }
+    let fails = lines.len() > 1
+        || lines.iter().any(|line| {
+            // Shrunk to the source width is fine while the full-size text
+            // would still end before the next cell.
+            let natural = line.x + (draw_ink_right(line) - line.x) * size / line.size.max(0.1);
+            (line.size < size * 0.85 && near_next && natural > next_left - size * 0.5)
+                || (near_next && draw_ink_right(line) > next_left - size * 0.3)
+                || (near_prev && line.x < prev_right + size * 0.3)
+        });
+    // A contents row has its page number on the baseline. It is not a cell.
+    fails
+        && !baseline_has_toc_page(extraction, first.page_index, base, size)
+        && !contents_page_indexes(extraction).contains(&first.page_index)
 }
 
 fn draw_ink_right(item: &Drawn) -> f32 {
