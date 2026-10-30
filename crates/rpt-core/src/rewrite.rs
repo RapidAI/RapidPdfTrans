@@ -2403,6 +2403,17 @@ fn pack_connective_stamps(
         if cuts.is_empty() {
             continue;
         }
+        // The cut closes the gap on this column's line only. `on an honest
+        // channel` in the next column moved left with `where` and was drawn
+        // over the left column.
+        let first_cut = cuts
+            .iter()
+            .map(|(right, _)| *right)
+            .fold(f32::MAX, f32::min);
+        let column_end = column_left_edges(extraction, page, size)
+            .into_iter()
+            .filter(|edge| *edge > first_cut + size)
+            .fold(f32::MAX, f32::min);
         let mut dx_of: HashMap<u32, f32> = HashMap::default();
         for glyph in &extraction.glyphs {
             if glyph.page_index != page || stamp_ids.contains(&glyph.id) || glyph.invisible {
@@ -2410,6 +2421,9 @@ fn pack_connective_stamps(
             }
             let gy = glyph.matrix[5];
             if gy > y + size * 0.4 || gy < y - size * 0.85 {
+                continue;
+            }
+            if glyph.matrix[4] >= column_end - 0.5 {
                 continue;
             }
             let mut dx = 0.0f32;
@@ -9024,8 +9038,12 @@ fn unstack_formula_tail(lines: &mut [Drawn]) {
         let size = lines[tail].size.max(1.0);
         let Some(next) = (0..lines.len())
             .filter(|&index| {
+                // A run-in heading starts its own paragraph, laid out with its
+                // body as one unit. Moving a tail onto its line pushed
+                // `定理 2（…）。` onto the body that follows it.
                 index != tail
                     && lines[index].page == page
+                    && !theorem_label_start(lines[index].text.trim_start())
                     && lines[index].y < y - size * 0.4
                     && y - lines[index].y <= size * 2.4
                     && lines[index].text.chars().any(is_han_char)
@@ -24075,6 +24093,45 @@ fn complete_display_line(
     let mut ids: Vec<u32> = ids.into_iter().collect();
     ids.sort_unstable();
     (ids, left, right)
+}
+
+/// Left edges where at least three lines of `page` start: a glyph with no
+/// glyph on its baseline in the two ems before it.
+fn column_left_edges(extraction: &Extraction, page: u32, size: f32) -> Vec<f32> {
+    let glyphs: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.page_index == page && !glyph.invisible && !glyph.unicode.trim().is_empty()
+        })
+        .collect();
+    let mut starts: Vec<f32> = Vec::new();
+    for glyph in &glyphs {
+        let x = glyph.matrix[4];
+        let y = glyph.matrix[5];
+        let led = glyphs.iter().any(|other| {
+            (other.matrix[5] - y).abs() <= size * 0.3
+                && other.matrix[4] < x - 0.1
+                && other.matrix[4] >= x - size * 2.0
+        });
+        if !led {
+            starts.push(x);
+        }
+    }
+    starts.sort_by(|left, right| left.total_cmp(right));
+    let mut edges = Vec::new();
+    let mut index = 0;
+    while index < starts.len() {
+        let mut end = index;
+        while end + 1 < starts.len() && starts[end + 1] - starts[index] <= 1.0 {
+            end += 1;
+        }
+        if end + 1 - index >= 3 {
+            edges.push(starts[index]);
+        }
+        index = end + 1;
+    }
+    edges
 }
 
 fn theorem_label_start(text: &str) -> bool {
