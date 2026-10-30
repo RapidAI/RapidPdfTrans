@@ -4392,6 +4392,16 @@ pub(crate) fn merge_stacked_paragraphs(
             .unwrap_or(&[]);
         spans.push(merge_span(&owned, stacks));
     }
+    // `Lean: bellRenyiBudget` is a one-line label in its own face above the
+    // paragraph with the binomial. Chained in, it widened the paragraph box
+    // and the Chinese no longer fit, so the paragraph stayed English.
+    for (index, segment) in segments.iter().enumerate() {
+        if spans[index].is_some_and(|span| !span.stacked)
+            && face_label_segment(segment, glyphs, &by_id)
+        {
+            spans[index] = None;
+        }
+    }
     let mut keep = vec![false; segments.len()];
     let mut queue = Vec::new();
     for (index, span) in spans.iter().enumerate() {
@@ -4517,6 +4527,49 @@ pub(crate) fn merge_stacked_paragraphs(
     out.into_iter()
         .map(|segment| rewrite_inline_math(segment, glyphs, &by_id))
         .collect()
+}
+
+/// One baseline, one face that no other segment on the page uses for body
+/// text, no math glyph, and only a few words.
+fn face_label_segment(
+    segment: &crate::segment::Segment,
+    glyphs: &[Glyph],
+    by_id: &HashMap<u32, usize>,
+) -> bool {
+    let owned: Vec<&Glyph> = segment
+        .glyph_ids
+        .iter()
+        .filter_map(|id| by_id.get(id).and_then(|&at| glyphs.get(at)))
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    let Some(first) = owned.first() else {
+        return false;
+    };
+    let size = first.font_size.max(1.0);
+    let one_line = owned
+        .iter()
+        .all(|glyph| (glyph.matrix[5] - first.matrix[5]).abs() <= size * 0.3);
+    let words = segment.text.split_whitespace().count();
+    if !one_line || words > 6 || owned.iter().any(|glyph| is_math_font(&glyph.font_name)) {
+        return false;
+    }
+    let mut faces: Vec<&str> = owned.iter().map(|glyph| glyph.font_name.as_str()).collect();
+    faces.sort_unstable();
+    faces.dedup();
+    if faces.len() > 3 {
+        return false;
+    }
+    let page_total = glyphs
+        .iter()
+        .filter(|glyph| glyph.page_index == segment.page_index)
+        .count();
+    faces.iter().all(|face| {
+        let used = glyphs
+            .iter()
+            .filter(|glyph| glyph.page_index == segment.page_index && glyph.font_name == *face)
+            .count();
+        used * 10 < page_total
+    })
 }
 
 #[derive(Clone, Copy)]
