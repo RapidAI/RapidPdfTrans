@@ -2107,6 +2107,16 @@ fn assemble(
     // It stays original, and it is not part of that sentence.
     let mut kept = Vec::new();
     let mut lines: Vec<VisualLine> = Vec::new();
+    let geometry: crate::detmap::HashMap<u32, (f32, f32, f32)> = raw
+        .iter()
+        .flatten()
+        .map(|glyph| {
+            (
+                glyph.id,
+                (glyph.matrix[4], glyph.matrix[5], glyph.font_size),
+            )
+        })
+        .collect();
     for glyphs in raw {
         let mut body = Vec::new();
         for glyph in glyphs {
@@ -2294,6 +2304,7 @@ fn assemble(
     // translation says it (`无人驾驶` for `U` + `NMANNED`). It joins that
     // paragraph's glyphs, so it is erased with them, and the text stays as
     // the extractor read it.
+    join_entry_values(&mut segments, &geometry);
     for (cap, host) in caps {
         let Some(seg) = segments
             .iter_mut()
@@ -4974,6 +4985,144 @@ fn reading_order(lines: &[VisualLine<'_>]) -> Vec<usize> {
 /// the body lines starting just right of it, inside its height. A margin
 /// stamp has no body beside it. Kept as a stamp, `U` stayed in front of
 /// `无人驾驶` and the wrapped line ran through it.
+/// `Output: Synthetic dataset S = …,` / `where G contains pseudo-target` /
+/// `recommendations` is one entry. The label sits on its own; the value
+/// wraps under itself at a hanging indent. Each wrap was its own segment,
+/// and a lone `Synthetic dataset S = {(s,G)},` came back untranslated.
+fn join_entry_values(
+    segments: &mut Vec<Segment>,
+    geometry: &crate::detmap::HashMap<u32, (f32, f32, f32)>,
+) {
+    struct Shape {
+        page: u32,
+        left: f32,
+        right_end: f32,
+        top: f32,
+        bottom: f32,
+        size: f32,
+    }
+    let shape = |seg: &Segment| -> Option<Shape> {
+        let points: Vec<(f32, f32, f32)> = seg
+            .glyph_ids
+            .iter()
+            .filter_map(|id| geometry.get(id).copied())
+            .collect();
+        let size = points.iter().map(|point| point.2).fold(0.0f32, f32::max);
+        let top = points.iter().map(|point| point.1).fold(f32::MIN, f32::max);
+        let bottom = points.iter().map(|point| point.1).fold(f32::MAX, f32::min);
+        // Only single-line pieces: a value wrap, not a paragraph.
+        (size > 0.0 && top - bottom <= size * 0.6).then(|| Shape {
+            page: seg.page_index,
+            left: points.iter().map(|point| point.0).fold(f32::MAX, f32::min),
+            right_end: points.iter().map(|point| point.0).fold(f32::MIN, f32::max),
+            top,
+            bottom,
+            size,
+        })
+    };
+    let is_label = |text: &str| {
+        let text = text.trim();
+        text.ends_with(':')
+            && text.split_whitespace().count() <= 2
+            && text.chars().filter(|ch| ch.is_alphabetic()).count() >= 3
+            && text.chars().next().is_some_and(char::is_uppercase)
+    };
+    let shapes: Vec<Option<Shape>> = segments.iter().map(|seg| shape(seg)).collect();
+    let labels: Vec<usize> = (0..segments.len())
+        .filter(|&index| is_label(&segments[index].text) && shapes[index].is_some())
+        .collect();
+    let mut absorbed = vec![false; segments.len()];
+    let mut joins: Vec<(usize, Vec<usize>)> = Vec::new();
+    for &label in &labels {
+        let key = shapes[label].as_ref().expect("label shape");
+        let on_baseline =
+            |other: &Shape, line_y: f32| (other.top - line_y).abs() <= key.size * 0.35;
+        // The value starts beside the label on its baseline.
+        let Some(first) = (0..segments.len())
+            .filter(|&index| index != label && !absorbed[index])
+            .filter(|&index| {
+                shapes[index].as_ref().is_some_and(|other| {
+                    other.page == key.page
+                        && on_baseline(other, key.top)
+                        && other.left > key.right_end
+                        && other.left - key.right_end <= key.size * 6.0
+                })
+            })
+            .min_by(|a, b| {
+                let (a, b) = (shapes[*a].as_ref().unwrap(), shapes[*b].as_ref().unwrap());
+                a.left.total_cmp(&b.left)
+            })
+        else {
+            continue;
+        };
+        let value = shapes[first].as_ref().unwrap();
+        let mut chain = vec![first];
+        let mut floor = value.bottom;
+        loop {
+            // The next wrap: a line just under the last one, at the value's
+            // indent, and no other label opening that line.
+            let next = (0..segments.len())
+                .filter(|&index| !absorbed[index] && !chain.contains(&index) && index != label)
+                .filter(|&index| {
+                    shapes[index].as_ref().is_some_and(|other| {
+                        other.page == key.page
+                            && (other.left - value.left).abs() <= value.size * 0.25
+                            && floor - other.top >= value.size * 0.8
+                            && floor - other.top <= value.size * 1.8
+                    })
+                })
+                .max_by(|a, b| {
+                    let (a, b) = (shapes[*a].as_ref().unwrap(), shapes[*b].as_ref().unwrap());
+                    a.top.total_cmp(&b.top)
+                });
+            let Some(next) = next else {
+                break;
+            };
+            let line = shapes[next].as_ref().unwrap();
+            let opens_label = labels.iter().any(|&other| {
+                other != label
+                    && shapes[other]
+                        .as_ref()
+                        .is_some_and(|shape| shape.page == key.page && on_baseline(shape, line.top))
+            });
+            if opens_label {
+                break;
+            }
+            floor = line.bottom;
+            chain.push(next);
+        }
+        if chain.len() < 2 {
+            continue;
+        }
+        for index in &chain {
+            absorbed[*index] = true;
+        }
+        joins.push((chain[0], chain[1..].to_vec()));
+    }
+    let mut drop = vec![false; segments.len()];
+    for (head, rest) in joins {
+        for index in rest {
+            let ids = std::mem::take(&mut segments[index].glyph_ids);
+            let text = std::mem::take(&mut segments[index].text);
+            segments[head].glyph_ids.extend(ids);
+            let joined = match segments[head].text.trim_end().strip_suffix('-') {
+                Some(stem) if text.starts_with(|ch: char| ch.is_lowercase()) => {
+                    format!("{stem}{}", text.trim_start())
+                }
+                _ => format!("{} {}", segments[head].text.trim_end(), text.trim_start()),
+            };
+            segments[head].text = joined;
+            drop[index] = true;
+        }
+    }
+    let mut index = 0usize;
+    segments.retain(|_| {
+        let keep = !drop[index];
+        index += 1;
+        keep
+    });
+}
+
 /// The first glyph of the topmost body line beside a drop cap.
 fn drop_cap_host(cap: &VisualLine<'_>, lines: &[VisualLine<'_>]) -> Option<u32> {
     let [glyph] = cap.glyphs.as_slice() else {
