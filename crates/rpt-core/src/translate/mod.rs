@@ -125,6 +125,9 @@ pub struct TranslateOptions {
     /// Source term, target term. Longer terms win. Applied before the model call.
     pub glossary: Vec<(String, String)>,
     pub context_window: usize,
+    /// Row and column text of a table cell, by segment id. Filled per
+    /// document so a lone `Through.` is read as the throughput header.
+    pub cell_context: Arc<HashMap<u32, String>>,
     pub batch_size: usize,
     /// Parallel model requests. `0` uses `RPT_TRANSLATE_JOBS`, then 4.
     /// The resolved count is capped at 8. Layout and rewrite stay on the
@@ -272,6 +275,7 @@ impl Default for TranslateOptions {
             cjk_size_scale: 0.0,
             cjk_leading: 0.0,
             output_mode: OutputMode::Replace,
+            cell_context: Arc::default(),
         }
     }
 }
@@ -609,6 +613,9 @@ pub fn translate_extraction(
     let guard = guard::Guarded::new(translator, opts);
     let translator: &dyn Translator = &guard;
     let (segments, reference_ids) = prepare_segments(extraction, opts)?;
+    let mut cell_opts = opts.clone();
+    cell_opts.cell_context = Arc::new(table_cell_context(&segments, extraction));
+    let opts = &cell_opts;
     let shielded: Vec<protect::Shielded> = segments
         .iter()
         .map(|seg| shield(&seg.text, &opts.glossary))
@@ -6252,7 +6259,15 @@ fn call_batch(
 ) -> Result<Vec<(u32, String)>> {
     let prompts = indexes
         .iter()
-        .map(|&i| prompt_for(segments, shielded, i, opts.context_window))
+        .map(|&i| {
+            prompt_for(
+                segments,
+                shielded,
+                i,
+                opts.context_window,
+                &opts.cell_context,
+            )
+        })
         .collect::<Vec<_>>();
     let user = user_payload(&prompts)?;
     let system = system_for(opts, strict, echo);
@@ -6341,15 +6356,112 @@ fn prompt_for(
     shielded: &[protect::Shielded],
     index: usize,
     window: usize,
+    cells: &HashMap<u32, String>,
 ) -> PromptSegment {
     let before = index.saturating_sub(window)..index;
     let after = (index + 1)..(index + 1 + window).min(segments.len());
+    let mut context_before: Vec<String> = before.map(|i| shielded[i].text.clone()).collect();
+    if let Some(cell) = cells.get(&segments[index].id) {
+        context_before.insert(0, cell.clone());
+    }
     PromptSegment {
         id: segments[index].id,
         text: shielded[index].text.clone(),
-        context_before: before.map(|i| shielded[i].text.clone()).collect(),
+        context_before,
         context_after: after.map(|i| shielded[i].text.clone()).collect(),
     }
+}
+
+/// Page, baseline, left, right, size.
+type CellBox = (u32, f32, f32, f32, f32);
+
+/// One-line geometry of a segment.
+fn cell_box(segment: &Segment, extraction: &Extraction) -> Option<CellBox> {
+    let glyphs: Vec<&crate::Glyph> = segment
+        .glyph_ids
+        .iter()
+        .filter_map(|id| extraction.glyph(*id))
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    let first = glyphs.first()?;
+    let mut sizes: Vec<f32> = glyphs.iter().map(|glyph| glyph.font_size).collect();
+    sizes.sort_by(|a, b| a.total_cmp(b));
+    let size = sizes[sizes.len() / 2].max(1.0);
+    let base = first.matrix[5];
+    if glyphs
+        .iter()
+        .any(|glyph| (glyph.matrix[5] - base).abs() > size * 0.3)
+    {
+        return None;
+    }
+    let left = glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].min(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min);
+    let right = glyphs
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+        .fold(f32::MIN, f32::max);
+    (right - left <= size * 12.0).then_some((first.page_index, base, left, right, size))
+}
+
+/// A short one-line segment with others on its baseline, each a cell gap
+/// apart, is a table cell. Its prompt carries the row and the column, so
+/// `Through.` under `(FPS)` is read as a header and not as `通过`.
+fn table_cell_context(segments: &[Segment], extraction: &Extraction) -> HashMap<u32, String> {
+    let boxes: Vec<Option<CellBox>> = segments
+        .iter()
+        .map(|segment| cell_box(segment, extraction))
+        .collect();
+    let mut out = HashMap::default();
+    for (index, item) in boxes.iter().enumerate() {
+        let Some((page, base, left, right, size)) = *item else {
+            continue;
+        };
+        let mut row: Vec<(f32, usize)> = Vec::new();
+        let mut column: Vec<(f32, usize)> = Vec::new();
+        for (other, item) in boxes.iter().enumerate() {
+            let Some((o_page, o_base, o_left, o_right, _)) = *item else {
+                continue;
+            };
+            if o_page != page {
+                continue;
+            }
+            if (o_base - base).abs() <= size * 0.3 {
+                row.push((o_left, other));
+            } else if (o_base - base).abs() <= size * 10.0 && o_left < right && o_right > left {
+                column.push((-o_base, other));
+            }
+        }
+        if row.len() < 2 {
+            continue;
+        }
+        row.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let spaced = row
+            .windows(2)
+            .all(|pair| match (boxes[pair[0].1], boxes[pair[1].1]) {
+                (Some(a), Some(b)) => b.2 - a.3 >= size * 0.6,
+                _ => false,
+            });
+        if !spaced {
+            continue;
+        }
+        column.push((-base, index));
+        column.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let text = |list: &[(f32, usize)]| {
+            list.iter()
+                .take(8)
+                .map(|(_, at)| segments[*at].text.trim().to_string())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let mut context = format!("[table cell] row: {}", text(&row));
+        if column.len() > 1 {
+            context.push_str(&format!("; column: {}", text(&column)));
+        }
+        out.insert(segments[index].id, context);
+    }
+    out
 }
 
 #[cfg(test)]
