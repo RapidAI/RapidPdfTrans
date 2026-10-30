@@ -3129,6 +3129,9 @@ fn absorb_interposed_digits(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>
             .iter()
             .filter_map(|id| by_id.get(id).map(|index| glyphs[*index]))
             .collect();
+        // Scripts (`r̂_k(i)`'s `k`) sit off the baseline; the full-size
+        // members fix it.
+        items.retain(|glyph| glyph.font_size > body * 0.75);
         if items.len() < 2 {
             continue;
         }
@@ -3165,7 +3168,12 @@ fn absorb_interposed_digits(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>
                 && between
                     .iter()
                     .any(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_digit()));
-            if digits {
+            // `(i)` with a math-italic `i`: a math-font letter between two
+            // members is part of the formula, not prose.
+            let math_letters = !between.is_empty()
+                && between.len() <= 3
+                && between.iter().all(|glyph| is_math_font(&glyph.font_name));
+            if digits || math_letters {
                 add.extend(between.iter().map(|glyph| glyph.id));
             }
         }
@@ -3652,7 +3660,29 @@ fn absorb_math_accents(glyphs: &[&Glyph], body: f32, groups: &mut Vec<Vec<u32>>)
     let mut used: HashSet<u32> = groups.iter().flatten().copied().collect();
     let mut fresh: Vec<Vec<u32>> = Vec::new();
     for glyph in glyphs {
-        if used.contains(&glyph.id) || !is_math_accent_char(&glyph.unicode) {
+        if !is_math_accent_char(&glyph.unicode) {
+            continue;
+        }
+        if used.contains(&glyph.id) {
+            // The hat joined a hole on its own but its letter stayed prose:
+            // `r⟦0⟧` drew `ˆ` away from `r`. A math-font letter under the
+            // hat's ink belongs to the hat's hole.
+            let center = (glyph.bbox[0] + glyph.bbox[2]) * 0.5;
+            let base = glyphs.iter().copied().find(|base| {
+                !used.contains(&base.id)
+                    && is_math_font(&base.font_name)
+                    && base.font_size > body * 0.75
+                    && !is_math_accent_char(&base.unicode)
+                    && (base.matrix[5] - glyph.matrix[5]).abs() < body * 0.1
+                    && center > base.bbox[0]
+                    && center < base.bbox[2]
+            });
+            if let Some(base) = base {
+                if let Some(group) = groups.iter_mut().find(|ids| ids.contains(&glyph.id)) {
+                    group.push(base.id);
+                    used.insert(base.id);
+                }
+            }
             continue;
         }
         let base = glyphs
