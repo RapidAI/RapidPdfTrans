@@ -6616,10 +6616,14 @@ fn math_font_glyph(glyph: &Glyph) -> bool {
         .iter()
         .any(|needle| upper.contains(needle))
         || upper.contains("MATH");
-    math && !matches!(
-        glyph.unicode.trim(),
-        "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
-    ) && !is_inline_math_symbol(&glyph.unicode)
+    let stix_text = (upper.contains("STIXGENERAL") || upper.contains("STIXTWOTEXT"))
+        && !upper.contains("ITALIC");
+    math && !stix_text
+        && !matches!(
+            glyph.unicode.trim(),
+            "*" | "∗" | "†" | "‡" | "§" | "¶" | "⋆" | "#"
+        )
+        && !is_inline_math_symbol(&glyph.unicode)
 }
 
 /// A subscript or superscript (`f_i`, `N_i^+`) drawn on its own baseline.
