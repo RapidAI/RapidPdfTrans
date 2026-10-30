@@ -1781,6 +1781,14 @@ fn ocr_garbage_token(token: &str) -> bool {
     if chars.iter().copied().any(junk_ocr_symbol) {
         return true;
     }
+    // `SCALECUA-Qwen3.5-9B` and `GUI-Owl-1.5-32B` are model names: hyphen
+    // joined parts, each a real token. Judged whole, the digit joins made
+    // the line look like a misread and the paragraph stayed in English.
+    let trimmed = token.trim_matches(|ch: char| !ch.is_alphanumeric());
+    let parts: Vec<&str> = trimmed.split('-').collect();
+    if parts.len() >= 2 && parts.iter().all(|part| !part.is_empty()) {
+        return parts.iter().any(|part| ocr_garbage_token(part));
+    }
     // `GKP24`, `BBN10`, `log2`, and `3z` are citations and formulas: one
     // capitalisation plus a digit. `3jOV9rOIit` is not that shape.
     // `junk_ocr_token` would flag every digit-letter join, including these.
@@ -17157,5 +17165,22 @@ mod tests {
             Some("智能体向大语言模型发送提示")
         );
         assert!(numbered_item_body("1.1 构建基于大语言模型的应用").is_none());
+    }
+}
+
+#[cfg(test)]
+mod hyphen_model_names {
+    #[test]
+    fn hyphen_joined_model_names_are_not_ocr_garbage() {
+        for token in [
+            "SCALECUA-Qwen3.5-9B",
+            "EvoCUA-1.5-32B",
+            "MAI-Gym-9B",
+            "GUI-Owl-1.5-32B",
+            "UI-Venus-2-9B",
+        ] {
+            assert!(!super::ocr_garbage_token(token), "{token}");
+        }
+        assert!(super::ocr_garbage_token("3jOV9rOIit"));
     }
 }
