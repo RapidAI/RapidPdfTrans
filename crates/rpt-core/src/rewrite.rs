@@ -23771,7 +23771,40 @@ fn claim_orphan_scripts(
     for base in extraction.glyphs.iter().filter(|base| formula_base(base)) {
         bases.entry(base.page_index).or_default().push(base);
     }
+    // `10^{−4}`: the seated `−` and the `4` after it are one exponent.
+    // Seating each glyph alone found no anchor for `4`, which stayed at its
+    // source x inside `因此`.
+    let mut last: Option<(u32, f32, f32, usize, usize)> = None;
     for glyph in &extraction.glyphs {
+        if let Some((page, y, right, slot, index)) = last {
+            let size = glyph.font_size.max(1.0);
+            let follows = !claimed.contains(&glyph.id)
+                && !glyph.invisible
+                && !glyph.unicode.trim().is_empty()
+                && glyph.font_size <= 8.0
+                && glyph.page_index == page
+                && (glyph.matrix[5] - y).abs() <= size * 0.2
+                && glyph.matrix[4] >= right - size * 0.3
+                && glyph.matrix[4] <= right + size * 0.3;
+            if follows {
+                let base_ids = drawn[index].glyph_ids.clone();
+                for (sibling, line) in drawn.iter().enumerate() {
+                    if sibling == index || line.glyph_ids == base_ids {
+                        extra.push((sibling, glyph.id));
+                    }
+                }
+                claimed.insert(glyph.id);
+                succeeded.insert(glyph.id);
+                keep.remove(&glyph.id);
+                let shift: &mut ListingShift = &mut shifts[slot];
+                shift.ids.push(glyph.id);
+                let ink = glyph_ink_right(glyph);
+                clearances[slot].2 = clearances[slot].2.max(ink + shift.dx);
+                last = Some((page, y, ink, slot, index));
+                continue;
+            }
+            last = None;
+        }
         if claimed.contains(&glyph.id)
             || glyph.invisible
             || glyph.unicode.trim().is_empty()
@@ -23826,6 +23859,13 @@ fn claim_orphan_scripts(
         keep.remove(&glyph.id);
         clearances.push((index, token_end, script_right));
         shifts.push(shift);
+        last = Some((
+            glyph.page_index,
+            glyph.matrix[5],
+            glyph_ink_right(glyph),
+            shifts.len() - 1,
+            index,
+        ));
     }
     for (index, id) in extra {
         drawn[index].glyph_ids.push(id);
