@@ -9412,6 +9412,16 @@ fn closer_then_text(line: &Drawn) -> bool {
         && chars.iter().skip(start + 1).any(|ch| !ch.is_whitespace())
         && line.widths.len() == chars.len()
         && line.cids.len() == chars.len()
+        && !seated_before(line, start)
+}
+
+/// A blank wider than half an em before `start` is a hole with a formula
+/// seated in it (`⟦ε_EC⟧。设…`). The mark already follows that formula; it
+/// is not at the start of the line.
+fn seated_before(line: &Drawn, start: usize) -> bool {
+    let size = line.size.max(1.0);
+    line.widths.len() == line.text.chars().count()
+        && line.widths[..start].iter().any(|width| *width > size * 0.6)
 }
 
 /// Split a leading `。` `，` `、` off `line`. The mark keeps the old origin.
@@ -9545,7 +9555,7 @@ fn pull_opening_punctuation(lines: &mut [Drawn]) {
         let Some(start) = chars.iter().position(|ch| !ch.is_whitespace()) else {
             continue;
         };
-        if !line_start_closer(chars[start]) {
+        if !line_start_closer(chars[start]) || seated_before(&lines[index], start) {
             continue;
         }
         if chars.iter().skip(start + 1).all(|ch| ch.is_whitespace()) {
@@ -11071,7 +11081,10 @@ fn drawn_has_tofu(line: &Drawn) -> bool {
 
 fn opens_on_closer(line: &Drawn) -> bool {
     let text = line.text.trim_start();
-    text.chars().count() > 1 && text.starts_with(['。', '，', '、', '；'])
+    let start = line.text.chars().count() - text.chars().count();
+    text.chars().count() > 1
+        && text.starts_with(['。', '，', '、', '；'])
+        && !seated_before(line, start)
 }
 
 fn stray_drawn_mark(line: &Drawn, drawn: &[Drawn]) -> bool {
@@ -19304,7 +19317,7 @@ fn reflow_bold_run_ins(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
     embedded: &[(String, SubsetFont)],
-    shifts: &mut [ListingShift],
+    shifts: &mut Vec<ListingShift>,
 ) {
     if drawn.is_empty() {
         return;
@@ -19331,13 +19344,41 @@ fn reflow_bold_run_ins(
         if used.contains(key) {
             continue;
         }
-        let Some((body_key, lines, slide, first_y)) =
+        let Some((body_key, mut lines, mut slide, first_y, run_in_x)) =
             compose_bold_run_in(key, &groups, drawn, extraction, by_id, embedded)
         else {
             continue;
         };
         if used.contains(&body_key) {
             continue;
+        }
+        // A shorter Chinese label slid the body left but kept its English
+        // line breaks, so `设一个无窃听者` ended well short of the column
+        // with the rest of the sentence on the next line. Rewrap the body
+        // after the label, keeping its seated formulas in their holes.
+        if let (Some(x), Some(body_indices)) = (run_in_x, groups.get(&body_key)) {
+            if slide < 0.0 {
+                if let Some(body) = reflow_run_in_body(
+                    drawn,
+                    &body_key,
+                    body_indices,
+                    x,
+                    extraction,
+                    by_id,
+                    embedded,
+                    shifts,
+                ) {
+                    let head_ids = lines[0].glyph_ids.clone();
+                    let head = lines.remove(0);
+                    lines = std::iter::once(head)
+                        .chain(body.into_iter().map(|mut line| {
+                            line.glyph_ids = head_ids.clone();
+                            line
+                        }))
+                        .collect();
+                    slide = 0.0;
+                }
+            }
         }
         let mut drop = groups.get(key).cloned().unwrap_or_default();
         drop.extend(groups.get(&body_key).cloned().unwrap_or_default());
@@ -19486,7 +19527,7 @@ fn compose_bold_run_in(
     extraction: &Extraction,
     by_id: &HashMap<u32, usize>,
     embedded: &[(String, SubsetFont)],
-) -> Option<(Vec<u32>, Vec<Drawn>, f32, f32)> {
+) -> Option<(Vec<u32>, Vec<Drawn>, f32, f32, Option<f32>)> {
     let head_glyphs = ids_glyphs(head_key, extraction, by_id);
     if !bold_run_in_glyphs(&head_glyphs) {
         return None;
@@ -19678,7 +19719,7 @@ fn compose_bold_run_in(
                 }
                 painted.push(kept);
             }
-            return Some((body_key, painted, slide, first_y));
+            return Some((body_key, painted, slide, first_y, Some(head_end)));
         }
     }
     let share = head_width + gap + paint * 2.0 <= width;
@@ -19740,7 +19781,81 @@ fn compose_bold_run_in(
             measure_width,
         ));
     }
-    Some((body_key, painted, 0.0, first_y))
+    Some((body_key, painted, 0.0, first_y, None))
+}
+
+/// Rewrap a run-in body as one paragraph whose first line starts at `x`,
+/// after the label. `None` keeps the slid source line breaks.
+#[allow(clippy::too_many_arguments)]
+fn reflow_run_in_body(
+    drawn: &[Drawn],
+    body_key: &[u32],
+    body_indices: &[usize],
+    x: f32,
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+    embedded: &[(String, SubsetFont)],
+    shifts: &mut Vec<ListingShift>,
+) -> Option<Vec<Drawn>> {
+    let page = drawn.get(*body_indices.first()?)?.page;
+    let piece = body_piece(page, body_key, body_indices, drawn, extraction, by_id);
+    let piece = piece?;
+    if !piece.has_cjk {
+        return None;
+    }
+    // The first source line starts after the label; every later one has to
+    // start at the column's left edge, or the body is not one column.
+    let glyphs = ids_glyphs(body_key, extraction, by_id);
+    let top = glyphs
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MIN, f32::max);
+    let mut starts: Vec<(f32, f32)> = Vec::new();
+    let em = piece.source_size.max(1.0);
+    for glyph in &glyphs {
+        let y = glyph.matrix[5];
+        // A superscript is not a line of its own.
+        if (y - top).abs() <= 1.6 || glyph.font_size < em * 0.85 {
+            continue;
+        }
+        match starts
+            .iter_mut()
+            .find(|(row, _)| (row - y).abs() <= glyph.font_size.max(1.0) * 0.5)
+        {
+            Some(slot) => slot.1 = slot.1.min(glyph.matrix[4]),
+            None => starts.push((y, glyph.matrix[4])),
+        }
+    }
+    if starts.is_empty()
+        || starts
+            .iter()
+            .any(|(_, left)| (left - piece.column_left).abs() > em * 1.5)
+    {
+        return None;
+    }
+    let indent = x - piece.column_left;
+    let size = piece.paint_size.max(1.0);
+    if indent < size * 2.0 || indent > (piece.column_right - piece.column_left) - size * 4.0 {
+        return None;
+    }
+    let pieces = [piece];
+    let plan = reflow_paragraph_chain_from(
+        drawn,
+        &pieces,
+        &[0],
+        embedded,
+        extraction,
+        shifts,
+        Some(indent),
+    );
+    let mut plan = plan?;
+    // Every rewrapped line has to stay inside the column.
+    let right = pieces[0].column_right + size * 0.3;
+    if plan.lines.iter().any(|line| line_ink_right(line) > right) {
+        return None;
+    }
+    apply_reflow_holes(&plan.old, &mut plan.lines, &plan.jobs, shifts, extraction);
+    Some(plan.lines)
 }
 
 /// Slices on one baseline with a hole between them. The formula was already
@@ -20664,6 +20779,19 @@ fn reflow_paragraph_chain(
     extraction: &Extraction,
     shifts: &[ListingShift],
 ) -> Option<ParagraphPlan> {
+    reflow_paragraph_chain_from(drawn, pieces, chain, embedded, extraction, shifts, None)
+}
+
+/// `first_indent` sets where the first line starts (after a run-in label).
+fn reflow_paragraph_chain_from(
+    drawn: &[Drawn],
+    pieces: &[BodyPiece],
+    chain: &[usize],
+    embedded: &[(String, SubsetFont)],
+    extraction: &Extraction,
+    shifts: &[ListingShift],
+    first_indent: Option<f32>,
+) -> Option<ParagraphPlan> {
     let host = chain.iter().find(|index| pieces[**index].has_cjk)?;
     let host = &pieces[*host];
     let font = embedded_font(&host.resource, embedded)?;
@@ -20705,6 +20833,9 @@ fn reflow_paragraph_chain(
     let mut indent = (first_drawn.x - column_left).max(0.0);
     if indent < size * 0.4 || indent > size * 2.6 {
         indent = 0.0;
+    }
+    if let Some(first) = first_indent {
+        indent = first;
     }
     let mut lines = wrap_text_holes(&text, size, (width - indent).max(size), width, font, &holes)?;
     attach_leading_closers(&mut lines);
