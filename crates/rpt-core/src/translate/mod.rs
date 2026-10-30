@@ -5053,7 +5053,21 @@ fn looks_like_reference(source: &str) -> bool {
         || lower.contains("arxiv:")
         || (lower.contains("et al")
             && source.contains('(')
-            && source.chars().any(|ch| ch.is_ascii_digit()))
+            && source.chars().any(|ch| ch.is_ascii_digit())
+            && !cites_inside_prose(&lower))
+}
+
+/// `…for the original Qwen3-14B baseline Yang et al. (2025). Among the…`
+/// cites inside a sentence. An entry names its authors first, so `et al`
+/// sits near the start. Calling the sentence a reference hid a body
+/// paragraph the model left in English.
+fn cites_inside_prose(lower: &str) -> bool {
+    let Some(at) = lower.find("et al") else {
+        return false;
+    };
+    let words = lower.split_whitespace().count();
+    let lead = lower[..at].split_whitespace().count();
+    words >= 16 && lead >= 10
 }
 
 fn looks_like_display_math(source: &str) -> bool {
@@ -6869,6 +6883,14 @@ mod tests {
             Some("name")
         );
         assert_eq!(intentional_keep_kind("Method"), None);
+        let prose = "full benchmark and 45.3 on LingLan-Hard, compared with 60.8 and 31.4, \
+                     respectively, for the original Qwen3-14B baseline Yang et al. (2025). \
+                     Among the external baselines";
+        assert_eq!(intentional_keep_kind(prose), None);
+        assert_eq!(
+            intentional_keep_kind("Yang, A., et al. (2025). Qwen3 technical report."),
+            Some("references")
+        );
         assert_eq!(intentional_keep_kind("(high)"), Some("formula"));
         assert_eq!(intentional_keep_kind("from εeval"), Some("formula"));
         assert_eq!(
