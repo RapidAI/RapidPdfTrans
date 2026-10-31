@@ -1110,6 +1110,7 @@ fn prepare_segments(
     if opts.batch_size == 0 {
         return Err(Error::Options("batch_size must be at least 1".into()));
     }
+    crate::rewrite::set_coverage_face(opts.cjk_font.as_deref(), opts.cjk_style.as_deref());
     let segmentation = segment::segment_placed(
         &extraction.glyphs,
         &segment::SegmentFlags {

@@ -3369,6 +3369,18 @@ fn faceless_relation_atoms(glyphs: &[&Glyph], used: &HashSet<u32>) -> Vec<Vec<u3
 /// source glyph is drawn instead and nothing is lost. The face is the
 /// regular body face, read once per process, so every caller sees the
 /// same holes.
+static COVERAGE_SOURCES: std::sync::OnceLock<FontSources> = std::sync::OnceLock::new();
+
+/// `--cjk-font` and `--cjk-style` pick the body face whose coverage decides
+/// [`face_drops`]. Set once, before the first segment is cut.
+pub(crate) fn set_coverage_face(serif: Option<&str>, style: Option<&str>) {
+    let _ = COVERAGE_SOURCES.set(FontSources {
+        serif: serif.map(std::path::PathBuf::from),
+        style: CjkStyle::resolve(style).ok(),
+        ..FontSources::default()
+    });
+}
+
 fn face_drops(ch: char) -> bool {
     use std::sync::OnceLock;
     static FACE: OnceLock<Option<SubsetFont>> = OnceLock::new();
@@ -3397,7 +3409,8 @@ fn face_drops(ch: char) -> bool {
             bold: false,
             italic: false,
         };
-        subset_for_style(style, &points, &FontSources::default())
+        let sources = COVERAGE_SOURCES.get().cloned().unwrap_or_default();
+        subset_for_style(style, &points, &sources)
     });
     face.as_ref()
         .is_some_and(|face| substitute_covered(&ch.to_string(), face).is_empty())
