@@ -2407,7 +2407,7 @@ fn listing_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
     let prose = mono_prose_block(lines);
     let mut kept = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if prose[index] || !(listing_line(line) || labelled_code_line(line)) {
+        if prose[index] || !(listing_line(line) || labelled_code_line(line) || identifier_row(line)) {
             continue;
         }
         for glyph in &line.glyphs {
@@ -2415,6 +2415,32 @@ fn listing_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
         }
     }
     kept
+}
+
+/// `block_validation_latency 0.21 (32)` and `del-1-2 0.25 (12)` are table
+/// rows named by identifiers. Every word with letters is an identifier
+/// (an underscore join, or letters then hyphen-joined digits), and the rest
+/// are numbers (`warmup_steps = 4000.` is a sentence). Translated, `clean_logs` became `清理日志` and the reflowed
+/// names no longer matched their rows.
+fn identifier_row(line: &VisualLine<'_>) -> bool {
+    let identifier = |word: &str| {
+        let word = word.trim_matches(|ch: char| matches!(ch, ',' | ';' | ':' | '(' | ')'));
+        let parts: Vec<&str> = word.split(['_', '-']).collect();
+        parts.len() >= 2
+            && parts.iter().all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric()))
+            && parts[0].chars().all(|ch| ch.is_ascii_lowercase())
+            && (word.contains('_') || parts[1..].iter().all(|part| part.chars().all(|ch| ch.is_ascii_digit())))
+    };
+    let words: Vec<&str> = line.text.split_whitespace().collect();
+    let named = words.iter().filter(|word| identifier(word)).count();
+    named >= 1
+        && words.iter().all(|word| {
+            identifier(word)
+                || word == &"t.o."
+                || word.chars().all(|ch| {
+                    ch.is_ascii_digit() || matches!(ch, '.' | '(' | ')' | '–' | '−' | '-' | '%' | ',')
+                })
+        })
 }
 
 /// `Lean: bellRenyiBudget` is a one-word label, a colon and a monospace
