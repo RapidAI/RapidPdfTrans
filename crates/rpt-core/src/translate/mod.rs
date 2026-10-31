@@ -4690,6 +4690,7 @@ fn gloss_replacement(inner: &str) -> Option<String> {
             .chars()
             .any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch))
         || math_parenthetical(inner)
+        || inner.chars().any(formula_char)
     {
         return None;
     }
@@ -4762,6 +4763,13 @@ fn math_word(word: &str) -> bool {
         }
     }
     cores == 1
+}
+
+/// `（𝑛 ≥ 0）` after `𝜋⟦0⟧⟦1⟧` is the formula's side condition, not an
+/// English gloss. A math-italic letter, an arrow, or an operator is never
+/// dropped as one.
+fn formula_char(ch: char) -> bool {
+    matches!(ch as u32, 0x1D400..=0x1D7FF | 0x2190..=0x22FF | 0x27C0..=0x2AFF)
 }
 
 fn math_mark(ch: char) -> bool {
