@@ -7245,10 +7245,22 @@ fn attach_formula_scripts(lines: &mut Vec<VisualLine<'_>>) {
         for script in scripts {
             combined.extend(lines[*script].glyphs.iter().copied());
         }
-        if !low_prose_math_sentence(&combined) {
+        // `{Ω^{ref}_{i,1}}^f` in a prose line: every script glyph sits on a
+        // math base, so the scripts are that formula's and never a word to
+        // translate. Left apart, `ref f` became its own segment.
+        let scripts: Vec<usize> = if low_prose_math_sentence(&combined) {
+            scripts.clone()
+        } else {
+            scripts
+                .iter()
+                .copied()
+                .filter(|script| every_glyph_on_math(&lines[*script], &lines[host]))
+                .collect()
+        };
+        if scripts.is_empty() {
             continue;
         }
-        for script in scripts {
+        for script in &scripts {
             let taken = std::mem::take(&mut lines[*script].glyphs);
             lines[host].glyphs.extend(taken);
             drop[*script] = true;
@@ -7352,6 +7364,20 @@ fn page_body_size(lines: &[VisualLine<'_>], page: u32) -> f32 {
     }
     sizes.sort_by(|left, right| left.total_cmp(right));
     sizes[sizes.len() / 2].max(1.0)
+}
+
+/// Each glyph of the script sits on a math glyph of the host.
+fn every_glyph_on_math(script: &VisualLine<'_>, host: &VisualLine<'_>) -> bool {
+    let size = host.size.max(1.0);
+    script.glyphs.iter().all(|mark| {
+        mark.unicode.trim().is_empty()
+            || host.glyphs.iter().any(|base| {
+                math_font_glyph(base) && {
+                    let dx = mark.matrix[4] - base.matrix[4];
+                    dx >= -size * 0.45 && dx <= size * 1.45
+                }
+            })
+    })
 }
 
 /// One glyph of the script sits on a math letter of the host (`d` on `R`,
