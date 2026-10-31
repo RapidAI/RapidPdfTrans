@@ -360,6 +360,23 @@ fn rewrite_translation_once(
         }
         keep.insert(*id, reason.clone());
     }
+    // Marks with no text (`●` in wasy) that no segment carries. They stay on
+    // the source line, so a sentence reflowed over them paints through them.
+    let in_segments: HashSet<u32> = report
+        .segments
+        .iter()
+        .flat_map(|segment| segment.glyph_ids.iter().copied())
+        .collect();
+    let unmapped_marks: Vec<&Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.unicode.trim().is_empty()
+                && !glyph.invisible
+                && !in_segments.contains(&glyph.id)
+                && !glyph.font_name.to_ascii_uppercase().contains("CMEX")
+        })
+        .collect();
     let mut symbol_shards: HashSet<u32> = HashSet::default();
     let mut formula_leads: HashSet<u32> = HashSet::default();
     for (index, segment) in report.segments.iter().enumerate() {
@@ -465,7 +482,8 @@ fn rewrite_translation_once(
         // A display line inside a paragraph stays in the source glyphs. An
         // inline formula the holes did not cover keeps that sentence too.
         let display_ids = display_equation_line_ids(&segment_glyphs);
-        let unholed_ids = unholed_formula_line_ids(&segment_glyphs, &display_ids);
+        let mut unholed_ids = unholed_formula_line_ids(&segment_glyphs, &display_ids);
+        unholed_ids.extend(unmapped_mark_line_ids(&segment_glyphs, &display_ids, &unmapped_marks));
         if !unholed_ids.is_empty() {
             // Inline math the holes missed. Drawing the flattened sentence
             // paints Chinese through the source glyphs. Keep the line.
@@ -10780,14 +10798,14 @@ fn unholed_formula_line_ids(glyphs: &[&Glyph], display: &HashSet<u32>) -> HashSe
         // `for 𝑛 ≥ 1000, it is 1.6–3.5× slower … at 𝑛 = 10^4`: plain
         // relations and `×` are drawn as text in the translation. They are
         // not a formula the holes missed, and counting them kept the whole
-        // Results paragraph in English.
+        // Results paragraph in English. Brackets are not operators either:
+        // `table p(x̄) [window a b] := add {θ}` is a sentence about code.
         let operators = loose
             .iter()
             .filter(|glyph| {
-                !glyph
-                    .unicode
-                    .chars()
-                    .all(|ch| matches!(ch, '≥' | '≤' | '×'))
+                !glyph.unicode.chars().all(|ch| {
+                    matches!(ch, '≥' | '≤' | '×' | '(' | ')' | '[' | ']' | '{' | '}')
+                })
             })
             .count();
         let equals = loose.iter().any(|glyph| glyph.unicode.contains('='))
@@ -10803,6 +10821,33 @@ fn unholed_formula_line_ids(glyphs: &[&Glyph], display: &HashSet<u32>) -> HashSe
                     ids.insert(glyph.id);
                 }
             }
+        }
+    }
+    ids
+}
+
+/// Lines of a sentence that pass over a textless mark no segment carries
+/// (`●_{[a,b]} φ`). The mark stays where it is, so the line keeps its source.
+fn unmapped_mark_line_ids(
+    glyphs: &[&Glyph],
+    display: &HashSet<u32>,
+    marks: &[&Glyph],
+) -> HashSet<u32> {
+    let mut ids = HashSet::default();
+    for mark in marks {
+        let line: Vec<&&Glyph> = glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.page_index == mark.page_index
+                    && !display.contains(&glyph.id)
+                    && (glyph.matrix[5] - mark.matrix[5]).abs() <= glyph.font_size.max(1.0) * 0.45
+            })
+            .collect();
+        let left = line.iter().map(|g| g.bbox[0].min(g.bbox[2])).fold(f32::MAX, f32::min);
+        let right = line.iter().map(|g| g.bbox[0].max(g.bbox[2])).fold(f32::MIN, f32::max);
+        let mid = (mark.bbox[0] + mark.bbox[2]) * 0.5;
+        if line.len() >= 2 && mid > left && mid < right {
+            ids.extend(line.iter().map(|g| g.id));
         }
     }
     ids
