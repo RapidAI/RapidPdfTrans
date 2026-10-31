@@ -578,6 +578,7 @@ fn rewrite_translation_once(
         );
         let translated = crate::translate::repair_body_translation(&segment.source, &translated);
         let translated = restore_flattened_set(&translated, &segment_glyphs);
+        let translated = restore_flattened_powers(&translated, &segment_glyphs);
         let translated = if prompt_samples.get(index).copied().unwrap_or(false) {
             crate::translate::unmix_prompt_line(&segment.source, &translated)
         } else {
@@ -8462,6 +8463,92 @@ fn restore_flattened_set(text: &str, glyphs: &[&Glyph]) -> String {
     out.extend(chars[start..close].iter());
     out.push('}');
     out.extend(chars[end..].iter());
+    out
+}
+
+/// `𝑛 = 10^4` came back as `𝑛 = 104`: the raised `4` was read into the
+/// number. Where the source has a digit base followed by smaller raised
+/// digits and the translation holds that run once, write the exponent with
+/// superscript digits so the value stays `10⁴`.
+fn restore_flattened_powers(text: &str, glyphs: &[&Glyph]) -> String {
+    const SUPER: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    let mut ordered: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .collect();
+    ordered.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut out = text.to_string();
+    let mut index = 0usize;
+    while index < ordered.len() {
+        let base_start = index;
+        while index < ordered.len()
+            && ordered[index].unicode.chars().all(|ch| ch.is_ascii_digit())
+            && ordered[index].font_size > 7.5
+        {
+            index += 1;
+        }
+        if index == base_start || index >= ordered.len() {
+            index = index.max(base_start + 1);
+            continue;
+        }
+        let base = &ordered[base_start..index];
+        let host = base[base.len() - 1];
+        let size = host.font_size.max(1.0);
+        let mut script_end = index;
+        while script_end < ordered.len() {
+            let glyph = ordered[script_end];
+            let raised = glyph.matrix[5] - host.matrix[5] >= size * 0.25
+                && glyph.matrix[5] - host.matrix[5] <= size * 0.7;
+            let small = glyph.font_size <= size * 0.8;
+            let near = glyph.matrix[4] >= host.matrix[4]
+                && glyph.matrix[4] - glyph_ink_right(host) <= size * 0.4;
+            if glyph.page_index != host.page_index
+                || !glyph.unicode.chars().all(|ch| ch.is_ascii_digit())
+                || !raised
+                || !small
+                || (script_end == index && !near)
+            {
+                break;
+            }
+            script_end += 1;
+        }
+        if script_end == index {
+            continue;
+        }
+        let base_text: String = base.iter().map(|glyph| glyph.unicode.as_str()).collect();
+        let script: String = ordered[index..script_end]
+            .iter()
+            .map(|glyph| glyph.unicode.as_str())
+            .collect();
+        let flat = format!("{base_text}{script}");
+        let chars: Vec<char> = out.chars().collect();
+        let flat_chars: Vec<char> = flat.chars().collect();
+        let mut hits = Vec::new();
+        if flat_chars.len() <= chars.len() {
+            for start in 0..=chars.len() - flat_chars.len() {
+                let end = start + flat_chars.len();
+                if chars[start..end] == flat_chars[..]
+                    && (start == 0 || !chars[start - 1].is_ascii_alphanumeric())
+                    && (end == chars.len() || !chars[end].is_ascii_alphanumeric())
+                {
+                    hits.push(start);
+                }
+            }
+        }
+        if let [start] = hits.as_slice() {
+            let raised: String = script
+                .chars()
+                .map(|ch| SUPER[ch.to_digit(10).unwrap_or(0) as usize])
+                .collect();
+            let mut next = String::new();
+            next.extend(chars[..start + base_text.chars().count()].iter());
+            next.push_str(&raised);
+            next.extend(chars[start + flat_chars.len()..].iter());
+            out = next;
+        }
+        index = script_end;
+    }
     out
 }
 
