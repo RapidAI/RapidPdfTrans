@@ -3311,6 +3311,8 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     groups.extend(formula_runs(glyphs, body, &used));
     used.extend(groups.iter().flatten().copied());
     groups.extend(unmapped_symbol_atoms(glyphs, &used));
+    used.extend(groups.iter().flatten().copied());
+    groups.extend(faceless_relation_atoms(glyphs, &used));
     absorb_radicals(glyphs, body, &mut groups);
     absorb_attached_scripts(glyphs, body, &mut groups);
     absorb_formula_parens(glyphs, body, &mut groups);
@@ -3341,6 +3343,24 @@ fn unmapped_symbol_atoms(glyphs: &[&Glyph], used: &HashSet<u32>) -> Vec<Vec<u32>
                 && ["WASY", "MSAM", "STMARY"]
                     .iter()
                     .any(|needle| contains_ascii_upper(&glyph.font_name, needle))
+        })
+        .map(|glyph| vec![glyph.id])
+        .collect()
+}
+
+/// `Γ ⊢ 𝜑 : C ⊲ Δ`: the CJK faces have no turnstile or normal-subgroup
+/// triangle, and no ASCII stand-in reads the same, so the Chinese line
+/// dropped them. Each is a hole that seats its own source glyph.
+fn faceless_relation_atoms(glyphs: &[&Glyph], used: &HashSet<u32>) -> Vec<Vec<u32>> {
+    glyphs
+        .iter()
+        .filter(|glyph| {
+            !glyph.invisible
+                && !used.contains(&glyph.id)
+                && glyph.unicode.trim().chars().count() == 1
+                && glyph.unicode.trim().chars().all(
+                    |ch| matches!(ch as u32, 0x22A2 | 0x22A3 | 0x22A6..=0x22AF | 0x22B2..=0x22B5),
+                )
         })
         .map(|glyph| vec![glyph.id])
         .collect()
