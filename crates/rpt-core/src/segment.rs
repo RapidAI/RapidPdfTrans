@@ -2219,6 +2219,11 @@ fn assemble(
             )
         })
         .collect();
+    let boxes: crate::detmap::HashMap<u32, ([f32; 4], f32, bool)> = raw
+        .iter()
+        .flatten()
+        .map(|glyph| (glyph.id, (glyph.bbox, glyph.font_size, glyph.invisible)))
+        .collect();
     for glyphs in raw {
         let mut body = Vec::new();
         for glyph in glyphs {
@@ -2395,6 +2400,19 @@ fn assemble(
     // `Email addresses: a@x.de (A. Name), b@y.uk (B. Name)` is a contact
     // list. Addresses are not translated, and a translated list reflows
     // the addresses into each other.
+    // `Neg`, `And−`, `Fut` beside an inference-rule bar name the rule. They
+    // stay as set; `Neg` came back `否定` on one run and not the next.
+    segments.retain(|seg| {
+        if !rule_label(seg, &boxes, regions) {
+            return true;
+        }
+        kept.extend(
+            seg.glyph_ids
+                .iter()
+                .map(|id| (*id, "rule-label".to_string())),
+        );
+        false
+    });
     segments.retain(|seg| {
         if !contact_list(&seg.text) {
             return true;
@@ -5315,6 +5333,69 @@ fn drop_caps(lines: &[VisualLine<'_>]) -> Vec<(u32, u32)> {
             Some((line.glyphs[0].id, host))
         })
         .collect()
+}
+
+/// One capitalised word of at most ten letters, maybe with a `−`/`+` or
+/// prime, whose box ends within 1.5 em of a thin horizontal bar that runs at
+/// the word's height: the name of an inference rule.
+fn rule_label(
+    seg: &Segment,
+    boxes: &crate::detmap::HashMap<u32, ([f32; 4], f32, bool)>,
+    regions: &[PaintedRegion],
+) -> bool {
+    // One word: `Split chain` beside a listing frame is an annotation.
+    let compact = seg.text.trim();
+    if compact.contains(char::is_whitespace) {
+        return false;
+    }
+    let mut chars = compact.chars();
+    if !chars.next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+        return false;
+    }
+    let letters = compact
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphabetic())
+        .count();
+    let tail: Vec<char> = compact.chars().skip(letters).collect();
+    if letters > 10
+        || tail.len() > 3
+        || tail
+            .iter()
+            .any(|ch| ch.is_alphanumeric() || matches!(ch, '.' | ',' | ':' | ';'))
+    {
+        return false;
+    }
+    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    let mut size = 0.0f32;
+    for id in &seg.glyph_ids {
+        let Some((bbox, font_size, invisible)) = boxes.get(id) else {
+            return false;
+        };
+        if *invisible {
+            continue;
+        }
+        bounds = [
+            bounds[0].min(bbox[0]),
+            bounds[1].min(bbox[1]),
+            bounds[2].max(bbox[2]),
+            bounds[3].max(bbox[3]),
+        ];
+        size = size.max(*font_size);
+    }
+    if size <= 0.0 {
+        return false;
+    }
+    regions.iter().any(|region| {
+        let [x0, y0, x1, y1] = region.bbox;
+        region.page_index == seg.page_index
+            && region.kind == "path"
+            && y1 - y0 < 1.5
+            && x1 - x0 > 10.0
+            && y0 >= bounds[1] - 0.2 * size
+            && y0 <= bounds[3] + 0.2 * size
+            && ((0.0..=1.5 * size).contains(&(x0 - bounds[2]))
+                || (0.0..=1.5 * size).contains(&(bounds[0] - x1)))
+    })
 }
 
 fn margin_stamps(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {

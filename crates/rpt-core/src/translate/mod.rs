@@ -643,7 +643,10 @@ pub fn translate_extraction(
         if translated[i].is_some() {
             continue;
         }
+        // `□` or a lone `−` has no word to translate. Sent alone, the model
+        // spent its whole reply budget reasoning about `□`.
         if seg.text.trim().is_empty()
+            || !seg.text.chars().any(char::is_alphanumeric)
             || url_or_email_only(&seg.text)
             || looks_like_formula_annotation(&seg.text)
             || formula_shard(seg, &extraction.glyphs, &glyph_at)
