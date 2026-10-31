@@ -7098,6 +7098,12 @@ fn radical_meets_base(script: &VisualLine<'_>, host: &VisualLine<'_>) -> bool {
 
 /// A prime or a spacing accent (`𝐻′`, `𝑆̂` drawn as `ˆ` over `𝑆`) that the
 /// extractor left on its own raised line.
+/// `´ ` ¨` over letters in a name such as `Martínez`: a row of these is
+/// spelling, not math accents.
+fn is_text_accent(text: &str) -> bool {
+    matches!(text, "´" | "`" | "¨" | "\u{301}" | "\u{300}" | "\u{308}")
+}
+
 fn is_math_mark(text: &str) -> bool {
     matches!(
         text,
@@ -7126,6 +7132,11 @@ fn is_math_script(line: &VisualLine<'_>) -> bool {
             .glyphs
             .iter()
             .all(|glyph| is_math_mark(glyph.unicode.trim()))
+        && (line.glyphs.len() == 1
+            || !line
+                .glyphs
+                .iter()
+                .any(|glyph| is_text_accent(glyph.unicode.trim())))
     {
         return true;
     }
