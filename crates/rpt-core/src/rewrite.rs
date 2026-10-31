@@ -30318,6 +30318,27 @@ fn layout_across_pages(
         }
         size = next;
     };
+    // `…时空维度上的衰减` filled page 6, and page 7 opened on `。以位置`.
+    // A closer at the top of the next box ends the previous box's last line.
+    let mut packed = packed;
+    for index in 1..packed.len() {
+        let (before, after) = packed.split_at_mut(index);
+        let Some(prev) = before.iter_mut().rev().find_map(|lines| lines.last_mut()) else {
+            continue;
+        };
+        let Some(first) = after[0].first_mut() else {
+            continue;
+        };
+        let moved: String = first
+            .chars()
+            .take_while(|ch| line_start_closer(*ch))
+            .collect();
+        if moved.is_empty() || moved.chars().count() == first.chars().count() {
+            continue;
+        }
+        prev.push_str(&moved);
+        *first = first.chars().skip(moved.chars().count()).collect();
+    }
     let color = callout
         .as_ref()
         .filter(|_| callout_label.is_some())
