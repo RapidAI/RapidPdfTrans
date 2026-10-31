@@ -12771,6 +12771,98 @@ fn latin_base(ch: char) -> Option<char> {
     })
 }
 
+/// `10⁵` where the face has `⁴` and not `⁵`. The stand-in is a plain `5`,
+/// which read as `105`. Each such number, as the substitution writes it, with
+/// the stand-ins flagged so they are painted raised. A number that also
+/// appears plainly in the text is skipped: the flags could land on it.
+fn lifted_power_tokens(text: &str, font: &SubsetFont) -> Vec<(Vec<char>, Vec<bool>)> {
+    let plain_of = |ch: char| {
+        if ('\u{2080}'..='\u{2089}').contains(&ch) {
+            return None;
+        }
+        script_digit(ch)
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<(Vec<char>, Vec<bool>)> = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if !chars[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index].is_ascii_digit() {
+            index += 1;
+        }
+        let mut token: Vec<char> = chars[start..index].to_vec();
+        let mut flags = vec![false; token.len()];
+        let mut lifted = false;
+        while index < chars.len() && plain_of(chars[index]).is_some() {
+            let ch = chars[index];
+            if font.has(ch as u32) {
+                token.push(ch);
+                flags.push(false);
+            } else if let Some(plain) = plain_of(ch).filter(|plain| font.has(*plain as u32)) {
+                token.push(plain);
+                flags.push(true);
+                lifted = true;
+            } else {
+                token.push(ch);
+                flags.push(false);
+            }
+            index += 1;
+        }
+        let bounded = chars
+            .get(index)
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric())
+            && (start == 0 || !chars[start - 1].is_ascii_alphanumeric());
+        if lifted && bounded && !out.iter().any(|(seen, _)| *seen == token) {
+            out.push((token, flags));
+        }
+    }
+    out.retain(|(token, _)| count_bounded(&chars, token) == 0);
+    out
+}
+
+fn count_bounded(chars: &[char], token: &[char]) -> usize {
+    if token.is_empty() || token.len() > chars.len() {
+        return 0;
+    }
+    (0..=chars.len() - token.len())
+        .filter(|&start| {
+            let end = start + token.len();
+            chars[start..end] == *token
+                && (start == 0 || !chars[start - 1].is_ascii_alphanumeric())
+                && chars.get(end).is_none_or(|ch| !ch.is_ascii_alphanumeric())
+        })
+        .count()
+}
+
+fn raise_lifted_powers(text: &str, lifted: &[(Vec<char>, Vec<bool>)], mask: &mut [bool]) {
+    let chars: Vec<char> = text.chars().collect();
+    if mask.len() != chars.len() {
+        return;
+    }
+    for (token, flags) in lifted {
+        if token.len() > chars.len() {
+            continue;
+        }
+        for start in 0..=chars.len() - token.len() {
+            let end = start + token.len();
+            if chars[start..end] == token[..]
+                && (start == 0 || !chars[start - 1].is_ascii_alphanumeric())
+                && chars.get(end).is_none_or(|ch| !ch.is_ascii_alphanumeric())
+            {
+                for (slot, flag) in flags.iter().enumerate() {
+                    if *flag {
+                        mask[start + slot] = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn substitute_covered(text: &str, font: &SubsetFont) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -17165,6 +17257,7 @@ fn layout_segment(
     if glyphs.is_empty() || text.trim().is_empty() {
         return None;
     }
+    let lifted = lifted_power_tokens(text, font);
     let covered = substitute_covered(text, font);
     let raw_mask = superscript_mask(&covered);
     let (normalized, _) = fullwidth_han_digits(&covered, &raw_mask, font);
@@ -17613,7 +17706,9 @@ fn layout_segment(
     // expansion. A mask built on the shielded sentence shifts onto the
     // expanded digits and raises an equation (`N = 6`) off its baseline.
     let mask = if sup.is_some() {
-        superscript_mask(text)
+        let mut mask = superscript_mask(text);
+        raise_lifted_powers(text, &lifted, &mut mask);
+        mask
     } else {
         vec![false; text.chars().count()]
     };
@@ -37848,6 +37943,29 @@ mod tests {
             "year should stay at body size: {:?}",
             year.iter().map(|glyph| glyph.font_size).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_power_the_face_lacks_is_painted_raised() {
+        let mut codes: Vec<u32> = "0123456789{},".chars().map(|ch| ch as u32).collect();
+        codes.push(0x2074);
+        let font = box_ttf(&codes);
+        let subset = subset_ttf(&font, &cover_with_fallbacks("{10⁴,10⁵}".chars())).unwrap();
+        let text = "{10⁴,10⁵}";
+        let lifted = lifted_power_tokens(text, &subset);
+        let covered = substitute_covered(text, &subset);
+        assert_eq!(covered, "{10⁴,105}");
+        let mut mask = vec![false; covered.chars().count()];
+        raise_lifted_powers(&covered, &lifted, &mut mask);
+        let raised: String = covered
+            .chars()
+            .zip(&mask)
+            .filter(|(_, flag)| **flag)
+            .map(|(ch, _)| ch)
+            .collect();
+        assert_eq!(raised, "5");
+        // A plain `105` elsewhere keeps the number on the baseline.
+        assert!(lifted_power_tokens("105 与 10⁵", &subset).is_empty());
     }
 
     #[test]
