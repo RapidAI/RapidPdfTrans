@@ -19980,8 +19980,28 @@ fn compose_bold_run_in(
     let head_font = embedded_font(&head_lines[0].resource, embedded)?;
     let body_font = embedded_font(&body_lines[0].resource, embedded)?;
     let (head_lines, fragments) = split_row_fragments(head_lines, size);
+    // `(Uadj)` already holds the subscript as text. A script-sized copy of
+    // `adj` past it was joined as a line and painted `（Uadj）.adj。`.
+    let head_lines: Vec<&Drawn> = head_lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            let others: Vec<&Drawn> = head_lines
+                .iter()
+                .copied()
+                .filter(|other| !std::ptr::eq(*other, *line))
+                .collect();
+            let text: String = others.iter().map(|other| other.text.as_str()).collect();
+            !script_fragment_echoed(&text, &others, line)
+        })
+        .collect();
     let mut head_text = join_wrapped_lines(&head_lines, head_font);
     for fragment in fragments {
+        // `(Uadj)` already holds the subscript as text. A script-sized copy
+        // of `adj` seated past it painted `（Uadj）.adj。`.
+        if script_fragment_echoed(&head_text, &head_lines, fragment) {
+            continue;
+        }
         head_text = seat_fragment(&head_text, &head_lines, fragment);
     }
     let body_text = join_wrapped_lines(&body_lines, body_font);
@@ -20328,6 +20348,32 @@ fn split_row_fragments(lines: Vec<&Drawn>, size: f32) -> (Vec<&Drawn>, Vec<&Draw
         }
     }
     (hosts, fragments)
+}
+
+fn script_fragment_echoed(text: &str, hosts: &[&Drawn], fragment: &Drawn) -> bool {
+    let piece = fragment.text.trim();
+    if piece.is_empty() || !piece.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let Some(host) = hosts
+        .iter()
+        .find(|host| (host.y - fragment.y).abs() < host.size.max(1.0) * 0.6)
+    else {
+        return false;
+    };
+    if fragment.size > host.size * 0.85 {
+        return false;
+    }
+    text.match_indices(piece).any(|(at, _)| {
+        text[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
+            && text[at + piece.len()..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !ch.is_ascii_alphanumeric())
+    })
 }
 
 /// Puts a row fragment back at the point of its host line it was drawn
