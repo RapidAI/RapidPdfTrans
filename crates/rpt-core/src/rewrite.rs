@@ -3355,15 +3355,52 @@ fn faceless_relation_atoms(glyphs: &[&Glyph], used: &HashSet<u32>) -> Vec<Vec<u3
     glyphs
         .iter()
         .filter(|glyph| {
+            let mut chars = glyph.unicode.trim().chars();
             !glyph.invisible
                 && !used.contains(&glyph.id)
-                && glyph.unicode.trim().chars().count() == 1
-                && glyph.unicode.trim().chars().all(
-                    |ch| matches!(ch as u32, 0x22A2 | 0x22A3 | 0x22A6..=0x22AF | 0x22B2..=0x22B5),
-                )
+                && matches!((chars.next(), chars.next()), (Some(ch), None) if face_drops(ch))
         })
         .map(|glyph| vec![glyph.id])
         .collect()
+}
+
+/// `⇀`, `↦`, `⊢`, `⊲`: a math mark the body CJK face lacks, with no covered
+/// stand-in, is dropped by [`substitute_covered`]. Held as a hole, the
+/// source glyph is drawn instead and nothing is lost. The face is the
+/// regular body face, read once per process, so every caller sees the
+/// same holes.
+fn face_drops(ch: char) -> bool {
+    use std::sync::OnceLock;
+    static FACE: OnceLock<Option<SubsetFont>> = OnceLock::new();
+    if !uncovered_symbol(ch) {
+        return false;
+    }
+    let face = FACE.get_or_init(|| {
+        let mut points: Vec<u32> = (0x20u32..0x7F).chain(0x370..0x400).collect();
+        for range in [0x20D0u32..0x2400, 0x2500..0x2C00, 0x2900..0x2B00] {
+            for cp in range {
+                let Some(ch) = char::from_u32(cp) else {
+                    continue;
+                };
+                if uncovered_symbol(ch) {
+                    points.push(cp);
+                    points.extend(coverage_fallbacks(ch).iter().map(|alt| *alt as u32));
+                    points.extend(math_plain(ch).map(|plain| plain as u32));
+                    points.extend(latin_base(ch).map(|base| base as u32));
+                }
+            }
+        }
+        points.sort_unstable();
+        points.dedup();
+        let style = FaceStyle {
+            serif: true,
+            bold: false,
+            italic: false,
+        };
+        subset_for_style(style, &points, &FontSources::default())
+    });
+    face.as_ref()
+        .is_some_and(|face| substitute_covered(&ch.to_string(), face).is_empty())
 }
 
 /// `p(c₁,c₂,…) = ∏ₜ p(cₜ | c₍<ₜ₎)` became `⟦1⟧ = t p⟦2⟧`: the `=` and the
@@ -4578,17 +4615,25 @@ fn rewrite_inline_math(
     let prose = prose_carries_inline_math(&owned);
     let formula_page = segment.page_index >= 4;
     let atomic = groups.iter().any(|group| group.len() >= 2);
+    // `⊲ reactive`, `: E ⇀ P(N × D∗) buffers`: a mark the CJK face lacks is
+    // dropped from the translation. Its hole is kept however short or
+    // prose-like the sentence is.
+    let faceless = owned.iter().any(|glyph| {
+        let mut chars = glyph.unicode.trim().chars();
+        !glyph.invisible
+            && matches!((chars.next(), chars.next()), (Some(ch), None) if face_drops(ch))
+    });
     // A sentence on an early page still gives its subscripts and radicals a
     // hole. Without one, `d_k` is redrawn on the baseline.
-    if prose && !atomic && (!formula_page || formula < 3) {
+    if !faceless && prose && !atomic && (!formula_page || formula < 3) {
         return segment;
     }
-    if groups.is_empty() || outside_letters(&owned, &groups) < 12 {
+    if groups.is_empty() || (!faceless && outside_letters(&owned, &groups) < 12) {
         return segment;
     }
     let text = reading_order_with_placeholders(&owned, &groups, body);
     let letters = text.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    if !text.contains('⟦') || letters < 8 {
+    if !text.contains('⟦') || (!faceless && letters < 8) {
         return segment;
     }
     crate::segment::Segment { text, ..segment }
