@@ -270,6 +270,15 @@ fn rewrite_translation_once(
     // Page bytes only. Image and font objects stay in `doc` and are reused
     // by the bilingual forms, so a side-by-side file is not a second copy of
     // every XObject.
+    // The source pages, for the missing-font check at the end.
+    let source_pages: Vec<(u32, ObjectId, Vec<u8>, Dictionary)> = doc
+        .get_pages()
+        .into_iter()
+        .map(|(number, id)| {
+            let snap = snap_page(doc, id);
+            (number.saturating_sub(1), id, snap.content, snap.resources)
+        })
+        .collect();
     let saved_pages = if compose.is_some() {
         Some(snapshot_pages(doc))
     } else {
@@ -1378,6 +1387,7 @@ fn rewrite_translation_once(
         extraction.mark_kept(id, reason)?;
     }
     let _ = spans;
+    restore_pages_with_missing_fonts(doc, &source_pages, extraction)?;
     if let (Some(layout), Some(saved)) = (compose, saved_pages) {
         let translated_pages = snapshot_pages(doc);
         compose_bilingual(doc, saved, translated_pages, layout)?;
@@ -1586,6 +1596,72 @@ fn record_unfitted_line_warnings(extraction: &mut Extraction) {
             message: format!("kept the original line because the translation did not fit: {text}"),
         });
     }
+}
+
+/// `Tf` names in `content` that `resources` has no font for.
+fn missing_font_names(doc: &Document, content: &[u8], resources: &Dictionary) -> Vec<String> {
+    let fonts = resources
+        .get(b"Font")
+        .ok()
+        .and_then(|obj| dict_of(doc, obj))
+        .cloned()
+        .unwrap_or_default();
+    let Ok(decoded) = lopdf::content::Content::decode(content) else {
+        return Vec::new();
+    };
+    let mut missing: Vec<String> = Vec::new();
+    for op in &decoded.operations {
+        if op.operator != "Tf" {
+            continue;
+        }
+        let Some(name) = op.operands.first().and_then(|obj| obj.as_name().ok()) else {
+            continue;
+        };
+        if fonts.get(name).is_err() {
+            let name = String::from_utf8_lossy(name).into_owned();
+            if !missing.contains(&name) {
+                missing.push(name);
+            }
+        }
+    }
+    missing
+}
+
+/// QA: a page whose text names a font its resources lack paints nothing for
+/// that text. Such a page goes back to the source page; lost content is
+/// worse than an untranslated page.
+fn restore_pages_with_missing_fonts(
+    doc: &mut Document,
+    source_pages: &[(u32, ObjectId, Vec<u8>, Dictionary)],
+    extraction: &mut Extraction,
+) -> Result<()> {
+    for (index, page_id, content, resources) in source_pages {
+        let now = doc.get_page_content(*page_id);
+        let merged = merged_resources(doc, *page_id);
+        let missing = missing_font_names(doc, &now, &merged);
+        if missing.is_empty() {
+            continue;
+        }
+        // The source itself may name a font it lacks; keep the translation.
+        if !missing_font_names(doc, content, resources).is_empty() {
+            continue;
+        }
+        let stream_id = doc.add_object(Stream::new(Dictionary::new(), content.clone()));
+        let page = doc
+            .get_object_mut(*page_id)
+            .and_then(|obj| obj.as_dict_mut())
+            .map_err(|err| Error::Pdf(err.to_string()))?;
+        page.set("Contents", Object::Reference(stream_id));
+        page.set("Resources", resources.clone());
+        extraction.diagnostics.push(crate::glyph::Diagnostic {
+            page_index: Some(*index),
+            message: format!(
+                "missing font {} on translated page; page restored to source",
+                missing.join(", ")
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn snapshot_pages(doc: &mut Document) -> Vec<PageSnap> {
@@ -33964,6 +34040,42 @@ mod tests {
         let mut ids = listing[0].ids.clone();
         ids.sort_unstable();
         assert_eq!(ids, vec![1, 2, 3, 4, 10, 11, 12, 13, 20]);
+    }
+
+    #[test]
+    fn a_page_naming_a_missing_font_goes_back_to_the_source() {
+        let mut doc = Document::with_version("1.5");
+        let font = doc.add_object(
+            dictionary! {"Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Roman"},
+        );
+        let pages_id = doc.new_object_id();
+        let source = b"BT /F1 12 Tf 72 700 Td (Hello) Tj ET".to_vec();
+        let content = doc.add_object(Stream::new(Dictionary::new(), source.clone()));
+        let resources = dictionary! {"Font" => dictionary! {"F1" => font}};
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "Resources" => resources.clone(), "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(
+                dictionary! {"Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1},
+            ),
+        );
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});
+        doc.trailer.set("Root", catalog);
+        let snaps = vec![(0u32, page_id, source.clone(), resources)];
+        let mut extraction = page_extraction(Vec::new());
+        restore_pages_with_missing_fonts(&mut doc, &snaps, &mut extraction).unwrap();
+        assert!(extraction.diagnostics.is_empty());
+        let bad = doc.add_object(Stream::new(
+            Dictionary::new(),
+            b"BT /F35 9 Tf (f) Tj ET".to_vec(),
+        ));
+        append_contents(&mut doc, page_id, bad).unwrap();
+        restore_pages_with_missing_fonts(&mut doc, &snaps, &mut extraction).unwrap();
+        assert_eq!(extraction.diagnostics.len(), 1);
+        assert_eq!(doc.get_page_content(page_id).trim_ascii_end(), source.as_slice());
     }
 
     fn page_extraction(glyphs: Vec<Glyph>) -> Extraction {
