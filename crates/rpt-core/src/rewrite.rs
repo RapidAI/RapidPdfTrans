@@ -10560,6 +10560,11 @@ fn display_equation_line_ids(glyphs: &[&Glyph]) -> HashSet<u32> {
         if line.len() < 4 || !glyphs_are_display(line) {
             continue;
         }
+        // `k=1` under `{Ω_i,k}^K_i` is the script row of a prose line, not
+        // a display. Held as one, its `=1` stayed while the hole moved.
+        if line.iter().all(|glyph| glyph.font_size <= body * 0.84) {
+            continue;
+        }
         let letters: usize = line
             .iter()
             .filter(|glyph| !display_math_face(&glyph.font_name))
