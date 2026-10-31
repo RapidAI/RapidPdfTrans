@@ -3343,6 +3343,26 @@ fn region_interiors(
     kept
 }
 
+/// The drawings on one page, as the segmenter groups them for figure labels.
+pub(crate) fn page_figure_rects(
+    regions: &[PaintedRegion],
+    pages: &[PageInfo],
+    page: u32,
+) -> Vec<[f32; 4]> {
+    let regs: Vec<&PaintedRegion> = regions
+        .iter()
+        .filter(|region| region.page_index == page)
+        .collect();
+    if regs.is_empty() {
+        return Vec::new();
+    }
+    let (width, height) = page_size(pages, page);
+    figure_unions(&regs, width, height)
+        .into_iter()
+        .map(|rect| [rect.x0, rect.y0, rect.x1, rect.y1])
+        .collect()
+}
+
 fn page_size(pages: &[PageInfo], page: u32) -> (f32, f32) {
     pages
         .iter()

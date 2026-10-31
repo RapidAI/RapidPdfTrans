@@ -19335,6 +19335,10 @@ fn adopt_unchanged_body_lines(
     // `B Baseline Methods ……… 18` is a contents row. Joining it into one
     // body-face run drops its bold and pulls the page number to the title.
     let contents = contents_page_indexes(extraction);
+    // Text inside a drawing is the figure's own label. It stays in its source
+    // glyphs: joined into a body line, the tick values of two panels became
+    // one run painted away from their positions.
+    let mut figures: HashMap<u32, Vec<[f32; 4]>> = HashMap::default();
     let mut lines: Vec<Vec<usize>> = Vec::new();
     for id in ids {
         let Some(&index) = by_id.get(&id) else {
@@ -19342,6 +19346,21 @@ fn adopt_unchanged_body_lines(
         };
         let glyph = &extraction.glyphs[index];
         if contents.contains(&glyph.page_index) {
+            continue;
+        }
+        let rects = figures.entry(glyph.page_index).or_insert_with(|| {
+            crate::segment::page_figure_rects(
+                &extraction.regions,
+                &extraction.pages,
+                glyph.page_index,
+            )
+        });
+        let x = (glyph.bbox[0] + glyph.bbox[2]) * 0.5;
+        let y = (glyph.bbox[1] + glyph.bbox[3]) * 0.5;
+        if rects
+            .iter()
+            .any(|rect| x >= rect[0] && x <= rect[2] && y >= rect[1] && y <= rect[3])
+        {
             continue;
         }
         let y = glyph.matrix[5];
@@ -44917,6 +44936,65 @@ doc[0].render(scale=3).to_pil().save(sys.argv[2])
                 .collect();
             Ok(serde_json::json!({"translations": translations}).to_string())
         }
+    }
+
+    #[test]
+    fn tick_values_inside_a_drawing_stay_at_their_source_positions() {
+        let content = b"0.9 0.9 0.9 rg 60 560 150 80 re f 214 560 150 80 re f 0 g \
+BT /F1 6 Tf \
+1 0 0 1 80 570 Tm (28) Tj 1 0 0 1 110 570 Tm (19) Tj 1 0 0 1 140 570 Tm (13) Tj \
+1 0 0 1 240 570 Tm (33) Tj 1 0 0 1 270 570 Tm (36) Tj 1 0 0 1 300 570 Tm (115) Tj \
+/F1 11 Tf \
+1 0 0 1 72 460 Tm (The dominant sequence transduction models are based on attention.) Tj \
+ET";
+        let bytes = contents_pdf(content);
+        let mut doc = PdfDocument::open_bytes(&bytes).unwrap();
+        let mut extraction = doc.extract();
+        let report = translate_extraction(
+            &mut extraction,
+            &TranslateOptions::default(),
+            &EchoExceptBody,
+        )
+        .unwrap();
+        let drawn = report
+            .segments
+            .iter()
+            .map(|segment| segment.translated.as_str())
+            .collect::<String>();
+        let mut codes: Vec<u32> = drawn.chars().map(|ch| ch as u32).collect();
+        codes.extend(
+            extraction
+                .glyphs
+                .iter()
+                .flat_map(|glyph| glyph.unicode.chars().map(|ch| ch as u32)),
+        );
+        doc.rewrite(
+            &mut extraction,
+            &report,
+            &RewriteOptions {
+                font_bytes: Some(box_ttf(&codes)),
+                ..RewriteOptions::default()
+            },
+        )
+        .unwrap();
+        let saved = doc.save_bytes().unwrap();
+        let again = PdfDocument::open_bytes(&saved).unwrap().extract();
+        let mut fives: Vec<f32> = again
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "5" && glyph.matrix[5] > 560.0)
+            .map(|glyph| glyph.matrix[4])
+            .collect();
+        fives.sort_by(f32::total_cmp);
+        assert_eq!(fives.len(), 1, "{:?}", again.plain_text());
+        assert!(fives[0] > 300.0, "115 moved to x {}", fives[0]);
+        let three = again
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode == "3" && glyph.matrix[5] > 560.0)
+            .map(|glyph| glyph.matrix[4])
+            .fold(f32::MAX, f32::min);
+        assert!((141.0..146.0).contains(&three), "13 moved to x {three}");
     }
 
     #[test]
