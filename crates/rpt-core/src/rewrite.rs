@@ -9075,15 +9075,6 @@ fn close_gap_after_formula(lines: &mut [Drawn], shifts: &[ListingShift], extract
         // `⟦0⟧ = ⟦1⟧。其中`: the tail after `⟦0⟧` already clears `⟦1⟧`,
         // which is seated in the gap. Pull only up to the last formula
         // standing before the tail.
-        let others: Vec<(f32, f32)> = seated
-            .iter()
-            .filter(|other| {
-                other.0 == page
-                    && (other.1 - seated_y).abs() <= room * 0.45
-                    && other.2 > ink_right - 0.5
-            })
-            .map(|other| (other.2, other.3))
-            .collect();
         for line in lines.iter_mut() {
             if line.page != page {
                 continue;
@@ -9092,6 +9083,21 @@ fn close_gap_after_formula(lines: &mut [Drawn], shifts: &[ListingShift], extract
             if (line.y - seated_y).abs() > em * 0.45 {
                 continue;
             }
+            // `e′(…, t′_j, …)` is seated as one shift per atom. The prime
+            // after `t` rides above the baseline, and against its own small
+            // size the `, …)` after it looked like another line, so the gap
+            // that holds it was closed and `且` was drawn on `…)`. Ink on
+            // this line is measured against the line.
+            let others: Vec<(f32, f32)> = seated
+                .iter()
+                .filter(|other| {
+                    other.0 == page
+                        && ((other.1 - seated_y).abs() <= room * 0.45
+                            || (other.1 - line.y).abs() <= em * 0.45)
+                        && other.2 > ink_right - 0.5
+                })
+                .map(|other| (other.2, other.3))
+                .collect();
             pull_tail_after_ink(line, ink_right, em, &others);
         }
     }
