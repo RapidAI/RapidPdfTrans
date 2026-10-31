@@ -1204,6 +1204,15 @@ fn rewrite_translation_once(
     carry_touching_delimiters(extraction, &mut listing_shifts, &mut stack_shifts);
     carry_hanging_operators(extraction, &mut listing_shifts, &mut stack_shifts);
     follow_display_rows(&drawn, extraction, &mut stack_shifts);
+    // A table row that moved as a listing can also sit in a stack shift.
+    // Both passes wrote the glyph, so `n = 10` was painted twice.
+    let listed: HashSet<u32> = listing_shifts
+        .iter()
+        .flat_map(|shift| shift.ids.iter().copied())
+        .collect();
+    for shift in &mut stack_shifts {
+        shift.ids.retain(|id| !listed.contains(id));
+    }
     reposition_listings(doc, extraction, &listing_shifts, &mut succeeded, &mut keep)?;
     reposition_stacks(doc, extraction, &stack_shifts, &mut succeeded, &mut keep)?;
     // An unmapped `ℓ` never entered the line, so the translation was drawn
@@ -29184,8 +29193,14 @@ fn reposition_stacks(
         let mut stream = String::from("BT\n0 Tc 0 Tw 100 Tz 0 TL\n");
         let mut moved = Vec::new();
         let mut foreign: HashMap<String, ObjectId> = HashMap::default();
+        // A glyph named by two shifts (a stack and the row it sits in) is
+        // drawn once. Drawing it for each shift stacked `n = 10` on itself.
+        let mut placed: HashSet<u32> = HashSet::default();
         for shift in page_shifts {
             for id in &shift.ids {
+                if !placed.insert(*id) {
+                    continue;
+                }
                 let Some(glyph) = by_id
                     .get(id)
                     .and_then(|index| extraction.glyphs.get(*index))
