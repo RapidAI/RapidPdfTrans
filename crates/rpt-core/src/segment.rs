@@ -7514,6 +7514,14 @@ fn keep_low_prose_math(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
         .collect();
     let mut kept = Vec::new();
     for (index, line) in lines.iter().enumerate() {
+        if delimited_word_script(line) {
+            kept.extend(
+                line.glyphs
+                    .iter()
+                    .map(|glyph| (glyph.id, "math-block".to_string())),
+            );
+            continue;
+        }
         if !dense[index] && !formula_sentence_tail(index, lines, &dense) {
             continue;
         }
@@ -7528,6 +7536,30 @@ fn keep_low_prose_math(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
         }
     }
     kept
+}
+
+/// `( ( clean` and `noise ))`: the script word of `x^{clean}` shares a
+/// baseline with the big parentheses of a display formula. The row has
+/// no prose; translated, it painted `干净` and `噪声` into equation (14).
+fn delimited_word_script(line: &VisualLine<'_>) -> bool {
+    let mut delimiter = 0.0f32;
+    let mut word = 0.0f32;
+    let mut letters = 0usize;
+    for glyph in &line.glyphs {
+        let text = glyph.unicode.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if matches!(text, "(" | ")" | "[" | "]" | "{" | "}" | "|") {
+            delimiter = delimiter.max(glyph.font_size);
+        } else if text.chars().all(|ch| ch.is_ascii_lowercase()) {
+            letters += text.chars().count();
+            word = word.max(glyph.font_size);
+        } else {
+            return false;
+        }
+    }
+    delimiter > 0.0 && (2..=8).contains(&letters) && word < delimiter * 0.85
 }
 
 fn prose_letter_count(glyphs: &[&Glyph]) -> usize {
