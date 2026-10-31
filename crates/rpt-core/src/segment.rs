@@ -268,12 +268,14 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
     let mut last_page: Option<u32> = None;
     let mut last_y: Option<f32> = None;
     let mut last_size = 12.0f32;
+    let mut orphans: Vec<&Glyph> = Vec::new();
     for (index, glyph) in ordered.iter().copied().enumerate() {
         if glyph.unmapped || glyph.unicode.is_empty() {
             if inline_symbol(&current, glyph, ordered.get(index + 1).copied()) {
                 current.push(glyph);
                 continue;
             }
+            orphans.push(glyph);
             // The gutter often holds an unmapped drawing. Flushing the line
             // without a column split glues the equation to the prose.
             if !current.is_empty() {
@@ -394,7 +396,67 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
     if !current.is_empty() {
         lines.extend(finish_line(current));
     }
+    seat_orphan_symbols(&mut lines, &orphans);
     lines
+}
+
+/// `Fut○)` and `Fut○ⁿ`: the wasysym circle sits a quarter em under its
+/// word, so it sorts after the whole row and the column split had already
+/// closed the line. A symbol-font mark with a word on its left and ink on
+/// its right in one collected line belongs to that line.
+fn seat_orphan_symbols<'a>(lines: &mut [Vec<&'a Glyph>], orphans: &[&'a Glyph]) {
+    for mark in orphans {
+        let upper = mark.font_name.to_ascii_uppercase();
+        if !["WASY", "MSAM", "STMARY"]
+            .iter()
+            .any(|needle| upper.contains(needle))
+        {
+            continue;
+        }
+        let left = mark.bbox[0].min(mark.bbox[2]);
+        let right = mark.bbox[0].max(mark.bbox[2]);
+        let mut seat: Option<(usize, usize)> = None;
+        for (index, line) in lines.iter().enumerate() {
+            let Some(size) = line
+                .iter()
+                .map(|glyph| glyph.font_size.max(1.0))
+                .reduce(f32::max)
+            else {
+                continue;
+            };
+            if line[0].page_index != mark.page_index
+                || (mark.font_size - size).abs() >= size * 0.3
+                || (mark.bbox[3] - mark.bbox[1]).abs() >= size * 1.5
+            {
+                continue;
+            }
+            let inked = |glyph: &&Glyph| {
+                !glyph.unmapped
+                    && !glyph.unicode.trim().is_empty()
+                    && (glyph.matrix[5] - mark.matrix[5]).abs() < size * 0.5
+            };
+            let before = line.iter().rposition(|glyph| {
+                inked(glyph)
+                    && glyph.unicode.chars().any(char::is_alphanumeric)
+                    && (left - glyph.bbox[0].max(glyph.bbox[2])).abs() < size * 0.3
+            });
+            // The script after the mark (`○ⁿ`) can close the line at a
+            // column split, so the ink on its right may sit in the next one.
+            let after = lines.iter().flatten().any(|glyph| {
+                glyph.page_index == mark.page_index && inked(glyph) && {
+                    let gap = glyph.bbox[0].min(glyph.bbox[2]) - right;
+                    gap > -size * 0.3 && gap < size * 0.5
+                }
+            });
+            if let (Some(at), true) = (before, after) {
+                seat = Some((index, at + 1));
+                break;
+            }
+        }
+        if let Some((index, at)) = seat {
+            lines[index].insert(at, mark);
+        }
+    }
 }
 
 /// Reading order reaches a lower subscript after the rest of the line.
