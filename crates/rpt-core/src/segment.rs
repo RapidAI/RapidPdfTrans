@@ -7120,7 +7120,13 @@ fn is_numeral_script(line: &VisualLine<'_>) -> bool {
 }
 
 fn is_math_script(line: &VisualLine<'_>) -> bool {
-    if line.glyphs.len() == 1 && is_math_mark(line.text.trim()) {
+    // `¯ ¯` over two `𝑡` in a row of `𝑒(𝑡̄)` is two accents, not a line.
+    if (1..=6).contains(&line.glyphs.len())
+        && line
+            .glyphs
+            .iter()
+            .all(|glyph| is_math_mark(glyph.unicode.trim()))
+    {
         return true;
     }
     let width = line.right - line.left;

@@ -16404,7 +16404,17 @@ fn open_leading_under_stacks(
     order.sort_by(|&left, &right| lines[right].y.total_cmp(&lines[left].y));
     for rank in 0..order.len().saturating_sub(1) {
         let line_index = order[rank];
-        let next = order[rank + 1];
+        // A script row drawn as its own small line (`1`, `2` of `C1 ⊗ C2`)
+        // is not the next body line. Measured against it, every gap looked
+        // 2pt tall and the paragraph was pushed into the one below.
+        let host = lines[line_index].size;
+        let Some(next) = order[rank + 1..]
+            .iter()
+            .copied()
+            .find(|&other| lines[other].size >= host * 0.8)
+        else {
+            continue;
+        };
         let mut below = 0.0f32;
         for &(hole_line, _, _, index, duplicate) in holes {
             if duplicate || hole_line != line_index || index >= stacks.len() {
