@@ -6972,9 +6972,12 @@ fn is_prose_function_word(word: &str) -> bool {
 
 fn math_font_glyph(glyph: &Glyph) -> bool {
     let upper = glyph.font_name.to_ascii_uppercase();
-    let math = ["CMMI", "CMSY", "CMEX", "MSAM", "MSBM", "STIX"]
-        .iter()
-        .any(|needle| upper.contains(needle))
+    // `txsym`/`pxsys` are the TX/PX fonts' symbol and blackboard faces.
+    let math = [
+        "CMMI", "CMSY", "CMEX", "MSAM", "MSBM", "STIX", "TXSY", "PXSY", "TXEX", "PXEX",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle))
         || upper.contains("MATH");
     let stix_text = (upper.contains("STIXGENERAL") || upper.contains("STIXTWOTEXT"))
         && !upper.contains("ITALIC");
