@@ -7025,7 +7025,9 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
     // `i^{(1)}` in roman digits has no math-font glyph. It is still a script
     // when it is smaller than a line and sits on that line's math letter.
     let numeral = !is_math_script(line) && is_numeral_script(line);
-    if !is_math_script(line) && !numeral {
+    // `𝑝^early`: a roman word set as a script. It is the base's label.
+    let word = !is_math_script(line) && !numeral && is_word_script(line);
+    if !is_math_script(line) && !numeral && !word {
         return None;
     }
     let mut best: Option<(usize, f32)> = None;
@@ -7036,6 +7038,12 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
         if numeral
             && (line.size >= other.size.max(1.0) * 0.85
                 || !script_sits_on_math(line, other, other.size.max(1.0)))
+        {
+            continue;
+        }
+        if word
+            && (line.size >= other.size.max(1.0) * 0.85
+                || !word_script_follows_math(line, other, other.size.max(1.0)))
         {
             continue;
         }
@@ -7069,7 +7077,7 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
         {
             continue;
         }
-        if line.left < other.left - size || line.right > other.right + size {
+        if line.left < other.left - size || (line.right > other.right + size && !word) {
             continue;
         }
         // A superscript rises well under an em. `𝑘` of `𝑦𝑘` in the row above,
@@ -7131,6 +7139,25 @@ fn is_numeral_script(line: &VisualLine<'_>) -> bool {
             .text
             .chars()
             .all(|ch| ch.is_ascii_digit() || ch.is_whitespace() || "()[]+−-,′".contains(ch))
+}
+
+/// `early` in `𝑝^early`: one short lowercase word.
+fn is_word_script(line: &VisualLine<'_>) -> bool {
+    (2..=8).contains(&line.glyphs.len())
+        && line
+            .glyphs
+            .iter()
+            .all(|glyph| glyph.unicode.chars().all(|ch| ch.is_ascii_lowercase()))
+}
+
+/// The word starts where a math letter of the host ends.
+fn word_script_follows_math(script: &VisualLine<'_>, host: &VisualLine<'_>, size: f32) -> bool {
+    host.glyphs.iter().any(|base| {
+        math_font_glyph(base) && {
+            let right = base.bbox[2];
+            (script.left - right).abs() <= size * 0.3
+        }
+    })
 }
 
 fn is_math_script(line: &VisualLine<'_>) -> bool {
@@ -7256,7 +7283,11 @@ fn next_formula_shard(lines: &[VisualLine<'_>], index: usize) -> Option<usize> {
             return false;
         }
         script.page == left.page
-            && (is_extended_formula_script(script, body) || is_math_script(script))
+            && (is_extended_formula_script(script, body)
+                || is_math_script(script)
+                || (is_word_script(script)
+                    && script.size < size * 0.85
+                    && word_script_follows_math(script, left, size)))
             && script.left < left.right + size
             && script.right > right.left - size
             && {
