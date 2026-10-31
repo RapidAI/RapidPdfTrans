@@ -10780,14 +10780,14 @@ fn unholed_formula_line_ids(glyphs: &[&Glyph], display: &HashSet<u32>) -> HashSe
         // `for 𝑛 ≥ 1000, it is 1.6–3.5× slower … at 𝑛 = 10^4`: plain
         // relations and `×` are drawn as text in the translation. They are
         // not a formula the holes missed, and counting them kept the whole
-        // Results paragraph in English.
+        // Results paragraph in English. Brackets are not operators either:
+        // `table p(x̄) [window a b] := add {θ}` is a sentence about code.
         let operators = loose
             .iter()
             .filter(|glyph| {
-                !glyph
-                    .unicode
-                    .chars()
-                    .all(|ch| matches!(ch, '≥' | '≤' | '×'))
+                !glyph.unicode.chars().all(|ch| {
+                    matches!(ch, '≥' | '≤' | '×' | '(' | ')' | '[' | ']' | '{' | '}')
+                })
             })
             .count();
         let equals = loose.iter().any(|glyph| glyph.unicode.contains('='))
