@@ -25520,7 +25520,7 @@ fn close_column_holes_with(
                     });
                 }
             }
-            if block.listing && applied > 0.4 {
+            if applied > 0.4 {
                 let size = block.size.max(1.0);
                 for region in &extraction.regions {
                     if region.page_index != page {
@@ -25534,7 +25534,18 @@ fn close_column_holes_with(
                         && x1 <= block.right + size
                         && y0 >= block.source_bottom - size
                         && y1 <= block.source_top + size;
-                    if inside && y1 - y0 < 2.5 {
+                    // A paragraph's own bars are short (`S_y + F_y N_y*`).
+                    // A rule across the column is not part of the block.
+                    // The footnote rule sits a line above the note's baseline.
+                    let short = block.listing
+                        || (owns_rule.is_none()
+                            && x1 - x0 < (block.right - block.left) * 0.5
+                            && y1 <= block.source_top + size * 0.8
+                            // A footnote rule hangs under the last baseline
+                            // of the text above it. A fraction bar or an
+                            // overline sits above a baseline of its block.
+                            && y0 >= block.source_bottom);
+                    if inside && short && y1 - y0 < 2.5 {
                         display_bars.push(RuleMove {
                             page,
                             x0,
