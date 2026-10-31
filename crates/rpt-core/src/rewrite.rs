@@ -27564,6 +27564,7 @@ fn reposition_listings(
     for (page, page_shifts) in by_page {
         let mut stream = String::from("BT\n0 Tc 0 Tw 100 Tz 0 TL\n");
         let mut moved = Vec::new();
+        let mut foreign: HashMap<String, ObjectId> = HashMap::default();
         for shift in page_shifts {
             let mut glyphs: Vec<&Glyph> = shift
                 .ids
@@ -27615,7 +27616,7 @@ fn reposition_listings(
                     continue;
                 }
                 stream.push('/');
-                stream.push_str(&sample.font_resource);
+                stream.push_str(&page_font_name(sample, page, &mut foreign));
                 stream.push(' ');
                 stream.push_str(&pdf_num(sample.font_size));
                 stream.push_str(" Tf ");
@@ -27642,6 +27643,9 @@ fn reposition_listings(
         };
         let stream_id = doc.add_object(Stream::new(Dictionary::new(), stream.into_bytes()));
         append_contents(doc, page_id, stream_id)?;
+        if !foreign.is_empty() {
+            attach_fonts(doc, page_id, &foreign)?;
+        }
         succeeded.extend(moved.iter().copied());
         // A kept listing would otherwise stay on the English baseline under
         // the copy drawn at the closed-up y.
@@ -29003,6 +29007,7 @@ fn reposition_stacks(
     for (page, page_shifts) in by_page {
         let mut stream = String::from("BT\n0 Tc 0 Tw 100 Tz 0 TL\n");
         let mut moved = Vec::new();
+        let mut foreign: HashMap<String, ObjectId> = HashMap::default();
         for shift in page_shifts {
             for id in &shift.ids {
                 let Some(glyph) = by_id
@@ -29019,7 +29024,7 @@ fn reposition_stacks(
                     continue;
                 }
                 stream.push('/');
-                stream.push_str(&glyph.font_resource);
+                stream.push_str(&page_font_name(glyph, page, &mut foreign));
                 stream.push(' ');
                 stream.push_str(&pdf_num(glyph.font_size));
                 stream.push_str(" Tf ");
@@ -29046,6 +29051,9 @@ fn reposition_stacks(
         };
         let stream_id = doc.add_object(Stream::new(Dictionary::new(), stream.into_bytes()));
         append_contents(doc, page_id, stream_id)?;
+        if !foreign.is_empty() {
+            attach_fonts(doc, page_id, &foreign)?;
+        }
         succeeded.extend(moved.iter().copied());
         for id in moved {
             keep.remove(&id);
@@ -31627,6 +31635,21 @@ fn tounicode_cmap(font: &SubsetFont, base_name: &str) -> String {
     }
     out.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
     out
+}
+
+/// The resource name of `glyph`'s font on `page`. A paragraph that flows
+/// over a page break carries glyphs of the next page, whose `/F35` is not in
+/// this page's resources. Such a font is added under a name of its own.
+fn page_font_name(glyph: &Glyph, page: u32, foreign: &mut HashMap<String, ObjectId>) -> String {
+    if glyph.page_index == page {
+        return glyph.font_resource.clone();
+    }
+    let Some(id) = glyph.font_object.as_deref().and_then(parse_id) else {
+        return glyph.font_resource.clone();
+    };
+    let name = format!("RPTX{}x{}", id.0, id.1);
+    foreign.insert(name.clone(), id);
+    name
 }
 
 fn attach_fonts(
