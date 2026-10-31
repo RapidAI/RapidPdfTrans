@@ -220,6 +220,32 @@ fn rejoin_formula_fragments(lines: Vec<Vec<&Glyph>>) -> Vec<Vec<&Glyph>> {
     out
 }
 
+/// `formula ● and S`: a symbol-font (wasysym) glyph with no unicode set between two
+/// words of one body line. Flushing on it split the sentence, and the
+/// translation of the first half ran under the symbol.
+fn inline_symbol(current: &[&Glyph], glyph: &Glyph, next: Option<&Glyph>) -> bool {
+    let (Some(last), Some(next)) = (current.last(), next) else {
+        return false;
+    };
+    let size = last.font_size.max(1.0);
+    let near = |a: &Glyph, b: &Glyph| {
+        a.page_index == b.page_index
+            && (a.matrix[5] - b.matrix[5]).abs() < size * 0.2
+            && b.bbox[0].min(b.bbox[2]) - a.bbox[0].max(a.bbox[2]) < size
+            && b.bbox[0].min(b.bbox[2]) > a.bbox[0].min(a.bbox[2])
+    };
+    let symbol_font = ["WASY", "MSAM", "CMSY", "STMARY"]
+        .iter()
+        .any(|needle| glyph.font_name.to_ascii_uppercase().contains(needle));
+    symbol_font
+        && !next.unmapped
+        && !next.unicode.is_empty()
+        && (glyph.font_size - size).abs() < size * 0.3
+        && (glyph.bbox[3] - glyph.bbox[1]).abs() < size * 1.5
+        && near(last, glyph)
+        && near(glyph, next)
+}
+
 fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
     let mut ordered: Vec<&Glyph> = glyphs.iter().collect();
     ordered.sort_by(|a, b| {
@@ -242,8 +268,12 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
     let mut last_page: Option<u32> = None;
     let mut last_y: Option<f32> = None;
     let mut last_size = 12.0f32;
-    for glyph in ordered {
+    for (index, glyph) in ordered.iter().copied().enumerate() {
         if glyph.unmapped || glyph.unicode.is_empty() {
+            if inline_symbol(&current, glyph, ordered.get(index + 1).copied()) {
+                current.push(glyph);
+                continue;
+            }
             // The gutter often holds an unmapped drawing. Flushing the line
             // without a column split glues the equation to the prose.
             if !current.is_empty() {
