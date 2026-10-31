@@ -24340,6 +24340,7 @@ fn unique_token_end(text: &str, token: &str) -> Option<usize> {
 
 /// A short rule just above a footnote. `dy` is the step the note took, and
 /// the rule has to take it too or it stays in the gap under the abstract.
+#[derive(Clone)]
 struct RuleMove {
     page: u32,
     x0: f32,
@@ -25180,6 +25181,7 @@ fn close_column_holes_with(
         let mut hold_scripts = false;
         let mut placed_lines: Vec<PlacedListing> = Vec::new();
         let mut placed_blocks: Vec<(f32, f32, f32, f32)> = Vec::new();
+        let mut display_bars: Vec<RuleMove> = Vec::new();
         for block in blocks {
             // A column page number sits to the right of its title. It is not
             // the next paragraph, and treating it as one used to drop the
@@ -25356,8 +25358,14 @@ fn close_column_holes_with(
                         ceiling.extend(item.ids.iter().copied());
                     }
                 }
-                let limited =
-                    cap_upward_shift(&block, shift, page, extraction, &ceiling, owns_rule, rules);
+                // A fraction bar of a display already lifted in this chain is
+                // not where the source drew it. Its old y capped the
+                // paragraph under equation (1) and left a blank band.
+                let mut lifted: Vec<RuleMove> = rules.clone();
+                lifted.extend(display_bars.iter().cloned());
+                let limited = cap_upward_shift(
+                    &block, shift, page, extraction, &ceiling, owns_rule, &lifted,
+                );
                 // The painted step is what the next line inherits. Keeping
                 // the uncapped pull stacked †, ‡, and the venue line on the
                 // first footnote baseline, just under the rule.
@@ -25464,6 +25472,31 @@ fn close_column_holes_with(
                         dy: shift,
                         host_y: f32::NAN,
                     });
+                }
+            }
+            if block.listing && applied > 0.4 {
+                let size = block.size.max(1.0);
+                for region in &extraction.regions {
+                    if region.page_index != page {
+                        continue;
+                    }
+                    let y0 = region.bbox[1].min(region.bbox[3]);
+                    let y1 = region.bbox[1].max(region.bbox[3]);
+                    let x0 = region.bbox[0].min(region.bbox[2]);
+                    let x1 = region.bbox[0].max(region.bbox[2]);
+                    let inside = x0 >= block.left - size
+                        && x1 <= block.right + size
+                        && y0 >= block.source_bottom - size
+                        && y1 <= block.source_top + size;
+                    if inside && y1 - y0 < 2.5 {
+                        display_bars.push(RuleMove {
+                            page,
+                            x0,
+                            x1,
+                            y: (y0 + y1) * 0.5,
+                            dy: applied,
+                        });
+                    }
                 }
             }
             let mut placed = block;
