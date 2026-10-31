@@ -19900,14 +19900,19 @@ fn reflow_bold_run_ins(
         return;
     }
     let mut groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::default();
+    let mut blank_slices: HashSet<Vec<u32>> = HashSet::default();
     for (index, line) in drawn.iter().enumerate() {
-        if line.text.trim().is_empty() {
-            continue;
-        }
         let mut key = line.glyph_ids.clone();
         key.sort_unstable();
         key.dedup();
         if key.is_empty() {
+            continue;
+        }
+        // `∈ Δ, m_Γ ⊢ (π,ψ) ⇝ (π′,ψ′)` was seated on its own row, with blank
+        // slices between the formulas. Rewrapping the body would not see
+        // that row and drew `一个子句集…` over the formulas.
+        if line.text.trim().is_empty() {
+            blank_slices.insert(key);
             continue;
         }
         groups.entry(key).or_default().push(index);
@@ -19926,7 +19931,7 @@ fn reflow_bold_run_ins(
         else {
             continue;
         };
-        if used.contains(&body_key) {
+        if used.contains(&body_key) || blank_slices.contains(&body_key) {
             continue;
         }
         // A shorter Chinese label slid the body left but kept its English
@@ -34075,7 +34080,10 @@ mod tests {
         append_contents(&mut doc, page_id, bad).unwrap();
         restore_pages_with_missing_fonts(&mut doc, &snaps, &mut extraction).unwrap();
         assert_eq!(extraction.diagnostics.len(), 1);
-        assert_eq!(doc.get_page_content(page_id).trim_ascii_end(), source.as_slice());
+        assert_eq!(
+            doc.get_page_content(page_id).trim_ascii_end(),
+            source.as_slice()
+        );
     }
 
     fn page_extraction(glyphs: Vec<Glyph>) -> Extraction {
