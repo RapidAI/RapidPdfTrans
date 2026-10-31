@@ -7069,6 +7069,11 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
         if line.left < other.left - size || line.right > other.right + size {
             continue;
         }
+        // A superscript rises well under an em. `𝑘` of `𝑦𝑘` in the row above,
+        // most of an em over this baseline, is not this line's.
+        if line.y > other.y && dy > size * 0.75 && !on_math && !radical_meets_base(line, other) {
+            continue;
+        }
         let mut score = dy;
         if on_math {
             score -= size;
