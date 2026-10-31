@@ -1132,15 +1132,25 @@ fn snap_line_compounds(
             }
             // `当前块` / `，而`: pulling `块` up must not leave its comma
             // behind. The comma comes along and hangs.
-            let mut pulled = pulled;
-            while pulled < upcoming.len() && !break_before(upcoming[pulled]) {
-                pulled += 1;
+            let mut hang = pulled;
+            while hang < upcoming.len() && !break_before(upcoming[hang]) {
+                hang += 1;
             }
-            if pulled > after.len() - before.len() {
+            if hang > pulled {
                 let mut grown = slot[0].clone();
-                grown.extend(upcoming[after.len() - before.len()..pulled].iter());
-                lines[index] = grown;
-                lines[index + 1] = upcoming[pulled..].iter().collect();
+                grown.extend(upcoming[pulled..hang].iter());
+                // A tail that runs past the column makes the fitter shrink
+                // the whole paragraph (the `hasRole(x̄)` paragraph).
+                // A formula hole disables hanging, so the mark must fit.
+                let room = if holes.is_empty() { size * 1.05 } else { 0.01 };
+                if fit_measure_holes(&grown, size, font, holes) <= width + room {
+                    lines[index] = grown;
+                    lines[index + 1] = upcoming[hang..].iter().collect();
+                    index += 1;
+                    continue;
+                }
+                // It cannot come along: keep the wrap as it was, which did
+                // not open on the mark.
                 index += 1;
                 continue;
             }
