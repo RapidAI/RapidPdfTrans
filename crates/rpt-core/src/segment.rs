@@ -1683,7 +1683,17 @@ fn detach_low_quality_ocr(
                 let body = page_body_size(lines, lines[index].page);
                 // `d_model×d_k` is a superscript of the sentence under it.
                 // The multiply sign makes the line look like scan garbage.
+                // `where each 𝜑𝑖 is one of 𝜓, ●𝐼𝜓 …` is set in math fonts. A
+                // scan's text layer has no math fonts, so this is no misread.
+                let typeset_math = lines[index]
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| math_font_glyph(glyph))
+                    .count()
+                    >= 2
+                    && prose_letter_count(&lines[index].glyphs) >= 10;
                 ocr_line_low_quality(&lines[index].text)
+                    && !typeset_math
                     && !is_extended_formula_script(&lines[index], body)
             })
             .collect();
@@ -7528,7 +7538,10 @@ fn keep_low_prose_math(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
         // `Where the projections are parameter matrices … and W^O …` is a
         // sentence. The formula runs are placeholders; the words translate.
         // A line that is only the formula stays in the source.
-        if prose_letter_count(&line.glyphs) >= 18 || follows_prose_sentence(index, lines) {
+        if prose_letter_count(&line.glyphs) >= 18
+            || follows_prose_sentence(index, lines)
+            || runs_into_prose(index, lines)
+        {
             continue;
         }
         for glyph in &line.glyphs {
@@ -7580,6 +7593,35 @@ fn prose_letter_count(glyphs: &[&Glyph]) -> usize {
             .count();
     }
     letters
+}
+
+/// `where each φ_i is one of ψ, … with χ an` ends on an article, and the
+/// sentence goes on in the next line (`MFOTL formula without …`). Keeping
+/// it left the first line in English above the Chinese rest.
+fn runs_into_prose(index: usize, lines: &[VisualLine<'_>]) -> bool {
+    let line = &lines[index];
+    let last = line
+        .text
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .filter(|word| !word.is_empty())
+        .last()
+        .unwrap_or("");
+    if !matches!(
+        last,
+        "a" | "an" | "the" | "of" | "with" | "and" | "or" | "to" | "for" | "in" | "is" | "that"
+    ) || !line.text.trim_end().ends_with(last)
+    {
+        return false;
+    }
+    let size = line.size.max(1.0);
+    lines.iter().enumerate().any(|(other, next)| {
+        other != index
+            && next.page == line.page
+            && next.y < line.y
+            && line.y - next.y <= size * 1.6
+            && (line.left - next.left).abs() <= size * 2.0
+            && prose_letter_count(&next.glyphs) >= 18
+    })
 }
 
 /// `and W^O ∈ R^{…}` sits under the projection sentence. Keeping it leaves

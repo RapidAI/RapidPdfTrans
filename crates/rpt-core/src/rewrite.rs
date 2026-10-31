@@ -3169,6 +3169,8 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     groups.extend(script_atoms(glyphs, body, &used));
     used.extend(groups.iter().flatten().copied());
     groups.extend(formula_runs(glyphs, body, &used));
+    used.extend(groups.iter().flatten().copied());
+    groups.extend(unmapped_symbol_atoms(glyphs, &used));
     absorb_radicals(glyphs, body, &mut groups);
     absorb_attached_scripts(glyphs, body, &mut groups);
     absorb_formula_parens(glyphs, body, &mut groups);
@@ -3184,6 +3186,24 @@ fn placeholder_groups(glyphs: &[&Glyph], body: f32) -> Vec<Vec<u32>> {
     let mut groups = close_open_brackets(glyphs, groups, body);
     sort_placeholder_groups(glyphs, body, &mut groups);
     groups
+}
+
+/// `operators), ● and S_I`: the wasysym `●` has no unicode, so the text
+/// skipped it and the Chinese ran under the source glyph. It is a hole of
+/// its own and travels with the sentence.
+fn unmapped_symbol_atoms(glyphs: &[&Glyph], used: &HashSet<u32>) -> Vec<Vec<u32>> {
+    glyphs
+        .iter()
+        .filter(|glyph| {
+            (glyph.unmapped || glyph.unicode.trim().is_empty())
+                && !glyph.invisible
+                && !used.contains(&glyph.id)
+                && ["WASY", "MSAM", "STMARY"]
+                    .iter()
+                    .any(|needle| contains_ascii_upper(&glyph.font_name, needle))
+        })
+        .map(|glyph| vec![glyph.id])
+        .collect()
 }
 
 /// `p(c₁,c₂,…) = ∏ₜ p(cₜ | c₍<ₜ₎)` became `⟦1⟧ = t p⟦2⟧`: the `=` and the
