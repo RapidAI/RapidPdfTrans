@@ -23512,11 +23512,11 @@ fn cap_upward_shift(
             continue;
         }
         let gy = glyph.matrix[5];
+        let gx0 = glyph.bbox[0].min(glyph.bbox[2]);
+        let gx1 = glyph.bbox[0].max(glyph.bbox[2]);
         if gy <= block.top + size * 0.35 {
             continue;
         }
-        let gx0 = glyph.bbox[0].min(glyph.bbox[2]);
-        let gx1 = glyph.bbox[0].max(glyph.bbox[2]);
         let overlap = block.right.min(gx1) - block.left.max(gx0);
         if overlap < size * 0.3 {
             continue;
@@ -23860,7 +23860,13 @@ fn claim_orphan_scripts(
     // Each page's equation letters, gathered once. Scanning the whole
     // document for every small glyph took minutes on a long article.
     let mut bases: HashMap<u32, Vec<&Glyph>> = HashMap::default();
-    for base in extraction.glyphs.iter().filter(|base| formula_base(base)) {
+    // A base inside a translated line was redrawn as text (`φ` in `在 C 处重写
+    // φ`); its source script no longer sits on anything and must be seated.
+    for base in extraction
+        .glyphs
+        .iter()
+        .filter(|base| formula_base(base) && !claimed.contains(&base.id))
+    {
         bases.entry(base.page_index).or_default().push(base);
     }
     // `10^{−4}`: the seated `−` and the `4` after it are one exponent.
@@ -24004,7 +24010,11 @@ fn seat_orphan_script(
                 && glyph.matrix[4] + size * 0.2 >= right
         })
         .max_by(|left, right| glyph_ink_right(left).total_cmp(&glyph_ink_right(right)))?;
-    if !anchor.unicode.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+    // `φ^♭` and `C^S`: a Greek or math-italic base seats a script as well
+    // as `10`. Only ASCII bases were tried, so `♭` stayed at its source x
+    // on top of `产生`.
+    let token_char = |ch: char| ch.is_alphanumeric() && !is_han_char(ch);
+    if !anchor.unicode.chars().all(token_char) {
         return None;
     }
     let mut token: Vec<&Glyph> = vec![anchor];
@@ -24022,7 +24032,10 @@ fn seat_orphan_script(
             break;
         };
         let gap = left_edge - glyph_ink_right(prev);
-        let word = prev.unicode.chars().all(|ch| ch.is_ascii_alphanumeric());
+        // `rewrites 𝜑`: an italic math letter does not join the word
+        // before it, so the token stays `𝜑`.
+        let math = |item: &Glyph| item.unicode.chars().any(|ch| math_plain(ch).is_some());
+        let word = prev.unicode.chars().all(token_char) && math(prev) == math(anchor);
         if !word || gap < -size * 0.1 || gap > size * 0.45 {
             break;
         }
@@ -24038,7 +24051,13 @@ fn seat_orphan_script(
         .iter()
         .map(|item| glyph_ink_right(item))
         .fold(f32::MIN, f32::max);
-    let end = unique_token_end(&line.text, &word)?;
+    // The line may draw `𝜑` as the plain `φ` the CJK face covers.
+    let plain: String = word
+        .chars()
+        .map(|ch| math_plain(ch).unwrap_or(ch))
+        .collect();
+    let end =
+        unique_token_end(&line.text, &word).or_else(|| unique_token_end(&line.text, &plain))?;
     let chars: Vec<char> = line.text.chars().collect();
     let drawn_right = char_origin(line, &chars, end);
     let gap = glyph.matrix[4] - source_right;
@@ -24074,6 +24093,12 @@ fn reserve_script_clearance(drawn: &mut [Drawn], seats: &[(usize, usize, f32)]) 
         let item = &drawn[line];
         let chars: Vec<char> = item.text.chars().collect();
         if token_end == 0 || token_end >= chars.len() || item.widths.len() != chars.len() {
+            continue;
+        }
+        // `重写 φ♭，… 实现(Γ, C)是`: kept ink already seated in a hole
+        // later on the line does not move with the widened gap, so the text
+        // after it would slide under `(Γ, C)`. Leave such a line alone.
+        if chars[token_end..].contains(&'\u{3000}') {
             continue;
         }
         let origin = char_origin(item, &chars, token_end);
