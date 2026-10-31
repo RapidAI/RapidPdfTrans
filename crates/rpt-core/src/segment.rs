@@ -7238,10 +7238,14 @@ fn next_formula_shard(lines: &[VisualLine<'_>], index: usize) -> Option<usize> {
     // `(C⁴)^⊗n. Generic postse-` is the rest of the column line. Its words
     // are prose, so the shard is long, but the script fills the hole
     // exactly. Left apart, the tail joined the other column's paragraph.
+    // `ℝ^{𝐿×𝐷𝐻}` is a wider hole; the script still spans it end to end.
     let fills_hole = |script: &VisualLine<'_>| {
-        gap <= size * 2.5
-            && script.left >= left.right - size
+        script.left >= left.right - size
             && script.right <= right.left + size * 0.5
+            && (gap <= size * 2.5
+                || (gap <= size * 4.0
+                    && script.left <= left.right + size * 0.5
+                    && script.right >= right.left - size * 0.6))
     };
     let long_tail = right_letters > 12;
     let bridged = lines.iter().any(|script| {
