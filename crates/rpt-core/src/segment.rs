@@ -2407,7 +2407,8 @@ fn listing_glyphs(lines: &[VisualLine<'_>]) -> Vec<(u32, String)> {
     let prose = mono_prose_block(lines);
     let mut kept = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if prose[index] || !(listing_line(line) || labelled_code_line(line) || identifier_row(line)) {
+        if prose[index] || !(listing_line(line) || labelled_code_line(line) || identifier_row(line))
+        {
             continue;
         }
         for glyph in &line.glyphs {
@@ -2427,9 +2428,14 @@ fn identifier_row(line: &VisualLine<'_>) -> bool {
         let word = word.trim_matches(|ch: char| matches!(ch, ',' | ';' | ':' | '(' | ')'));
         let parts: Vec<&str> = word.split(['_', '-']).collect();
         parts.len() >= 2
-            && parts.iter().all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric()))
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric()))
             && parts[0].chars().all(|ch| ch.is_ascii_lowercase())
-            && (word.contains('_') || parts[1..].iter().all(|part| part.chars().all(|ch| ch.is_ascii_digit())))
+            && (word.contains('_')
+                || parts[1..]
+                    .iter()
+                    .all(|part| part.chars().all(|ch| ch.is_ascii_digit())))
     };
     let words: Vec<&str> = line.text.split_whitespace().collect();
     let named = words.iter().filter(|word| identifier(word)).count();
@@ -2438,7 +2444,8 @@ fn identifier_row(line: &VisualLine<'_>) -> bool {
             identifier(word)
                 || word == &"t.o."
                 || word.chars().all(|ch| {
-                    ch.is_ascii_digit() || matches!(ch, '.' | '(' | ')' | '–' | '−' | '-' | '%' | ',')
+                    ch.is_ascii_digit()
+                        || matches!(ch, '.' | '(' | ')' | '–' | '−' | '-' | '%' | ',')
                 })
         })
 }

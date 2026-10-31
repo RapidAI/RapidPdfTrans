@@ -483,7 +483,11 @@ fn rewrite_translation_once(
         // inline formula the holes did not cover keeps that sentence too.
         let display_ids = display_equation_line_ids(&segment_glyphs);
         let mut unholed_ids = unholed_formula_line_ids(&segment_glyphs, &display_ids);
-        unholed_ids.extend(unmapped_mark_line_ids(&segment_glyphs, &display_ids, &unmapped_marks));
+        unholed_ids.extend(unmapped_mark_line_ids(
+            &segment_glyphs,
+            &display_ids,
+            &unmapped_marks,
+        ));
         if !unholed_ids.is_empty() {
             // Inline math the holes missed. Drawing the flattened sentence
             // paints Chinese through the source glyphs. Keep the line.
@@ -1288,6 +1292,39 @@ fn rewrite_translation_once(
                 keep.insert(*id, "no-stream".into());
             }
         }
+    }
+    // A line drawn back in its own source text over operators that stay on
+    // the page repaints ink that is still there. A kept table cell painted
+    // that way stacked a second `0.25 (12)` on the first.
+    if !overlay {
+        let blanked = |id: &u32| {
+            let glyph = &extraction.glyphs[by_id[id]];
+            span_of(&glyph.source).is_some_and(|span| {
+                spans.iter().any(|other: &Span| {
+                    other.object_id == span.object_id
+                        && other.start == span.start
+                        && other.end == span.end
+                })
+            })
+        };
+        drawn.retain(|line| {
+            if line.glyph_ids.is_empty()
+                || line
+                    .glyph_ids
+                    .iter()
+                    .any(|id| !by_id.contains_key(id) || blanked(id))
+            {
+                return true;
+            }
+            let source: String = line
+                .glyph_ids
+                .iter()
+                .flat_map(|id| extraction.glyphs[by_id[id]].unicode.chars())
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            let text: String = line.text.chars().filter(|ch| !ch.is_whitespace()).collect();
+            text != source
+        });
     }
     if let Err(err) = blank_operators(doc, &spans, extraction) {
         for id in &succeeded {
@@ -10803,9 +10840,10 @@ fn unholed_formula_line_ids(glyphs: &[&Glyph], display: &HashSet<u32>) -> HashSe
         let operators = loose
             .iter()
             .filter(|glyph| {
-                !glyph.unicode.chars().all(|ch| {
-                    matches!(ch, '≥' | '≤' | '×' | '(' | ')' | '[' | ']' | '{' | '}')
-                })
+                !glyph
+                    .unicode
+                    .chars()
+                    .all(|ch| matches!(ch, '≥' | '≤' | '×' | '(' | ')' | '[' | ']' | '{' | '}'))
             })
             .count();
         let equals = loose.iter().any(|glyph| glyph.unicode.contains('='))
@@ -10843,8 +10881,14 @@ fn unmapped_mark_line_ids(
                     && (glyph.matrix[5] - mark.matrix[5]).abs() <= glyph.font_size.max(1.0) * 0.45
             })
             .collect();
-        let left = line.iter().map(|g| g.bbox[0].min(g.bbox[2])).fold(f32::MAX, f32::min);
-        let right = line.iter().map(|g| g.bbox[0].max(g.bbox[2])).fold(f32::MIN, f32::max);
+        let left = line
+            .iter()
+            .map(|g| g.bbox[0].min(g.bbox[2]))
+            .fold(f32::MAX, f32::min);
+        let right = line
+            .iter()
+            .map(|g| g.bbox[0].max(g.bbox[2]))
+            .fold(f32::MIN, f32::max);
         let mid = (mark.bbox[0] + mark.bbox[2]) * 0.5;
         if line.len() >= 2 && mid > left && mid < right {
             ids.extend(line.iter().map(|g| g.id));
