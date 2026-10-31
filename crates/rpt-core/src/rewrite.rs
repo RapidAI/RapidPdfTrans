@@ -27041,6 +27041,7 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
     });
     let mut clusters: Vec<Vec<&Glyph>> = Vec::new();
     let first_delimiter = lines.len();
+    let big_glyphs: Vec<&Glyph> = delimiters.iter().flatten().copied().collect();
     lines.extend(delimiters);
     for (at, line) in lines.into_iter().enumerate() {
         if at >= first_delimiter {
@@ -27065,7 +27066,19 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
                         .map(|dy| (index, dy))
                 })
                 .min_by(|left, right| left.1.total_cmp(&right.1))
-                .map(|(index, _)| index);
+                .map(|(index, _)| index)
+                // The closing `]` of `[ … ]` wraps nothing to its own right.
+                // It pairs with the opening delimiter on its baseline.
+                .or_else(|| {
+                    clusters.iter().position(|cluster| {
+                        let (cx0, cx1) = formula_line_span(cluster);
+                        formula_horiz_gap(lx0, lx1, cx0, cx1) < size * 2.0
+                            && cluster.iter().any(|glyph| {
+                                contains_ascii_upper(&glyph.font_name, "CMEX")
+                                    && (glyph.matrix[5] - ly).abs() < 0.6
+                            })
+                    })
+                });
             match host {
                 Some(index) => clusters[index].extend(line),
                 None => clusters.push(line),
@@ -27104,6 +27117,44 @@ fn display_formula_blocks(drawn: &[Drawn], extraction: &Extraction, page: u32) -
                     .map(|glyph| glyph.matrix[5])
                     .fold(ly, f32::min);
                 if top - bottom <= cluster_size * 2.05 {
+                    return true;
+                }
+                // `t` under a fraction bar and `i=1` under a sum hang just
+                // below the row they belong to, inside its width.
+                let line_top = line
+                    .iter()
+                    .map(|glyph| glyph.matrix[5])
+                    .fold(f32::MIN, f32::max);
+                let row_bottom = cluster
+                    .iter()
+                    .map(|glyph| glyph.matrix[5])
+                    .fold(f32::MAX, f32::min);
+                if lx0 >= cx0
+                    && lx1 <= cx1
+                    && lx1 - lx0 < (cx1 - cx0) * 0.4
+                    && line_top < row_bottom + 0.6
+                    && row_bottom - line_top <= cluster_size * 0.8
+                    && line.iter().any(|glyph| is_math_font(&glyph.font_name))
+                    // `∈ R^d, such as a hidden` is the tail of a kept English
+                    // line, not a limit. A limit's letters are all math.
+                    && line.iter().all(|glyph| {
+                        !glyph.unicode.chars().any(char::is_alphabetic)
+                            || is_math_font(&glyph.font_name)
+                    })
+                    // A limit or a denominator sits next to a big operator or
+                    // bracket of that row (`∑`, `[`), not under plain math.
+                    && big_glyphs
+                        .iter()
+                        .chain(cluster.iter().filter(|glyph| {
+                            contains_ascii_upper(&glyph.font_name, "CMEX")
+                        }))
+                        .any(|glyph| {
+                            let (gx0, gx1) = formula_glyph_span(glyph);
+                            formula_horiz_gap(lx0, lx1, gx0, gx1) < size * 2.0
+                                && glyph.matrix[5] > line_top
+                                && glyph.matrix[5] < top + cluster_size
+                        })
+                {
                     return true;
                 }
                 // A tall numerator (`exp(-d(x, c))` with big parens) puts the
