@@ -10198,9 +10198,21 @@ fn pull_opening_punctuation(lines: &mut [Drawn]) {
             .collect();
         // `”` drawn as its own slice in front of `。因此` is not a hole: the
         // pair wrapped together and both go up.
+        // A closer slice with words before it on this baseline follows a
+        // hole (`（c⟦1⟧），因此`). It is not a line start.
         let closer_slice = beside.len() == 1 && {
             let text = lines[beside[0]].text.trim();
-            !text.is_empty() && text.chars().all(line_start_closer)
+            let mark_x = lines[beside[0]].x;
+            !text.is_empty()
+                && text.chars().all(line_start_closer)
+                && !(0..lines.len()).any(|other| {
+                    other != index
+                        && other != beside[0]
+                        && lines[other].page == page
+                        && (lines[other].y - y).abs() <= size * 0.25
+                        && lines[other].x + 1.0 < mark_x
+                        && !lines[other].text.trim().is_empty()
+                })
         };
         let beside_hole = !closer_slice
             && (0..lines.len()).any(|other| {
@@ -16795,6 +16807,24 @@ fn open_leading_under_stacks(
     }
 }
 
+/// The formula's last glyph is a `)` it never opened.
+fn stack_closes_paren(ids: &[u32], glyphs: &[&Glyph]) -> bool {
+    let members: Vec<&Glyph> = glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| ids.contains(&glyph.id) && !glyph.unicode.trim().is_empty())
+        .collect();
+    let Some(last) = members
+        .iter()
+        .max_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]))
+    else {
+        return false;
+    };
+    let opens = members.iter().filter(|glyph| glyph.unicode.trim() == "(").count();
+    let closes = members.iter().filter(|glyph| glyph.unicode.trim() == ")").count();
+    last.unicode.trim() == ")" && closes > opens
+}
+
 /// `_` drawn between two pieces of one formula (`warmup` `_` `steps`).
 /// It is a roman glyph, so the math run does not include it, and the
 /// reading order leaves `⟦N⟧_`. The glyph still has to move with the run.
@@ -16907,6 +16937,15 @@ fn lift_stack_placeholders(
             // paints `warmup steps_`.
             let connectors = identifier_connectors(&stacks[index], glyphs, body);
             if cursor < chars.len() && chars[cursor] == '_' && !connectors.is_empty() {
+                cursor += 1;
+            }
+            // `(𝑐⟦0⟧）`: the source `)` after the subscripts rides in the
+            // hole's ink. The closer the translation adds after the hole
+            // printed a second paren on top of the scripts.
+            if cursor < chars.len()
+                && matches!(chars[cursor], '）' | ')')
+                && stack_closes_paren(&stacks[index], glyphs)
+            {
                 cursor += 1;
             }
             holes.push((line_index, start, cursor, index, duplicate));
