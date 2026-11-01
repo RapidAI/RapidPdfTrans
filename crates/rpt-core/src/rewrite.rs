@@ -9051,9 +9051,44 @@ fn clear_seated_formula_overlaps(
                 ink_right += shift_by;
             }
         }
-        for slot in hosts {
-            if text_runs_through_ink(&lines[slot], ink_left, ink_right) {
-                push_text_clear_of_ink(&mut lines[slot], ink_left, ink_right, 1.0);
+        let mut pushed: Vec<(f32, f32, f32)> = Vec::new();
+        for slot in &hosts {
+            if text_runs_through_ink(&lines[*slot], ink_left, ink_right) {
+                let holes = ideographic_hole_spans(&lines[*slot]);
+                if let Some((from, extra)) =
+                    push_text_clear_of_ink(&mut lines[*slot], ink_left, ink_right, 1.0)
+                {
+                    pushed.extend(
+                        holes
+                            .into_iter()
+                            .filter(|(left, _)| *left >= from - 0.3)
+                            .map(|(left, right)| (left, extra, right)),
+                    );
+                }
+            }
+        }
+        // `)且 x 出现在 t⟦′ⱼ⟧`: pushing `且` clear of `)` moved `t` too, and
+        // the scripts seated after `t` stayed behind, on the letter. A
+        // formula seated further along this baseline moves with its text.
+        // Only ink seated in a hole of the pushed text moves. A formula
+        // with no hole of its own is cleared by its own push below.
+        for &(from, extra, until) in &pushed {
+            for other in 0..shifts.len() {
+                if other == index || shifts[other].page != page {
+                    continue;
+                }
+                let Some((left, _)) = seated_ink_span(&shifts[other], extraction) else {
+                    continue;
+                };
+                // A prime above a subscript has no glyph on the baseline.
+                // The host line is what it was seated on.
+                let host_y = lines[line_index].y;
+                if (shifts[other].host_y - host_y).abs() <= body * 0.45
+                    && left >= from - 0.5
+                    && left < until
+                {
+                    shifts[other].dx += extra;
+                }
             }
         }
         runs.push((page, seated_y, ink_right));
@@ -12073,10 +12108,34 @@ fn seated_ink_span(shift: &ListingShift, extraction: &Extraction) -> Option<(f32
     (left.is_finite() && right > left + 0.2).then_some((left, right))
 }
 
-fn push_text_clear_of_ink(line: &mut Drawn, ink_left: f32, ink_right: f32, pad: f32) {
+/// The `[left, right)` of each ideographic-space run on the line.
+fn ideographic_hole_spans(line: &Drawn) -> Vec<(f32, f32)> {
+    let chars: Vec<char> = line.text.chars().collect();
+    if line.widths.len() != chars.len() {
+        return Vec::new();
+    }
+    let mut spans: Vec<(f32, f32)> = Vec::new();
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch != '\u{3000}' {
+            continue;
+        }
+        let left = char_origin(line, &chars, index);
+        let right = left + line.widths[index] + line.gaps.get(index).copied().unwrap_or(0.0).min(0.0);
+        spans.push((left, right.max(left + 0.5)));
+    }
+    spans
+}
+
+/// The x the text was pushed from and by how much.
+fn push_text_clear_of_ink(
+    line: &mut Drawn,
+    ink_left: f32,
+    ink_right: f32,
+    pad: f32,
+) -> Option<(f32, f32)> {
     let chars: Vec<char> = line.text.chars().collect();
     if chars.is_empty() || line.widths.len() != chars.len() {
-        return;
+        return None;
     }
     let mut origin = line.x;
     for index in 0..chars.len() {
@@ -12090,7 +12149,10 @@ fn push_text_clear_of_ink(line: &mut Drawn, ink_left: f32, ink_right: f32, pad: 
         let hole = ch == '\u{3000}' || ch.is_whitespace();
         if !hole && origin >= ink_left - 0.5 && origin < ink_right + pad - 0.3 {
             let extra = ink_right + pad - origin;
-            if extra > 0.4 {
+            if extra <= 0.4 {
+                return None;
+            }
+            {
                 if index == 0 {
                     line.x += extra;
                 } else {
@@ -12105,13 +12167,14 @@ fn push_text_clear_of_ink(line: &mut Drawn, ink_left: f32, ink_right: f32, pad: 
                     }
                 }
             }
-            return;
+            return Some((origin, extra));
         }
         origin += width;
         if index + 1 < chars.len() {
             origin += gap;
         }
     }
+    None
 }
 
 fn seat_formula_holes(
@@ -17092,7 +17155,7 @@ fn seat_script_on_base(
     // The `p` of `applying` on the line above is not the base of `¯t`.
     let base = glyphs.iter().copied().find(|glyph| {
         !ids.contains(&glyph.id)
-            && glyph.unicode.trim() == letter
+            && same_letter(glyph.unicode.trim(), &letter)
             && glyph.matrix[5] >= low - body * 0.6
             && glyph.matrix[5] <= high + body * 0.6
             && glyph.font_size > body * 0.75
@@ -17104,6 +17167,19 @@ fn seat_script_on_base(
         base.id,
         base_index,
     ))
+}
+
+/// `𝑡′ⱼ`: the CJK face has no math-italic `𝑡`, so the line paints `t`.
+/// The source base is still the math letter.
+fn same_letter(source: &str, painted: &str) -> bool {
+    if source == painted {
+        return true;
+    }
+    let mut chars = source.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => math_plain(ch).is_some_and(|plain| painted.chars().eq([plain])),
+        _ => false,
+    }
 }
 
 fn slice_drawn(line: &Drawn, chars: &[char], start: usize, end: usize, x: f32) -> Drawn {
@@ -22301,7 +22377,19 @@ fn append_baseline_row(
             let size = line.size.max(previous.size).max(1.0);
             let gap_left = draw_ink_right(previous);
             let gap_right = line.x;
-            if gap_right > gap_left + size * 0.25 {
+            // `t⟦′_j⟧ 中`: a prime and subscript reserve less than a
+            // quarter em, and the letter's ink already reaches into it. The
+            // gap still holds seated ink, and skipping it drew `中` over
+            // the scripts once the paragraph was reflowed.
+            let holds_seated = gap_right > gap_left
+                && shifts.iter().any(|shift| {
+                    !claimed.contains(&shift.ids)
+                        && shift_sits_on_line(shift, line)
+                        && seated_ink_span(shift, extraction).is_some_and(|(left, right)| {
+                            left >= gap_left - size * 0.4 && left <= gap_right && right > left
+                        })
+                });
+            if gap_right > gap_left + size * 0.25 || holds_seated {
                 let mut ids = Vec::new();
                 let mut anchor_y = line.y;
                 let mut source_left = gap_left;
@@ -22972,7 +23060,13 @@ fn apply_reflow_holes(
                     .map(|glyph| glyph.font_size)
                     .fold(1.0f32, f32::max)
                     .max(1.0);
-                let (_reserved, atoms) = pack_formula_atoms(&glyphs, body);
+                let (_reserved, mut atoms) = pack_formula_atoms(&glyphs, body);
+                // `t′ⱼ`: a prime over a subscript is one column of ink.
+                // Packing them as two atoms side by side pushed the
+                // subscript back into the letter before the hole.
+                if one_ink_column(&glyphs) {
+                    atoms.clear();
+                }
                 let idset: HashSet<u32> = ids.iter().copied().collect();
                 for shift in shifts.iter_mut() {
                     shift.ids.retain(|id| !idset.contains(id));
@@ -23013,6 +23107,29 @@ fn apply_reflow_holes(
             }
         }
     }
+}
+
+/// Glyphs stacked above one another (a prime over a subscript) whose
+/// horizontal spans all share one column.
+fn one_ink_column(glyphs: &[&Glyph]) -> bool {
+    let inked: Vec<&&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    if inked.len() < 2 {
+        return false;
+    }
+    let left = inked
+        .iter()
+        .map(|glyph| glyph.bbox[0].min(glyph.bbox[2]))
+        .fold(f32::MIN, f32::max);
+    let right = inked
+        .iter()
+        .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+        .fold(f32::MAX, f32::min);
+    let low = inked.iter().map(|glyph| glyph.matrix[5]).fold(f32::MAX, f32::min);
+    let high = inked.iter().map(|glyph| glyph.matrix[5]).fold(f32::MIN, f32::max);
+    left < right && high - low > 1.0
 }
 
 fn attach_leading_closers(lines: &mut Vec<String>) {
