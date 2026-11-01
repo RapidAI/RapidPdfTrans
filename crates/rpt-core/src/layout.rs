@@ -1802,7 +1802,38 @@ fn can_break_at(chars: &[char], sticky: &[bool], end: usize) -> bool {
     if sticky.get(end - 1).copied().unwrap_or(false) {
         return false;
     }
+    // A quantifier or a negation binds what follows it. `∃` / `𝑐, 𝑑, 𝑢.`
+    // across a line (or a page) reads as a stray symbol.
+    let mut prev = end;
+    while prev > 0 && chars[prev - 1] == ' ' {
+        prev -= 1;
+    }
+    if prev > 0 && (is_prefix_operator(chars[prev - 1]) || is_relation(chars[prev - 1])) {
+        return false;
+    }
+    // `n ∈ {1, 10}` stays one unit on both sides of the relation.
+    let mut next = end;
+    while next < chars.len() && chars[next] == ' ' {
+        next += 1;
+    }
+    // After Chinese (`组合长度 ≤ 512`) the left side is a word, not a variable.
+    if next < chars.len()
+        && is_relation(chars[next])
+        && prev > 0
+        && !is_cjk_body(chars[prev - 1])
+        && !chars[prev - 1].is_ascii_punctuation()
+    {
+        return false;
+    }
     can_break(chars[end - 1], chars[end])
+}
+
+fn is_relation(ch: char) -> bool {
+    matches!(ch, '∈' | '∉' | '≤' | '≥' | '⊆' | '⊂' | '≠' | '≈')
+}
+
+fn is_prefix_operator(ch: char) -> bool {
+    matches!(ch, '∃' | '∀' | '∄' | '¬')
 }
 
 /// ASCII letters and accented Latin (`Plücker`, `naïve`, `café`). CJK stays
@@ -2553,6 +2584,20 @@ mod tests {
             lines[1].starts_with('随'),
             "the next line should continue after the citation: {lines:?}"
         );
+    }
+
+    #[test]
+    fn a_quantifier_and_a_relation_keep_their_operands() {
+        let chars: Vec<char> = "体 ∃ x 且 n ∈ {1} 长度 ≤ 5".chars().collect();
+        let sticky = vec![false; chars.len()];
+        let at = |needle: &str| {
+            let text: String = chars.iter().collect();
+            text[..text.find(needle).unwrap()].chars().count()
+        };
+        assert!(!can_break_at(&chars, &sticky, at("x")));
+        assert!(!can_break_at(&chars, &sticky, at("∈") - 1));
+        assert!(!can_break_at(&chars, &sticky, at("{")));
+        assert!(can_break_at(&chars, &sticky, at("≤")));
     }
 
     #[test]
