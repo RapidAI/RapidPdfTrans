@@ -217,7 +217,7 @@ pub fn reference_glyph_ids(glyphs: &[Glyph]) -> HashSet<u32> {
             // The heading is in the right column. Body beside it on that
             // page is not a reference. The next page's left column is the
             // continuation, so the guard does not follow the section there.
-        } else if is_section_break(text) {
+        } else if is_section_break(text) || split_appendix_label(&order, &placed, &tops, pos) {
             in_refs = false;
             refs_x = None;
             refs_page = None;
@@ -773,6 +773,36 @@ fn heading_match(norm: &str, heading: &str) -> bool {
         || norm
             .strip_prefix(heading)
             .is_some_and(|rest| rest.starts_with(' ') || rest.starts_with('　'))
+}
+
+/// `A` / `NOTATIONS`: the appendix letter is its own line, set apart from
+/// the title. Joined, they read as the lettered heading that ends the
+/// bibliography (23658 kept its appendix body as references).
+fn split_appendix_label(
+    order: &[usize],
+    placed: &[Placed],
+    tops: &HashMap<u32, f32>,
+    pos: usize,
+) -> bool {
+    let label = placed[order[pos]].text.trim();
+    let mut chars = label.chars();
+    let lone = chars.next().is_some_and(|ch| ch.is_ascii_uppercase())
+        && chars.all(|ch| ch.is_ascii_digit() || ch == '.')
+        && label.len() <= 6;
+    if !lone {
+        return false;
+    }
+    let Some(next) = order[pos + 1..]
+        .iter()
+        .map(|&index| &placed[index])
+        .find(|line| !is_running_header(placed, tops, line))
+    else {
+        return false;
+    };
+    if next.page != placed[order[pos]].page || is_reference_entry(&next.text) {
+        return false;
+    }
+    appendix_letter_heading(&format!("{label} {}", next.text.trim()))
 }
 
 fn is_section_break(text: &str) -> bool {
@@ -1605,6 +1635,36 @@ mod tests {
         assert!(!kept.contains("Derivations"), "{kept}");
         assert!(!kept.contains("Region-Specific"), "{kept}");
         assert!(!kept.contains("derivation"), "{kept}");
+    }
+
+    #[test]
+    fn an_appendix_letter_on_its_own_line_stops_the_references() {
+        let mut glyphs = Vec::new();
+        let mut id = 0;
+        line(&mut glyphs, &mut id, 0, 72.0, 700.0, "References");
+        line(
+            &mut glyphs,
+            &mut id,
+            0,
+            72.0,
+            680.0,
+            "Bai, S.; Cai, Y. 2025. Qwen technical report.",
+        );
+        line(&mut glyphs, &mut id, 1, 72.0, 760.0, "A");
+        line(&mut glyphs, &mut id, 1, 72.0, 746.0, "NOTATIONS");
+        line(
+            &mut glyphs,
+            &mut id,
+            1,
+            72.0,
+            720.0,
+            "The text prompt is tokenized to at most 512 tokens and encoded by an encoder.",
+        );
+        let ids = reference_glyph_ids(&glyphs);
+        let kept = text_of(&glyphs, &ids);
+        assert!(kept.contains("Qwen"), "{kept}");
+        assert!(!kept.contains("NOTATIONS"), "{kept}");
+        assert!(!kept.contains("tokenized"), "{kept}");
     }
 
     #[test]
