@@ -620,6 +620,7 @@ pub fn translate_extraction(
         .iter()
         .map(|seg| shield(&seg.text, &opts.glossary))
         .collect();
+    let mut request_failed: HashSet<usize> = HashSet::default();
     let mut translated: Vec<Option<String>> = segments
         .iter()
         .map(|seg| {
@@ -704,6 +705,7 @@ pub fn translate_extraction(
                     if translated[index].is_some() {
                         continue;
                     }
+                    request_failed.insert(index);
                     translated[index] = Some(segments[index].text.clone());
                     // Copies of this source were never sent. They read the
                     // owner's result from the cache, so record the kept source.
@@ -756,6 +758,7 @@ pub fn translate_extraction(
     // Each round waits longer before it starts, gives every paragraph a
     // longer budget, and asks differently: alone, then with the stricter
     // fallback prompt, then sentence by sentence.
+    let attempted_failed = request_failed.clone();
     for round in 0..LEFTOVER_ROUNDS {
         // A spent document budget or a gateway that refuses every call
         // would only add sleeps and instant failures here.
@@ -771,6 +774,7 @@ pub fn translate_extraction(
             &mut translated,
             &mut cache,
             &attempted,
+            &mut request_failed,
             opts,
             translator,
             jobs,
@@ -783,6 +787,12 @@ pub fn translate_extraction(
         }
     }
     progress.emit_done();
+    // A failed request that a leftover round answered is recovered even when
+    // the answer is the source (`17`), so its diagnostic goes too.
+    let answered: Vec<usize> = attempted_failed
+        .difference(&request_failed)
+        .copied()
+        .collect();
     if let Some(reason) = guard.halted() {
         extraction.diagnostics.push(Diagnostic {
             page_index: None,
@@ -796,6 +806,11 @@ pub fn translate_extraction(
         .zip(translated.iter())
         .filter(|(seg, text)| text.as_deref().is_some_and(|text| text != seg.text))
         .map(|(seg, _)| (seg.page_index, seg.text.chars().take(80).collect()))
+        .chain(
+            answered
+                .iter()
+                .map(|index| (segments[*index].page_index, segments[*index].text.chars().take(80).collect())),
+        )
         .collect();
     extraction.diagnostics.retain(|item| {
         !item.message.starts_with(UNTRANSLATED_PREFIX)
@@ -1552,6 +1567,7 @@ fn retry_english_leftovers(
     translated: &mut [Option<String>],
     cache: &mut HashMap<String, String>,
     attempted: &HashSet<usize>,
+    request_failed: &mut HashSet<usize>,
     opts: &TranslateOptions,
     translator: &dyn Translator,
     jobs: usize,
@@ -1565,9 +1581,12 @@ fn retry_english_leftovers(
         .enumerate()
         .filter(|(index, text)| {
             attempted.contains(index)
-                && text
-                    .as_ref()
-                    .is_some_and(|text| needs_english_retry(&segments[*index].text, text))
+                // A failed request is asked again even when it is a label
+                // (`17`, `ref`) that reads the same in Chinese.
+                && (request_failed.contains(index)
+                    || text
+                        .as_ref()
+                        .is_some_and(|text| needs_english_retry(&segments[*index].text, text)))
         })
         .map(|(index, _)| index)
         .collect();
@@ -1632,6 +1651,9 @@ fn retry_english_leftovers(
         improved.into_inner().unwrap_or_default()
     };
     let count = improved.len();
+    for (index, _) in &improved {
+        request_failed.remove(index);
+    }
     if opts.progress != ProgressMode::Off || std::env::var_os("RPT_RETRY_LOG").is_some() {
         let fixed: HashSet<usize> = improved.iter().map(|(index, _)| *index).collect();
         let still: Vec<String> = pending_ids

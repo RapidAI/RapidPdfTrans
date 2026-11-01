@@ -196,8 +196,17 @@ impl LlmTranslator {
         match self.complete_capped(system, user, 1) {
             // Ask again with room for the thinking. The cap still bounds a
             // reply that runs away after it.
+            // A short label's 512-token cap times four is still only 2048, and
+            // a reasoning model can spend that too (23658 `ref`, `17`). The
+            // last ask has a fixed floor of 8192 tokens.
             Err(err) if err.to_string().contains(THINKING_CAP) => {
-                self.complete_capped(system, user, 4)
+                match self.complete_capped(system, user, 4) {
+                    Err(err) if err.to_string().contains(THINKING_CAP) => {
+                        let base = self.max_tokens.unwrap_or_else(|| reply_token_cap(user)).max(1);
+                        self.complete_capped(system, user, (8192 / base).max(5))
+                    }
+                    other => other,
+                }
             }
             other => other,
         }
@@ -633,6 +642,37 @@ mod tests {
         let client = LlmTranslator::with_key(&opts, "test-key-not-real").unwrap();
         let err = client.complete("sys", "user").unwrap_err();
         assert!(err.to_string().contains("reply too long"), "{err}");
+    }
+
+    #[test]
+    fn a_label_whose_thinking_spends_two_caps_gets_a_large_third_cap() {
+        let thinking = r#"{"choices":[{"finish_reason":"length","message":{"content":""}}],"usage":{"completion_tokens":512,"completion_tokens_details":{"reasoning_tokens":512}}}"#;
+        let answer = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let caps = Arc::new(Mutex::new(Vec::new()));
+        let seen = caps.clone();
+        thread::spawn(move || {
+            for reply in [thinking, thinking, answer] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let req = read_request(&mut stream);
+                let start = req.find("\r\n\r\n").unwrap() + 4;
+                let posted: Value = serde_json::from_str(&req[start..]).unwrap();
+                seen.lock().unwrap().push(posted["max_tokens"].as_u64().unwrap());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        let opts = TranslateOptions {
+            base_url: Some(format!("http://127.0.0.1:{port}/v1")),
+            ..TranslateOptions::default()
+        };
+        let client = LlmTranslator::with_key(&opts, "test-key-not-real").unwrap();
+        assert_eq!(client.complete("sys", "17").unwrap(), "ok");
+        assert_eq!(*caps.lock().unwrap(), vec![512, 2048, 8192]);
     }
 
     #[test]
