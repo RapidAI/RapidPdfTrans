@@ -22664,9 +22664,21 @@ fn shift_inserts(
         if right < line.x - size || left > draw_ink_right(line) + size {
             continue;
         }
-        let at = (0..chars.len())
+        let mut at = (0..chars.len())
             .find(|index| char_origin(line, chars, *index) + line.widths[*index] * 0.5 >= left)
             .unwrap_or(chars.len());
+        // `t⟦′ⱼ⟧`: the words after the scripts were spread once they were
+        // seated, and the letter they hang on moved past their x. Scripts
+        // follow their base letter; they never open a word.
+        if at < chars.len()
+            && chars[at].is_alphabetic()
+            && !is_han_char(chars[at])
+            && (at + 1 == chars.len() || !chars[at + 1].is_alphabetic())
+            && (at == 0 || !chars[at - 1].is_alphabetic())
+            && shift_is_scripts_only(shift, extraction, size)
+        {
+            at += 1;
+        }
         if (at > 0 && chars[at - 1] == '\u{3000}') || (at < chars.len() && chars[at] == '\u{3000}')
         {
             continue;
@@ -22685,6 +22697,24 @@ fn shift_inserts(
         ));
     }
     inserts
+}
+
+/// Every inked glyph of the shift is set smaller than the line's text.
+fn shift_is_scripts_only(shift: &ListingShift, extraction: &Extraction, size: f32) -> bool {
+    let mut any = false;
+    for id in &shift.ids {
+        let Some(glyph) = extraction.glyph(*id) else {
+            continue;
+        };
+        if glyph.unicode.trim().is_empty() {
+            continue;
+        }
+        if glyph.font_size > size * 0.84 {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
 
 fn cluster_right(shift: &ListingShift, extraction: &Extraction) -> f32 {
