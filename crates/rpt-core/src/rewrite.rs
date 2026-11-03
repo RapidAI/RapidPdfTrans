@@ -9248,12 +9248,23 @@ fn close_gap_after_formula(lines: &mut [Drawn], shifts: &[ListingShift], extract
             member_size.max(1.0),
         ));
     }
+    let mut pulled = Vec::new();
+    // `C1` keeps the old path: tucked under a capital, the digit runs into
+    // the bowl of `C`, and the reseat after the pull puts it after the letter.
+    let riding: HashSet<usize> = (0..lines.len())
+        .filter(|&slot| tucked_under_small_letter(lines, slot))
+        .collect();
     for &(page, seated_y, _, ink_right, room) in &seated {
         // `⟦0⟧ = ⟦1⟧。其中`: the tail after `⟦0⟧` already clears `⟦1⟧`,
         // which is seated in the gap. Pull only up to the last formula
         // standing before the tail.
-        for line in lines.iter_mut() {
+        for (slot, line) in lines.iter_mut().enumerate() {
             if line.page != page {
+                continue;
+            }
+            // `和 k0 +`: the sunk `0` is its own small draw under `k`. Taken
+            // for a tail, it was pulled onto `和`. It moves with its letter.
+            if riding.contains(&slot) && is_tucked_script(line, room) {
                 continue;
             }
             let em = line.size.max(room).max(1.0);
@@ -9275,17 +9286,73 @@ fn close_gap_after_formula(lines: &mut [Drawn], shifts: &[ListingShift], extract
                 })
                 .map(|other| (other.2, other.3))
                 .collect();
-            pull_tail_after_ink(line, ink_right, em, &others);
+            if let Some((from, by)) = pull_tail_after_ink(line, ink_right, em, &others) {
+                pulled.push((slot, from, -by));
+            }
+        }
+    }
+    for (slot, from, by) in pulled {
+        carry_tucked_scripts(lines, slot, from, by);
+    }
+}
+
+/// The draw at `slot` is a sunk digit tucked under a lowercase letter of a
+/// larger line on its page (`k0`).
+fn tucked_under_small_letter(lines: &[Drawn], slot: usize) -> bool {
+    let script = &lines[slot];
+    let w = script.widths.first().copied().unwrap_or(0.0);
+    let tucked_right = script.x + w * 0.55;
+    lines.iter().enumerate().any(|(index, host)| {
+        let chars: Vec<char> = host.text.chars().collect();
+        index != slot
+            && host.page == script.page
+            && is_tucked_script(script, host.size)
+            && (host.y - script.y - host.size * 0.24).abs() <= host.size * 0.06
+            && host.widths.len() == chars.len()
+            && (0..chars.len()).any(|at| {
+                chars[at].is_ascii_lowercase()
+                    && (char_origin(host, &chars, at) + host.widths[at] - tucked_right).abs()
+                        <= script.size * 0.15
+            })
+    })
+}
+
+/// A one- or two-character draw well under body size: a sunk subscript.
+fn is_tucked_script(line: &Drawn, body: f32) -> bool {
+    line.size < body * 0.75 && (1..=2).contains(&line.text.trim().chars().count())
+}
+
+/// `和 k0 +`: the `0` was sunk into its own draw under `k`. Moving the text
+/// from `from` by `by` left the digit behind. A small draw just under the
+/// moved text moves with it.
+fn carry_tucked_scripts(lines: &mut [Drawn], host: usize, from: f32, by: f32) {
+    let (page, y, size) = (lines[host].page, lines[host].y, lines[host].size.max(1.0));
+    let right = line_ink_right(&lines[host]) + (-by).max(0.0);
+    for (index, line) in lines.iter_mut().enumerate() {
+        if index == host || line.page != page || !is_tucked_script(line, size) {
+            continue;
+        }
+        let drop = y - line.y;
+        if drop < size * 0.1 || drop > size * 0.4 {
+            continue;
+        }
+        if line.x >= from - size * 0.5 && line.x <= right {
+            line.x += by;
         }
     }
 }
 
 /// Shrink the gap between `ink_right` and the next letter on this line.
 /// A gap that holds other seated ink (`others`) is not empty.
-fn pull_tail_after_ink(line: &mut Drawn, ink_right: f32, em: f32, others: &[(f32, f32)]) {
+fn pull_tail_after_ink(
+    line: &mut Drawn,
+    ink_right: f32,
+    em: f32,
+    others: &[(f32, f32)],
+) -> Option<(f32, f32)> {
     let chars: Vec<char> = line.text.chars().collect();
     if chars.is_empty() || line.widths.len() != chars.len() {
-        return;
+        return None;
     }
     let holds_ink = |next: f32| {
         others
@@ -9309,7 +9376,7 @@ fn pull_tail_after_ink(line: &mut Drawn, ink_right: f32, em: f32, others: &[(f32
             && next - ink_right < em * 2.2
         {
             if holds_ink(next) {
-                return;
+                return None;
             }
             // A leftover hole-space has no ink. The next letter sits one
             // word space after the formula, not after that space plus a gap.
@@ -9322,21 +9389,25 @@ fn pull_tail_after_ink(line: &mut Drawn, ink_right: f32, em: f32, others: &[(f32
             if reduce > 0.4 {
                 let slot = index;
                 if line.gaps.len() > slot {
-                    line.gaps[slot] = (line.gaps[slot] - reduce).max(0.0);
+                    let before = line.gaps[slot];
+                    line.gaps[slot] = (before - reduce).max(0.0);
+                    return Some((next, before - line.gaps[slot]));
                 }
             }
-            return;
+            return None;
         }
         // The tail is its own line, starting after the formula.
         if index == 0 && !hole && origin > ink_right + em * 0.45 && origin - ink_right < em * 2.2 {
             let desired = ink_right + em * 0.28;
             if origin - desired > 0.4 && !holds_ink(origin) {
                 line.x = desired;
+                return Some((origin, origin - desired));
             }
-            return;
+            return None;
         }
         origin = next;
     }
+    None
 }
 
 /// Right edge of an ASCII run (`Bx1`) that ends before `ink_left`.
@@ -12132,7 +12203,8 @@ fn ideographic_hole_spans(line: &Drawn) -> Vec<(f32, f32)> {
             continue;
         }
         let left = char_origin(line, &chars, index);
-        let right = left + line.widths[index] + line.gaps.get(index).copied().unwrap_or(0.0).min(0.0);
+        let right =
+            left + line.widths[index] + line.gaps.get(index).copied().unwrap_or(0.0).min(0.0);
         spans.push((left, right.max(left + 0.5)));
     }
     spans
@@ -16820,8 +16892,14 @@ fn stack_closes_paren(ids: &[u32], glyphs: &[&Glyph]) -> bool {
     else {
         return false;
     };
-    let opens = members.iter().filter(|glyph| glyph.unicode.trim() == "(").count();
-    let closes = members.iter().filter(|glyph| glyph.unicode.trim() == ")").count();
+    let opens = members
+        .iter()
+        .filter(|glyph| glyph.unicode.trim() == "(")
+        .count();
+    let closes = members
+        .iter()
+        .filter(|glyph| glyph.unicode.trim() == ")")
+        .count();
     last.unicode.trim() == ")" && closes > opens
 }
 
@@ -23196,8 +23274,14 @@ fn one_ink_column(glyphs: &[&Glyph]) -> bool {
         .iter()
         .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
         .fold(f32::MAX, f32::min);
-    let low = inked.iter().map(|glyph| glyph.matrix[5]).fold(f32::MAX, f32::min);
-    let high = inked.iter().map(|glyph| glyph.matrix[5]).fold(f32::MIN, f32::max);
+    let low = inked
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MAX, f32::min);
+    let high = inked
+        .iter()
+        .map(|glyph| glyph.matrix[5])
+        .fold(f32::MIN, f32::max);
     left < right && high - low > 1.0
 }
 

@@ -202,7 +202,10 @@ impl LlmTranslator {
             Err(err) if err.to_string().contains(THINKING_CAP) => {
                 match self.complete_capped(system, user, 4) {
                     Err(err) if err.to_string().contains(THINKING_CAP) => {
-                        let base = self.max_tokens.unwrap_or_else(|| reply_token_cap(user)).max(1);
+                        let base = self
+                            .max_tokens
+                            .unwrap_or_else(|| reply_token_cap(user))
+                            .max(1);
                         self.complete_capped(system, user, (8192 / base).max(5))
                     }
                     other => other,
@@ -658,7 +661,9 @@ mod tests {
                 let req = read_request(&mut stream);
                 let start = req.find("\r\n\r\n").unwrap() + 4;
                 let posted: Value = serde_json::from_str(&req[start..]).unwrap();
-                seen.lock().unwrap().push(posted["max_tokens"].as_u64().unwrap());
+                seen.lock()
+                    .unwrap()
+                    .push(posted["max_tokens"].as_u64().unwrap());
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                     reply.len()

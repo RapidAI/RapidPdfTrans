@@ -806,11 +806,12 @@ pub fn translate_extraction(
         .zip(translated.iter())
         .filter(|(seg, text)| text.as_deref().is_some_and(|text| text != seg.text))
         .map(|(seg, _)| (seg.page_index, seg.text.chars().take(80).collect()))
-        .chain(
-            answered
-                .iter()
-                .map(|index| (segments[*index].page_index, segments[*index].text.chars().take(80).collect())),
-        )
+        .chain(answered.iter().map(|index| {
+            (
+                segments[*index].page_index,
+                segments[*index].text.chars().take(80).collect(),
+            )
+        }))
         .collect();
     extraction.diagnostics.retain(|item| {
         !item.message.starts_with(UNTRANSLATED_PREFIX)
