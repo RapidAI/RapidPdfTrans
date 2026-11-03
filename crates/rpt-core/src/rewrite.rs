@@ -48778,6 +48778,37 @@ ET",
         assert!(notes.is_empty(), "{notes:?}");
     }
 
+    #[test]
+    fn text_run_into_a_script_falls_back() {
+        // `ℝ^{S×D_T}。在`: the text after the hole was placed against the base
+        // only, so `骨` lands on the 7pt `D` of the exponent.
+        let script = ink_glyph(7, 414.0, 524.0, 7.0, "D");
+        let body = ink_glyph(8, 414.0, 520.0, 9.0, "x");
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs: vec![script, body],
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let line = test_draw(403.7, 520.0, 9.0, "。在骨干", vec![1, 2]);
+        let hits = drawn_over_script_ink(&[line.clone()], &extraction, &HashSet::default(), &[]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, vec![7], "only the script glyph counts");
+        // Moved clear of the text with its formula: no collision.
+        let shifts = vec![ListingShift {
+            page: 0,
+            ids: vec![7],
+            dx: 20.0,
+            dy: 0.0,
+            host_y: 520.0,
+        }];
+        let erased: HashSet<u32> = [7].into_iter().collect();
+        assert!(drawn_over_script_ink(&[line.clone()], &extraction, &erased, &shifts).is_empty());
+        // Erased and not moved: it is not painted.
+        assert!(drawn_over_script_ink(&[line], &extraction, &erased, &[]).is_empty());
+    }
+
     fn test_draw(x: f32, y: f32, size: f32, text: &str, glyph_ids: Vec<u32>) -> Drawn {
         let count = text.chars().count();
         Drawn {
