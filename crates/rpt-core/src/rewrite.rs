@@ -610,6 +610,17 @@ fn rewrite_translation_once(
         let translated = crate::translate::repair_body_translation(&segment.source, &translated);
         let translated = restore_flattened_set(&translated, &segment_glyphs);
         let translated = restore_flattened_powers(&translated, &segment_glyphs);
+        // `⟦7⟧ + ⟦8⟧⟦9⟧⟦10⟧⟦11⟧)`: one inline formula cut into four glued
+        // holes. Seating them separately drops scripts and overlaps the next
+        // line. A paragraph that only joined because a set exponent was read
+        // on its base line (`ℝ^{C×…}`) stays in the source.
+        let translated = if glued_hole_run(&segment.source) >= 4
+            && joined_by_seated_exponent(&segment_glyphs, extraction)
+        {
+            segment.source.clone()
+        } else {
+            translated
+        };
         let translated = if prompt_samples.get(index).copied().unwrap_or(false) {
             crate::translate::unmix_prompt_line(&segment.source, &translated)
         } else {
@@ -1484,6 +1495,7 @@ fn rewrite_translation_once(
         &draw_ids,
         &placed_shifts,
     ));
+    colliding.extend(drawn_over_script_ink(&drawn, extraction, &draw_ids, &placed_shifts));
     colliding.extend(qa_failures(&drawn, &audit));
     for note in audit {
         extraction.diagnostics.push(crate::glyph::Diagnostic {
@@ -1603,6 +1615,81 @@ fn drawn_over_kept_source(
                     line.page, line.x, line.y, line.text
                 );
             }
+            out.push((line.glyph_ids.clone(), hits));
+        }
+    }
+    out
+}
+
+/// `z ∈ ℝ^{S×D_T}。在`: a script beside a formula hole is painted (at its
+/// source place or moved with its formula) but the text after the hole was
+/// placed against the base only, so a CJK character runs into the script.
+/// That paragraph goes back to its source glyphs in the next round.
+fn drawn_over_script_ink(
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    erased: &HashSet<u32>,
+    shifts: &[ListingShift],
+) -> Vec<Collision> {
+    let mut moved: HashMap<u32, (f32, f32)> = HashMap::default();
+    for shift in shifts {
+        for id in &shift.ids {
+            moved.entry(*id).or_insert((shift.dx, shift.dy));
+        }
+    }
+    let scripts: Vec<(&Glyph, f32, f32, f32, f32)> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            !glyph.invisible
+                && glyph.unicode.chars().any(|ch| !ch.is_whitespace() && !is_han_char(ch))
+                && (!erased.contains(&glyph.id) || moved.contains_key(&glyph.id))
+        })
+        .map(|glyph| {
+            let (dx, dy) = moved.get(&glyph.id).copied().unwrap_or((0.0, 0.0));
+            (
+                glyph,
+                glyph.bbox[0].min(glyph.bbox[2]) + dx,
+                glyph.bbox[0].max(glyph.bbox[2]) + dx,
+                glyph.bbox[1].min(glyph.bbox[3]) + dy,
+                glyph.bbox[1].max(glyph.bbox[3]) + dy,
+            )
+        })
+        .collect();
+    let mut out = Vec::new();
+    for line in drawn {
+        if line.glyph_ids.is_empty() || !line.text.chars().any(is_han_char) {
+            continue;
+        }
+        let chars: Vec<char> = line.text.chars().collect();
+        if line.widths.len() != chars.len() {
+            continue;
+        }
+        let size = line.size.max(1.0);
+        let (low, high) = (line.y - size * 0.1, line.y + size * 0.7);
+        let mut hits: Vec<u32> = Vec::new();
+        for (index, ch) in chars.iter().enumerate() {
+            if ch.is_whitespace() || *ch == '\u{3000}' {
+                continue;
+            }
+            let left = char_origin(line, &chars, index);
+            let right = left + line.widths[index];
+            for &(glyph, gx0, gx1, gy0, gy1) in &scripts {
+                if glyph.page_index != line.page
+                    || hits.contains(&glyph.id)
+                    || glyph.font_size >= line.size * 0.85
+                {
+                    continue;
+                }
+                if right.min(gx1) - left.max(gx0) > 1.0 && high.min(gy1) - low.max(gy0) > size * 0.25 {
+                    hits.push(glyph.id);
+                }
+            }
+        }
+        if !hits.is_empty() && std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+            eprintln!("over script p{} ({:.1},{:.1}) {:?} {:?}", line.page, line.x, line.y, line.text, hits.iter().filter_map(|id| extraction.glyphs.iter().find(|g| g.id == *id).map(|g| (g.unicode.clone(), g.font_size))).collect::<Vec<_>>());
+        }
+        if !hits.is_empty() {
             out.push((line.glyph_ids.clone(), hits));
         }
     }
@@ -8975,8 +9062,22 @@ fn clear_seated_formula_overlaps(
         // `直至 |R| = B` : the `= B` beside the source formula is prose the
         // translation redraws. Counting it as the formula's tail pushed the
         // redrawn `= B` to its source x and the line past the column.
-        (ink_left, ink_right) =
-            extend_ink_across_tail_except(ink_left, ink_right, &shifts[index], extraction, &prose);
+        // Glyphs of the other seated formulas paint at their seats, not at
+        // their source x.
+        let moved: HashSet<u32> = shifts
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .flat_map(|(_, other)| other.ids.iter().copied())
+            .collect();
+        (ink_left, ink_right) = extend_ink_across_unmoved_tail(
+            ink_left,
+            ink_right,
+            &shifts[index],
+            extraction,
+            &prose,
+            &moved,
+        );
         let Some(line_index) = lines.iter().position(|line| {
             line.page == shifts[index].page
                 && (line.y - seated_y).abs() <= line.size.max(member_size).max(1.0) * 0.45
@@ -9013,12 +9114,13 @@ fn clear_seated_formula_overlaps(
                 if (new_dx - shifts[index].dx).abs() > 0.5 {
                     shifts[index].dx = new_dx;
                     if let Some((left, right)) = seated_ink_span(&shifts[index], extraction) {
-                        (ink_left, ink_right) = extend_ink_across_tail_except(
+                        (ink_left, ink_right) = extend_ink_across_unmoved_tail(
                             left,
                             right,
                             &shifts[index],
                             extraction,
                             &prose,
+                            &moved,
                         );
                     }
                 }
@@ -11955,7 +12057,17 @@ fn nearest_hole_origin(line: &Drawn, ink_left: f32, body: f32) -> Option<f32> {
     best.map(|(_, hole_x)| hole_x)
 }
 
+#[cfg(test)]
 fn reserve_formula_ink(lines: &mut [Drawn], shift: &mut ListingShift, extraction: &Extraction) {
+    reserve_formula_ink_after(lines, shift, extraction, &HashSet::default());
+}
+
+fn reserve_formula_ink_after(
+    lines: &mut [Drawn],
+    shift: &mut ListingShift,
+    extraction: &Extraction,
+    moved: &HashSet<u32>,
+) {
     let Some((mut ink_left, mut ink_right)) = seated_ink_span(shift, extraction) else {
         return;
     };
@@ -11969,7 +12081,7 @@ fn reserve_formula_ink(lines: &mut [Drawn], shift: &mut ListingShift, extraction
         .flat_map(|line| line.glyph_ids.iter().copied())
         .collect();
     (ink_left, ink_right) =
-        extend_ink_across_tail_except(ink_left, ink_right, shift, extraction, &prose);
+        extend_ink_across_unmoved_tail(ink_left, ink_right, shift, extraction, &prose, moved);
     let pad = 1.0;
     // `形如` is the text in front of the hole. The seated ink still covers
     // those characters, and pushing them past the formula paints the formula
@@ -12107,12 +12219,27 @@ fn extend_ink_across_formula_tail(
     extend_ink_across_tail_except(ink_left, ink_right, shift, extraction, &HashSet::default())
 }
 
+#[cfg(test)]
 fn extend_ink_across_tail_except(
+    ink_left: f32,
+    ink_right: f32,
+    shift: &ListingShift,
+    extraction: &Extraction,
+    prose: &HashSet<u32>,
+) -> (f32, f32) {
+    extend_ink_across_unmoved_tail(ink_left, ink_right, shift, extraction, prose, &HashSet::default())
+}
+
+/// `moved` glyphs are blanked or were seated by another formula's shift. Their source x is
+/// not where they paint, so they are no tail of this one (`ℝ^{(1+f)…}`
+/// moved away left its exponent's source x under `= 16`).
+fn extend_ink_across_unmoved_tail(
     mut ink_left: f32,
     mut ink_right: f32,
     shift: &ListingShift,
     extraction: &Extraction,
     prose: &HashSet<u32>,
+    moved: &HashSet<u32>,
 ) -> (f32, f32) {
     let member = extraction
         .glyphs
@@ -12133,7 +12260,10 @@ fn extend_ink_across_tail_except(
     while grew {
         grew = false;
         for glyph in &extraction.glyphs {
-            if glyph.page_index != shift.page || shift.ids.contains(&glyph.id) {
+            if glyph.page_index != shift.page
+                || shift.ids.contains(&glyph.id)
+                || moved.contains(&glyph.id)
+            {
                 continue;
             }
             if (glyph.matrix[5] - host_y).abs() > body * 0.45 {
@@ -12344,7 +12474,14 @@ fn seat_formula_holes(
         let before = cluster_left(&shift, extraction);
         absorb_formula_neighbors(&mut shift, extraction, keep, body);
         keep_absorbed_ink_in_the_hole(&mut shift, extraction, before);
-        reserve_formula_ink(lines, &mut shift, extraction);
+        // A glyph of this segment no longer in `keep` is blanked or was
+        // seated elsewhere. Its source x paints nothing.
+        let moved: HashSet<u32> = segment_ids
+            .iter()
+            .copied()
+            .filter(|id| !keep.contains_key(id))
+            .collect();
+        reserve_formula_ink_after(lines, &mut shift, extraction, &moved);
         ids = shift.ids.clone();
         for id in &ids {
             keep.remove(id);
@@ -12743,6 +12880,12 @@ fn place_segments(
                         Some(shifts) => {
                             let body = prose_body_size(&glyphs);
                             let mut seated_right: Vec<(u32, f32, f32)> = Vec::new();
+                            // Every hole of the paragraph is reseated. A glyph
+                            // of another hole is not ink at its source x.
+                            let lifted: HashSet<u32> = shifts
+                                .iter()
+                                .flat_map(|lift| lift.ids.iter().copied())
+                                .collect();
                             for mut shift in shifts {
                                 // `th` of `(ℓ+1)th` was glued into `connect`
                                 // because the ell never joined that line.
@@ -12782,7 +12925,12 @@ fn place_segments(
                                         shift.dx += right + 1.0 - left;
                                     }
                                 }
-                                reserve_formula_ink(&mut lines, &mut shift, extraction);
+                                let moved: HashSet<u32> = lifted
+                                    .iter()
+                                    .copied()
+                                    .filter(|id| !shift.ids.contains(id))
+                                    .collect();
+                                reserve_formula_ink_after(&mut lines, &mut shift, extraction, &moved);
                                 if let Some((_, right)) = seated_ink_span(&shift, extraction) {
                                     seated_right.push((shift.page, shift.host_y, right));
                                 }
@@ -33057,6 +33205,34 @@ fn formula_words_only(
         })
 }
 
+fn joined_by_seated_exponent(segment_glyphs: &[&Glyph], extraction: &Extraction) -> bool {
+    let pages: HashSet<u32> = segment_glyphs.iter().map(|glyph| glyph.page_index).collect();
+    let page_glyphs: Vec<Glyph> = extraction
+        .glyphs
+        .iter()
+        .filter(|glyph| pages.contains(&glyph.page_index))
+        .cloned()
+        .collect();
+    let seated = crate::segment::hole_script_baselines(&page_glyphs);
+    segment_glyphs.iter().any(|glyph| seated.contains_key(&glyph.id))
+}
+
+/// The longest run of placeholders with nothing between them.
+fn glued_hole_run(source: &str) -> usize {
+    let mut best = 0usize;
+    let mut run = 0usize;
+    let mut rest = source;
+    while let Some(start) = rest.find('⟦') {
+        let Some(end) = rest[start..].find('⟧') else {
+            break;
+        };
+        run = if start == 0 && run > 0 { run + 1 } else { 1 };
+        best = best.max(run);
+        rest = &rest[start + end + '⟧'.len_utf8()..];
+    }
+    best
+}
+
 fn kept_source_reason(source: &str, job_translates: bool) -> &'static str {
     // An affiliation (`Google AI Language`) stays in the original embedded
     // face. `unchanged` would blank it and redraw with the CJK subset.
@@ -53165,6 +53341,13 @@ q\n1 0 0 1 120.056 265.599 cm\n[]0 d 0 J 0.398 w 0 0 m 15.047 0 l S\nQ\n"
 
 #[cfg(test)]
 mod stix_text_faces {
+    #[test]
+    fn four_glued_holes_keep_the_paragraph_in_the_source() {
+        assert_eq!(crate::rewrite::glued_hole_run("uses ⟦7⟧ + ⟦8⟧⟦9⟧⟦10⟧⟦11⟧). A flow"), 4);
+        assert_eq!(crate::rewrite::glued_hole_run("video ⟦0⟧ ⟦1⟧, where ⟦2⟧⟦3⟧ = 16"), 2);
+        assert_eq!(crate::rewrite::glued_hole_run("no formula"), 0);
+    }
+
     #[test]
     fn stix_text_faces_are_not_math() {
         assert!(!super::is_math_font("ARMSJG+STIXGeneral-Regular"));

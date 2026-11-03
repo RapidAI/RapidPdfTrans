@@ -246,14 +246,130 @@ fn inline_symbol(current: &[&Glyph], glyph: &Glyph, next: Option<&Glyph>) -> boo
         && near(glyph, next)
 }
 
+/// `tensor in ℝ^{D×(1+f)×h×w}, which`: the exponent sits a third of an em
+/// above the baseline. Sorted on its own y it is read before the body line
+/// and becomes a line of its own, and the four-em hole it leaves after `ℝ`
+/// looks like a column gutter, so the paragraph is cut in pieces. A run of
+/// smaller raised glyphs that starts right after a math glyph and ends right
+/// before the sentence resumes in the text face is that symbol's script. It
+/// is read on the body baseline, so the symbol and its script stay one
+/// formula. A short script leaves no gutter-sized hole and is left alone.
+pub(crate) fn hole_script_baselines(glyphs: &[Glyph]) -> HashMap<u32, f32> {
+    let mut seated = HashMap::default();
+    let mut pages: HashMap<u32, Vec<&Glyph>> = HashMap::default();
+    for glyph in glyphs {
+        if !glyph.unmapped && !glyph.unicode.trim().is_empty() {
+            pages.entry(glyph.page_index).or_default().push(glyph);
+        }
+    }
+    for page in pages.values() {
+        for base in page.iter().copied() {
+            // Only a set symbol (`ℝ^{S×D}`, blackboard or calligraphic) takes
+            // a dimension exponent. A letter's script stays with its letter.
+            if !math_font_glyph(base) || !set_symbol_base(base) {
+                continue;
+            }
+            let size = base.font_size.max(1.0);
+            let base_y = base.matrix[5];
+            let base_right = base.bbox[0].max(base.bbox[2]);
+            // A script's own subscript (`C_z` in the exponent) sits lower
+            // than the script, but still above the body baseline.
+            let raised = |glyph: &Glyph, first: bool| {
+                let rise = glyph.matrix[5] - base_y;
+                let floor = if first { size * 0.15 } else { size * 0.02 };
+                glyph.font_size <= size * 0.84 && rise >= floor && rise <= size * 0.6
+            };
+            let mut reach = base_right;
+            let mut run: Vec<&Glyph> = Vec::new();
+            while run.len() <= 64 {
+                let next = page
+                    .iter()
+                    .copied()
+                    .filter(|glyph| {
+                        raised(glyph, run.is_empty()) && !run.iter().any(|item| item.id == glyph.id)
+                    })
+                    .filter(|glyph| {
+                        let left = glyph.bbox[0].min(glyph.bbox[2]);
+                        left >= reach - size * 0.3 && left <= reach + size * 0.6
+                    })
+                    .min_by(|a, b| {
+                        a.bbox[0]
+                            .min(a.bbox[2])
+                            .total_cmp(&b.bbox[0].min(b.bbox[2]))
+                    });
+                let Some(next) = next else {
+                    break;
+                };
+                // `q^a k^{a*} e^{iΔ…}`: a body-size letter on the base line
+                // before this script is the script's own base. The run of
+                // `q` ends there.
+                let next_left = next.bbox[0].min(next.bbox[2]);
+                let rebased = page.iter().copied().any(|glyph| {
+                    let left = glyph.bbox[0].min(glyph.bbox[2]);
+                    glyph.id != base.id
+                        && (glyph.matrix[5] - base_y).abs() <= size * 0.1
+                        && glyph.font_size > size * 0.84
+                        && left >= base_right - size * 0.1
+                        && left < next_left
+                });
+                if rebased {
+                    break;
+                }
+                reach = reach.max(next.bbox[0].max(next.bbox[2]));
+                run.push(next);
+            }
+            if run.is_empty()
+                || reach - base_right < size * 4.0
+                || !run.iter().any(|glyph| glyph.unicode.contains('×'))
+            {
+                continue;
+            }
+            // The sentence goes on in the text face (`, which`, `is
+            // patchified`). An equation number after a display is not prose.
+            let resumes = page.iter().copied().any(|glyph| {
+                let left = glyph.bbox[0].min(glyph.bbox[2]);
+                (glyph.matrix[5] - base_y).abs() <= size * 0.1
+                    && glyph.font_size > size * 0.84
+                    && left >= reach - size * 0.3
+                    && left <= reach + size * 0.8
+                    && !math_font_glyph(glyph)
+                    && glyph.unicode.trim().chars().next().is_some_and(|ch| {
+                        ch.is_ascii_lowercase() || matches!(ch, ',' | '.' | ';' | ':')
+                    })
+            });
+            if resumes {
+                for glyph in run {
+                    seated.insert(glyph.id, base_y);
+                }
+            }
+        }
+    }
+    seated
+}
+
+fn set_symbol_base(glyph: &Glyph) -> bool {
+    let font = glyph.font_name.to_ascii_uppercase();
+    let text = glyph.unicode.trim();
+    font.contains("MSBM")
+        || font.contains("BBOLD")
+        || text.chars().any(|ch| {
+            matches!(ch, 'ℝ' | 'ℕ' | 'ℤ' | 'ℂ' | 'ℚ' | '𝔼' | 'ℙ')
+                || ('\u{1D49C}'..='\u{1D4CF}').contains(&ch)
+                || ('\u{1D538}'..='\u{1D56B}').contains(&ch)
+        })
+        || (font.contains("CMSY") && text.chars().all(|ch| ch.is_ascii_uppercase()) && !text.is_empty())
+}
+
 fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
+    let seated = hole_script_baselines(glyphs);
+    let line_y = |glyph: &Glyph| seated.get(&glyph.id).copied().unwrap_or(glyph.matrix[5]);
     let mut ordered: Vec<&Glyph> = glyphs.iter().collect();
     ordered.sort_by(|a, b| {
         a.page_index
             .cmp(&b.page_index)
             .then(
-                b.matrix[5]
-                    .partial_cmp(&a.matrix[5])
+                line_y(b)
+                    .partial_cmp(&line_y(a))
                     .unwrap_or(std::cmp::Ordering::Equal),
             )
             .then(
@@ -318,7 +434,7 @@ fn raw_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
         };
         let new_line = match (last_page, last_y) {
             (Some(page), Some(_)) => {
-                glyph.page_index != page || (glyph.matrix[5] - anchor_y).abs() > tolerance
+                glyph.page_index != page || (line_y(glyph) - anchor_y).abs() > tolerance
             }
             _ => !current.is_empty(),
         };
@@ -12000,6 +12116,28 @@ mod tests {
         );
         assert!(
             !texts.iter().any(|text| text.ends_with("contrac-")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_raised_exponent_hole_is_not_a_column_gutter() {
+        // `hidden tensor in ℝ^{D×(1+f)×h×w}, which`: the exponent is drawn
+        // 3.6pt up, so on its own y it leaves a 57pt hole after `ℝ`.
+        let mut lead = block(0, 108.0, 251.6, 240.0, 10.0, "This produces a hidden tensor in ");
+        lead.font_name = "NimbusRomNo9L-Regu".into();
+        let mut set = block(1, 349.4, 251.6, 7.2, 10.0, "R");
+        set.font_name = "MSBM10".into();
+        let mut script = block(2, 356.6, 255.2, 56.0, 7.0, "D×(1+f)×h×w");
+        script.font_name = "CMMI7".into();
+        let mut tail = block(3, 414.1, 251.6, 90.0, 10.0, ", which is flattened in");
+        tail.font_name = "NimbusRomNo9L-Regu".into();
+        let segs = segment_glyphs(&[lead, set, script, tail]);
+        let texts: Vec<_> = segs.iter().map(|seg| seg.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("tensor in") && text.contains("flattened")),
             "{texts:?}"
         );
     }
