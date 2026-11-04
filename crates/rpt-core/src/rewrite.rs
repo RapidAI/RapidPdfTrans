@@ -512,11 +512,20 @@ fn rewrite_translation_once(
         // it was read as a script of that line (`takes` + `n`). The sum
         // operator then shares the paragraph. Both stay printed with the
         // equation; they do not keep the sentence in English.
-        if prose_math && !placing_stack {
+        // A CMEX radical under `map is: √` sits below the prose baseline.
+        // Skipping this when the sentence has holes left the radical blanked
+        // and painted a text `√` into the Chinese line. Only extend the keep
+        // under `placing_stack` to CMEX display operators — keeping every
+        // detached CMSY atom pulled Attention's √d_k into the text run.
+        if prose_math {
             for glyph in &segment_glyphs {
-                if detached_display_atom(glyph, &segment_glyphs) {
-                    keep.insert(glyph.id, "math-block".into());
+                if !detached_display_atom(glyph, &segment_glyphs) {
+                    continue;
                 }
+                if placing_stack && !is_cmex_font(&glyph.font_name) {
+                    continue;
+                }
+                keep.insert(glyph.id, "math-block".into());
             }
         }
         {
@@ -610,6 +619,7 @@ fn rewrite_translation_once(
         let translated = crate::translate::repair_body_translation(&segment.source, &translated);
         let translated = restore_flattened_set(&translated, &segment_glyphs);
         let translated = restore_flattened_powers(&translated, &segment_glyphs);
+        let translated = strip_detached_display_echo(&translated, &segment_glyphs);
         // `⟦7⟧ + ⟦8⟧⟦9⟧⟦10⟧⟦11⟧)`: one inline formula cut into four glued
         // holes. Seating them separately drops scripts and overlaps the next
         // line. A paragraph that only joined because a set exponent was read
@@ -5839,6 +5849,10 @@ fn is_footnote_symbol(text: &str) -> bool {
 /// name's own style often never contained the dagger.
 const AUTHOR_MARK_CHARS: &str = "*∗†‡§¶";
 
+fn is_cmex_font(name: &str) -> bool {
+    contains_ascii_upper(name, "CMEX")
+}
+
 fn is_math_font(name: &str) -> bool {
     // `STIXGeneral-Regular` and `STIXTwoText` set the body of a paper. Read
     // as math, every paragraph in that face stayed in English. The italic
@@ -5893,6 +5907,28 @@ fn operator_owners(glyphs: &[Glyph]) -> HashMap<(u32, u16, usize, usize), Vec<u3
 /// A formula glyph that sits under every prose line in the segment.
 /// The upper limit of a display sum is one em below `takes the following
 /// form`, not a subscript of that sentence.
+/// `交叉注意力图为：√` copied the radical into the translation. The glyph is
+/// kept as a display atom; drop the echo so the line does not paint it again.
+fn strip_detached_display_echo(text: &str, glyphs: &[&Glyph]) -> String {
+    let mut out = text.to_string();
+    let mut marks: Vec<char> = glyphs
+        .iter()
+        .filter(|glyph| detached_display_atom(glyph, glyphs) && is_cmex_font(&glyph.font_name))
+        .flat_map(|glyph| glyph.unicode.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    marks.sort_unstable();
+    marks.dedup();
+    for mark in marks {
+        let trimmed = out.trim_end();
+        if trimmed.ends_with(mark) {
+            let keep_to = trimmed.len() - mark.len_utf8();
+            out = trimmed[..keep_to].trim_end().to_string();
+        }
+    }
+    out
+}
+
 fn detached_display_atom(glyph: &Glyph, glyphs: &[&Glyph]) -> bool {
     match inherent_keep(glyph) {
         Some("formula" | "unmapped") => {}
@@ -48887,6 +48923,30 @@ ET",
         around.gaps = vec![0.0, 0.0, 14.0, 0.0, 0.0, 0.0];
         let notes = audit_kept_math_overlap(&[around], &extraction, &erased, &[]);
         assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_detached_radical_echo_is_stripped_from_the_translation() {
+        let mut radical = ink_glyph(1, 344.0, 308.9, 10.0, "√");
+        radical.font_name = "CMEX10".into();
+        let mut prose = ink_glyph(2, 108.0, 319.0, 10.0, "a");
+        prose.font_name = "Times-Roman".into();
+        // More prose letters so prose_carries_inline_math / detached see a sentence.
+        let mut glyphs = vec![radical];
+        for (i, ch) in "tokens while map is".chars().enumerate() {
+            let mut g = ink_glyph(10 + i as u32, 120.0 + i as f32 * 5.0, 319.0, 10.0, &ch.to_string());
+            g.font_name = "Times-Roman".into();
+            glyphs.push(g);
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        assert!(detached_display_atom(refs[0], &refs));
+        let stripped = strip_detached_display_echo("交叉注意力图为：√", &refs);
+        assert_eq!(stripped, "交叉注意力图为：");
+        assert_eq!(
+            strip_detached_display_echo("图为：√ 还有", &refs),
+            "图为：√ 还有",
+            "only a trailing echo is stripped"
+        );
     }
 
     #[test]

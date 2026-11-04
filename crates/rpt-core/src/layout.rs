@@ -1288,6 +1288,7 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     mark_reserved_gaps(chars, &mut sticky);
     mark_angle_formulas(chars, &mut sticky);
     mark_hole_relations(chars, &mut sticky);
+    mark_adjacent_formula_holes(chars, &mut sticky);
     sticky
 }
 
@@ -1338,9 +1339,55 @@ fn mark_hole_relations(chars: &[char], sticky: &mut [bool]) {
     }
 }
 
-/// `⟨x, y, z⟩` and `<x, y, z>` stay on one line. A break after the comma
-/// painted `<x,` at the end of the line and `y,z>` on the next. `x < y`
-/// has no closing bracket of formula characters, so it still wraps.
+/// `K　,V　∈　R` are one formula unit. Breaking between the holes left
+/// `,V∈R` alone at the start of the next line. Only bind when a relation
+/// follows the pair — gluing every adjacent hole pushed `,{W_i}` to a line
+/// start in `F(x,{W_i})`.
+fn mark_adjacent_formula_holes(chars: &[char], sticky: &mut [bool]) {
+    let relation = |ch: char| matches!(ch, '=' | '<' | '>' | '≤' | '≥' | '≠' | '≈' | '∈' | '∉');
+    let mut index = 0usize;
+    while index + 2 < chars.len() {
+        if !(chars[index].is_ascii_digit()
+            && chars[index + 1].is_ascii_digit()
+            && chars[index + 2] == '　')
+        {
+            index += 1;
+            continue;
+        }
+        let mut hole_end = index + 3;
+        while hole_end < chars.len() && chars[hole_end] == '　' {
+            hole_end += 1;
+        }
+        let mut cursor = hole_end;
+        while cursor < chars.len() && chars[cursor] == ' ' {
+            cursor += 1;
+        }
+        if !(cursor + 2 < chars.len()
+            && chars[cursor].is_ascii_digit()
+            && chars[cursor + 1].is_ascii_digit()
+            && chars[cursor + 2] == '　')
+        {
+            index = hole_end;
+            continue;
+        }
+        let mut after = cursor + 3;
+        while after < chars.len() && chars[after] == '　' {
+            after += 1;
+        }
+        while after < chars.len() && chars[after] == ' ' {
+            after += 1;
+        }
+        if after < chars.len() && relation(chars[after]) {
+            for boundary in index..cursor {
+                if let Some(flag) = sticky.get_mut(boundary) {
+                    *flag = true;
+                }
+            }
+        }
+        index = hole_end;
+    }
+}
+
 fn mark_angle_formulas(chars: &[char], sticky: &mut [bool]) {
     let mut index = 0usize;
     while index < chars.len() {
@@ -2783,6 +2830,54 @@ mod tests {
             "{:?}",
             fitted.0
         );
+    }
+
+        #[test]
+    fn adjacent_holes_before_a_closer_still_wrap_after_the_first() {
+        // `F(x,{W_i})`: holes for x and W sit next to each other but the
+        // closer is `)`, not a relation. Do not glue them — that pushed
+        // `,{W` to the next line start.
+        let text = "函数 00　F(01　x,{02　}) 表示待学习的残差映射。";
+        let font = mixed_ascii_font(text);
+        let holes = crate::detmap::HashMap::from_iter([
+            (0usize, 10.0f32),
+            (1usize, 8.0f32),
+            (2usize, 20.0f32),
+        ]);
+        for width in (60..220).step_by(2) {
+            let lines = wrap_text_holes(text, 9.0, width as f32, width as f32, &font, &holes)
+                .expect("wrap");
+            for (index, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                assert!(
+                    !trimmed.starts_with(',') && !trimmed.starts_with("02　"),
+                    "{width}: line {index} opens on comma/W hole: {lines:?}"
+                );
+            }
+        }
+    }
+
+#[test]
+    fn a_wrap_never_opens_on_a_comma_hole_after_another_hole() {
+        // `而 K,V ∈ R …`: adjacent holes for K and ,V must not split so the
+        // next line opens on the math comma.
+        let text = "而 04\u{3000}05\u{3000} ∈ 06\u{3000} 由文本词元计算得到。交叉注意力图为：";
+        let font = mixed_ascii_font(text);
+        let holes = crate::detmap::HashMap::from_iter([
+            (0usize, 28.0f32),
+            (1usize, 36.0f32),
+            (2usize, 40.0f32),
+        ]);
+        for width in (80..360).step_by(2) {
+            let lines = wrap_text_holes(text, 9.0, width as f32, width as f32, &font, &holes)
+                .expect("wrap");
+            // The ,V hole (05) must not start a line alone without K (04).
+            for (index, line) in lines.iter().enumerate() {
+                if line.contains("05\u{3000}") && !line.contains("04\u{3000}") {
+                    panic!("{width}: ,V hole alone on line {index}: {lines:?}");
+                }
+            }
+        }
     }
 
     #[test]
