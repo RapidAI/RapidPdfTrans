@@ -1641,13 +1641,15 @@ fn drawn_over_script_ink(
     erased: &HashSet<u32>,
     shifts: &[ListingShift],
 ) -> Vec<Collision> {
-    let mut moved: HashMap<u32, (f32, f32)> = HashMap::default();
+    // A hole seated on the next page carries its script there. The shift
+    // names the page it was drawn on; the glyph still names its source page.
+    let mut moved: HashMap<u32, (f32, f32, u32)> = HashMap::default();
     for shift in shifts {
         for id in &shift.ids {
-            moved.entry(*id).or_insert((shift.dx, shift.dy));
+            moved.entry(*id).or_insert((shift.dx, shift.dy, shift.page));
         }
     }
-    let scripts: Vec<(&Glyph, f32, f32, f32, f32)> = extraction
+    let scripts: Vec<(&Glyph, u32, f32, f32, f32, f32)> = extraction
         .glyphs
         .iter()
         .filter(|glyph| {
@@ -1656,9 +1658,11 @@ fn drawn_over_script_ink(
                 && (!erased.contains(&glyph.id) || moved.contains_key(&glyph.id))
         })
         .map(|glyph| {
-            let (dx, dy) = moved.get(&glyph.id).copied().unwrap_or((0.0, 0.0));
+            let (dx, dy, page) =
+                moved.get(&glyph.id).copied().unwrap_or((0.0, 0.0, glyph.page_index));
             (
                 glyph,
+                page,
                 glyph.bbox[0].min(glyph.bbox[2]) + dx,
                 glyph.bbox[0].max(glyph.bbox[2]) + dx,
                 glyph.bbox[1].min(glyph.bbox[3]) + dy,
@@ -1684,8 +1688,8 @@ fn drawn_over_script_ink(
             }
             let left = char_origin(line, &chars, index);
             let right = left + line.widths[index];
-            for &(glyph, gx0, gx1, gy0, gy1) in &scripts {
-                if glyph.page_index != line.page
+            for &(glyph, page, gx0, gx1, gy0, gy1) in &scripts {
+                if page != line.page
                     || hits.contains(&glyph.id)
                     || glyph.font_size >= line.size * 0.85
                 {
