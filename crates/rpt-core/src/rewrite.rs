@@ -215,6 +215,36 @@ fn fallback_segments(report: &TranslateReport, colliding: &[Collision]) -> Vec<u
             a.into_iter().chain(b).collect()
         };
         out.extend(pick);
+        // A kept paragraph that collides only with itself or unowned ink:
+        // the hole a translated neighbour left moved part of it (its first
+        // line stayed, the rest rose onto it, 04611 p13). Falling back the
+        // neighbours removes the pull.
+        let owner_of = |ids: &[u32]| -> Vec<usize> {
+            let ids: HashSet<u32> = ids.iter().copied().collect();
+            report
+                .segments
+                .iter()
+                .enumerate()
+                .filter(|(_, segment)| segment.glyph_ids.iter().any(|id| ids.contains(id)))
+                .map(|(index, _)| index)
+                .collect()
+        };
+        let mut sides = owner_of(left);
+        sides.extend(owner_of(right));
+        sides.sort_unstable();
+        sides.dedup();
+        if let [index] = sides[..] {
+            let segment = &report.segments[index];
+            if segment.translated == segment.source && segment.glyph_ids.len() >= 80 {
+                for near in [index.wrapping_sub(1), index + 1] {
+                    if let Some(other) = report.segments.get(near) {
+                        if other.page_index == segment.page_index && other.translated != other.source {
+                            out.push(near);
+                        }
+                    }
+                }
+            }
+        }
     }
     out.sort_unstable();
     out.dedup();
@@ -35169,6 +35199,32 @@ mod tests {
         let mut report = report;
         report.segments[0].glyph_ids = (1..=2).chain(100..140).collect();
         assert_eq!(fallback_segments(&report, &colliding), vec![1]);
+    }
+
+    #[test]
+    fn a_kept_paragraph_overprinting_itself_falls_back_its_neighbours() {
+        let segment = |id: u32, ids: Vec<u32>, translated: Option<&str>| TranslatedSegment {
+            id,
+            page_index: 0,
+            glyph_ids: ids,
+            source: format!("source {id}"),
+            translated: translated.map_or(format!("source {id}"), str::to_string),
+        };
+        let report = TranslateReport {
+            segments: vec![
+                segment(0, (0..50).collect(), Some("中文")),
+                segment(1, (100..200).collect(), None),
+                segment(2, (300..350).collect(), Some("中文")),
+                segment(3, vec![400, 401], None),
+            ],
+            calls: 0,
+            cache_hits: 0,
+        };
+        // The kept paragraph against unowned ink: its translated
+        // neighbours fall back, since their hole moved it.
+        assert_eq!(fallback_segments(&report, &[(vec![100, 101], vec![999])]), vec![0, 2]);
+        // A short kept label is not a moved paragraph.
+        assert!(fallback_segments(&report, &[(vec![400, 401], vec![999])]).is_empty());
     }
 
     #[test]
