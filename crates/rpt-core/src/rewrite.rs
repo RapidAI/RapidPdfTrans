@@ -3543,6 +3543,20 @@ fn bridge_formula_groups(glyphs: &[&Glyph], body: f32, groups: &mut Vec<Vec<u32>
                 if (ya - yb).abs() >= body * 0.1 || lb < ra - 0.3 || lb - ra > body * 4.0 {
                     continue;
                 }
+                // `p^a θ_{a,i}) − B^a_i`: `θ_{a,i})` is a hole of its own
+                // between the two. Bridging over it joins `p^a` to `B^a_i`
+                // and seats `θ_{a,i})` after `B`. Only the next hole on the
+                // line bridges.
+                let skips_a_hole = groups.iter().enumerate().any(|(c, other)| {
+                    c != a
+                        && c != b
+                        && span(other).is_some_and(|(yc, lc, _)| {
+                            (yc - ya).abs() < body * 0.5 && lc >= ra - 0.3 && lc < lb
+                        })
+                });
+                if skips_a_hole {
+                    continue;
+                }
                 let between: Vec<&Glyph> = glyphs
                     .iter()
                     .copied()
@@ -39099,6 +39113,23 @@ mod tests {
         assert!(text.contains("AB"), "{text}");
         assert!(text.contains("References"), "{text}");
         assert!(!text.contains("Hello"), "{text}");
+    }
+
+    #[test]
+    fn a_bridge_does_not_jump_over_a_hole() {
+        // `p θ − B`: `θ` is its own hole between `p` and `B`. Bridging `p` to
+        // `B` over it seated `θ` after `B`.
+        let glyphs = vec![
+            math_glyph(1, 100.0, 400.0, "p", true),
+            math_glyph(2, 110.0, 400.0, "θ", true),
+            math_glyph(3, 120.0, 400.0, "−", true),
+            math_glyph(4, 130.0, 400.0, "B", true),
+        ];
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let mut groups = vec![vec![1], vec![2], vec![4]];
+        bridge_formula_groups(&refs, 10.0, &mut groups);
+        assert!(groups.contains(&vec![1]), "{groups:?}");
+        assert!(groups.iter().any(|g| g.contains(&2) && g.contains(&4)), "{groups:?}");
     }
 
     fn math_glyph(id: u32, x: f32, y: f32, text: &str, math: bool) -> Glyph {
