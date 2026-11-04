@@ -57,7 +57,9 @@ pub fn report(glyphs: &[Glyph]) -> CoverageReport {
             Disposition::KeptOriginal { reason } => {
                 kept += 1;
                 if real_miss_reason(reason) && glyph_is_latin_letter(g) {
-                    if reason == "english-body" {
+                    // `math-prose`: a sentence kept whole because its inline
+                    // formula was not holed. It is still English body text.
+                    if reason == "english-body" || reason == "math-prose" {
                         english_body += 1;
                         *english_body_pages.entry(g.page_index).or_insert(0) += 1;
                     }
@@ -95,6 +97,7 @@ fn real_miss_reason(reason: &str) -> bool {
             | "no-font"
             | "no-stream"
             | "english-body"
+            | "math-prose"
             | "incomplete-list"
     )
 }
@@ -262,6 +265,16 @@ mod tests {
         let echoed_report = report(&echoed);
         assert_eq!(echoed_report.english_body, 2);
         assert_eq!(echoed_report.english_body_pages.get(&3), Some(&2));
+        // Prose kept whole around an unholed inline formula is a miss.
+        for g in &mut echoed {
+            g.disposition = Disposition::KeptOriginal {
+                reason: "math-prose".into(),
+            };
+        }
+        let prose_report = report(&echoed);
+        assert!(!prose_report.complete);
+        assert_eq!(prose_report.english_body, 2);
+        assert_eq!(prose_report.intentional, 0);
         assert!(assert_complete(&failed).is_err());
         let mut kept_on_purpose = vec![glyph(3), glyph(4), glyph(5), glyph(6)];
         for (glyph, reason) in

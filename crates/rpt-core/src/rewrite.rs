@@ -287,6 +287,10 @@ fn rewrite_translation_once(
     let overlay = matches!(opts.mode, OutputMode::Bilingual(BilingualLayout::Overlay));
     let by_id = glyph_index(&extraction.glyphs);
     let mut keep: HashMap<u32, String> = HashMap::default();
+    // Prose glyphs of a sentence kept in its source because an inline
+    // formula was not holed. They are English body text left untranslated,
+    // not math, and coverage must count them as a miss.
+    let mut prose_math_kept: HashSet<u32> = HashSet::default();
     let mut non_text: HashMap<u32, String> = HashMap::default();
     let mut rewrite_ids: HashSet<u32> = HashSet::default();
 
@@ -493,6 +497,18 @@ fn rewrite_translation_once(
             // paints Chinese through the source glyphs. Keep the line.
             for id in &segment.glyph_ids {
                 keep.entry(*id).or_insert_with(|| "math-block".into());
+            }
+            if segment.translated != segment.source {
+                prose_math_kept.extend(
+                    segment_glyphs
+                        .iter()
+                        .filter(|glyph| {
+                            !display_ids.contains(&glyph.id)
+                                && !is_math_font(&glyph.font_name)
+                                && !display_math_face(&glyph.font_name)
+                        })
+                        .map(|glyph| glyph.id),
+                );
             }
             continue;
         }
@@ -1470,6 +1486,15 @@ fn rewrite_translation_once(
             "untranslated"
         };
         extraction.mark_kept(id, reason)?;
+    }
+    for glyph in extraction.glyphs.iter_mut() {
+        if prose_math_kept.contains(&glyph.id)
+            && matches!(&glyph.disposition, Disposition::KeptOriginal { reason } if reason == "math-block")
+        {
+            glyph.disposition = Disposition::KeptOriginal {
+                reason: "math-prose".into(),
+            };
+        }
     }
     let _ = spans;
     restore_pages_with_missing_fonts(doc, &source_pages, extraction)?;
