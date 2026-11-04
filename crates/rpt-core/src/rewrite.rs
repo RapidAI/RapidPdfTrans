@@ -12137,6 +12137,12 @@ fn reserve_formula_ink_after(
         }
         push_text_clear_of_ink(line, ink_left, ink_right, pad);
     }
+    // A raised numerator (`C(Ω→Ω)` above `C=`) sits between two body lines.
+    // Chinese wrap can park the line above only a few points over that ink
+    // (`。` / `C`), while the English source kept a wider gap. Lift that
+    // Han line when there is room, so it clears the ink without a horizontal
+    // push that would run past the column.
+    lift_han_clear_of_raised_ink(lines, shift, ink_left, ink_right, extraction);
 }
 
 /// The hole was measured after `形如`, but the formula's ink still covers
@@ -12315,6 +12321,80 @@ fn extend_ink_across_unmoved_tail(
         }
     }
     (ink_left, ink_right)
+}
+
+fn seated_ink_y_span(shift: &ListingShift, extraction: &Extraction) -> Option<(f32, f32)> {
+    let by_id = glyph_index(&extraction.glyphs);
+    let mut low = f32::MAX;
+    let mut high = f32::MIN;
+    for id in &shift.ids {
+        let Some(glyph) = by_id
+            .get(id)
+            .and_then(|index| extraction.glyphs.get(*index))
+        else {
+            continue;
+        };
+        let dy = shift.dy;
+        low = low.min(glyph.bbox[1].min(glyph.bbox[3]) + dy);
+        high = high.max(glyph.bbox[1].max(glyph.bbox[3]) + dy);
+    }
+    (low.is_finite() && high > low + 0.2).then_some((low, high))
+}
+
+/// `选择候选。考虑` over a fraction numerator: the body line above the host
+/// shares x with the raised ink. Prefer a small lift over pushing past the
+/// column edge.
+fn lift_han_clear_of_raised_ink(
+    lines: &mut [Drawn],
+    shift: &ListingShift,
+    ink_left: f32,
+    ink_right: f32,
+    extraction: &Extraction,
+) {
+    let Some((ink_y0, ink_y1)) = seated_ink_y_span(shift, extraction) else {
+        return;
+    };
+    let mut order: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let size = line.size.max(1.0);
+            line.page == shift.page
+                && line.y > shift.host_y + size * 0.45
+                && line.text.chars().any(is_han_char)
+                && text_runs_through_ink(line, ink_left, ink_right)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    order.sort_by(|&left, &right| lines[left].y.total_cmp(&lines[right].y));
+    for index in order {
+        let size = lines[index].size.max(1.0);
+        let low = lines[index].y - size * 0.15;
+        let high = lines[index].y + size * 0.75;
+        let overlap = high.min(ink_y1) - low.max(ink_y0);
+        if overlap <= size * 0.12 {
+            continue;
+        }
+        let lift = ink_y1 - low + size * 0.2;
+        if lift <= 0.4 || lift > size * 1.25 {
+            continue;
+        }
+        // Keep the raised line's body under the next line's body. Using
+        // `size * 0.85` as a floor blocked a 4pt lift into a 12pt leading
+        // (`。` / raised `C`), even though the boxes would still clear.
+        let ceiling = lines
+            .iter()
+            .enumerate()
+            .filter(|(other, line)| {
+                *other != index && line.page == lines[index].page && line.y > lines[index].y
+            })
+            .map(|(_, line)| line.y - line.size.max(1.0) * 0.15)
+            .min_by(f32::total_cmp);
+        if ceiling.is_some_and(|ceil| lines[index].y + lift + size * 0.75 > ceil - 0.5) {
+            continue;
+        }
+        lines[index].y += lift;
+    }
 }
 
 fn seated_ink_span(shift: &ListingShift, extraction: &Extraction) -> Option<(f32, f32)> {
@@ -48807,6 +48887,97 @@ ET",
         around.gaps = vec![0.0, 0.0, 14.0, 0.0, 0.0, 0.0];
         let notes = audit_kept_math_overlap(&[around], &extraction, &erased, &[]);
         assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_han_line_above_a_raised_numerator_is_lifted() {
+        // Host at y=100; numerator ink reaches y=114; Han at y=112 overlaps it.
+        let mut num = ink_glyph(10, 160.0, 108.0, 8.0, "C");
+        num.bbox = [160.0, 105.0, 200.0, 114.0];
+        num.font_name = "CMMI7".into();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs: vec![num],
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let mut host = test_draw(100.0, 100.0, 10.0, "定义为C=", vec![1]);
+        host.widths = vec![10.0; host.text.chars().count()];
+        let mut above = test_draw(100.0, 112.0, 10.0, "选择候选。考虑", vec![2]);
+        // 选@100..160 covers four 15pt chars; 。@160 lands in the ink.
+        above.widths = vec![15.0, 15.0, 15.0, 15.0, 10.0, 10.0, 10.0];
+        above.gaps = vec![0.0; above.text.chars().count().saturating_sub(1)];
+        let mut shift = ListingShift {
+            page: 0,
+            ids: vec![10],
+            dx: 0.0,
+            dy: 0.0,
+            host_y: 100.0,
+        };
+        let before = above.y;
+        let mut lines = vec![host, above];
+        reserve_formula_ink_after(&mut lines, &mut shift, &extraction, &HashSet::default());
+        assert!(
+            lines[1].y > before + 1.0,
+            "line above should rise clear of the numerator: before={before} after={}",
+            lines[1].y
+        );
+        let size = lines[1].size.max(1.0);
+        assert!(
+            lines[1].y - size * 0.15 >= 114.0 - 0.6,
+            "raised line still overlaps ink: y={}",
+            lines[1].y
+        );
+    }
+
+    #[test]
+    fn a_han_line_lifts_into_tight_leading_above_a_numerator() {
+        // 23658 p7: host ~356.5, numerator top ~368.8, Han ~368.1, next ~380.9.
+        let mut num = ink_glyph(10, 402.0, 363.0, 7.0, "C");
+        num.bbox = [402.0, 361.8, 408.0, 368.8];
+        num.font_name = "CMMI7".into();
+        let extraction = Extraction {
+            coordinate_space: "user",
+            pages: vec![],
+            glyphs: vec![num],
+            regions: vec![],
+            diagnostics: vec![],
+        };
+        let mut host = test_draw(128.0, 356.5, 9.0, "定义为 C =", vec![1]);
+        host.widths = vec![9.0; host.text.chars().count()];
+        let mut above = test_draw(108.0, 368.1, 9.0, "选择候选。考虑帧", vec![2]);
+        above.widths = vec![9.0; above.text.chars().count()];
+        above.gaps = vec![0.0; above.text.chars().count().saturating_sub(1)];
+        // Place 。 on the numerator ink at x=402.
+        let text = "选择候选。考虑";
+        above.text = text.into();
+        above.widths = vec![15.0, 15.0, 15.0, 15.0, 10.0, 10.0, 10.0];
+        above.gaps = vec![0.0; text.chars().count().saturating_sub(1)];
+        above.x = 402.0 - 15.0 * 4.0; // 。 at 402
+        let mut next = test_draw(108.0, 380.9, 9.0, "中心。然后胜者", vec![3]);
+        next.widths = vec![9.0; next.text.chars().count()];
+        let mut shift = ListingShift {
+            page: 0,
+            ids: vec![10],
+            dx: 0.0,
+            dy: 0.0,
+            host_y: 356.5,
+        };
+        let before = above.y;
+        let mut lines = vec![host, above, next];
+        reserve_formula_ink_after(&mut lines, &mut shift, &extraction, &HashSet::default());
+        assert!(
+            lines[1].y > before + 1.0,
+            "tight leading should still allow a short lift: before={before} after={}",
+            lines[1].y
+        );
+        assert!(
+            lines[1].y < lines[2].y - 6.0,
+            "lifted line should stay below the next body: y={} next={}",
+            lines[1].y,
+            lines[2].y
+        );
     }
 
     #[test]
