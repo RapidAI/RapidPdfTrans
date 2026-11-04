@@ -26179,6 +26179,24 @@ fn close_column_holes_with(
         }
         let mut claimed_quotes = HashSet::default();
         let mut shift = 0.0f32;
+        // Ink no block carries stays on its source baseline. A kept English
+        // line the holes did not turn into a block must stop a growth push,
+        // or the lines above paint onto it (04611 p10).
+        let movable: HashSet<u32> = blocks
+            .iter()
+            .flat_map(|block| block.kept_ids.iter().copied())
+            .chain(used_ids.iter().copied())
+            .collect();
+        let pinned: Vec<&Glyph> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.page_index == page
+                    && !glyph.invisible
+                    && glyph.unicode.chars().any(char::is_alphanumeric)
+                    && !movable.contains(&glyph.id)
+            })
+            .collect();
         let mut prev: Option<ColumnBlock> = None;
         // Footnote rules claimed on this page. Later lines see them at the
         // y they will be painted, not the English y that capped the note.
@@ -26293,7 +26311,28 @@ fn close_column_holes_with(
                 // hole-closer, which only pulls a shorter paragraph up.
                 let grew = prev.bottom + 0.5 < prev.source_bottom;
                 let drawn_gap = prev.bottom - (block.top + shift);
-                if grew && source_gap > 0.0 && drawn_gap < size * 0.85 {
+                // A push stops at ink that cannot move. Pushing anyway paints
+                // the lines above onto it; holding the push lets the overlap
+                // pass put the grown paragraph back instead.
+                // Glyphs inside the growing block's own source band are not
+                // obstacles below — they belong to the paragraph that grew
+                // (04611 p10 stray fence under 基础事件).
+                let blocked_below = pinned.iter().any(|glyph| {
+                    let y = glyph.matrix[5];
+                    let x = glyph.matrix[4];
+                    if y <= prev.source_bottom + size * 0.35
+                        && y >= prev.source_top - size * 0.35
+                        && x >= prev.left - size
+                        && x <= prev.right + size
+                    {
+                        return false;
+                    }
+                    y < block.source_top + 0.6
+                        && y > block.source_top - size * 15.0
+                        && x >= block.left - size
+                        && x <= block.right + size
+                });
+                if grew && source_gap > 0.0 && drawn_gap < size * 0.85 && !blocked_below {
                     let want = source_gap.max(size * 1.05);
                     extra += drawn_gap - want;
                 }
