@@ -5770,7 +5770,18 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
         } else {
             content
         };
-        let mut ys: Vec<f32> = source.iter().map(|glyph| glyph.matrix[5]).collect();
+        // A big delimiter's origin sits above its formula's baseline. In
+        // `(⌊h/2⌋, ⌊w/2⌋)` under a prose line, two of four origins were the
+        // delimiters', and the hole was read inside that prose line.
+        let mut ys: Vec<f32> = source
+            .iter()
+            .filter(|glyph| !is_cmex_font(&glyph.font_name))
+            .map(|glyph| glyph.matrix[5])
+            .collect();
+        let only_delimiters = ys.is_empty();
+        if only_delimiters {
+            ys = source.iter().map(|glyph| glyph.matrix[5]).collect();
+        }
         ys.sort_by(|left, right| left.total_cmp(right));
         let mid = ys.get(ys.len() / 2).copied().unwrap_or(0.0);
         let page = source.first().map(|glyph| glyph.page_index).unwrap_or(0);
@@ -5780,8 +5791,20 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
             .filter(|glyph| glyph.page_index == page)
             .collect();
         let page_baselines = body_baselines(&page_glyphs, body);
-        let y = nearest_baseline(mid, &page_baselines, body * 0.85)
-            .map_or(mid, |index| page_baselines[index]);
+        // A delimiter alone hangs onto the baseline below its origin.
+        let hung = only_delimiters
+            .then(|| {
+                page_baselines
+                    .iter()
+                    .copied()
+                    .filter(|line| *line < mid - body * 0.15 && *line > mid - body)
+                    .fold(None, |best: Option<f32>, line| Some(best.map_or(line, |b| b.max(line))))
+            })
+            .flatten();
+        let y = hung.unwrap_or_else(|| {
+            nearest_baseline(mid, &page_baselines, body * 0.85)
+                .map_or(mid, |index| page_baselines[index])
+        });
         let x = source
             .iter()
             .map(|glyph| glyph.matrix[4])
@@ -18262,6 +18285,25 @@ fn stack_anchor(ids: &[u32], glyphs: &[&Glyph], body: f32) -> (f32, f32) {
         .map(|glyph| glyph.matrix[5])
         .fold(f32::MAX, f32::min);
     let mid = (high + low) * 0.5;
+    // A big delimiter hangs from its origin onto the baseline under it. A
+    // hole of delimiters alone, as `⌊` `⌋` of `(⌊h/2⌋, ⌊w/2⌋)`, sits on
+    // that baseline, not on the prose line its origin reaches.
+    if members.iter().all(|glyph| extension_font(&glyph.font_name)) {
+        let hung = glyphs
+            .iter()
+            .copied()
+            .filter(|glyph| !idset.contains(&glyph.id) && glyph.font_size > body * 0.82)
+            .filter(|glyph| {
+                let x = glyph.matrix[4];
+                x + body * 6.0 >= left && x <= right + body * 6.0
+            })
+            .map(|glyph| glyph.matrix[5])
+            .filter(|y| *y < low - body * 0.15 && *y > low - body)
+            .fold(f32::MIN, f32::max);
+        if hung > f32::MIN {
+            return (left, hung);
+        }
+    }
     let mut band: Vec<f32> = glyphs
         .iter()
         .copied()
