@@ -5846,6 +5846,61 @@ fn reading_order_with_placeholders(glyphs: &[&Glyph], stacks: &[Vec<u32>], body:
         }
         lines.push(vec![token]);
     }
+    // A TeX big delimiter's origin sits above the baseline of its formula.
+    // `⌊h/2⌋` under `we fix the two tokens` came within the band of that
+    // prose line, and read by x it split its words: `th⌋e t⌊wo`. A math
+    // glyph off this baseline that lands on a prose letter of the line goes
+    // to the next line down.
+    let span = |glyph: &Glyph| (glyph.bbox[0].min(glyph.bbox[2]), glyph.bbox[0].max(glyph.bbox[2]));
+    let mut moves: Vec<(usize, usize, usize)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let letters: Vec<(f32, f32, f32)> = line
+            .iter()
+            .filter_map(|token| token.glyph)
+            .filter(|glyph| {
+                glyph.unicode.chars().any(|ch| ch.is_alphabetic()) && !is_math_font(&glyph.font_name)
+            })
+            .map(|glyph| {
+                let (x0, x1) = span(glyph);
+                (x0, x1, glyph.matrix[5])
+            })
+            .collect();
+        for (at, token) in line.iter().enumerate() {
+            let Some(glyph) = token.glyph else {
+                continue;
+            };
+            if !is_math_font(&glyph.font_name) {
+                continue;
+            }
+            let (x0, x1) = span(glyph);
+            let splits = letters.iter().any(|(o0, o1, y)| {
+                y - glyph.matrix[5] > body * 0.15
+                    && o1.min(x1) - o0.max(x0) > 0.5 * (x1 - x0).min(o1 - o0).max(0.1)
+            });
+            if !splits {
+                continue;
+            }
+            let target = lines
+                .iter()
+                .enumerate()
+                .filter(|(other, below)| {
+                    *other != index
+                        && below[0].page == token.page
+                        && column(&below[0]) == column(token)
+                        && below[0].y < glyph.matrix[5]
+                        && below[0].y > glyph.matrix[5] - band * 2.0
+                })
+                .max_by(|a, b| a.1[0].y.total_cmp(&b.1[0].y))
+                .map(|(other, _)| other);
+            if let Some(target) = target {
+                moves.push((index, at, target));
+            }
+        }
+    }
+    for &(index, at, target) in moves.iter().rev() {
+        let token = lines[index].remove(at);
+        lines[target].push(token);
+    }
     for line in &mut lines {
         line.sort_by(|left, right| left.x.total_cmp(&right.x));
     }
