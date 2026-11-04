@@ -122,6 +122,11 @@ impl PdfDocument {
         Ok(Self { inner: doc })
     }
 
+    /// Wrap a document already in memory (the rewritten output, for QA).
+    pub(crate) fn from_document(inner: Document) -> Self {
+        Self { inner }
+    }
+
     pub fn page_count(&self) -> usize {
         self.inner.get_pages().len()
     }

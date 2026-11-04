@@ -1537,6 +1537,13 @@ fn rewrite_translation_once(
     ));
     colliding.extend(drawn_over_script_ink(&drawn, extraction, &draw_ids, &placed_shifts));
     colliding.extend(qa_failures(&drawn, &audit));
+    // Every model check above reasons about where ink should be. The
+    // painted page is the truth: extract it and test the drawn Chinese
+    // against every other inked glyph, scripts and moved holes included.
+    if compose.is_none() && std::env::var_os("RPT_NO_INK_QA").is_none() {
+        let painted = crate::extract::PdfDocument::from_document(doc.clone()).extract();
+        colliding.extend(painted_ink_collisions(&drawn, &painted, extraction));
+    }
     for note in audit {
         extraction.diagnostics.push(crate::glyph::Diagnostic {
             page_index: note.0,
@@ -1736,6 +1743,170 @@ fn drawn_over_script_ink(
         if !hits.is_empty() {
             out.push((line.glyph_ids.clone(), hits));
         }
+    }
+    out
+}
+
+/// Drawn text whose painted glyph box covers another painted glyph, read
+/// from the saved page itself. Different baselines collide at 35% of the
+/// smaller box, one baseline at 60% with distinct origins (kerning is
+/// tighter). Two Latin draws on one baseline are kerning, not a hit. The
+/// drawn line owning the Chinese glyph falls back; the other side is named
+/// when it is drawn too, so the smaller paragraph is chosen.
+fn painted_ink_collisions(
+    drawn: &[Drawn],
+    painted: &Extraction,
+    source: &Extraction,
+) -> Vec<Collision> {
+    let source_box: HashMap<u32, ([f32; 4], f32, f32)> = source
+        .glyphs
+        .iter()
+        .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
+        .map(|glyph| {
+            let b = glyph.bbox;
+            (
+                glyph.id,
+                ([b[0].min(b[2]), b[1].min(b[3]), b[0].max(b[2]), b[1].max(b[3])], glyph.matrix[5], glyph.font_size.abs()),
+            )
+        })
+        .collect();
+    // A box the replaced source line's main-baseline glyphs already crossed
+    // as deep, on another baseline, is font padding (a CMEX `(` reaching
+    // into the line above), not new ink. The line's own scripts and holes
+    // never excuse a hit.
+    let preexisting = |line: &Drawn, ob: [f32; 4], other_y: f32, depth: f32| {
+        let mut ys: Vec<f32> = line.glyph_ids.iter().filter_map(|id| source_box.get(id)).map(|v| v.1).collect();
+        if ys.is_empty() {
+            return false;
+        }
+        ys.sort_by(f32::total_cmp);
+        let main = ys[ys.len() / 2];
+        line.glyph_ids.iter().filter_map(|id| source_box.get(id)).any(|(sb, y, size)| {
+            let size = size.max(1.0);
+            (y - main).abs() <= size * 0.3
+                && (other_y - main).abs() > size * 0.3
+                && sb[2].min(ob[2]) - sb[0].max(ob[0]) > 0.0
+                && sb[3].min(ob[3]) - sb[1].max(ob[1]) >= depth * 0.8
+        })
+    };
+    let han = |text: &str| text.chars().any(is_han_char);
+    let drawn_face = |glyph: &Glyph| glyph.font_name.contains("RPTCJK");
+    let mut boxes: Vec<(&Glyph, [f32; 4])> = Vec::new();
+    for glyph in &painted.glyphs {
+        if glyph.invisible {
+            continue;
+        }
+        let font = glyph.font_name.to_ascii_uppercase();
+        if glyph.unicode.trim().is_empty() && !font.contains("CMEX") && !font.contains("WASY") {
+            continue;
+        }
+        let b = glyph.bbox;
+        let (x0, x1) = (b[0].min(b[2]), b[0].max(b[2]));
+        let (y0, y1) = (b[1].min(b[3]), b[1].max(b[3]));
+        if x1 - x0 < 0.5 || y1 - y0 < 0.5 {
+            continue;
+        }
+        boxes.push((glyph, [x0, y0, x1, y1]));
+    }
+    let mut grid: HashMap<(u32, i32, i32), Vec<usize>> = HashMap::default();
+    for (index, (glyph, b)) in boxes.iter().enumerate() {
+        grid.entry((glyph.page_index, (b[0] / 20.0).floor() as i32, (b[1] / 20.0).floor() as i32))
+            .or_default()
+            .push(index);
+    }
+    let owner = |glyph: &Glyph| -> Option<&Drawn> {
+        let (x, y) = (glyph.matrix[4], glyph.matrix[5]);
+        drawn.iter().find(|line| {
+            let (left, right) = drawn_ink_span(line);
+            line.page == glyph.page_index
+                && !line.glyph_ids.is_empty()
+                && (line.y - y).abs() <= line.size.max(1.0) * 0.3
+                && x >= left - 0.5
+                && x <= right + 0.5
+        })
+    };
+    let mut seen: HashSet<(u32, i32)> = HashSet::default();
+    let mut out = Vec::new();
+    for (glyph, b) in &boxes {
+        if !(han(&glyph.unicode) || (drawn_face(glyph) && !glyph.unicode.trim().is_empty())) {
+            continue;
+        }
+        let key = (glyph.page_index, glyph.matrix[5].round() as i32);
+        if seen.contains(&key) {
+            continue;
+        }
+        let [mut x0, y0, mut x1, y1] = *b;
+        // Full-width punctuation inks half its box: `（` the right half,
+        // `）` and `，` the left. A tall delimiter beside the empty half is
+        // no collision.
+        let width = x1 - x0;
+        match glyph.unicode.trim() {
+            "（" | "【" | "「" | "『" | "《" | "〈" | "“" | "‘" => x0 += width * 0.45,
+            "）" | "】" | "」" | "』" | "》" | "〉" | "，" | "。" | "、" | "；" | "：" | "！" | "？" | "”" | "’" => {
+                x1 -= width * 0.45
+            }
+            _ => {}
+        }
+        let mut found: Option<&Glyph> = None;
+        'scan: for gx in ((x0 / 20.0).floor() as i32 - 1)..=((x1 / 20.0).floor() as i32) {
+            for gy in ((y0 / 20.0).floor() as i32 - 1)..=((y1 / 20.0).floor() as i32) {
+                let Some(cell) = grid.get(&(glyph.page_index, gx, gy)) else {
+                    continue;
+                };
+                for &index in cell {
+                    let (other, ob) = boxes[index];
+                    if std::ptr::eq(other, *glyph) {
+                        continue;
+                    }
+                    let size = glyph.font_size.abs().max(1.0);
+                    if drawn_face(other)
+                        && drawn_face(glyph)
+                        && !han(&format!("{}{}", other.unicode, glyph.unicode))
+                        && (glyph.matrix[5] - other.matrix[5]).abs() <= 0.5 * size
+                    {
+                        continue;
+                    }
+                    let w = x1.min(ob[2]) - x0.max(ob[0]);
+                    let h = y1.min(ob[3]) - y0.max(ob[1]);
+                    if w <= 0.0 || h <= 0.0 {
+                        continue;
+                    }
+                    let area = ((x1 - x0) * (y1 - y0)).min((ob[2] - ob[0]) * (ob[3] - ob[1]));
+                    if (w * h > 0.35 * area && (glyph.matrix[5] - other.matrix[5]).abs() > 0.5)
+                        || (w * h > 0.6 * area && (glyph.matrix[4] - other.matrix[4]).abs() > 0.5)
+                    {
+                        found = Some(other);
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        let Some(other) = found else {
+            continue;
+        };
+        let Some(line) = owner(glyph) else {
+            continue;
+        };
+        let theirs_line = owner(other).filter(|them| !std::ptr::eq(*them, line));
+        if theirs_line.is_none() {
+            let ob = boxes.iter().find(|(g, _)| std::ptr::eq(*g, other)).map(|(_, b)| *b).unwrap();
+            let depth = y1.min(ob[3]) - y0.max(ob[1]);
+            if preexisting(line, ob, other.matrix[5], depth) {
+                continue;
+            }
+        }
+        seen.insert(key);
+        let theirs = owner(other)
+            .filter(|them| !std::ptr::eq(*them, line))
+            .map(|them| them.glyph_ids.clone())
+            .unwrap_or_default();
+        if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+            eprintln!(
+                "painted overlap p{} {:?}/{:?} line ({:.1},{:.1}) {:?}",
+                glyph.page_index, glyph.unicode, other.unicode, line.x, line.y, line.text
+            );
+        }
+        out.push((line.glyph_ids.clone(), theirs));
     }
     out
 }
@@ -4230,6 +4401,25 @@ fn absorb_math_accents(glyphs: &[&Glyph], body: f32, groups: &mut Vec<Vec<u32>>)
                 left_dx.total_cmp(&right_dx)
             });
         let Some(base) = base else {
+            // `(𝑥̄1)`: the macron's own baseline is the letter's, so no base
+            // sits below it. Ink inside a hole's span on that line is that
+            // hole's accent; left out, it was drawn as text after the hole.
+            let center = (glyph.bbox[0] + glyph.bbox[2]) * 0.5;
+            let by_id: HashMap<u32, &Glyph> = glyphs.iter().map(|g| (g.id, *g)).collect();
+            let inside = groups.iter_mut().find(|ids| {
+                let members: Vec<&Glyph> =
+                    ids.iter().filter_map(|id| by_id.get(id).copied()).collect();
+                let on_line: Vec<&&Glyph> = members
+                    .iter()
+                    .filter(|m| (m.matrix[5] - glyph.matrix[5]).abs() < body * 0.35)
+                    .collect();
+                on_line.iter().any(|m| m.bbox[2].max(m.bbox[0]) < center)
+                    && on_line.iter().any(|m| m.bbox[0].min(m.bbox[2]) > center)
+            });
+            if let Some(group) = inside {
+                group.push(glyph.id);
+                used.insert(glyph.id);
+            }
             continue;
         };
         if let Some(group) = groups.iter_mut().find(|ids| ids.contains(&base.id)) {
