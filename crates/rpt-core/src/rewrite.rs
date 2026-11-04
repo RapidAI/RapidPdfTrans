@@ -19103,6 +19103,18 @@ fn layout_segment(
         (0..lines.len())
             .map(|index| top_y - index as f32 * lead)
             .collect()
+    } else if lines.len() > ink.len()
+        && ink.len() >= 2
+        && leading >= size * 0.95
+        && (lines.len() - 1) as f32 * leading <= (ink[0].y - ink[ink.len() - 1].y) + size * 0.25
+    {
+        // The Chinese needs one more line than the source, and the fitted
+        // leading still stacks every line inside the source block. Splitting
+        // one source pitch in half put `(Soudani et al., 2026; …` 6.8pt under
+        // the line above it at a 9.8pt size: the two lines overprinted.
+        (0..lines.len())
+            .map(|index| ink[0].y - index as f32 * leading)
+            .collect()
     } else {
         baselines_for(&ink, lines.len())
     };
