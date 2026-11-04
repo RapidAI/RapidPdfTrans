@@ -1193,11 +1193,6 @@ fn rewrite_translation_once(
     // formula can land on 且. Snap it back onto the ideographic hole and
     // push the following character clear of the ink.
     clear_seated_formula_overlaps(&mut drawn, &mut stack_shifts, extraction);
-    // Reflow can seat the hole 1-2pt inside the em box of the character
-    // before it (`满足𝑖` painted the 𝑖 on 足), and two holes in a row can
-    // touch. A seated formula starts after the previous glyph's advance,
-    // with a small gap after Chinese, and after the formula before it.
-    clear_formula_of_preceding_text(&mut drawn, &mut stack_shifts, extraction);
     // `Bx1 ∪···∪ Bxn`: clearing the atom left a gap wider than the source
     // word space. Pull the union back until one space remains.
     tighten_formula_after_atom(&drawn, &mut stack_shifts, extraction);
@@ -1235,6 +1230,11 @@ fn rewrite_translation_once(
     // A full-width `•` from the CJK face is wider than the Latin bullet's
     // slot and ran into `计算方法`. Move it left so it ends before the words.
     clear_wide_bullets(&mut drawn);
+    // Reflow can seat the hole 1-2pt inside the em box of the character
+    // before it (`满足𝑖` painted the 𝑖 on 足), and two holes in a row can
+    // touch. Run after the passes that slide text around formulas. A seated formula starts after the previous glyph's advance,
+    // with a small gap after Chinese, and after the formula before it.
+    clear_formula_of_preceding_text(&mut drawn, &mut stack_shifts, extraction);
     // A formula lead moves exactly as the rest of its formula does.
     let mates = formula_lead_mates(&formula_leads, extraction);
     for shift in listing_shifts.iter_mut().chain(stack_shifts.iter_mut()) {
@@ -9500,6 +9500,55 @@ fn clear_formula_of_preceding_text(
             }
         } else {
             deficit = 0.0;
+        }
+        // `𝑝𝑖(𝑥̄𝑖) :=`: the piece after the formula starts on its subscript.
+        // Slide that piece right when the gap to the next piece allows.
+        let ink_end = right + deficit;
+        let mut follow: Vec<usize> = hosts
+            .iter()
+            .copied()
+            .filter(|slot| lines[*slot].x >= left - 0.3)
+            .collect();
+        follow.sort_by(|l, r| lines[*l].x.total_cmp(&lines[*r].x));
+        if let Some(&slot) = follow.first() {
+            let line = &lines[slot];
+            let chars: Vec<char> = line.text.chars().collect();
+            let mut origin = line.x;
+            let mut first_ink = None;
+            // A leading word space is not painted: ` := add` drew `:` at
+            // the piece's own x.
+            for (at, ch) in chars.iter().enumerate() {
+                if *ch == '\u{3000}' {
+                    origin += line.widths[at] + line.gaps.get(at).copied().unwrap_or(0.0);
+                    continue;
+                }
+                first_ink = Some(origin);
+                break;
+            }
+            if let Some(first) = first_ink {
+                let push = ink_end + 0.5 - first;
+                if push > 0.3 && push <= em.max(1.0) * 0.4 {
+                    // Slide the pieces after it along until a gap is wide
+                    // enough to take the push. With no such gap the line
+                    // stays as it was.
+                    let mut absorbed = false;
+                    for (rank, &piece) in follow.iter().enumerate() {
+                        let end = line_ink_right(&lines[piece]) + push;
+                        let next_x = follow.get(rank + 1).map(|next| lines[*next].x);
+                        if next_x.is_some_and(|next| end < next - 0.5) {
+                            absorbed = true;
+                            for &moved in &follow[..=rank] {
+                                lines[moved].x += push;
+                            }
+                            break;
+                        }
+                        if next_x.is_none() {
+                            break;
+                        }
+                    }
+                    let _ = absorbed;
+                }
+            }
         }
         previous = Some((page, host_y, right + deficit));
     }
@@ -20466,6 +20515,28 @@ fn adopt_unchanged_body_lines(
             .filter(|_| advance > 0.0)
             .map(|axis| axis - advance * 0.5)
             .unwrap_or(sample.matrix[4]);
+        // `Termination.` is a run-in heading whose paragraph stayed in its
+        // source glyphs on the same baseline. The body face is wider than
+        // the italic, so the redraw ran into `Termination is decided`. Keep
+        // the source when kept ink follows within the redraw's advance.
+        let source_right = glyphs
+            .iter()
+            .map(|glyph| glyph.bbox[0].max(glyph.bbox[2]))
+            .fold(f32::MIN, f32::max);
+        let own: HashSet<u32> = glyph_ids.iter().copied().collect();
+        let runs_into_kept = extraction.glyphs.iter().any(|other| {
+            other.page_index == page
+                && !own.contains(&other.id)
+                && !other.invisible
+                && !other.unicode.trim().is_empty()
+                && (other.matrix[5] - y).abs() < 1.2
+                && other.bbox[0] >= source_right - 0.5
+                && other.bbox[0] < x + advance + 0.5
+                && !succeeded.contains(&other.id)
+        });
+        if runs_into_kept {
+            continue;
+        }
         for id in &glyph_ids {
             keep.remove(id);
             succeeded.insert(*id);
