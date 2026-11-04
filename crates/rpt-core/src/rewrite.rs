@@ -9378,14 +9378,28 @@ fn clear_formula_of_preceding_text(
 ) {
     let spans: Vec<Option<(f32, f32)>> =
         shifts.iter().map(|shift| seated_ink_span(shift, extraction)).collect();
+    // The seated baseline of the largest member. `host_y` can be stale: a
+    // later pass carried `𝑛 ≥` to the next line and left the host behind.
+    let by_id = glyph_index(&extraction.glyphs);
+    let base: Vec<f32> = shifts
+        .iter()
+        .map(|shift| {
+            shift
+                .ids
+                .iter()
+                .filter_map(|id| by_id.get(id).and_then(|at| extraction.glyphs.get(*at)))
+                .max_by(|l, r| l.font_size.total_cmp(&r.font_size))
+                .map_or(shift.host_y, |glyph| glyph.matrix[5] + shift.dy)
+        })
+        .collect();
     let mut order: Vec<usize> = (0..shifts.len())
-        .filter(|&index| spans[index].is_some() && shifts[index].host_y.is_finite())
+        .filter(|&index| spans[index].is_some() && base[index].is_finite())
         .collect();
     order.sort_by(|&l, &r| {
         shifts[l]
             .page
             .cmp(&shifts[r].page)
-            .then(shifts[r].host_y.total_cmp(&shifts[l].host_y))
+            .then(base[r].total_cmp(&base[l]))
             .then(spans[l].unwrap().0.total_cmp(&spans[r].unwrap().0))
     });
     // Formulas: runs of shifts on one baseline whose ink touches.
@@ -9395,7 +9409,7 @@ fn clear_formula_of_preceding_text(
             let last = *group.last().unwrap();
             let right = group.iter().map(|g| spans[*g].unwrap().1).fold(f32::MIN, f32::max);
             shifts[last].page == shifts[index].page
-                && (shifts[last].host_y - shifts[index].host_y).abs() < 0.6
+                && (base[last] - base[index]).abs() < 0.6
                 && spans[index].unwrap().0 <= right + 1.2
         });
         if same {
@@ -9407,7 +9421,7 @@ fn clear_formula_of_preceding_text(
     let mut previous: Option<(u32, f32, f32)> = None;
     for group in &groups {
         let page = shifts[group[0]].page;
-        let host_y = shifts[group[0]].host_y;
+        let host_y = base[group[0]];
         let mut left = f32::MAX;
         let mut right = f32::MIN;
         for &index in group {
@@ -9481,7 +9495,7 @@ fn clear_formula_of_preceding_text(
         if let Some(next) = groups.iter().find(|other| {
             let o = other[0];
             shifts[o].page == page
-                && (shifts[o].host_y - host_y).abs() < 0.6
+                && (base[o] - host_y).abs() < 0.6
                 && spans[o].is_some_and(|(l, _)| l > right - 0.3)
         }) {
             obstacle = obstacle.min(spans[next[0]].unwrap().0);
