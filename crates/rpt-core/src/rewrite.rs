@@ -1169,7 +1169,7 @@ fn rewrite_translation_once(
         close_column_holes_with(&mut drawn, extraction, &by_id, &mut footnote_rules);
     // The formula was seated on the line before this pull. Leaving it there
     // paints `≤ µ(Q̂) + µ(H)` on the proof after the lemma statement moved up.
-    carry_formula_with_line(&drawn, &y_before, &mut stack_shifts);
+    carry_formula_with_line(&drawn, &y_before, &mut stack_shifts, extraction, &by_id);
     // A heading stamped onto a formula line is a short drawn run. Closing the
     // gap above it lifts `定义 1.23` off `⟨a,b⟩`. Put it back on that baseline.
     snap_heading_to_formula(&mut drawn, extraction, &listing_shifts);
@@ -17987,6 +17987,7 @@ fn lift_stack_placeholders(
                     cut_start = base_index;
                 }
             }
+            if std::env::var_os("RPT_HOLE_DEBUG").is_some() { eprintln!("HOLEDBG page {} line {} y {} anchor ({}, {}) hole_x {} text {:?}", line.page, line_index, line.y, anchor_x, anchor_y, hole, line.text); }
             shifts.push(ListingShift {
                 page: line.page,
                 ids,
@@ -19257,6 +19258,33 @@ fn layout_segment(
     // whatever sits underneath.
     if sample_sans_ink(&ink) {
         ys = separate_baselines(&ys, size);
+    }
+    // `1.00 Spearman Rank Correlations…` took the axis tick 3.5pt under the
+    // title as its second baseline, and `性` printed on `1.00`. Two lines
+    // closer than a little over half the size always overprint. A row that
+    // close to another is a superscript row or a tick, not a baseline: keep
+    // the row with more ink, and leave the English when too few remain.
+    let stray_row = ink.windows(2).any(|pair| {
+        pair[0].y - pair[1].y < size * 0.6
+            && pair[1].glyphs.len() < pair[0].glyphs.len()
+            && pair[1].glyphs.iter().all(|glyph| !is_math_font(&glyph.font_name))
+    });
+    if stray_row && ys.windows(2).any(|pair| pair[0] - pair[1] < size * 0.6) {
+        let mut spaced: Vec<(f32, usize)> = Vec::new();
+        for line in &ink {
+            match spaced.last_mut() {
+                Some(last) if last.0 - line.y < size * 0.6 => {
+                    if line.glyphs.len() > last.1 {
+                        *last = (line.y, line.glyphs.len());
+                    }
+                }
+                _ => spaced.push((line.y, line.glyphs.len())),
+            }
+        }
+        if spaced.len() < lines.len() {
+            return None;
+        }
+        ys = spaced.iter().take(lines.len()).map(|(y, _)| *y).collect();
     }
     let last_y = ys.iter().copied().fold(origin_y, f32::min);
     if last_y < media[1] - 0.5 || origin_y > media[3] {
@@ -21391,7 +21419,10 @@ fn slide_run_in_bodies(
             continue;
         }
         let glyphs = ids_glyphs(&head.glyph_ids, extraction, by_id);
-        if !bold_run_in_glyphs(&glyphs) {
+        // `Prompt Templates` has no stop, so it is not a run-in sentence
+        // label, but redrawn wider it still runs over the body after it.
+        let label = bold_run_in_glyphs(&glyphs);
+        if !label && !emphasized_label(&glyphs) {
             continue;
         }
         // The label is one drawn line.
@@ -21408,7 +21439,11 @@ fn slide_run_in_bodies(
             line.page == head.page
                 && line.glyph_ids != head.glyph_ids
                 && (line.y - head.y).abs() <= 1.0
-                && line.x > head_right + gap * 1.5
+                // `Prompt Templates` redrawn in the text face is wider than
+                // the source label and ran over `模型的基础`. A body that starts
+                // inside the label's redrawn ink slides right as well.
+                && ((label && line.x > head_right + gap * 1.5)
+                    || (line.x > head.x + head.size.max(1.0) * 2.0 && line.x < head_right + gap))
                 && line.x - head.x < head.size.max(1.0) * 16.0
                 && line.text.chars().any(is_han_char)
         });
@@ -21823,6 +21858,18 @@ fn seated_formula_gap(lines: &[&Drawn]) -> bool {
         }
     }
     false
+}
+
+fn emphasized_label(glyphs: &[&Glyph]) -> bool {
+    let letters: Vec<&&Glyph> = glyphs
+        .iter()
+        .filter(|glyph| glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic()))
+        .collect();
+    (2..=80).contains(&letters.len())
+        && letters.iter().all(|glyph| {
+            let style = face_style(&glyph.font_name);
+            !is_math_font(&glyph.font_name) && (style.bold || medium_weight(&glyph.font_name))
+        })
 }
 
 fn bold_run_in_glyphs(glyphs: &[&Glyph]) -> bool {
@@ -25108,11 +25155,27 @@ fn tuck_trailing_formulas(
 
 /// A column pull moves the translated line. The formula hole was measured
 /// against the line's old baseline, so it has to take the same step.
-fn carry_formula_with_line(drawn: &[Drawn], y_before: &[f32], shifts: &mut [ListingShift]) {
+fn carry_formula_with_line(
+    drawn: &[Drawn],
+    y_before: &[f32],
+    shifts: &mut [ListingShift],
+    extraction: &Extraction,
+    by_id: &HashMap<u32, usize>,
+) {
     for shift in shifts.iter_mut() {
         if !shift.host_y.is_finite() {
             continue;
         }
+        // 36209 p3: `为每个 ⟦S(t)⟧` rose two lines with its paragraph, but the
+        // left column's line on the same baseline was taken as the host and
+        // the formula stayed behind on `恒星的`. A line that does not list the
+        // formula hosts it only if the seated ink lies across that line.
+        let seat_x = shift
+            .ids
+            .iter()
+            .filter_map(|id| by_id.get(id))
+            .map(|slot| extraction.glyphs[*slot].matrix[4] + shift.dx)
+            .fold(f32::NAN, f32::min);
         let mut best: Option<(usize, f32)> = None;
         for (index, line) in drawn.iter().enumerate() {
             // `令 ⟦4⟧ = ⟦5⟧ : ⟦6⟧` leaves a blank slice between holes. The
@@ -25125,6 +25188,12 @@ fn carry_formula_with_line(drawn: &[Drawn], y_before: &[f32], shifts: &mut [List
             let listed = shift.ids.iter().any(|id| line.glyph_ids.contains(id));
             let distance = (y_before[index] - shift.host_y).abs();
             if !listed && distance > 0.4 {
+                continue;
+            }
+            if !listed
+                && seat_x.is_finite()
+                && (seat_x < line.x - line.size * 1.5 || seat_x > line_ink_right(line) + line.size * 1.5)
+            {
                 continue;
             }
             if distance > line.size.max(1.0) * 0.7 {
@@ -38827,7 +38896,7 @@ mod tests {
             dy: 4.0,
             host_y: 492.0,
         }];
-        carry_formula_with_line(&drawn, &y_before, &mut shifts);
+        carry_formula_with_line(&drawn, &y_before, &mut shifts, &page_extraction(Vec::new()), &HashMap::default());
         assert!(
             (shifts[0].dy - 22.0).abs() < 0.01,
             "formula dy {} did not follow the 18pt pull",
@@ -38840,7 +38909,7 @@ mod tests {
             dy: 18.0,
             host_y: f32::NAN,
         };
-        carry_formula_with_line(&drawn, &y_before, std::slice::from_mut(&mut listing));
+        carry_formula_with_line(&drawn, &y_before, std::slice::from_mut(&mut listing), &page_extraction(Vec::new()), &HashMap::default());
         assert!(
             (listing.dy - 18.0).abs() < 0.01,
             "a listing shift was pulled twice"
@@ -40668,7 +40737,7 @@ mod tests {
             host_y: 367.0,
         }];
         let line_copy = line.clone();
-        carry_formula_with_line(&[line], &[367.0], &mut shifts);
+        carry_formula_with_line(&[line], &[367.0], &mut shifts, &page_extraction(Vec::new()), &HashMap::default());
         assert!(
             (shifts[0].dy - 24.0).abs() < 0.1,
             "the hole moved with the line, dy {}",
@@ -40686,7 +40755,7 @@ mod tests {
             dy: 12.0,
             host_y: 367.0,
         }];
-        carry_formula_with_line(&[blank, line_copy], &[367.0, 367.0], &mut shifts);
+        carry_formula_with_line(&[blank, line_copy], &[367.0, 367.0], &mut shifts, &page_extraction(Vec::new()), &HashMap::default());
         assert!(
             (shifts[0].dy - 24.0).abs() < 0.1,
             "a blank slice kept the hole, dy {}",
