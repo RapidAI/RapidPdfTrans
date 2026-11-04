@@ -1753,6 +1753,33 @@ fn drawn_over_script_ink(
 /// tighter). Two Latin draws on one baseline are kerning, not a hit. The
 /// drawn line owning the Chinese glyph falls back; the other side is named
 /// when it is drawn too, so the smaller paragraph is chosen.
+/// Where a glyph's ink lies. The extracted box is an em from 0.2 em under
+/// the origin. A TeX extension-font glyph (`⌊`, a big `(`, `∑`) hangs from
+/// its origin instead: its ink runs an em or more down and barely rises.
+/// Read by the em box, `( ⌊ ⌋ )` drawn a line too high over `RoPE 空间衰减`
+/// seemed to sit in the gap above that line.
+fn ink_box(glyph: &Glyph) -> [f32; 4] {
+    let b = glyph.bbox;
+    let (x0, x1) = (b[0].min(b[2]), b[0].max(b[2]));
+    let (y0, y1) = (b[1].min(b[3]), b[1].max(b[3]));
+    if !extension_font(&glyph.font_name) || glyph.matrix[1].abs() > 0.01 || glyph.matrix[2].abs() > 0.01 {
+        return [x0, y0, x1, y1];
+    }
+    let size = glyph.font_size.abs().max(1.0);
+    let base = glyph.matrix[5];
+    let code = glyph.char_code.first().copied().unwrap_or(0);
+    // Delimiters, radicals and operators (`⌊` `(` `√` `∑` `∫`) reach at
+    // least an em down; the extensible pieces at least 0.6 em.
+    let depth = if (0x30..=0x3F).contains(&code) || (0x40..=0x43).contains(&code) { 0.6 } else { 1.0 };
+    [x0, base - depth * size, x1, base + 0.05 * size]
+}
+
+fn extension_font(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    let face = upper.rsplit('+').next().unwrap_or(&upper);
+    face.starts_with("CMEX") || face.starts_with("TXEX") || face.starts_with("PXEX") || face.starts_with("EUEX")
+}
+
 fn painted_ink_collisions(
     drawn: &[Drawn],
     painted: &Extraction,
@@ -1762,13 +1789,7 @@ fn painted_ink_collisions(
         .glyphs
         .iter()
         .filter(|glyph| !glyph.invisible && !glyph.unicode.trim().is_empty())
-        .map(|glyph| {
-            let b = glyph.bbox;
-            (
-                glyph.id,
-                ([b[0].min(b[2]), b[1].min(b[3]), b[0].max(b[2]), b[1].max(b[3])], glyph.matrix[5], glyph.font_size.abs()),
-            )
-        })
+        .map(|glyph| (glyph.id, (ink_box(glyph), glyph.matrix[5], glyph.font_size.abs())))
         .collect();
     // A box the replaced source line's main-baseline glyphs already crossed
     // as deep, on another baseline, is font padding (a CMEX `(` reaching
@@ -1800,9 +1821,7 @@ fn painted_ink_collisions(
         if glyph.unicode.trim().is_empty() && !font.contains("CMEX") && !font.contains("WASY") {
             continue;
         }
-        let b = glyph.bbox;
-        let (x0, x1) = (b[0].min(b[2]), b[0].max(b[2]));
-        let (y0, y1) = (b[1].min(b[3]), b[1].max(b[3]));
+        let [x0, y0, x1, y1] = ink_box(glyph);
         if x1 - x0 < 0.5 || y1 - y0 < 0.5 {
             continue;
         }
@@ -1881,6 +1900,19 @@ fn painted_ink_collisions(
                             found = Some(other);
                             break 'scan;
                         }
+                    }
+                    // A big delimiter inks a stroke and two serifs, not its
+                    // box. Overprint is a fifth of an em of its inner half
+                    // reaching into this glyph.
+                    if extension_font(&other.font_name) {
+                        let inset = (ob[2] - ob[0]) * 0.25;
+                        let w = x1.min(ob[2] - inset) - x0.max(ob[0] + inset);
+                        let h = y1.min(ob[3]) - y0.max(ob[1]);
+                        if w > 0.2 * size && h > 0.2 * size && (glyph.matrix[5] - other.matrix[5]).abs() > 0.5 {
+                            found = Some(other);
+                            break 'scan;
+                        }
+                        continue;
                     }
                     let w = x1.min(ob[2]) - x0.max(ob[0]);
                     let h = y1.min(ob[3]) - y0.max(ob[1]);
