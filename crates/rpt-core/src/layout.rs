@@ -207,9 +207,10 @@ fn numbered_depth(text: &str) -> Option<u8> {
     }
     // Chinese often drops the space: "2.2裁判引导".
     let rest = text.get(index..)?;
+    // `00\u{3000}` is a seated math hole, not section 0.
     rest.chars()
         .next()
-        .filter(|ch| !ch.is_ascii())
+        .filter(|ch| !ch.is_ascii() && !ch.is_whitespace())
         .map(|_| groups)
 }
 
@@ -2481,6 +2482,14 @@ fn consumed_chars(src: &[char], lines: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seated_hole_token_is_not_a_section_number() {
+        assert_eq!(numbered_depth("00\u{3000}，则点积为 01\u{3000}"), None);
+        assert_eq!(heading_level(1, 9.96, false, "00\u{3000}，则点积为 01\u{3000} 02\u{3000}。因此，我们定义"), HeadingLevel::Body);
+        assert_eq!(numbered_depth("2.2裁判引导"), Some(2));
+        assert_eq!(numbered_depth("1 Introduction"), Some(1));
+    }
 
     #[test]
     fn a_centered_paragraph_balances_a_short_tail() {
