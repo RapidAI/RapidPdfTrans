@@ -1851,6 +1851,14 @@ fn can_break(prev: char, next: char) -> bool {
     if (prev == '-' || prev == '\'') && is_latin_word_char(next) {
         return false;
     }
+    // A spacing macron binds the base and the following digit (`z¯0`).
+    // Breaking after U+00AF left `z¯` on one line and `0` on the next.
+    if prev == '\u{00AF}' && (next.is_ascii_alphanumeric() || is_latin_word_char(next)) {
+        return false;
+    }
+    if (prev.is_ascii_alphanumeric() || is_latin_word_char(prev)) && next == '\u{00AF}' {
+        return false;
+    }
     // `41.8` and `1,000`. The break before the dot is already forbidden, so
     // the old split was `41.` / `8`. A sentence period is followed by a space.
     if matches!(prev, '.' | ',') && next.is_ascii_digit() {
@@ -2584,6 +2592,18 @@ mod tests {
             lines[1].starts_with('随'),
             "the next line should continue after the citation: {lines:?}"
         );
+    }
+
+    #[test]
+    fn a_macron_keeps_its_base_and_digit() {
+        assert!(!can_break('z', '\u{00AF}'));
+        assert!(!can_break('\u{00AF}', '0'));
+        assert!(!can_break('\u{00AF}', 't'));
+        let chars: Vec<char> = "潜变量 z¯0 = H/8".chars().collect();
+        let sticky = vec![false; chars.len()];
+        let bar = chars.iter().position(|&c| c == '\u{00AF}').unwrap();
+        assert!(!can_break_at(&chars, &sticky, bar));
+        assert!(!can_break_at(&chars, &sticky, bar + 1));
     }
 
     #[test]
