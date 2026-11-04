@@ -1193,6 +1193,11 @@ fn rewrite_translation_once(
     // formula can land on 且. Snap it back onto the ideographic hole and
     // push the following character clear of the ink.
     clear_seated_formula_overlaps(&mut drawn, &mut stack_shifts, extraction);
+    // Reflow can seat the hole 1-2pt inside the em box of the character
+    // before it (`满足𝑖` painted the 𝑖 on 足), and two holes in a row can
+    // touch. A seated formula starts after the previous glyph's advance,
+    // with a small gap after Chinese, and after the formula before it.
+    clear_formula_of_preceding_text(&mut drawn, &mut stack_shifts, extraction);
     // `Bx1 ∪···∪ Bxn`: clearing the atom left a gap wider than the source
     // word space. Pull the union back until one space remains.
     tighten_formula_after_atom(&drawn, &mut stack_shifts, extraction);
@@ -4673,15 +4678,91 @@ fn close_open_brackets(glyphs: &[&Glyph], mut groups: Vec<Vec<u32>>, body: f32) 
         .collect()
 }
 
+/// `𝑝(𝑡)={𝑣|dom(𝑣)=fv(𝑡)}`: newtx sets `=` in txmiaX and `(`, `|`, `∈` in
+/// txsys, faces outside the extraction list. Each Libertine variable stood
+/// alone, so no run formed and the sentence stayed in English. The newtx
+/// operators join the variables beside them into one hole.
+fn newtx_operator(glyph: &Glyph) -> bool {
+    !glyph.invisible
+        && !glyph.unicode.trim().is_empty()
+        && display_math_face(&glyph.font_name)
+        && !is_math_font(&glyph.font_name)
+        && !is_footnote_symbol(&glyph.unicode)
+}
+
+/// `𝑒 ∈ E, 𝑥 ∈ V`: the text comma between two newtx formulas ends the run.
+/// One hole across it left the comma behind in the sentence, and every
+/// formula after it was dropped from the line. The text `:` of `⊥ := ¬⊤`
+/// joins the hole, or it is left behind as `⊥ = ¬⊤ :`; so does the text-face
+/// bar of `𝑝𝑖(𝑥¯)`, or it is drawn over the Chinese. `None` ends the run.
+fn newtx_interposed(
+    glyphs: &[&Glyph],
+    used: &HashSet<u32>,
+    before: &Glyph,
+    glyph: &Glyph,
+    body: f32,
+) -> Option<Vec<usize>> {
+    let left = before.bbox[2].max(before.matrix[4]);
+    let right = glyph.matrix[4];
+    let mut glue = Vec::new();
+    for (index, other) in glyphs.iter().enumerate() {
+        if other.id == before.id || other.id == glyph.id || used.contains(&other.id) {
+            continue;
+        }
+        let text = other.unicode.trim();
+        if text.is_empty() || other.invisible {
+            continue;
+        }
+        if (other.matrix[5] - glyph.matrix[5]).abs() > body * 0.35 {
+            continue;
+        }
+        let mid = (other.bbox[0] + other.bbox[2]) * 0.5;
+        if mid <= left || mid >= right {
+            continue;
+        }
+        if text == ":" || text.chars().all(|ch| "¯ˆ˜˙¨´`→⃗\u{0304}\u{0302}\u{20D7}".contains(ch)) {
+            glue.push(index);
+            continue;
+        }
+        if text.chars().any(|ch| ch.is_alphanumeric() || matches!(ch, ',' | ';' | '.')) {
+            return None;
+        }
+    }
+    Some(glue)
+}
+
 /// `µ(AG)` and `ν(det A)` stay one hole. A lone italic `k` stays in the sentence.
 fn formula_runs(glyphs: &[&Glyph], body: f32, used: &HashSet<u32>) -> Vec<Vec<u32>> {
+    let mut runs = glyph_runs(glyphs, body, used, false);
+    // `where 𝑒 ∈ E, … abbreviations ⊥ := ¬⊤` opens page 4 but belongs to a
+    // sentence from page 3. Its holes were seated on page 3 with the
+    // Chinese, and page 4 lost the formulas. Across a page the newtx
+    // operators stay out of the runs, so the sentence keeps its old holes.
+    let one_page = glyphs
+        .iter()
+        .all(|glyph| glyph.page_index == glyphs.first().map_or(0, |first| first.page_index));
+    if one_page {
+        runs.extend(glyph_runs(glyphs, body, used, true));
+    }
+    runs
+}
+
+/// The newtx pass also walks glyphs another hole already holds. `𝐷𝑖 ∈ DB`
+/// shares the `𝑖` with the script atom, so the two merge into one hole and
+/// keep their own spacing. As `⟦4⟧⟦5⟧` the `∈` was seated on the subscript.
+/// Only runs with a newtx operator come out of that pass.
+fn glyph_runs(glyphs: &[&Glyph], body: f32, used: &HashSet<u32>, newtx: bool) -> Vec<Vec<u32>> {
     let mut indexes: Vec<usize> = glyphs
         .iter()
         .enumerate()
         .filter(|(_, glyph)| {
-            !used.contains(&glyph.id)
-                && !glyph.unicode.trim().is_empty()
-                && inherent_keep(glyph) == Some("formula")
+            !glyph.unicode.trim().is_empty()
+                && if newtx {
+                    inherent_keep(glyph) == Some("formula")
+                        || (!used.contains(&glyph.id) && newtx_operator(glyph))
+                } else {
+                    !used.contains(&glyph.id) && inherent_keep(glyph) == Some("formula")
+                }
         })
         .map(|(index, _)| index)
         .collect();
@@ -4693,7 +4774,8 @@ fn formula_runs(glyphs: &[&Glyph], body: f32, used: &HashSet<u32>) -> Vec<Vec<u3
     let mut runs = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     let flush = |current: &mut Vec<usize>, runs: &mut Vec<Vec<u32>>| {
-        if current.len() >= 2 {
+        let operator = current.iter().any(|&index| newtx_operator(glyphs[index]));
+        if current.len() >= 2 && (!newtx || operator) {
             runs.push(current.iter().map(|&index| glyphs[index].id).collect());
         }
         current.clear();
@@ -4705,8 +4787,15 @@ fn formula_runs(glyphs: &[&Glyph], body: f32, used: &HashSet<u32>) -> Vec<Vec<u3
             let same = (before.matrix[5] - glyph.matrix[5]).abs() <= body * 0.35;
             let gap = glyph.matrix[4] - before.bbox[2].max(before.matrix[4]);
             if same && gap <= body * 0.55 && gap >= -body * 0.2 {
-                current.push(index);
-                continue;
+                if !newtx {
+                    current.push(index);
+                    continue;
+                }
+                if let Some(glue) = newtx_interposed(glyphs, used, before, glyph, body) {
+                    current.extend(glue);
+                    current.push(index);
+                    continue;
+                }
             }
         }
         flush(&mut current, &mut runs);
@@ -9273,6 +9362,146 @@ fn clear_seated_formula_overlaps(
             }
         }
         runs.push((page, seated_y, ink_right));
+    }
+}
+
+/// Reflow can seat a hole 1-2pt inside the em box of the character before
+/// it: `满足𝑖` painted the 𝑖 on 足. When the ink of a seated formula starts
+/// inside the advance of the glyph before it, or inside the formula seated
+/// before it, the whole formula moves right, 0.15em clear of a Chinese
+/// character, and the text after it is pushed clear of the moved ink.
+/// Atoms of one formula touch, so they move as one.
+fn clear_formula_of_preceding_text(
+    lines: &mut [Drawn],
+    shifts: &mut [ListingShift],
+    extraction: &Extraction,
+) {
+    let spans: Vec<Option<(f32, f32)>> =
+        shifts.iter().map(|shift| seated_ink_span(shift, extraction)).collect();
+    let mut order: Vec<usize> = (0..shifts.len())
+        .filter(|&index| spans[index].is_some() && shifts[index].host_y.is_finite())
+        .collect();
+    order.sort_by(|&l, &r| {
+        shifts[l]
+            .page
+            .cmp(&shifts[r].page)
+            .then(shifts[r].host_y.total_cmp(&shifts[l].host_y))
+            .then(spans[l].unwrap().0.total_cmp(&spans[r].unwrap().0))
+    });
+    // Formulas: runs of shifts on one baseline whose ink touches.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for index in order {
+        let same = groups.last().is_some_and(|group| {
+            let last = *group.last().unwrap();
+            let right = group.iter().map(|g| spans[*g].unwrap().1).fold(f32::MIN, f32::max);
+            shifts[last].page == shifts[index].page
+                && (shifts[last].host_y - shifts[index].host_y).abs() < 0.6
+                && spans[index].unwrap().0 <= right + 1.2
+        });
+        if same {
+            groups.last_mut().unwrap().push(index);
+        } else {
+            groups.push(vec![index]);
+        }
+    }
+    let mut previous: Option<(u32, f32, f32)> = None;
+    for group in &groups {
+        let page = shifts[group[0]].page;
+        let host_y = shifts[group[0]].host_y;
+        let mut left = f32::MAX;
+        let mut right = f32::MIN;
+        for &index in group {
+            if let Some((l, r)) = seated_ink_span(&shifts[index], extraction) {
+                left = left.min(l);
+                right = right.max(r);
+            }
+        }
+        if !left.is_finite() {
+            continue;
+        }
+        let hosts: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.page == page
+                    && (line.y - host_y).abs() < 0.6
+                    && line.widths.len() == line.text.chars().count()
+            })
+            .map(|(slot, _)| slot)
+            .collect();
+        let mut need: Option<f32> = None;
+        let mut em = 0.0f32;
+        // The glyph drawn last before the ink starts, across every piece on
+        // this baseline.
+        let mut best_origin = f32::MIN;
+        for &slot in &hosts {
+            let line = &lines[slot];
+            let chars: Vec<char> = line.text.chars().collect();
+            let mut origin = line.x;
+            for (at, ch) in chars.iter().enumerate() {
+                let width = line.widths[at];
+                if origin >= left - 0.3 {
+                    break;
+                }
+                if origin > best_origin {
+                    best_origin = origin;
+                    let end = origin + width;
+                    let gap = if is_han_char(*ch) { 0.15 } else { 0.03 };
+                    need = (end > left + 0.3 && !ch.is_whitespace() && *ch != '\u{3000}')
+                        .then_some(end + line.size.max(1.0) * gap);
+                    em = line.size.max(1.0);
+                }
+                origin += width + line.gaps.get(at).copied().unwrap_or(0.0);
+            }
+        }
+        if let Some((prev_page, prev_y, prev_right)) = previous {
+            if prev_page == page && (prev_y - host_y).abs() < 0.6 && prev_right > left + 0.3 {
+                need = Some(need.map_or(prev_right + 0.5, |n| n.max(prev_right + 0.5)));
+                if em == 0.0 {
+                    em = hosts.first().map_or(10.0, |slot| lines[*slot].size.max(1.0));
+                }
+            }
+        }
+        // Room up to the next character or formula on this baseline. The
+        // move never pushes text: pushing ran the tail into the next piece
+        // and the paragraph fell back.
+        let mut obstacle = f32::MAX;
+        for &slot in &hosts {
+            let line = &lines[slot];
+            let chars: Vec<char> = line.text.chars().collect();
+            let mut origin = line.x;
+            for (at, ch) in chars.iter().enumerate() {
+                if origin >= left - 0.3 && *ch != '\u{3000}' && !ch.is_whitespace() {
+                    obstacle = obstacle.min(origin);
+                    break;
+                }
+                origin += line.widths[at] + line.gaps.get(at).copied().unwrap_or(0.0);
+            }
+        }
+        if let Some(next) = groups.iter().find(|other| {
+            let o = other[0];
+            shifts[o].page == page
+                && (shifts[o].host_y - host_y).abs() < 0.6
+                && spans[o].is_some_and(|(l, _)| l > right - 0.3)
+        }) {
+            obstacle = obstacle.min(spans[next[0]].unwrap().0);
+        }
+        let room = (obstacle - 0.5 - right).max(0.0);
+        let mut deficit = 0.0;
+        if let Some(need) = need {
+            let gap = need - left;
+            if gap > 0.3 && gap <= em * 0.5 {
+                deficit = gap.min(room);
+            }
+        }
+        if deficit > 0.2 {
+            for &index in group {
+                shifts[index].dx += deficit;
+            }
+        } else {
+            deficit = 0.0;
+        }
+        previous = Some((page, host_y, right + deficit));
     }
 }
 
