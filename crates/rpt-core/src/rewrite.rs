@@ -17987,7 +17987,6 @@ fn lift_stack_placeholders(
                     cut_start = base_index;
                 }
             }
-            if std::env::var_os("RPT_HOLE_DEBUG").is_some() { eprintln!("HOLEDBG page {} line {} y {} anchor ({}, {}) hole_x {} text {:?}", line.page, line_index, line.y, anchor_x, anchor_y, hole, line.text); }
             shifts.push(ListingShift {
                 page: line.page,
                 ids,
