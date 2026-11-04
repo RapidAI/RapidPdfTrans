@@ -1866,6 +1866,22 @@ fn painted_ink_collisions(
                     {
                         continue;
                     }
+                    // A Han face inks from just under its baseline to
+                    // about 0.85 em above it, whatever its box says. Ink
+                    // reaching a fifth of an em into another line's glyph
+                    // overprints it even when the boxes barely overlap.
+                    let base = glyph.matrix[5];
+                    if han(&glyph.unicode)
+                        && !han(&other.unicode)
+                        && (base - other.matrix[5]).abs() > 0.5 * size
+                    {
+                        let iw = (x1 - 0.05 * size).min(ob[2]) - (x0 + 0.05 * size).max(ob[0]);
+                        let ih = (base + 0.85 * size).min(ob[3]) - (base - 0.1 * size).max(ob[1]);
+                        if iw > 0.2 * size && ih > 0.2 * size {
+                            found = Some(other);
+                            break 'scan;
+                        }
+                    }
                     let w = x1.min(ob[2]) - x0.max(ob[0]);
                     let h = y1.min(ob[3]) - y0.max(ob[1]);
                     if w <= 0.0 || h <= 0.0 {
