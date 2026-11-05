@@ -401,6 +401,8 @@ fn rewrite_translation_once(
     opts: &RewriteOptions,
 ) -> Result<Vec<Collision>> {
     let cjk_family = CjkStyle::resolve(opts.cjk_style.as_deref()).map_err(Error::Options)?;
+    // Paragraphs left in English because a formula hole is glued to them.
+    let mut glued_notes: Vec<(u32, String)> = Vec::new();
     let compose = match opts.mode {
         OutputMode::Bilingual(
             layout @ (BilingualLayout::SideBySide | BilingualLayout::Alternating),
@@ -736,6 +738,13 @@ fn rewrite_translation_once(
                         keep.entry(*id).or_insert_with(|| "kept".into());
                     }
                 }
+                glued_notes.push((
+                    segment.page_index,
+                    format!(
+                        "kept the original paragraph because a formula is glued into it: {}",
+                        clip_note(&segment.source)
+                    ),
+                ));
                 connective_stamps.extend(stamps);
                 connective_stamps.extend(heading);
                 continue;
@@ -1685,6 +1694,18 @@ fn rewrite_translation_once(
         colliding.extend(painted_ink_collisions(&drawn, &painted, extraction));
         colliding.extend(painted_formula_collisions(&drawn, &painted, extraction));
     }
+    for (page, message) in glued_notes {
+        let seen = extraction
+            .diagnostics
+            .iter()
+            .any(|have| have.page_index == Some(page) && have.message == message);
+        if !seen {
+            extraction.diagnostics.push(crate::glyph::Diagnostic {
+                page_index: Some(page),
+                message,
+            });
+        }
+    }
     for note in audit {
         extraction.diagnostics.push(crate::glyph::Diagnostic {
             page_index: note.0,
@@ -2265,6 +2286,33 @@ fn record_unfitted_line_warnings(extraction: &mut Extraction) {
         let key = (glyph.page_index, (glyph.matrix[5] * 2.0).round() as i32);
         groups.entry(key).or_default().push_str(&glyph.unicode);
     }
+    // One note per page for paragraphs whose translation overflowed.
+    let mut overflow: BTreeMap<u32, (usize, String)> = BTreeMap::new();
+    for glyph in &extraction.glyphs {
+        if let Disposition::KeptOriginal { reason } = &glyph.disposition {
+            if reason == "overflow" {
+                let entry = overflow.entry(glyph.page_index).or_default();
+                entry.0 += 1;
+                entry.1.push_str(&glyph.unicode);
+            }
+        }
+    }
+    for (page, (count, text)) in overflow {
+        let message = format!(
+            "kept {count} glyphs of the original because the translation overflowed its block: {}",
+            clip_note(&text)
+        );
+        if !extraction
+            .diagnostics
+            .iter()
+            .any(|have| have.page_index == Some(page) && have.message == message)
+        {
+            extraction.diagnostics.push(crate::glyph::Diagnostic {
+                page_index: Some(page),
+                message,
+            });
+        }
+    }
     for ((page, _), text) in groups {
         let text = text.trim();
         if text.is_empty() {
@@ -2274,6 +2322,15 @@ fn record_unfitted_line_warnings(extraction: &mut Extraction) {
             page_index: Some(page),
             message: format!("kept the original line because the translation did not fit: {text}"),
         });
+    }
+}
+
+/// The first 60 characters of a note's text, so a diagnostic stays one line.
+fn clip_note(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.char_indices().nth(60) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text,
     }
 }
 

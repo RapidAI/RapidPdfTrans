@@ -455,7 +455,7 @@ fn run_translate(
         }
         note_wrote(opts.progress, bilingual_output);
         if let Some(warning) = bilingual_extraction.note_incomplete_coverage() {
-            eprintln!("rpt: warning: {warning}");
+            eprintln!("rpt: warning (dual output): {warning}");
         }
         warn_cjk_font(&bilingual_extraction);
         if let Some(message) = failing_layout_message(&bilingual_extraction.diagnostics) {
