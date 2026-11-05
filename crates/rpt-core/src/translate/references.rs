@@ -930,6 +930,57 @@ pub(crate) fn is_reference_entry(text: &str) -> bool {
     }
     ((looks_author_year_start(trimmed) || initials_author_start(trimmed)) && contains_year(trimmed))
         || organisation_entry(trimmed)
+        || names_then_year_entry(trimmed)
+}
+
+/// ACL style: `Samira Abnar and Willem Zuidema. 2020. Quantifying …` and
+/// `Aaron Grattafiori et al. 2024. The llama 3 …`. Given names come first and
+/// no comma follows the first surname, so the other author checks miss it.
+/// Everything before `. 2020.` is capitalised names, initials, commas, `and`
+/// or `et al.`, and a title follows.
+fn names_then_year_entry(text: &str) -> bool {
+    let mut cut = None;
+    for (start, _) in text.match_indices(". ") {
+        let rest = &text[start + 2..];
+        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits != 4 || !matches!(&rest[..2], "19" | "20") {
+            continue;
+        }
+        let tail = rest[4..].trim_start_matches(|ch: char| ch.is_ascii_lowercase());
+        if tail.starts_with(". ") && tail.len() > 3 {
+            cut = Some(start);
+            break;
+        }
+    }
+    let Some(cut) = cut else {
+        return false;
+    };
+    let names = &text[..cut];
+    let mut capitals = 0usize;
+    for (index, word) in names
+        .split(|ch: char| ch.is_whitespace() || ch == ',')
+        .filter(|word| !word.is_empty())
+        .enumerate()
+    {
+        if index == 0 && NOT_SURNAMES.contains(&word) {
+            return false;
+        }
+        if matches!(word, "and" | "et" | "al." | "al") {
+            continue;
+        }
+        let Some(first) = word.chars().next() else {
+            continue;
+        };
+        if !first.is_uppercase()
+            || !word
+                .chars()
+                .all(|ch| ch.is_alphabetic() || matches!(ch, '.' | '-' | '‐' | '\'' | '’'))
+        {
+            return false;
+        }
+        capitals += 1;
+    }
+    capitals >= 2
 }
 
 /// `T. Chen, S. Lu, K. Zhao` and `J.-B. Alayrac and A. Smith`: given-name
@@ -1270,6 +1321,23 @@ fn take_capital_word(text: &str) -> Option<(&str, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_acl_names_then_year_line_is_a_reference_entry() {
+        assert!(is_reference_entry(
+            "Samira Abnar and Willem Zuidema. 2020. Quantifying attention flow in transformers."
+        ));
+        assert!(is_reference_entry(
+            "Aaron Grattafiori et al. 2024. The llama 3 herd of models. Preprint, arXiv:2407.21783."
+        ));
+        assert!(is_reference_entry(
+            "Tianyang Liu, Fei Wang, and Muhao Chen. 2024b. Rethinking tabular data understanding."
+        ));
+        assert!(!is_reference_entry(
+            "We ran the experiment again. 2024. That year the results changed."
+        ));
+        assert!(!is_reference_entry("Figure Three. 2020. A caption."));
+    }
 
     #[test]
     fn initials_first_and_organisation_entries_open_a_bibliography() {
