@@ -129,6 +129,7 @@ pub fn rewrite_translation(
     let pristine_extraction = extraction.clone();
     let mut current = report.clone();
     keep_formula_scripts(&mut current, extraction);
+    adopt_detached_scripts(&mut current, extraction);
     let mut fallen_back: Vec<(u32, String)> = Vec::new();
     for round in 0..4 {
         let colliding = rewrite_translation_once(doc, extraction, &current, opts)?;
@@ -236,6 +237,130 @@ fn keep_formula_scripts(report: &mut TranslateReport, extraction: &Extraction) {
             segment.translated = segment.source.clone();
         }
     }
+}
+
+/// `A^{CA}`: the raised `CA` sits on its own row, so segmentation cut it
+/// off as a segment of two script glyphs while the base `A` stayed in the
+/// sentence. The sentence's hole then moved without its script, and the
+/// script stayed where the Chinese line now runs. A segment of a few small
+/// formula-face glyphs that sits as a script of a formula glyph in another
+/// segment joins that segment, so the hole carries it.
+fn placeholder_count(text: &str) -> usize {
+    let mut seen: Vec<&str> = Vec::new();
+    for part in text.split('⟦').skip(1) {
+        if let Some(end) = part.find('⟧') {
+            if !seen.contains(&&part[..end]) {
+                seen.push(&part[..end]);
+            }
+        }
+    }
+    seen.len()
+}
+
+fn adopt_detached_scripts(report: &mut TranslateReport, extraction: &Extraction) {
+    let by_id = glyph_index(&extraction.glyphs);
+    // `ℝ` is MSBM, a TeX symbol face beside Computer Modern.
+    let tex_face = |name: &str| {
+        let base = name.split_once('+').map_or(name, |(_, rest)| rest);
+        display_math_face(name)
+            || base.starts_with("CM")
+            || base.starts_with("MSBM")
+            || base.starts_with("MSAM")
+    };
+    let glyph = |id: &u32| by_id.get(id).map(|&index| &extraction.glyphs[index]);
+    let mut moves: Vec<(usize, usize)> = Vec::new();
+    for (index, segment) in report.segments.iter().enumerate() {
+        let glyphs: Vec<&Glyph> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(glyph)
+            .filter(|glyph| !glyph.unicode.trim().is_empty())
+            .collect();
+        // `S×D^T`: the transpose mark is a text-face `T`, one of four.
+        let tex = glyphs.iter().filter(|glyph| tex_face(&glyph.font_name)).count();
+        if glyphs.is_empty() || glyphs.len() > 6 || tex * 4 < glyphs.len() * 3 {
+            continue;
+        }
+        let first = glyphs
+            .iter()
+            .min_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]))
+            .copied()
+            .unwrap();
+        if !tex_face(&first.font_name) {
+            continue;
+        }
+        let mut host = None;
+        for (other_index, other) in report.segments.iter().enumerate() {
+            // A paragraph that starts on the previous page still owns
+            // this page's lines, so compare the glyphs' pages.
+            if other_index == index || other.translated == other.source
+            {
+                continue;
+            }
+            let found = other.glyph_ids.iter().filter_map(glyph).any(|base| {
+                let size = base.font_size.abs().max(1.0);
+                let right = base.bbox[0].max(base.bbox[2]);
+                let dy = (first.matrix[5] - base.matrix[5]).abs();
+                base.page_index == first.page_index
+                    && tex_face(&base.font_name)
+                    && glyphs.iter().all(|glyph| glyph.font_size.abs() <= size * 0.85)
+                    && first.matrix[4] >= right - size * 0.2
+                    && first.matrix[4] <= right + size * 0.5
+                    && dy >= size * 0.15
+                    && dy <= size * 0.7
+            });
+            if found {
+                host = Some(other_index);
+                break;
+            }
+        }
+        if let Some(host) = host {
+            moves.push((index, host));
+        }
+    }
+    let mut dropped: HashSet<usize> = HashSet::default();
+    for (from, to) in moves {
+        if dropped.contains(&to) {
+            continue;
+        }
+        // The translation names each hole by its index. A script that would
+        // open a hole of its own, or merge two, renumbers every later hole
+        // and the formulas land in the wrong places. It must fall inside the
+        // hole that already holds its base.
+        let groups_of = |ids: &[u32]| {
+            let owned: Vec<&Glyph> = ids.iter().filter_map(glyph).collect();
+            let body = prose_body_size(&owned);
+            placeholder_groups(&owned, body)
+        };
+        let before = groups_of(&report.segments[to].glyph_ids);
+        let mut joined = report.segments[to].glyph_ids.clone();
+        joined.extend(report.segments[from].glyph_ids.iter().copied());
+        let after = groups_of(&joined);
+        // Every old hole must survive inside a new one, and the count must
+        // either stay put or come to the number the translation names (the
+        // script completes a formula the source had lost).
+        let kept = before
+            .iter()
+            .all(|old| after.iter().any(|new| old.iter().all(|id| new.contains(id))));
+        let named = placeholder_count(&report.segments[to].translated);
+        let same_holes = kept
+            && (before.len() == after.len() || (before.len() != named && after.len() == named));
+        if !same_holes {
+            continue;
+        }
+        let ids = std::mem::take(&mut report.segments[from].glyph_ids);
+        if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+            eprintln!("script adopted: {:?} into segment {}", report.segments[from].source, report.segments[to].id);
+        }
+        report.segments[to].glyph_ids.extend(ids);
+        dropped.insert(from);
+    }
+    let mut index = 0usize;
+    report.segments.retain(|_| {
+        let keep = !dropped.contains(&index);
+        index += 1;
+        keep
+    });
 }
 
 /// Two drawn lines that overlap: the source glyph ids of each.
@@ -35668,6 +35793,85 @@ mod tests {
         let translated: Vec<&str> = report.segments.iter().map(|segment| segment.translated.as_str()).collect();
         // Body prose and a small note in the body face are still translated.
         assert_eq!(translated, vec!["正文", "cond,clean", "注释", "Mobj(p) [utcond"]);
+    }
+
+    #[test]
+    fn a_script_cut_off_its_base_joins_the_base_paragraph() {
+        // 23658 p3: the raised `CA` of `A^{CA}` was its own segment, so the
+        // hole for `A` moved and `CA` stayed under the Chinese line.
+        let face = |mut glyph: Glyph, name: &str| {
+            glyph.font_name = name.into();
+            glyph
+        };
+        let mut glyphs: Vec<Glyph> = (0..20)
+            .map(|id| face(ink_glyph(id, 100.0 + id as f32 * 5.0, 400.0, 10.0, "a"), "Times-Roman"))
+            .collect();
+        let base = face(ink_glyph(20, 300.0, 400.0, 10.0, "A"), "CLYXQM+CMMIB10");
+        let right = base.bbox[0].max(base.bbox[2]);
+        glyphs.push(base);
+        glyphs.push(face(ink_glyph(21, right + 0.5, 403.7, 7.0, "C"), "YLNPLB+CMR7"));
+        glyphs.push(face(ink_glyph(22, right + 6.0, 403.7, 7.0, "A"), "YLNPLB+CMR7"));
+        glyphs.push(face(ink_glyph(23, 500.0, 300.0, 7.0, "x"), "YLNPLB+CMR7"));
+        let extraction = page_extraction(glyphs);
+        let segment = |id: u32, ids: Vec<u32>, source: &str, translated: &str| TranslatedSegment {
+            id,
+            page_index: 0,
+            glyph_ids: ids,
+            source: source.into(),
+            translated: translated.into(),
+        };
+        let mut report = TranslateReport {
+            segments: vec![
+                segment(0, (0..21).collect(), "we visualise A", "我们可视化 ⟦0⟧"),
+                segment(1, vec![21, 22], "CA", "CA"),
+                segment(2, vec![23], "x", "x"),
+            ],
+            calls: 0,
+            cache_hits: 0,
+        };
+        adopt_detached_scripts(&mut report, &extraction);
+        let ids: Vec<u32> = report.segments.iter().map(|segment| segment.id).collect();
+        assert_eq!(ids, vec![0, 2], "the script segment was not adopted");
+        assert!(report.segments[0].glyph_ids.contains(&21) && report.segments[0].glyph_ids.contains(&22));
+    }
+
+    #[test]
+    fn a_script_that_would_renumber_the_holes_stays_apart() {
+        // 04611 p11: a ♭ joining a paragraph whose translation names fewer
+        // holes than the joined glyphs form shifted every later formula.
+        let face = |mut glyph: Glyph, name: &str| {
+            glyph.font_name = name.into();
+            glyph
+        };
+        let mut glyphs: Vec<Glyph> = (0..20)
+            .map(|id| face(ink_glyph(id, 100.0 + id as f32 * 5.0, 400.0, 10.0, "a"), "Times-Roman"))
+            .collect();
+        let base = face(ink_glyph(20, 300.0, 400.0, 10.0, "A"), "CLYXQM+CMMIB10");
+        let right = base.bbox[0].max(base.bbox[2]);
+        glyphs.push(base);
+        glyphs.push(face(ink_glyph(21, right + 0.5, 403.7, 7.0, "C"), "YLNPLB+CMR7"));
+        glyphs.push(face(ink_glyph(22, right + 6.0, 403.7, 7.0, "A"), "YLNPLB+CMR7"));
+        glyphs.push(face(ink_glyph(23, 500.0, 300.0, 7.0, "x"), "YLNPLB+CMR7"));
+        let extraction = page_extraction(glyphs);
+        let segment = |id: u32, ids: Vec<u32>, source: &str, translated: &str| TranslatedSegment {
+            id,
+            page_index: 0,
+            glyph_ids: ids,
+            source: source.into(),
+            translated: translated.into(),
+        };
+        let mut report = TranslateReport {
+            segments: vec![
+                segment(0, (0..21).collect(), "we visualise A", "我们可视化 A"),
+                segment(1, vec![21, 22], "CA", "CA"),
+                segment(2, vec![23], "x", "x"),
+            ],
+            calls: 0,
+            cache_hits: 0,
+        };
+        adopt_detached_scripts(&mut report, &extraction);
+        let ids: Vec<u32> = report.segments.iter().map(|segment| segment.id).collect();
+        assert_eq!(ids, vec![0, 1, 2], "the script renumbered the holes");
     }
 
     #[test]
