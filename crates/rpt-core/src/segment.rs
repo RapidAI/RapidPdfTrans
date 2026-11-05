@@ -7328,6 +7328,17 @@ fn is_prose_function_word(word: &str) -> bool {
     )
 }
 
+/// CMR/CMTI at script size (`A^{CA}` uses CMR7). Body-size CMR is prose.
+fn tex_script_face(glyph: &Glyph) -> bool {
+    let upper = glyph.font_name.to_ascii_uppercase();
+    glyph.font_size > 0.0
+        && glyph.font_size <= 8.0
+        && (upper.contains("CMR")
+            || upper.contains("CMTI")
+            || upper.contains("CMBX")
+            || upper.contains("CMSS"))
+}
+
 fn math_font_glyph(glyph: &Glyph) -> bool {
     let upper = glyph.font_name.to_ascii_uppercase();
     // `txsym`/`pxsys` are the TX/PX fonts' symbol and blackboard faces.
@@ -7390,7 +7401,16 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
     }
     let mut best: Option<(usize, f32)> = None;
     for (other_index, other) in lines.iter().enumerate() {
-        if other_index == index || other.page != line.page || is_math_script(other) {
+        if other_index == index || other.page != line.page {
+            continue;
+        }
+        // A lone baseline `A` is is_math_script, but it is the base of `A^{CA}`,
+        // not a competing script. Skipping every is_math_script host left `CA`
+        // unattached (23658 p3); only skip raised script atoms the mark does
+        // not sit on.
+        if is_math_script(other)
+            && !script_sits_on_math(line, other, other.size.max(1.0))
+        {
             continue;
         }
         if numeral
@@ -7435,7 +7455,12 @@ fn math_script_host(index: usize, lines: &[VisualLine<'_>]) -> Option<usize> {
         {
             continue;
         }
-        if line.left < other.left - size || (line.right > other.right + size && !word) {
+        // `A^{CA}`: the script sticks out past a one-glyph base line. When it
+        // sits on that math letter, the host's right edge is not a fence
+        // (23658 p3).
+        if line.left < other.left - size
+            || (line.right > other.right + size && !word && !on_math)
+        {
             continue;
         }
         // A superscript rises well under an em. `𝑘` of `𝑦𝑘` in the row above,
@@ -7534,7 +7559,8 @@ fn is_math_script(line: &VisualLine<'_>) -> bool {
         return true;
     }
     let width = line.right - line.left;
-    let symbol = |glyph: &Glyph| math_font_glyph(glyph) || vector_symbol_glyph(glyph);
+    let symbol =
+        |glyph: &Glyph| math_font_glyph(glyph) || vector_symbol_glyph(glyph) || tex_script_face(glyph);
     width <= line.size.max(1.0) * 6.0
         && (1..=6).contains(&line.glyphs.len())
         && line.glyphs.iter().any(|glyph| symbol(glyph))
@@ -7605,7 +7631,16 @@ fn next_formula_shard(lines: &[VisualLine<'_>], index: usize) -> Option<usize> {
         .split_whitespace()
         .filter(|word| word.len() >= 3 && word.chars().all(|ch| ch.is_ascii_alphabetic()))
         .count();
-    if display_equation_glyphs(&left.glyphs)
+    // `where ∆u = u` looks like a display once the first shards join, so the
+    // old skip refused `− u` on the right. A short math-only continuation
+    // (`−u_t`) still belongs in that equation (23658 p5 uncond,clean).
+    let short_math_cont = right.glyphs.len() <= 6
+        && prose_words == 0
+        && right
+            .glyphs
+            .iter()
+            .any(|glyph| math_font_glyph(glyph) || is_display_operator(&glyph.unicode));
+    if (display_equation_glyphs(&left.glyphs) && !short_math_cont)
         || (display_equation_glyphs(&right.glyphs) && prose_words < 2)
     {
         return None;
@@ -7692,7 +7727,10 @@ fn attach_formula_scripts(lines: &mut Vec<VisualLine<'_>>) {
             scripts
                 .iter()
                 .copied()
-                .filter(|script| every_glyph_on_math(&lines[*script], &lines[host]))
+                .filter(|script| {
+                    every_glyph_on_math(&lines[*script], &lines[host])
+                        || script_word_on_math(&lines[*script], &lines[host])
+                })
                 .collect()
         };
         if scripts.is_empty() {
@@ -7733,12 +7771,17 @@ fn formula_script_host(index: usize, lines: &[VisualLine<'_>], body: f32) -> Opt
             continue;
         }
         let other_body = page_body_size(lines, other.page);
-        if is_math_script(other) || is_extended_formula_script(other, other_body) {
+        // Baseline math atoms are is_math_script but may be the base (`u` of
+        // `u^{cond,clean}`); only skip scripts the mark does not sit on.
+        if (is_math_script(other)
+            && !script_sits_on_math(line, other, other.size.max(1.0)))
+            || is_extended_formula_script(other, other_body)
+        {
             continue;
         }
-        if display_equation_glyphs(&other.glyphs) {
-            continue;
-        }
+        // Do not skip display_equation hosts: `where ∆u_t^clean = u_t` is
+        // classified as a display after its math scripts attach, and that
+        // rejected the only host for `cond,clean` (23658 p5).
         let size = other.size.max(body).max(1.0);
         let dy = (line.y - other.y).abs();
         if dy < size * 0.08 || dy > size * 1.05 {
@@ -7747,8 +7790,18 @@ fn formula_script_host(index: usize, lines: &[VisualLine<'_>], body: f32) -> Opt
         if !script_sits_on_math(line, other, size) {
             continue;
         }
-        if best.is_none_or(|(_, score)| dy < score) {
-            best = Some((other_index, dy));
+        // Prefer the base the script sits on. A full `size` penalty per
+        // function word made `where ∆u = u − u` lose to `p∈V` for
+        // `uncond,clean` (dy 4.8+10 vs 9.1). Tight word-on-math hosts keep
+        // dy only; loose x-overlap still pays the prose penalty (23658 p5).
+        let (function_words, _) = prose_word_counts(&other.glyphs);
+        let score = if script_word_on_math(line, other) {
+            dy
+        } else {
+            dy + function_words as f32 * size
+        };
+        if best.is_none_or(|(_, best_score)| score < best_score) {
+            best = Some((other_index, score));
         }
     }
     best.map(|(host, _)| host)
@@ -7767,14 +7820,24 @@ fn is_extended_formula_script(line: &VisualLine<'_>, body: f32) -> bool {
         if glyph.font_size > ceiling {
             return false;
         }
-        if math_font_glyph(glyph) || vector_symbol_glyph(glyph) {
+        if math_font_glyph(glyph) || vector_symbol_glyph(glyph) || tex_script_face(glyph) {
             math = true;
         }
     }
     // A footnote in a slightly smaller face (`has mean 0 and variance`)
     // is prose. `d_model` has no function word.
     let (function_words, _) = prose_word_counts(&line.glyphs);
-    math && function_words == 0
+    // A roman label such as `cond,clean` is a subscript: prose never
+    // joins words with a bare comma (23658 p5).
+    let text = line.text.trim();
+    let label = !text.contains(' ')
+        && text.len() <= 24
+        && text
+            .split(',')
+            .filter(|part| part.chars().any(|ch| ch.is_alphabetic()))
+            .count()
+            >= 2;
+    (math || label) && function_words == 0
 }
 
 fn page_body_size(lines: &[VisualLine<'_>], page: u32) -> f32 {
@@ -7816,6 +7879,31 @@ fn every_glyph_on_math(script: &VisualLine<'_>, host: &VisualLine<'_>) -> bool {
                 }
             })
     })
+}
+
+/// `u_t^{cond,clean}`: the script starts immediately after a math base on the
+/// host. A wide dx window glued labels onto the wrong host (23658 p5).
+fn script_word_on_math(script: &VisualLine<'_>, host: &VisualLine<'_>) -> bool {
+    let marks: Vec<&&Glyph> = script
+        .glyphs
+        .iter()
+        .filter(|glyph| !glyph.unicode.trim().is_empty())
+        .collect();
+    let Some(first) = marks.first() else {
+        return false;
+    };
+    let size = host.size.max(1.0);
+    let starts_on_math = host.glyphs.iter().any(|base| {
+        math_font_glyph(base) && {
+            let gap = first.matrix[4] - base.bbox[2].max(base.bbox[0]);
+            gap >= -size * 0.35 && gap <= size * 0.55
+        }
+    });
+    starts_on_math
+        && marks.windows(2).all(|pair| {
+            pair[1].matrix[4] - pair[0].bbox[2].max(pair[0].bbox[0])
+                <= pair[0].font_size.abs().max(1.0) * 0.35
+        })
 }
 
 /// One glyph of the script sits on a math letter of the host (`d` on `R`,
