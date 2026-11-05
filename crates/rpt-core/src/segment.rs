@@ -955,7 +955,18 @@ fn formula_bridge(current: &[&Glyph], next: &Glyph, gap: f32, hard: f32) -> bool
     // A raised next glyph is a superscript (`∈ ℝ^{d×k}`), not the rest of
     // the formula after an unmapped operator (`= ∏_t p`).
     let raised = next.matrix[5] > last.matrix[5] + 0.15 * last.font_size.max(1.0);
-    gap <= hard
+    // `gener-` | `ρ when using`: a text-face hyphen after a letter breaks a
+    // word at the column edge. It is no minus, and the gutter splits.
+    let word_hyphen = last.unicode.trim() == "-"
+        && !math_font_glyph(last)
+        && current.len() >= 2
+        && current[current.len() - 2]
+            .unicode
+            .chars()
+            .all(|ch| ch.is_alphabetic())
+        && !math_font_glyph(current[current.len() - 2]);
+    !word_hyphen
+        && gap <= hard
         && !raised
         && math_font_glyph(next)
         && matches!(
@@ -5887,6 +5898,7 @@ struct ColumnHead {
     page: u32,
     left: f32,
     y: f32,
+    size: f32,
     body: bool,
 }
 
@@ -5898,6 +5910,7 @@ fn column_heads(paragraphs: &[Vec<VisualLine<'_>>]) -> Vec<ColumnHead> {
             page: para[0].page,
             left: para[0].left,
             y: para[0].y,
+            size: para[0].size,
             body: substantial_paragraph(para) && !marked_footnote(para),
         })
         .collect()
@@ -5913,9 +5926,22 @@ fn closes_the_column(current: &[VisualLine<'_>], heads: &[ColumnHead]) -> bool {
     !heads.iter().any(|head| {
         head.body
             && head.page == upper.page
-            && (head.left - upper.left).abs() <= 36.0
+            && same_column_below(head.left, upper)
             && head.y < upper.y - 0.5
+            // `4ancient world wonders, …` is an 8pt footnote under 10pt body.
+            // Its marker is fused to the first word, so it reads as body.
+            && head.size >= upper.size * 0.85
     })
+}
+
+/// A paragraph head below starts in this line's column. `Single Forward Pass
+/// We begin by investigating the` leaves its tail at 165pt after the run-in
+/// label, and the next line `initial forward pass.` is back at the 71pt
+/// margin. That margin is left of the tail by less than the tail is wide.
+/// A full-width paragraph under the right column starts a whole column away.
+fn same_column_below(head_left: f32, upper: &VisualLine<'_>) -> bool {
+    (head_left - upper.left).abs() <= 36.0
+        || (head_left < upper.left && upper.left - head_left <= upper.right - upper.left)
 }
 
 fn find_page_continuation(
