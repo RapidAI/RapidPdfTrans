@@ -316,7 +316,49 @@ fn fallback_segments(report: &TranslateReport, colliding: &[Collision]) -> Vec<u
     }
     out.sort_unstable();
     out.dedup();
+    // 23658 p7: `… (where φ are 2D vectors; see` | `Appendix F for details).
+    // …`. A sentence cut at a formula row is two segments; when one falls
+    // back the other half stays Chinese and the line reads half and half.
+    let mut halves = Vec::new();
+    for &index in &out {
+        let segment = &report.segments[index];
+        for near in [index.wrapping_sub(1), index + 1] {
+            let Some(other) = report.segments.get(near) else {
+                continue;
+            };
+            if other.page_index != segment.page_index || other.translated == other.source {
+                continue;
+            }
+            let (first, second) = if near < index { (other, segment) } else { (segment, other) };
+            if sentence_runs_on(&first.source, &second.source) {
+                halves.push(near);
+            }
+        }
+    }
+    out.extend(halves);
+    out.sort_unstable();
+    out.dedup();
     out
+}
+
+/// `…vectors; see` then `Appendix F for details).`: the first segment stops
+/// mid-sentence on a running word and the second ends a bracket the first
+/// opened.
+fn sentence_runs_on(first: &str, second: &str) -> bool {
+    let first = first.trim_end();
+    let words = first.split_whitespace().count();
+    let last = first.split_whitespace().last().unwrap_or("");
+    if words < 6 || !last.chars().all(|ch| ch.is_ascii_lowercase()) || last.is_empty() {
+        return false;
+    }
+    let open = first.matches('(').count() as i32 - first.matches(')').count() as i32;
+    let close = second
+        .split(['.', '!', '?'])
+        .next()
+        .map(|head| head.matches(')').count() as i32 - head.matches('(').count() as i32)
+        .unwrap_or(0);
+    // The `(` may sit inside a formula placeholder.
+    open >= 0 && close > 0
 }
 
 /// Pairs of drawn lines that overlap by more than kerning slop.
@@ -35494,6 +35536,13 @@ mod tests {
             fallback_line(0, 108.0, 180.0, "下面的一行", vec![3]),
         ];
         assert_eq!(qa_failures(&drawn, &notes), vec![(vec![1], Vec::new())]);
+    }
+
+    #[test]
+    fn a_sentence_cut_at_a_formula_row_runs_on() {
+        assert!(sentence_runs_on("⟦0⟧⟦1⟧where ⟦2⟧ are 2D vectors; see", "Appendix F for details). Consequently, the dot"));
+        assert!(!sentence_runs_on("We train the model for ten epochs.", "Appendix F for details)."));
+        assert!(!sentence_runs_on("Related work", "(see above) for details)."));
     }
 
     #[test]
