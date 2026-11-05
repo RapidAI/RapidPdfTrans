@@ -215,6 +215,15 @@ fn keep_formula_scripts(report: &mut TranslateReport, extraction: &Extraction) {
             display_math_face(name)
                 || name.split_once('+').map_or(name, |(_, rest)| rest).starts_with("CM")
         };
+        // `Mobj(p) [utcond` came back as `M_obj(p) [u_t^cond`: no Chinese,
+        // only TeX markup, for glyphs in formula faces. Set as a line it
+        // erased the display equation it was cut from (23658 p5 eq. 2).
+        if !segment.translated.chars().any(is_han_char)
+            && glyphs.iter().filter(|glyph| tex_face(&glyph.font_name)).count() * 2 > glyphs.len()
+        {
+            segment.translated = segment.source.clone();
+            continue;
+        }
         if segment.source.split_whitespace().count() <= 2
             && segment.source.chars().count() <= 24
             && glyphs.iter().all(|glyph| {
@@ -1663,12 +1672,37 @@ fn qa_failures(drawn: &[Drawn], notes: &[(Option<u32>, String)]) -> Vec<Collisio
         // A gap or a line-start comma is a layout nit. Dropping the whole
         // paragraph to English for one costs more than it fixes. A translated
         // figure label or a rewritten equation breaks a preserved region.
-        if !region_failure(message) {
-            continue;
-        }
         let Some((x, y)) = note_position(message) else {
             continue;
         };
+        // 23658 p5: paragraph 66 came back shorter and its reflow lifted the
+        // right half of eq. (2) 55pt into its own lines, while `ℒ_m = ∑` and
+        // `(2)` stayed. The note names the formula, not a drawn line, so the
+        // translated lines the lifted half now sits among fall back; with
+        // the paragraph at its source height nothing pulls the formula apart.
+        if let Some(span) = message
+            .strip_prefix("display formula split across ")
+            .and_then(|rest| rest.split_once("pt "))
+            .and_then(|(span, _)| span.parse::<f32>().ok())
+        {
+            for line in drawn {
+                if line.page == page
+                    && !line.glyph_ids.is_empty()
+                    && line.text.chars().any(is_han_char)
+                    && line.y > y + 1.0
+                    && line.y <= y + span + line.size.max(1.0) * 3.0
+                {
+                    if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+                        eprintln!("qa fallback p{page} {message} lifted into {:?}", line.text);
+                    }
+                    out.push((line.glyph_ids.clone(), Vec::new()));
+                }
+            }
+            continue;
+        }
+        if !region_failure(message) {
+            continue;
+        }
         for line in drawn {
             if line.page == page
                 && !line.glyph_ids.is_empty()
@@ -35384,6 +35418,82 @@ mod tests {
         assert_eq!(fallback_segments(&report, &[(vec![100, 101], vec![999])]), vec![0, 2]);
         // A short kept label is not a moved paragraph.
         assert!(fallback_segments(&report, &[(vec![400, 401], vec![999])]).is_empty());
+    }
+
+    #[test]
+    fn a_script_size_formula_fragment_keeps_its_source() {
+        // 23658 p5: `cond,clean` is the CMR7 superscript of `u_t` beside a
+        // 10pt Times body; `M_obj(p)` came back as TeX with no Chinese.
+        let face = |mut glyph: Glyph, name: &str| {
+            glyph.font_name = name.into();
+            glyph
+        };
+        let mut glyphs: Vec<Glyph> = (0..40)
+            .map(|id| ink_glyph(id, 100.0 + id as f32 * 5.0, 400.0, 10.0, "a"))
+            .collect();
+        glyphs.extend((40..50).map(|id| face(ink_glyph(id, 100.0 + id as f32 * 3.0, 193.0, 7.0, "c"), "YLNPLB+CMR7")));
+        glyphs.extend((50..60).map(|id| face(ink_glyph(id, 100.0 + id as f32 * 3.0, 300.0, 7.0, "c"), "Times-Roman")));
+        glyphs.extend((60..66).map(|id| face(ink_glyph(id, 100.0 + id as f32 * 5.0, 209.0, 10.0, "M"), "CMMIB10")));
+        let extraction = page_extraction(glyphs);
+        let segment = |id: u32, ids: Vec<u32>, source: &str, translated: &str| TranslatedSegment {
+            id,
+            page_index: 0,
+            glyph_ids: ids,
+            source: source.into(),
+            translated: translated.into(),
+        };
+        let mut report = TranslateReport {
+            segments: vec![
+                segment(0, (0..40).collect(), "body text", "正文"),
+                segment(1, (40..50).collect(), "cond,clean", "条件,干净"),
+                segment(2, (50..60).collect(), "note text", "注释"),
+                segment(3, (60..66).collect(), "Mobj(p) [utcond", "M_obj(p) [u_t^cond"),
+            ],
+            calls: 0,
+            cache_hits: 0,
+        };
+        keep_formula_scripts(&mut report, &extraction);
+        let translated: Vec<&str> = report.segments.iter().map(|segment| segment.translated.as_str()).collect();
+        // Body prose and a small note in the body face are still translated.
+        assert_eq!(translated, vec!["正文", "cond,clean", "注释", "Mobj(p) [utcond"]);
+    }
+
+    #[test]
+    fn a_formula_hit_falls_back_every_line_on_its_row() {
+        // 23658 p5: `where Δu =u`, `−u` and `∈ R^D is the difference…` are
+        // three translated fragments of one row; a superscript set onto the
+        // row below must take all of them back to source.
+        let mut source: Vec<Glyph> = Vec::new();
+        for (id, x) in [(1, 100.0), (2, 200.0), (3, 300.0)] {
+            source.push(ink_glyph(id, x, 188.7, 10.0, "w"));
+        }
+        source.push(ink_glyph(4, 228.0, 193.5, 7.0, "c"));
+        source.push(ink_glyph(5, 228.0, 176.0, 10.0, "t"));
+        let source = page_extraction(source);
+        // The painted page: the translated superscript dropped onto the `u`
+        // of its own row.
+        let painted = page_extraction(vec![ink_glyph(10, 228.0, 188.7, 10.0, "u"), ink_glyph(11, 228.5, 185.5, 7.0, "c")]);
+        let drawn = vec![
+            fallback_line(0, 210.0, 188.7, "其中", vec![1]),
+            fallback_line(0, 300.0, 188.7, "是差", vec![3]),
+        ];
+        let hits = painted_formula_collisions(&drawn, &painted, &source);
+        let fallen: HashSet<u32> = hits.iter().flat_map(|(a, b)| a.iter().chain(b.iter()).copied()).collect();
+        assert!([1, 2, 3].iter().all(|id| fallen.contains(id)), "{hits:?}");
+        // The row below is not part of the hit.
+        assert!(!fallen.contains(&5), "{hits:?}");
+    }
+
+    #[test]
+    fn a_split_display_formula_falls_back_the_lines_it_rose_into() {
+        // 23658 p5: half of eq. (2) rose 55pt toward the shorter paragraph.
+        let notes = vec![(Some(0), "display formula split across 55.7pt at (184.0, 207.1)".to_string())];
+        let drawn = vec![
+            fallback_line(0, 108.0, 280.4, "修补度量定义为：", vec![1]),
+            fallback_line(0, 108.0, 400.0, "更早的一段话", vec![2]),
+            fallback_line(0, 108.0, 180.0, "下面的一行", vec![3]),
+        ];
+        assert_eq!(qa_failures(&drawn, &notes), vec![(vec![1], Vec::new())]);
     }
 
     #[test]
