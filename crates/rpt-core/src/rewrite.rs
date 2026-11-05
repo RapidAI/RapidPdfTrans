@@ -128,6 +128,7 @@ pub fn rewrite_translation(
     let pristine_doc = doc.clone();
     let pristine_extraction = extraction.clone();
     let mut current = report.clone();
+    keep_formula_scripts(&mut current, extraction);
     let mut fallen_back: Vec<(u32, String)> = Vec::new();
     for round in 0..4 {
         let colliding = rewrite_translation_once(doc, extraction, &current, opts)?;
@@ -168,6 +169,64 @@ pub fn rewrite_translation(
         });
     }
     Ok(())
+}
+
+/// `cond,clean` is the superscript of `u_t` in `Δu_t^clean = u_t^cond,clean
+/// − u_t^uncond,clean`. Split from its formula it became a segment, came back
+/// as `条件,干净`, and was set as a Chinese line over the English (23658 p5).
+/// A segment in script-size formula faces, with no glyph in the page's body
+/// face, is part of a formula and keeps its source.
+fn keep_formula_scripts(report: &mut TranslateReport, extraction: &Extraction) {
+    let by_id = glyph_index(&extraction.glyphs);
+    let mut faces: HashMap<(u32, &str, i32), usize> = HashMap::default();
+    for glyph in &extraction.glyphs {
+        if glyph.unicode.chars().any(char::is_alphabetic) {
+            *faces
+                .entry((glyph.page_index, glyph.font_name.as_str(), (glyph.font_size.abs() * 10.0).round() as i32))
+                .or_default() += 1;
+        }
+    }
+    let mut body: HashMap<u32, (&str, f32, usize)> = HashMap::default();
+    for ((page, font, size), count) in faces {
+        let entry = body.entry(page).or_insert((font, size as f32 / 10.0, 0));
+        if count > entry.2 {
+            *entry = (font, size as f32 / 10.0, count);
+        }
+    }
+    for segment in &mut report.segments {
+        if segment.translated == segment.source {
+            continue;
+        }
+        let glyphs: Vec<&Glyph> = segment
+            .glyph_ids
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|&index| &extraction.glyphs[index]))
+            .filter(|glyph| !glyph.unicode.trim().is_empty())
+            .collect();
+        let Some(first) = glyphs.first() else {
+            continue;
+        };
+        let Some(&(face, size, _)) = body.get(&first.page_index) else {
+            continue;
+        };
+        // `cond,clean` is all CMR7: a Computer Modern face counts as formula
+        // here, and the length cap keeps a CMR7 footnote of a CMR10 paper.
+        let tex_face = |name: &str| {
+            display_math_face(name)
+                || name.split_once('+').map_or(name, |(_, rest)| rest).starts_with("CM")
+        };
+        if segment.source.split_whitespace().count() <= 2
+            && segment.source.chars().count() <= 24
+            && glyphs.iter().all(|glyph| {
+                tex_face(&glyph.font_name) && glyph.font_size.abs() < size * 0.8 && glyph.font_name != face
+            })
+        {
+            if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+                eprintln!("formula-script kept: {:?}", segment.source);
+            }
+            segment.translated = segment.source.clone();
+        }
+    }
 }
 
 /// Two drawn lines that overlap: the source glyph ids of each.
@@ -1573,6 +1632,7 @@ fn rewrite_translation_once(
     if compose.is_none() && std::env::var_os("RPT_NO_INK_QA").is_none() {
         let painted = crate::extract::PdfDocument::from_document(doc.clone()).extract();
         colliding.extend(painted_ink_collisions(&drawn, &painted, extraction));
+        colliding.extend(painted_formula_collisions(&drawn, &painted, extraction));
     }
     for note in audit {
         extraction.diagnostics.push(crate::glyph::Diagnostic {
@@ -1808,6 +1868,105 @@ fn extension_font(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     let face = upper.rsplit('+').next().unwrap_or(&upper);
     face.starts_with("CMEX") || face.starts_with("TXEX") || face.starts_with("PXEX") || face.starts_with("EUEX")
+}
+
+/// Formula ink painted on other formula ink one row away, where the source
+/// page had no such pair: a hole set into the wrong line (23658 p7 `C =`
+/// over its own fraction) or a translated script pushed under the next
+/// row (p5 `Δu`). Each side's nearest drawn line owns the hit.
+fn painted_formula_collisions(drawn: &[Drawn], painted: &Extraction, source: &Extraction) -> Vec<Collision> {
+    fn formula_ink(glyphs: &[Glyph]) -> Vec<(&Glyph, [f32; 4])> {
+        glyphs
+            .iter()
+            .filter(|glyph| {
+                !glyph.invisible
+                    && !glyph.unicode.trim().is_empty()
+                    && !glyph.unicode.chars().any(is_han_char)
+                    && !glyph.font_name.contains("RPTCJK")
+                    && glyph.matrix[1].abs() < 1e-3
+                    && glyph.matrix[2].abs() < 1e-3
+            })
+            .map(|glyph| {
+                let b = glyph.bbox;
+                (glyph, [b[0].min(b[2]), b[1].min(b[3]), b[0].max(b[2]), b[1].max(b[3])])
+            })
+            .collect()
+    }
+    fn pairs<'a>(ink: &[(&'a Glyph, [f32; 4])]) -> Vec<(&'a Glyph, &'a Glyph)> {
+        let mut sorted: Vec<&(&Glyph, [f32; 4])> = ink.iter().collect();
+        sorted.sort_by(|a, b| (a.0.page_index, a.1[0]).partial_cmp(&(b.0.page_index, b.1[0])).unwrap_or(std::cmp::Ordering::Equal));
+        let mut out = Vec::new();
+        for (index, (a, ab)) in sorted.iter().map(|v| (v.0, v.1)).enumerate() {
+            for (b, bb) in sorted[index + 1..].iter().map(|v| (v.0, v.1)) {
+                if b.page_index != a.page_index || bb[0] >= ab[2] {
+                    break;
+                }
+                let w = ab[2].min(bb[2]) - ab[0].max(bb[0]);
+                let h = ab[3].min(bb[3]) - ab[1].max(bb[1]);
+                if w <= 0.0 || h <= 0.0 {
+                    continue;
+                }
+                let small = ((ab[2] - ab[0]) * (ab[3] - ab[1])).min((bb[2] - bb[0]) * (bb[3] - bb[1]));
+                if small > 0.5
+                    && w * h > 0.1 * small
+                    && (a.matrix[5] - b.matrix[5]).abs() > 2.0
+                    && !((ab[0] - bb[0]).abs() < 0.3 && (ab[1] - bb[1]).abs() < 0.3)
+                {
+                    out.push((a, b));
+                }
+            }
+        }
+        out
+    }
+    let key = |a: &Glyph, b: &Glyph| {
+        let (x, y) = (a.unicode.clone(), b.unicode.clone());
+        if x <= y { (a.page_index, x, y) } else { (a.page_index, y, x) }
+    };
+    let source_ink = formula_ink(&source.glyphs);
+    let before: HashSet<(u32, String, String)> = pairs(&source_ink).into_iter().map(|(a, b)| key(a, b)).collect();
+    let painted_ink = formula_ink(&painted.glyphs);
+    let near = |glyph: &Glyph| -> Option<&Drawn> {
+        let size = glyph.font_size.abs().max(1.0);
+        drawn
+            .iter()
+            .filter(|line| line.page == glyph.page_index && !line.glyph_ids.is_empty() && line.text.chars().any(is_han_char))
+            .filter(|line| {
+                let (left, right) = drawn_ink_span(line);
+                glyph.matrix[4] >= left - size && glyph.matrix[4] <= right + size
+            })
+            .map(|line| ((line.y - glyph.matrix[5]).abs(), line))
+            .filter(|(d, line)| *d <= line.size.max(size) * 1.2)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, line)| line)
+    };
+    let mut out = Vec::new();
+    for (a, b) in pairs(&painted_ink) {
+        if before.contains(&key(a, b)) {
+            continue;
+        }
+        let (Some(la), Some(lb)) = (near(a), near(b)) else {
+            continue;
+        };
+        if std::env::var_os("RPT_FALLBACK_DEBUG").is_some() {
+            eprintln!("formula-on-formula p{} {:?}/{:?} at ({:.1},{:.1})", a.page_index, a.unicode, b.unicode, a.matrix[4], a.matrix[5]);
+        }
+        out.push((la.glyph_ids.clone(), lb.glyph_ids.clone()));
+        // The row the hit sits on was cut into fragments around the formula
+        // (23658 p5 `where Δu =u`, `−u`, `∈ R^D is the difference…`); one
+        // fragment falling back leaves the others set over the English, so
+        // every source glyph on either row goes with it.
+        let row: Vec<u32> = source
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.page_index == a.page_index
+                    && [a, b].iter().any(|hit| (glyph.matrix[5] - hit.matrix[5]).abs() <= hit.font_size.abs().max(1.0) * 0.4)
+            })
+            .map(|glyph| glyph.id)
+            .collect();
+        out.push((row.clone(), row));
+    }
+    out
 }
 
 fn painted_ink_collisions(
