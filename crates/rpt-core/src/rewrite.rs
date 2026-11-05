@@ -20222,6 +20222,7 @@ fn split_styled_line(
     pieces
 }
 
+#[derive(Clone)]
 struct ColumnBlock {
     indices: Vec<usize>,
     /// A monospace listing left in the source stream. It is not a `Drawn`
@@ -27194,6 +27195,10 @@ fn close_column_holes_with(
         // a shorter paragraph above resets the pull and leaves a hole
         // between `计算如下：` and equation (1).
         blocks.extend(display_formula_blocks(drawn, extraction, page));
+        // 23658 p3: eq. (1) rose 124pt with the shorter paragraph above and
+        // `(1)` stayed: the number is a drawn line, its own block, and a
+        // block on the formula's row is no hole to close. One row, one pull.
+        fuse_equation_numbers(&mut blocks, drawn, extraction, page);
         let slots = listing_slots(&blocks, extraction);
         blocks.sort_by(|left, right| right.top.total_cmp(&left.top));
         let mut used_ids = HashSet::default();
@@ -28400,6 +28405,114 @@ fn quotes_hanging_beside(
         ids.push(glyph.id);
     }
     ids
+}
+
+fn equation_number_text(text: &str) -> bool {
+    let text = text.trim();
+    let Some(inner) = text.strip_prefix('(').and_then(|rest| rest.strip_suffix(')')) else {
+        return false;
+    };
+    let inner = inner.trim();
+    !inner.is_empty()
+        && inner.len() <= 6
+        && inner.chars().next().is_some_and(|ch| ch.is_ascii_digit() || ch.is_ascii_uppercase())
+        && inner.chars().all(|ch| ch.is_ascii_alphanumeric() || ".-".contains(ch))
+        && inner.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn fuse_equation_numbers(
+    blocks: &mut Vec<ColumnBlock>,
+    drawn: &[Drawn],
+    extraction: &Extraction,
+    page: u32,
+) {
+    // A kept `(1)` the formula pool did not join (a word-sized gap after a
+    // roman glyph) is no drawn line either. It rides with its formula.
+    let mut taken: HashSet<u32> = blocks
+        .iter()
+        .flat_map(|block| block.kept_ids.iter().copied())
+        .collect();
+    for line in drawn.iter().filter(|line| line.page == page) {
+        taken.extend(line.glyph_ids.iter().copied());
+    }
+    for block in blocks.iter_mut() {
+        if !block.indices.is_empty() || block.kept_ids.is_empty() {
+            continue;
+        }
+        let size = block.size.max(1.0);
+        let mut row: Vec<&Glyph> = extraction
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.page_index == page
+                    && !glyph.invisible
+                    && !taken.contains(&glyph.id)
+                    && !glyph.unicode.trim().is_empty()
+                    && glyph.matrix[4] >= block.right
+                    && glyph.matrix[5] <= block.source_top + size * 0.3
+                    && glyph.matrix[5] >= block.source_bottom - size * 0.3
+            })
+            .collect();
+        row.sort_by(|a, b| a.matrix[4].total_cmp(&b.matrix[4]));
+        let text: String = row.iter().map(|glyph| glyph.unicode.trim()).collect();
+        if row.is_empty() || !equation_number_text(&text) {
+            continue;
+        }
+        let tight = row
+            .windows(2)
+            .all(|pair| pair[1].matrix[4] - pair[0].matrix[4] <= size * 1.2);
+        if !tight {
+            continue;
+        }
+        for glyph in &row {
+            taken.insert(glyph.id);
+            block.kept_ids.push(glyph.id);
+        }
+        block.right = row
+            .iter()
+            .map(|glyph| glyph_paint_right(glyph))
+            .fold(block.right, f32::max);
+    }
+    let mut drop = Vec::new();
+    for index in 0..blocks.len() {
+        let formula = &blocks[index];
+        if !formula.indices.is_empty() || formula.kept_ids.is_empty() {
+            continue;
+        }
+        let size = formula.size.max(1.0);
+        let Some(mate) = (0..blocks.len()).find(|&other| {
+            let block = &blocks[other];
+            other != index
+                && !drop.contains(&other)
+                && block.kept_ids.is_empty()
+                && block.indices.len() == 1
+                && equation_number_text(&drawn[block.indices[0]].text)
+                && block.left >= formula.right
+                && block.source_bottom <= formula.source_top + size * 0.5
+                && block.source_top >= formula.source_bottom - size * 0.5
+        }) else {
+            continue;
+        };
+        let number = blocks[mate].clone();
+        let block = &mut blocks[index];
+        block.indices.extend(number.indices);
+        block.top = block.top.max(number.top);
+        block.bottom = block.bottom.min(number.bottom);
+        block.right = block.right.max(number.right);
+        block.source_top = block.source_top.max(number.source_top);
+        block.source_bottom = block.source_bottom.min(number.source_bottom);
+        drop.push(mate);
+    }
+    if drop.is_empty() {
+        return;
+    }
+    let mut kept = Vec::new();
+    for (index, block) in blocks.drain(..).enumerate() {
+        if !drop.contains(&index) {
+            kept.push(block);
+        }
+    }
+    *blocks = kept;
 }
 
 fn merge_section_heading_blocks(blocks: &mut Vec<ColumnBlock>, drawn: &[Drawn]) {
@@ -35536,6 +35649,16 @@ mod tests {
             fallback_line(0, 108.0, 180.0, "下面的一行", vec![3]),
         ];
         assert_eq!(qa_failures(&drawn, &notes), vec![(vec![1], Vec::new())]);
+    }
+
+    #[test]
+    fn an_equation_number_is_a_bracketed_index() {
+        assert!(equation_number_text("(1)"));
+        assert!(equation_number_text("(A.3)"));
+        assert!(equation_number_text("(12b)"));
+        assert!(!equation_number_text("(a)"));
+        assert!(!equation_number_text("(see)"));
+        assert!(!equation_number_text("1"));
     }
 
     #[test]
@@ -54820,3 +54943,4 @@ mod stix_text_faces {
         assert!(super::is_math_font("STIXTwoMath-Regular"));
     }
 }
+
