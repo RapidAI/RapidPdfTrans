@@ -7035,8 +7035,12 @@ fn prose_formula_tail(upper: &VisualLine<'_>, lower: &VisualLine<'_>) -> bool {
     // `For a candidate 𝐻′ relative to the current harness` / `𝐻𝑡, let`: the
     // wrap opens with the symbol the sentence was naming and goes on in words.
     if next.starts_with(is_math_alphanumeric) {
+        // `𝑅𝑖−1 takes 𝑂(𝑁𝑤) time.` under `… in the domain of`: the symbol
+        // carries a script (`𝑖−1`, `𝑡2`, `𝑥∗`), which is still the symbol.
         let rest = next.trim_start_matches(|ch: char| {
-            is_math_alphanumeric(ch) || matches!(ch, '′' | '\'' | ',' | ' ' | '(' | ')')
+            is_math_alphanumeric(ch)
+                || ch.is_ascii_digit()
+                || matches!(ch, '′' | '\'' | ',' | ' ' | '(' | ')' | '−' | '∗' | '⋆')
         });
         let operator = next
             .chars()
@@ -15351,6 +15355,29 @@ mod tests {
             "{texts:?}"
         );
         assert!(!texts.iter().any(|text| text.contains("knowlWe")), "{texts:?}");
+    }
+
+    /// `… in the domain of` / `𝑅𝑖−1 takes 𝑂(𝑁𝑤) time.`: the wrap opens
+    /// with a scripted symbol and goes on in words, so it is the same sentence.
+    #[test]
+    fn scripted_symbol_wrap_continues_the_sentence() {
+        let math = |mut glyph: Glyph| {
+            glyph.font_name = "LibertineMathMI".into();
+            glyph
+        };
+        let glyphs = vec![
+            block(0, 45.8, 106.5, 390.0, 10.0, "Lemma 3.3. Given a relation, computing it for any clause with all identifiers in the domain of"),
+            math(block(1, 45.6, 94.5, 5.4, 10.0, "𝑅")),
+            math(block(2, 51.1, 93.0, 11.3, 7.3, "𝑖−1")),
+            block(3, 65.0, 94.5, 25.0, 10.0, "takes"),
+            math(block(4, 93.0, 94.5, 18.0, 10.0, "𝑂(𝑁𝑤)")),
+            block(5, 114.0, 94.5, 25.0, 10.0, "time."),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
     }
 
     fn block(id: u32, x: f32, y: f32, w: f32, size: f32, text: &str) -> Glyph {
