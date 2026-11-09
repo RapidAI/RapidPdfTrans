@@ -5748,6 +5748,8 @@ fn join_paragraphs(lines: Vec<VisualLine<'_>>) -> Vec<Vec<VisualLine<'_>>> {
 fn stitch_page_continuations<'a>(
     mut paragraphs: Vec<Vec<VisualLine<'a>>>,
 ) -> Vec<Vec<VisualLine<'a>>> {
+    adopt_orphan_hyphen_tails(&mut paragraphs);
+    paragraphs.retain(|para| !para.is_empty());
     // Reading order: finish the left column before the right one, so a sentence
     // at the bottom of a column can claim the top of the next column. The next
     // page is still later, so a page-break join is unchanged.
@@ -5799,6 +5801,53 @@ fn stitch_page_continuations<'a>(
             .then(left[0].left.total_cmp(&right[0].left))
     });
     stitched
+}
+
+/// A short `The knowl-` tail shares its baseline with a run-in title
+/// (`Language Models for KB Construction`) and sits mid-band, so the line
+/// joiner leaves it alone and stitching would send it to the right column
+/// (`The knowlWe position…`). Its continuation `edge implicitly…` is the
+/// next baseline down, back at the column margin, and runs under the tail.
+/// Join that paragraph onto the tail before reading-order stitching. Only a
+/// lone short hyphenated line qualifies, so normal column flow is unchanged.
+fn adopt_orphan_hyphen_tails(paragraphs: &mut [Vec<VisualLine<'_>>]) {
+    for index in 0..paragraphs.len() {
+        let Some(upper) = paragraphs[index].last() else {
+            continue;
+        };
+        if paragraphs[index].len() != 1 || soft_hyphen_stem(&upper.text).is_none() {
+            continue;
+        }
+        let size = upper.size.max(1.0);
+        if upper.right - upper.left > size * 10.0 {
+            continue;
+        }
+        let mut best: Option<(usize, f32)> = None;
+        for (other, para) in paragraphs.iter().enumerate() {
+            if other == index || para.is_empty() {
+                continue;
+            }
+            let lower = &para[0];
+            let dy = upper.y - lower.y;
+            if lower.page == upper.page
+                && (size * 0.7..=size * 1.6).contains(&dy)
+                && (lower.size - upper.size).abs() <= size * 0.15
+                && lower.left < upper.left - size * 2.8
+                && lower.right > upper.left
+                && lower
+                    .text
+                    .trim_start()
+                    .starts_with(|ch: char| ch.is_ascii_lowercase())
+                && best.is_none_or(|(_, y)| lower.y > y)
+            {
+                best = Some((other, lower.y));
+            }
+        }
+        if let Some((other, _)) = best {
+            let tail = std::mem::take(&mut paragraphs[other]);
+            paragraphs[index].extend(tail);
+        }
+    }
 }
 
 /// Column bottom first, then the bottom of the page. A later column on this
@@ -15279,6 +15328,29 @@ mod tests {
             !texts.iter().any(|text| text.ends_with("tra-")),
             "{texts:?}"
         );
+    }
+
+    /// 36209 p1: same-baseline title + mid-band `The knowl-`; its tail
+    /// `edge…` is the next baseline at the margin, not the right column.
+    #[test]
+    fn orphan_hyphen_tail_adopts_the_line_below_not_the_right_column() {
+        let glyphs = vec![
+            block(0, 70.9, 332.9, 170.0, 10.0, "Language Models for KB Construction"),
+            block(1, 245.2, 332.9, 45.6, 10.0, "The knowl-"),
+            block(2, 70.9, 321.0, 218.0, 10.0, "edge implicitly stored in language models"),
+            block(3, 70.9, 309.0, 218.0, 10.0, "is widely used for constructing KBs."),
+            block(4, 306.1, 700.0, 218.0, 10.0, "We position our work as an analysis of"),
+            block(5, 306.1, 688.0, 218.0, 10.0, "the intermediate step of elicitation."),
+        ];
+        let texts: Vec<_> = segment_glyphs(&glyphs)
+            .iter()
+            .map(|seg| seg.text.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("The knowledge implicitly")),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|text| text.contains("knowlWe")), "{texts:?}");
     }
 
     fn block(id: u32, x: f32, y: f32, w: f32, size: f32, text: &str) -> Glyph {
