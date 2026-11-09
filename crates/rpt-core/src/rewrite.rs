@@ -5016,7 +5016,22 @@ fn absorb_attached_scripts(glyphs: &[&Glyph], body: f32, groups: &mut [Vec<u32>]
                 .get(id)
                 .is_some_and(|at| is_math_font(&glyphs[*at].font_name))
         });
-        if !group_math && citation_mark_text(&glyph.unicode) && !is_math_font(&glyph.font_name) {
+        // `𝒫(𝔻∗)`: a star seated before the closing paren is inside the
+        // formula. A footnote mark follows the formula, it never sits
+        // between its glyphs.
+        let inside = groups[index].iter().any(|id| {
+            by_id.get(id).is_some_and(|at| {
+                let member = glyphs[*at];
+                member.page_index == glyph.page_index
+                    && (member.matrix[5] - glyph.matrix[5]).abs() <= body * 0.7
+                    && member.matrix[4] >= glyph.matrix[4] + glyph.advance[0].max(0.0) * 0.5
+            })
+        });
+        if !group_math
+            && !inside
+            && citation_mark_text(&glyph.unicode)
+            && !is_math_font(&glyph.font_name)
+        {
             continue;
         }
         groups[index].push(glyph.id);
@@ -33542,9 +33557,13 @@ fn script_baseline_host(index: usize, groups: &[Vec<&Glyph>]) -> Option<usize> {
 }
 
 fn is_script_baseline(group: &[&Glyph]) -> bool {
-    let math = group.iter().any(|glyph| is_math_font(&glyph.font_name));
+    // `𝑇#` and `𝔻∗` in newtx: the raised `#` and `∗` are scripts too. As a
+    // baseline of their own they took the first Chinese line 3pt above the
+    // words, and every hole after it slid one slot.
+    let math = group.iter().any(|glyph| display_math_face(&glyph.font_name));
     let no_word = group.iter().all(|glyph| {
-        is_math_font(&glyph.font_name) || !glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
+        display_math_face(&glyph.font_name)
+            || !glyph.unicode.chars().any(|ch| ch.is_ascii_alphabetic())
     });
     // `−d(x,y)` is seven glyphs. A limit of six left it as its own baseline.
     if math && no_word && (1..=12).contains(&group.len()) {
@@ -41206,6 +41225,57 @@ mod tests {
         out.replace_range(start..end, "");
         assert_eq!(out, "以及 ⟦14⟧ 如果 ⟦17⟧ ⟦18⟧");
         assert!(echo_touching_marker("𝜑 是 ⟦0⟧ 和 ⟦1⟧", 1, "𝜑").is_none());
+    }
+
+    #[test]
+    fn a_raised_newtx_mark_is_not_a_baseline_of_its_own() {
+        // `(𝑇, 𝑇#, Ω) … 𝔻∗`: the `#` (no unicode) and the txsys `∗` sit 3.6pt
+        // above the words. They are scripts of this line.
+        let mut glyphs: Vec<Glyph> = Vec::new();
+        for (i, ch) in "a triple where the maps table names".chars().enumerate() {
+            glyphs.push(math_glyph(i as u32, 50.0 + i as f32 * 10.0, 625.4, &ch.to_string(), false));
+        }
+        let mut hash = math_glyph(100, 199.0, 629.0, "", false);
+        hash.font_name = "HJVLE+stmary10".into();
+        let mut star = math_glyph(101, 340.6, 629.0, "∗", false);
+        star.font_name = "PWXQYV+txsys".into();
+        star.font_size = 7.27;
+        glyphs.push(hash);
+        glyphs.push(star);
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let lines = ink_lines(&refs);
+        assert_eq!(lines.len(), 1, "{:?}", lines.iter().map(|line| line.y).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_star_inside_the_parens_stays_in_the_hole() {
+        // `𝑅 : E ⇀ P(D∗) of`: newtx faces, the star is a superscript before `)`.
+        let spec: [(&str, &str, f32, f32, f32, f32, f32); 8] = [
+            ("E", "LHXXWI+txsym", 9.96, 200.6, 563.8, 206.7, 6.09),
+            ("⇀", "QNTQIO+NewTXMI", 9.96, 209.5, 563.8, 219.1, 9.6),
+            ("P", "PWXQYV+txsys", 9.96, 222.1, 563.8, 229.2, 8.19),
+            ("(", "PWXQYV+txsys", 9.96, 230.3, 563.8, 233.6, 3.32),
+            ("D", "LHXXWI+txsym", 9.96, 234.0, 563.8, 241.2, 7.19),
+            ("∗", "PWXQYV+txsys", 7.27, 241.2, 567.4, 244.6, 3.43),
+            (")", "PWXQYV+txsys", 9.96, 245.1, 563.8, 248.4, 3.32),
+            ("o", "PBYFVJ+LinLibertineT", 9.96, 251.0, 563.8, 255.9, 4.92),
+        ];
+        let glyphs: Vec<Glyph> = spec
+            .iter()
+            .enumerate()
+            .map(|(i, (text, face, size, x, y, right, advance))| {
+                let mut glyph = math_glyph(i as u32, *x, *y, text, false);
+                glyph.font_name = (*face).into();
+                glyph.font_size = *size;
+                glyph.matrix = [*size, 0.0, 0.0, *size, *x, *y];
+                glyph.bbox = [*x, *y - 2.0, *right, *y + 8.0];
+                glyph.advance = [*advance, 0.0];
+                glyph
+            })
+            .collect();
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let groups = placeholder_groups(&refs, 9.96);
+        assert!(groups.iter().any(|group| group.contains(&5) && group.contains(&4)), "{groups:?}");
     }
 
     #[test]
