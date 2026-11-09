@@ -1289,8 +1289,28 @@ fn sticky_after(chars: &[char]) -> Vec<bool> {
     mark_reserved_gaps(chars, &mut sticky);
     mark_angle_formulas(chars, &mut sticky);
     mark_hole_relations(chars, &mut sticky);
+    mark_spaced_punctuation(chars, &mut sticky);
     mark_adjacent_formula_holes(chars, &mut sticky);
     sticky
+}
+
+/// `解释 𝑅 : ⟦1⟧ 下`: the model kept the space of `R : E`. A wrap at that
+/// space opened the next line on `:`. A spaced ASCII mark stays with the
+/// word before it.
+fn mark_spaced_punctuation(chars: &[char], sticky: &mut [bool]) {
+    for index in 1..chars.len().saturating_sub(1) {
+        if chars[index] != ' '
+            || chars[index - 1].is_whitespace()
+            || !matches!(chars[index + 1], ':' | ';' | ',' | '!' | '?')
+        {
+            continue;
+        }
+        for boundary in [index - 1, index] {
+            if let Some(flag) = sticky.get_mut(boundary) {
+                *flag = true;
+            }
+        }
+    }
 }
 
 /// `⟦0⟧ = 1` and `⟦1⟧ ≤ 𝛿` are one formula. A wrap at the space before
@@ -3994,5 +4014,15 @@ mod hole_relation_tests {
         let one = chars.iter().position(|ch| *ch == '1').unwrap();
         assert!((hole..one).all(|boundary| sticky[boundary]), "{sticky:?}");
         assert!(!sticky[one], "the break after the value stays open");
+    }
+
+    #[test]
+    fn a_spaced_colon_does_not_open_a_line() {
+        let chars: Vec<char> = "解释 R : 01\u{3000}下".chars().collect();
+        let mut sticky = vec![false; chars.len() - 1];
+        mark_spaced_punctuation(&chars, &mut sticky);
+        let colon = chars.iter().position(|ch| *ch == ':').unwrap();
+        assert!(sticky[colon - 2] && sticky[colon - 1], "{sticky:?}");
+        assert!(!sticky[colon], "the break after the colon stays open");
     }
 }

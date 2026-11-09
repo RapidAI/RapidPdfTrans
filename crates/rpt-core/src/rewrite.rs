@@ -9864,11 +9864,24 @@ fn echo_touching_marker(text: &str, marker: usize, echo: &str) -> Option<(usize,
     let mut matched = needle.len();
     let mut cursor = chars.len();
     let mut start = at;
+    let mut end = at;
     while cursor > 0 && matched > 0 {
         cursor -= 1;
         let ch = chars[cursor].1;
         if ch.is_whitespace() {
             continue;
+        }
+        // `如果 𝜑⟦17⟧ ⟦18⟧`: the stay is the second of two glued holes.
+        // The letter before the first is still its echo.
+        if ch == '⟧' && matched == needle.len() {
+            if let Some(open) = chars[..cursor].iter().rposition(|(_, ch)| *ch == '⟦') {
+                let inner: String = chars[open + 1..cursor].iter().map(|(_, ch)| *ch).collect();
+                if inner.parse::<usize>().is_ok_and(|index| index < marker) {
+                    cursor = open;
+                    end = chars[open].0;
+                    continue;
+                }
+            }
         }
         if ch != needle[matched - 1] {
             return None;
@@ -9876,7 +9889,7 @@ fn echo_touching_marker(text: &str, marker: usize, echo: &str) -> Option<(usize,
         matched -= 1;
         start = chars[cursor].0;
     }
-    (matched == 0).then_some((start, at))
+    (matched == 0).then_some((start, end))
 }
 
 /// `th` glued into the word above its ell. The script's own baseline is a
@@ -12122,6 +12135,42 @@ fn display_operator_name(word: &str) -> bool {
     )
 }
 
+/// A text-face joining word (`and`, `where`, `or`) is the first thing on a
+/// line that starts at the paragraph's left edge.
+fn opens_with_joining_word(line: &[&Glyph], margin: f32, body: f32) -> bool {
+    let mut ordered = line.to_vec();
+    ordered.sort_by(|left, right| left.matrix[4].total_cmp(&right.matrix[4]));
+    let Some(first) = ordered.first() else {
+        return false;
+    };
+    if !margin.is_finite() || first.matrix[4] > margin + body * 0.5 {
+        return false;
+    }
+    let mut word = String::new();
+    for glyph in &ordered {
+        if display_math_face(&glyph.font_name) || is_math_font(&glyph.font_name) {
+            break;
+        }
+        let mut done = false;
+        for ch in glyph.unicode.chars() {
+            if ch.is_ascii_lowercase() {
+                word.push(ch);
+            } else {
+                done = true;
+                break;
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    matches!(
+        word.as_str(),
+        "and" | "or" | "where" | "with" | "which" | "then" | "for" | "if" | "the" | "of"
+            | "to" | "in" | "is" | "are" | "so" | "since" | "while" | "when"
+    )
+}
+
 /// Baselines that are a display equation, plus the scripts and fences that
 /// sit on them. Prose around the equation is not included.
 fn display_equation_line_ids(glyphs: &[&Glyph]) -> HashSet<u32> {
@@ -12153,9 +12202,22 @@ fn display_equation_line_ids(glyphs: &[&Glyph]) -> HashSet<u32> {
         }
         lines.push(vec![glyph]);
     }
+    // The paragraph's own left edge. A wrapped prose line starts there.
+    let margin = lines
+        .iter()
+        .filter(|line| line.len() >= 4)
+        .map(|line| line.iter().map(|glyph| glyph.matrix[4]).fold(f32::INFINITY, f32::min))
+        .fold(f32::INFINITY, f32::min);
     let mut ids = HashSet::default();
     for line in &lines {
         if line.len() < 4 || !glyphs_are_display(line) {
+            continue;
+        }
+        // `and ⟦κ1 or … or κm if φ⟧R = {v ∈`: the last wrap of a sentence
+        // opens at the paragraph edge with a joining word. Held as a display,
+        // its `and`, `or`, `if` matched the inline math of the line above as
+        // an echo, and the whole paragraph stayed English.
+        if lines.len() >= 3 && opens_with_joining_word(line, margin, body) {
             continue;
         }
         // `k=1` under `{Ω_i,k}^K_i` is the script row of a prose line, not
@@ -41134,6 +41196,48 @@ mod tests {
             prose_carries_inline_math(&sentence.iter().collect::<Vec<_>>()),
             "a sentence with one symbol is still prose"
         );
+    }
+
+    #[test]
+    fn an_echo_before_a_glued_hole_pair_is_dropped() {
+        let text = "以及 ⟦14⟧ 如果 𝜑⟦17⟧ ⟦18⟧";
+        let (start, end) = echo_touching_marker(text, 18, "𝜑").unwrap();
+        let mut out = text.to_string();
+        out.replace_range(start..end, "");
+        assert_eq!(out, "以及 ⟦14⟧ 如果 ⟦17⟧ ⟦18⟧");
+        assert!(echo_touching_marker("𝜑 是 ⟦0⟧ 和 ⟦1⟧", 1, "𝜑").is_none());
+    }
+
+    #[test]
+    fn a_last_wrap_opening_with_and_is_not_a_display() {
+        // `… evaluate to sets of valuations as follows: … ,` / `and ⟦κ⟧ = {v ∈`:
+        // the last wrap starts at the paragraph edge with a joining word.
+        // A centered `x = {y ∈` under the same paragraph is still a display.
+        let mut glyphs = Vec::new();
+        let mut id = 0u32;
+        for y in [100.0f32, 88.0, 76.0] {
+            for (k, word) in "prose words here".chars().enumerate() {
+                glyphs.push(math_glyph(id, 50.0 + k as f32 * 6.0, y, &word.to_string(), false));
+                id += 1;
+            }
+        }
+        let wrap_start = id;
+        for (k, (text, math)) in [("a", false), ("n", false), ("d", false), ("κ", true), ("=", true), ("{", true), ("v", true), ("∈", true)]
+            .iter()
+            .enumerate()
+        {
+            glyphs.push(math_glyph(id, 50.0 + k as f32 * 6.0, 64.0, text, *math));
+            id += 1;
+        }
+        let wrap_end = id;
+        for (k, text) in ["x", "=", "{", "y", "∈"].iter().enumerate() {
+            glyphs.push(math_glyph(id, 120.0 + k as f32 * 6.0, 46.0, text, true));
+            id += 1;
+        }
+        let refs: Vec<&Glyph> = glyphs.iter().collect();
+        let display = display_equation_line_ids(&refs);
+        assert!((wrap_start..wrap_end).all(|id| !display.contains(&id)), "{display:?}");
+        assert!((wrap_end..id).all(|id| display.contains(&id)), "{display:?}");
     }
 
     #[test]
