@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- LLM settings fall back to `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` when no `RPT_LLM_*` variable is set. Flags win, then `RPT_LLM_*`; the groups are never mixed, and a missing `OPENAI_BASE_URL` or `OPENAI_MODEL` is an error naming the variable.
+- `skills/rapidpdftrans/SKILL.md` is an agent skill for `rpt translate`; `skills/install.sh` installs it in one command (see README).
 - A translated line that runs into a kept math atom on its baseline is narrowed by up to a fifth to end in front of it, instead of falling back to English.
 - A shared baseline splits at the gutter when the left column is about 18em wide (span 22em), so the tail of a right-column paragraph is not read into the left column's last line.
 - Two blocks side by side in different columns are no longer merged into one stacked paragraph, so a left-column bullet and the right-column paragraph beside it stay separate segments.

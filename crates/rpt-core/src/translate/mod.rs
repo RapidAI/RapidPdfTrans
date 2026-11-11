@@ -9,6 +9,8 @@
 //!
 //! The default backend is the maclaw preset: an OpenAI-compatible chat
 //! gateway at `https://hub.mypapers.top/api/llm/v1` with model `auto`.
+//! LLM settings come from `RPT_LLM_*`, or from `OPENAI_API_KEY`,
+//! `OPENAI_BASE_URL`, and `OPENAI_MODEL` when no `RPT_LLM_*` is set.
 //! `RPT_TRANSLATOR` selects `maclaw`, `openai`, `google-v2`, `google-v3`,
 //! or `google-unofficial`. Keys come only from environment variables.
 //! With no translator and no `RPT_LLM_*` settings, a reachable Google
@@ -34,7 +36,7 @@ pub(crate) use crate::segment::is_inline_math_symbol;
 pub use crate::segment::Segment;
 pub use backend::TranslatorBackend;
 pub use google::GoogleTranslator;
-pub use llm::LlmTranslator;
+pub use llm::{LlmEnv, LlmEnvSource, LlmTranslator};
 pub use protect::citation_end;
 pub(crate) use protect::verbatim_spans;
 pub use references::{identical_reference_operators, reference_glyph_ids, reference_stream_spans};
@@ -284,7 +286,7 @@ impl TranslateOptions {
     pub fn resolved_model(&self) -> String {
         resolve_choice(
             self.model.as_deref(),
-            std::env::var("RPT_LLM_MODEL").ok().as_deref(),
+            LlmEnv::from_env().model.as_deref(),
             DEFAULT_LLM_MODEL,
         )
     }
@@ -292,7 +294,7 @@ impl TranslateOptions {
     pub fn resolved_base_url(&self) -> String {
         resolve_choice(
             self.base_url.as_deref(),
-            std::env::var("RPT_LLM_BASE_URL").ok().as_deref(),
+            LlmEnv::from_env().base_url.as_deref(),
             DEFAULT_LLM_BASE_URL,
         )
     }
@@ -6713,7 +6715,7 @@ mod tests {
             "official-mid"
         );
         assert_eq!(TranslateOptions::default().resolved_model(), {
-            resolve_choice(None, std::env::var("RPT_LLM_MODEL").ok().as_deref(), "auto")
+            resolve_choice(None, LlmEnv::from_env().model.as_deref(), "auto")
         });
     }
 

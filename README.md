@@ -52,6 +52,24 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 
 `Translate` returns JSON and does not write a PDF. The C function that writes a file is `rpt_save`.
 
+### Agent skill
+
+`skills/rapidpdftrans/SKILL.md` teaches a coding agent (Cursor, Claude Code, …) to run `rpt translate`, read the LLM settings from `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`, and check the result. One command installs it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RapidAI/RapidPdfTrans/main/skills/install.sh | bash
+```
+
+That writes `~/.cursor/skills/rapidpdftrans/SKILL.md` and nothing else. Add options after `bash -s --`: `--claude` for `~/.claude/skills`, `--all` for both, `--dir PATH` for another skills directory, and `--with-cli` to also put the prebuilt `rpt` in `~/.local/bin` (Linux x86_64 and aarch64):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RapidAI/RapidPdfTrans/main/skills/install.sh | bash -s -- --all --with-cli
+```
+
+From a clone, `bash skills/install.sh` does the same with the local file. Without the script, copy the folder: `mkdir -p ~/.cursor/skills && cp -r skills/rapidpdftrans ~/.cursor/skills/`. Re-running replaces only that `SKILL.md`.
+
+The `rpt` CLI itself is `cargo build -p rpt-cli --release` above, or the `rpt-linux-*.tar.gz` assets of the [latest release](https://github.com/RapidAI/RapidPdfTrans/releases/latest). Release binaries up to v0.1.8 read only `RPT_LLM_*`; newer builds also read `OPENAI_*` (see [Environment](#environment)).
+
 ### Environment
 
 Set the key in the environment. An `api_key` field in options JSON is ignored.
@@ -61,6 +79,7 @@ Set the key in the environment. An `api_key` field in options JSON is ignored.
 | `RPT_LLM_API_KEY` | live LLM translation | unset |
 | `RPT_LLM_BASE_URL` | optional LLM gateway | `https://hub.mypapers.top/api/llm/v1` |
 | `RPT_LLM_MODEL` | optional LLM model | `auto` |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` | used only when no `RPT_LLM_*` variable is set; base URL and model are then required | unset |
 | `RPT_TRANSLATOR` | optional backend name | unset (see below) |
 | `RPT_GOOGLE_API_KEY` | Cloud Translation v2 | unset |
 | `RPT_GOOGLE_CREDENTIALS` | `google-v3` service account | unset |
@@ -74,6 +93,8 @@ Set the key in the environment. An `api_key` field in options JSON is ignored.
 | `RPT_GATEWAY_DOWN_AFTER` | consecutive refusals (401/403/410/400 access denied) before no more requests are sent | `6` |
 | `RPT_CJK_SIZE_SCALE` | optional | `0.90` |
 | `RPT_CJK_LEADING` | optional | `1.60` |
+
+`--model` and `--base-url` win over `RPT_LLM_*`, which win over `OPENAI_*`. The two groups are not mixed: when any `RPT_LLM_*` variable is set, all `OPENAI_*` variables are ignored, so a key is never sent to the other group's endpoint. With `OPENAI_API_KEY`, a missing `OPENAI_BASE_URL` or `OPENAI_MODEL` (and no `--base-url` / `--model`) stops the run with an error naming that variable; the built-in gateway and `auto` model are not used for it.
 
 `RPT_TRANSLATOR` is `maclaw`, `openai`, `google`, `google-v2`, `google-v3`, or `google-unofficial`. When it is unset and no `RPT_LLM_API_KEY`, `RPT_LLM_BASE_URL`, `RPT_LLM_MODEL`, `model`, or `base_url` is set, the order is: `RPT_GOOGLE_API_KEY` (Cloud Translation v2), then v3 credentials (`RPT_GOOGLE_CREDENTIALS` or `RPT_GOOGLE_ACCESS_TOKEN`), then a 3-second probe of `https://translate.googleapis.com/translate_a/single?client=gtx`. A successful probe uses that endpoint. If the probe fails, translation stops and asks for `RPT_LLM_API_KEY` or `RPT_TRANSLATOR`. An explicit translator name or LLM setting skips the probe.
 
@@ -113,7 +134,7 @@ Flags that exist on `rpt translate`:
 | `--layout` | `side-by-side` (default), `alternating`, or `overlay`. Used with `--bilingual` or `--mode bilingual`. |
 | `--bilingual-output` | Also write a bilingual PDF from the same translation. |
 | `--max-pages N` | Only the first N pages. |
-| `--model`, `--base-url` | Override `RPT_LLM_MODEL` and `RPT_LLM_BASE_URL` for this run. |
+| `--model`, `--base-url` | Override `RPT_LLM_MODEL` / `RPT_LLM_BASE_URL` (or `OPENAI_MODEL` / `OPENAI_BASE_URL`) for this run. |
 | `--glossary source=target` | Repeat for more than one term. A path to a CSV file (`src,tgt` or `source,target`, header optional) is read instead. Applied locally before the call. |
 | `--system-prompt TEXT` | Extra instructions appended to the system prompt. A path to an existing file is read; `@path` always reads a file. |
 | `--timeout-secs N` | Hard per-request deadline for DNS, connect, TLS, and the response body. Default `60`. A stalled call is abandoned and retried with backoff (four attempts). |

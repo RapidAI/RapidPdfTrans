@@ -61,8 +61,10 @@ enum Command {
         source_lang: String,
         #[arg(long = "to", default_value = "zh")]
         target_lang: String,
+        /// Model name. Wins over `RPT_LLM_MODEL`, then `OPENAI_MODEL`.
         #[arg(long)]
         model: Option<String>,
+        /// OpenAI-compatible endpoint. Wins over `RPT_LLM_BASE_URL`, then `OPENAI_BASE_URL`.
         #[arg(long)]
         base_url: Option<String>,
         /// Glossary entry `source=target`, or a CSV file (`src,tgt`). Repeat for more than one.
@@ -723,6 +725,7 @@ fn fail(err: impl std::fmt::Display) -> ExitCode {
     let mut message = err.to_string();
     for name in [
         "RPT_LLM_API_KEY",
+        "OPENAI_API_KEY",
         "RPT_GOOGLE_API_KEY",
         "RPT_GOOGLE_ACCESS_TOKEN",
     ] {

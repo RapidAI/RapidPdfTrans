@@ -6,8 +6,9 @@
 //! document translator. Its own connectivity check reports `protocol: openai`
 //! and `wire_api: chat_completions`, so translation uses that wire.
 //!
-//! The API key is read only from `RPT_LLM_API_KEY`. It is never taken from
-//! options JSON, and [`Debug`] prints it as `redacted`.
+//! The API key is read only from the environment: `RPT_LLM_API_KEY`, or
+//! `OPENAI_API_KEY` when no `RPT_LLM_*` variable is set (see [`LlmEnv`]). It
+//! is never taken from options JSON, and [`Debug`] prints it as `redacted`.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -51,17 +52,133 @@ impl std::fmt::Debug for LlmTranslator {
     }
 }
 
-impl LlmTranslator {
-    pub fn from_env(opts: &TranslateOptions) -> Result<Self> {
-        let key = std::env::var("RPT_LLM_API_KEY").map_err(|_| {
-            Error::Translate(
-                "RPT_LLM_API_KEY is not set; the API key is accepted only from that environment variable"
-                    .into(),
-            )
-        })?;
-        if key.trim().is_empty() {
-            return Err(Error::Translate("RPT_LLM_API_KEY is empty".into()));
+/// Where the LLM environment settings come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LlmEnvSource {
+    /// `RPT_LLM_API_KEY`, `RPT_LLM_BASE_URL`, `RPT_LLM_MODEL`.
+    Rpt,
+    /// `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, the variables an
+    /// agent host injects for its selected model.
+    OpenAi,
+}
+
+impl LlmEnvSource {
+    pub fn key_var(self) -> &'static str {
+        match self {
+            Self::Rpt => "RPT_LLM_API_KEY",
+            Self::OpenAi => "OPENAI_API_KEY",
         }
+    }
+
+    pub fn base_url_var(self) -> &'static str {
+        match self {
+            Self::Rpt => "RPT_LLM_BASE_URL",
+            Self::OpenAi => "OPENAI_BASE_URL",
+        }
+    }
+
+    pub fn model_var(self) -> &'static str {
+        match self {
+            Self::Rpt => "RPT_LLM_MODEL",
+            Self::OpenAi => "OPENAI_MODEL",
+        }
+    }
+}
+
+/// LLM settings from the environment.
+///
+/// The `RPT_LLM_*` group wins as a whole: when any of its three variables is
+/// set, the `OPENAI_*` group is ignored, so a key from one group is never sent
+/// to an endpoint from the other. Only when no `RPT_LLM_*` variable is set are
+/// `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` used. CLI flags and
+/// options JSON (`--model`, `--base-url`) still win over both groups.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LlmEnv {
+    pub source: LlmEnvSource,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+}
+
+impl std::fmt::Debug for LlmEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmEnv")
+            .field("source", &self.source)
+            .field("api_key", &self.api_key.as_ref().map(|_| "redacted"))
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+impl LlmEnv {
+    pub fn from_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Resolve from any variable lookup. Blank values count as unset.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let read = |name: &str| {
+            lookup(name)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let group = |source: LlmEnvSource| Self {
+            source,
+            api_key: read(source.key_var()),
+            base_url: read(source.base_url_var()),
+            model: read(source.model_var()),
+        };
+        let rpt = group(LlmEnvSource::Rpt);
+        if rpt.is_configured() {
+            return rpt;
+        }
+        let openai = group(LlmEnvSource::OpenAi);
+        if openai.is_configured() {
+            openai
+        } else {
+            rpt
+        }
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.api_key.is_some() || self.base_url.is_some() || self.model.is_some()
+    }
+
+    /// The key, and for the `OPENAI_*` group also an endpoint and a model
+    /// unless the options supply them. The built-in gateway and its `auto`
+    /// model are not used for an `OPENAI_API_KEY`, so that key is not sent to
+    /// a host it was not issued for. Errors name the missing variable and
+    /// never contain a value.
+    pub fn require(&self, opts: &TranslateOptions) -> Result<String> {
+        let Some(key) = self.api_key.clone() else {
+            return Err(Error::Translate(match self.source {
+                LlmEnvSource::Rpt => "RPT_LLM_API_KEY is not set; set RPT_LLM_API_KEY (or OPENAI_API_KEY, OPENAI_BASE_URL and OPENAI_MODEL) in the environment".into(),
+                LlmEnvSource::OpenAi => "OPENAI_API_KEY is not set; the API key is accepted only from the environment".into(),
+            }));
+        };
+        if self.source == LlmEnvSource::OpenAi {
+            let given = |value: Option<&str>| value.map(str::trim).is_some_and(|v| !v.is_empty());
+            if !given(opts.base_url.as_deref()) && self.base_url.is_none() {
+                return Err(Error::Translate(
+                    "OPENAI_BASE_URL is not set; OPENAI_API_KEY needs an OpenAI-compatible endpoint (or pass --base-url)".into(),
+                ));
+            }
+            if !given(opts.model.as_deref()) && self.model.is_none() {
+                return Err(Error::Translate(
+                    "OPENAI_MODEL is not set; OPENAI_API_KEY needs a model name (or pass --model)"
+                        .into(),
+                ));
+            }
+        }
+        Ok(key)
+    }
+}
+
+impl LlmTranslator {
+    /// Build from the environment ([`LlmEnv`]). Options win over it.
+    pub fn from_env(opts: &TranslateOptions) -> Result<Self> {
+        let key = LlmEnv::from_env().require(opts)?;
         Self::with_key(opts, key)
     }
 
@@ -833,5 +950,103 @@ mod call_timeout_tests {
             Duration::from_secs(180)
         );
         assert_eq!(call_timeout_for(base, Duration::from_secs(10)), base);
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn env(pairs: &[(&str, &str)]) -> LlmEnv {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        LlmEnv::from_lookup(|name| map.get(name).cloned())
+    }
+
+    #[test]
+    fn openai_variables_are_used_when_no_rpt_variable_is_set() {
+        let e = env(&[
+            ("OPENAI_API_KEY", "dummy-openai"),
+            ("OPENAI_BASE_URL", "http://127.0.0.1:9/v1"),
+            ("OPENAI_MODEL", "dummy-model"),
+        ]);
+        assert_eq!(e.source, LlmEnvSource::OpenAi);
+        assert_eq!(e.base_url.as_deref(), Some("http://127.0.0.1:9/v1"));
+        assert_eq!(e.model.as_deref(), Some("dummy-model"));
+        assert_eq!(
+            e.require(&TranslateOptions::default()).unwrap(),
+            "dummy-openai"
+        );
+    }
+
+    #[test]
+    fn any_rpt_variable_keeps_the_rpt_group_and_ignores_openai() {
+        let e = env(&[
+            ("RPT_LLM_MODEL", "rpt-model"),
+            ("OPENAI_API_KEY", "dummy-openai"),
+            ("OPENAI_BASE_URL", "http://127.0.0.1:9/v1"),
+        ]);
+        assert_eq!(e.source, LlmEnvSource::Rpt);
+        assert_eq!(e.base_url, None);
+        let err = e
+            .require(&TranslateOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("RPT_LLM_API_KEY is not set"), "{err}");
+        assert!(!err.contains("dummy-openai"), "{err}");
+    }
+
+    #[test]
+    fn blank_values_count_as_unset() {
+        let e = env(&[("RPT_LLM_API_KEY", "  "), ("OPENAI_API_KEY", " dummy ")]);
+        assert_eq!(e.source, LlmEnvSource::OpenAi);
+        assert_eq!(e.api_key.as_deref(), Some("dummy"));
+        assert!(!env(&[]).is_configured());
+        assert_eq!(env(&[]).source, LlmEnvSource::Rpt);
+    }
+
+    #[test]
+    fn missing_openai_values_name_the_variable_without_the_key() {
+        let opts = TranslateOptions::default();
+        let err = env(&[("OPENAI_BASE_URL", "http://x/v1"), ("OPENAI_MODEL", "m")])
+            .require(&opts)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("OPENAI_API_KEY is not set"), "{err}");
+        let err = env(&[("OPENAI_API_KEY", "dummy-secret"), ("OPENAI_MODEL", "m")])
+            .require(&opts)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("OPENAI_BASE_URL is not set"), "{err}");
+        assert!(!err.contains("dummy-secret"), "{err}");
+        let err = env(&[
+            ("OPENAI_API_KEY", "dummy-secret"),
+            ("OPENAI_BASE_URL", "http://x/v1"),
+        ])
+        .require(&opts)
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("OPENAI_MODEL is not set"), "{err}");
+    }
+
+    #[test]
+    fn flags_fill_in_for_missing_openai_endpoint_and_model() {
+        let opts = TranslateOptions {
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            model: Some("flag-model".into()),
+            ..TranslateOptions::default()
+        };
+        let e = env(&[("OPENAI_API_KEY", "dummy")]);
+        assert_eq!(e.require(&opts).unwrap(), "dummy");
+    }
+
+    #[test]
+    fn the_debug_form_hides_the_key() {
+        let shown = format!("{:?}", env(&[("OPENAI_API_KEY", "dummy-secret")]));
+        assert!(!shown.contains("dummy-secret"), "{shown}");
+        assert!(shown.contains("redacted"), "{shown}");
     }
 }

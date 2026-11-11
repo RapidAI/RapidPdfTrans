@@ -52,6 +52,24 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 
 `Translate` 返回 JSON，不写 PDF。写文件的 C 函数是 `rpt_save`。
 
+### Agent 技能（Skill）
+
+`skills/rapidpdftrans/SKILL.md` 教编程 Agent（Cursor、Claude Code 等）调用 `rpt translate`，从 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 读取 LLM 配置，并检查结果。一条命令安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RapidAI/RapidPdfTrans/main/skills/install.sh | bash
+```
+
+它只写入 `~/.cursor/skills/rapidpdftrans/SKILL.md`。在 `bash -s --` 后加选项：`--claude` 装到 `~/.claude/skills`，`--all` 两处都装，`--dir PATH` 装到其他 skills 目录，`--with-cli` 同时把预编译的 `rpt` 放进 `~/.local/bin`（Linux x86_64、aarch64）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RapidAI/RapidPdfTrans/main/skills/install.sh | bash -s -- --all --with-cli
+```
+
+在克隆的仓库里运行 `bash skills/install.sh` 效果相同，用的是本地文件。不用脚本时直接复制目录：`mkdir -p ~/.cursor/skills && cp -r skills/rapidpdftrans ~/.cursor/skills/`。重复安装只会覆盖这一个 `SKILL.md`。
+
+`rpt` 命令行本身用上面的 `cargo build -p rpt-cli --release` 构建，或下载[最新发布](https://github.com/RapidAI/RapidPdfTrans/releases/latest)里的 `rpt-linux-*.tar.gz`。v0.1.8 及更早的发布版只读 `RPT_LLM_*`；之后的构建也读 `OPENAI_*`（见[环境变量](#环境变量)）。
+
 ### 环境变量
 
 密钥只放在环境变量里。选项 JSON 中的 `api_key` 会被忽略。
@@ -61,6 +79,7 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 | `RPT_LLM_API_KEY` | 使用 LLM 时必须有 | 未设置 |
 | `RPT_LLM_BASE_URL` | 可选，LLM 网关 | `https://hub.mypapers.top/api/llm/v1` |
 | `RPT_LLM_MODEL` | 可选，LLM 模型 | `auto` |
+| `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | 仅在没有设置任何 `RPT_LLM_*` 时使用；此时 base URL 和模型必须设置 | 未设置 |
 | `RPT_TRANSLATOR` | 可选，后端名称 | 未设置（见下文） |
 | `RPT_GOOGLE_API_KEY` | Cloud Translation v2 | 未设置 |
 | `RPT_GOOGLE_CREDENTIALS` | `google-v3` 服务账号 | 未设置 |
@@ -74,6 +93,8 @@ text, err := rapidpdftrans.Extract("testdata/hello.pdf")
 | `RPT_GATEWAY_DOWN_AFTER` | 连续被拒（401/403/410/400 Access denied）多少次后不再发请求 | `6` |
 | `RPT_CJK_SIZE_SCALE` | 可选 | `0.90` |
 | `RPT_CJK_LEADING` | 可选 | `1.60` |
+
+`--model`、`--base-url` 优先于 `RPT_LLM_*`，`RPT_LLM_*` 优先于 `OPENAI_*`。两组变量不混用：只要设置了任一 `RPT_LLM_*`，所有 `OPENAI_*` 都被忽略，密钥不会发往另一组的地址。使用 `OPENAI_API_KEY` 时，如果缺 `OPENAI_BASE_URL` 或 `OPENAI_MODEL`（也没传 `--base-url` / `--model`），运行会报错并指出缺的变量名，不会改用内置网关和 `auto` 模型。
 
 `RPT_TRANSLATOR` 可以是 `maclaw`、`openai`、`google`、`google-v2`、`google-v3` 或 `google-unofficial`。它未设置，且没有 `RPT_LLM_API_KEY`、`RPT_LLM_BASE_URL`、`RPT_LLM_MODEL`、`model` 或 `base_url` 时，顺序是：`RPT_GOOGLE_API_KEY`（Cloud Translation v2），然后 v3 凭据（`RPT_GOOGLE_CREDENTIALS` 或 `RPT_GOOGLE_ACCESS_TOKEN`），然后用 3 秒探测 `https://translate.googleapis.com/translate_a/single?client=gtx`。探测成功就用这个端点。探测失败则停止，并提示设置 `RPT_LLM_API_KEY` 或 `RPT_TRANSLATOR`。显式的翻译器名称或 LLM 设置会跳过探测。
 
@@ -113,7 +134,7 @@ export RPT_LLM_API_KEY=...
 | `--layout` | `side-by-side`（默认）、`alternating` 或 `overlay`。配合 `--bilingual` 或 `--mode bilingual`。 |
 | `--bilingual-output` | 用同一次翻译再写一份双语 PDF。 |
 | `--max-pages N` | 只处理前 N 页。 |
-| `--model`、`--base-url` | 覆盖这一次的 `RPT_LLM_MODEL` 和 `RPT_LLM_BASE_URL`。 |
+| `--model`、`--base-url` | 覆盖这一次的 `RPT_LLM_MODEL` / `RPT_LLM_BASE_URL`（或 `OPENAI_MODEL` / `OPENAI_BASE_URL`）。 |
 | `--glossary source=target` | 可重复。也可以是 CSV 文件（`src,tgt` 或 `source,target`，表头可省略）。调用前在本地替换。 |
 | `--system-prompt TEXT` | 追加到系统提示词。已存在的文件路径会读取文件；`@路径` 一定按文件读。 |
 | `--timeout-secs N` | 单次请求的硬截止时间，覆盖 DNS、连接、TLS 和响应体。默认 `60` 秒。卡住的调用会被放弃并按退避重试，最多四次。 |

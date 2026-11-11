@@ -283,6 +283,7 @@ fn scrub(message: &str) -> String {
     let mut cleaned = message.to_string();
     for key in [
         "RPT_LLM_API_KEY",
+        "OPENAI_API_KEY",
         "RPT_GOOGLE_API_KEY",
         "RPT_GOOGLE_PRIVATE_KEY",
     ] {

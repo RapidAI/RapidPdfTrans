@@ -1,7 +1,9 @@
 //! Select a translator from `RPT_TRANSLATOR` or [`TranslateOptions::translator`].
 //!
 //! An explicit name wins. A configured LLM (`RPT_LLM_API_KEY`,
-//! `RPT_LLM_BASE_URL`, `RPT_LLM_MODEL`, or a model/base URL option) is next.
+//! `RPT_LLM_BASE_URL`, `RPT_LLM_MODEL`, the `OPENAI_API_KEY` /
+//! `OPENAI_BASE_URL` / `OPENAI_MODEL` fallback, or a model/base URL option)
+//! is next.
 //! Otherwise an official Google key or credential is used. With none of those
 //! set, a short probe of the unofficial Google endpoint selects it when the
 //! probe succeeds.
@@ -16,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
 use crate::translate::google::GoogleTranslator;
-use crate::translate::llm::LlmTranslator;
+use crate::translate::llm::{LlmEnv, LlmTranslator};
 use crate::translate::{TranslateOptions, Translator, DEFAULT_LLM_BASE_URL};
 
 pub const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -49,7 +51,7 @@ impl TranslatorBackend {
                     Ok(Self::Google(with_timeout(client, opts)))
                 } else {
                     Err(Error::Translate(
-                        "no translator is configured and Google Translate is unreachable; set RPT_LLM_API_KEY or RPT_TRANSLATOR"
+                        "no translator is configured and Google Translate is unreachable; set RPT_LLM_API_KEY (or OPENAI_API_KEY) or RPT_TRANSLATOR"
                             .into(),
                     ))
                 }
@@ -157,9 +159,7 @@ fn env_set(name: &str) -> bool {
 }
 
 fn llm_configured(opts: &TranslateOptions) -> bool {
-    env_set("RPT_LLM_API_KEY")
-        || env_set("RPT_LLM_BASE_URL")
-        || env_set("RPT_LLM_MODEL")
+    LlmEnv::from_env().is_configured()
         || opts
             .model
             .as_deref()
@@ -187,19 +187,14 @@ fn named(opts: &TranslateOptions, name: &str) -> Result<TranslatorBackend> {
         "maclaw" | "llm" => Ok(TranslatorBackend::OpenAi(LlmTranslator::from_env(opts)?)),
         "openai" => {
             let mut opts = opts.clone();
+            let env = LlmEnv::from_env();
             if opts.base_url.as_deref().map(str::trim).unwrap_or("").is_empty()
-                && std::env::var("RPT_LLM_BASE_URL")
-                    .ok()
-                    .map(|v| v.trim().is_empty())
-                    .unwrap_or(true)
+                && env.base_url.is_none()
             {
                 opts.base_url = Some(OPENAI_DEFAULT_BASE_URL.into());
             }
             if opts.model.as_deref().map(str::trim).unwrap_or("").is_empty()
-                && std::env::var("RPT_LLM_MODEL")
-                    .ok()
-                    .map(|v| v.trim().is_empty())
-                    .unwrap_or(true)
+                && env.model.is_none()
             {
                 opts.model = Some(OPENAI_DEFAULT_MODEL.into());
             }
